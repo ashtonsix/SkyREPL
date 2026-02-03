@@ -1,0 +1,122 @@
+# runpod.ts - RunPod Provider
+
+GPU cloud with container-based instances and spot support.
+
+## Capabilities
+
+- snapshots: true (pod snapshots)
+- spot: true (spot pods)
+- gpu: true (primary offering)
+- multiRegion: true
+- persistentVolumes: true (network volumes)
+- idempotentSpawn: false (manual reconciliation)
+- secureCloud: true (optional enhanced security)
+
+## RunPodProvider implements Provider<RunPodInstance, RunPodSnapshot>
+
+### spawn(options)
+
+- Build RunPod GraphQL mutation
+- cloudType: 'SECURE' if options.tags?.secureCloud, else 'ALL'
+- gpuTypeId: from options.spec
+- volumeInGb: from options.spec or default
+- containerDiskInGb: from options.spec or default
+- name: repl-${controlId}-${manifestIdShort}-${instanceIdShort}
+- env: { SKYREPL_MANIFEST_ID, SKYREPL_RUN_ID, SKYREPL_SPAWN_KEY }
+- Call GraphQL createPod mutation
+- Return RunPodInstance
+
+### terminate(providerId)
+
+- Call GraphQL terminatePod mutation
+- Idempotent (not found = no-op)
+
+### list(filter?)
+
+- Call GraphQL query for pods
+- Filter by name prefix 'repl-' or env tags
+- Return RunPodInstance[]
+
+### get(providerId)
+
+- Call GraphQL pod query by ID
+- Return RunPodInstance or null
+
+### generateBootstrap(config)
+
+- Format: shell script (runs inside container)
+- RunPod containers start with entry command
+- Download agent, register, start
+- Return: { content: bash, format: 'shell', checksum: SHA256 }
+
+### createSnapshot(providerId, options)
+
+- Call GraphQL createTemplate mutation (pod snapshot)
+- Return { requestId, providerSnapshotId }
+
+### getSnapshotStatus(requestId)
+
+- Query template status
+- Map to 'creating' | 'available' | 'failed'
+
+### deleteSnapshot(providerSnapshotId)
+
+- Call GraphQL deleteTemplate mutation
+
+### requestSpotInstance(options)
+
+- Call spawn() with spot pricing
+- RunPod handles spot via bid pricing
+- Return SpotRequest
+
+### getSpotPrices(spec, regions?)
+
+- Query GPU pricing via GraphQL
+- Return spot prices by region
+
+## RunPod Lifecycle Hooks
+
+### onStartup()
+
+- Verify API key via test query
+- Fetch available GPU types, cache
+
+### onReconcile(context)
+
+- Query all pods with repl-prefixed names or skyrepl env vars
+- Compare to DB records
+- Detect orphans (pods not in DB)
+- Detect drift (status mismatch)
+- Return recommendations
+
+### onHeartbeat()
+
+- Refresh GPU types cache if stale
+- Check spot prices for cost alerts
+
+## Error Mapping
+
+| RunPod Error | Provider Error |
+|--------------|----------------|
+| "insufficient capacity" | CapacityError |
+| "invalid API key" | AuthError |
+| "pod not found" | NotFoundError |
+| "invalid GPU type" | InvalidSpecError |
+| rate limit response | RateLimitError |
+| "quota exceeded" | QuotaExceededError |
+
+## Cache TTL
+
+- 'runpod:gpu_types': 3_600_000 (1 hour)
+- 'runpod:pod:*': 30_000 (30s)
+- 'runpod:spot_prices': 300_000 (5 min)
+
+## Notes
+
+RunPod specifics:
+- Container-based (pods), not VMs
+- GPU-focused with good spot support
+- Network volumes for persistence
+- GraphQL API
+- Secure cloud option for sensitive workloads
+- No native idempotency, use env vars for reconciliation

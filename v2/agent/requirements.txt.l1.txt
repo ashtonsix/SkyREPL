@@ -1,0 +1,7 @@
+# requirements.txt - Python Dependencies
+
+## Stdlib Only (no pip install)
+http.client, urllib.request, json, subprocess, threading, fcntl, os, sys, time, signal, shutil, hashlib, glob
+
+## Optional
+psutil (better metrics, graceful fallback to /proc parsing if unavailable)

@@ -1,0 +1,32 @@
+# finalize.ts - Finalize Node
+
+## Input Type
+{ manifestId: string, createSnapshot?: boolean, instanceId?: string }
+
+## Output Type
+{ sealed: true, snapshotId?: string }
+
+## Execute Steps
+- Seal manifest: db.sealManifest(manifestId) transitions DRAFT → SEALED
+- SEALED manifests are immutable, all resources locked
+- If createSnapshot=true and instanceId provided:
+  - Generate snapshot name from timestamp and run details
+  - Call provider.createSnapshot(instanceId, name, tags)
+  - Poll provider.getSnapshotStatus(snapshotId) until complete (timeout: 30 min)
+  - Create snapshot object in DB with provider_snapshot_id
+  - Add snapshot to manifest resources
+  - Return snapshotId
+- Manifest sealing enables cleanup: All resources owned by manifest can be freed together
+
+## Compensation
+- Unseal manifest: Update manifest status back to DRAFT (rare, usually sealing is final)
+- If snapshot creation failed: Delete partial snapshot via provider.deleteSnapshot()
+- Note: Usually no compensation needed, finalize is terminal success state
+
+## Key Calls
+- db.sealManifest()
+- provider.createSnapshot()
+- provider.getSnapshotStatus()
+- provider.deleteSnapshot()
+- db.createObject() for snapshot
+- db.addResourceToManifest()

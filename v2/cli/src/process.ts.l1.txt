@@ -1,0 +1,33 @@
+# process-manager.ts - Control Plane Process Management
+
+## PID Management
+- PID file location: `~/.repl/control.pid`
+- Write PID on start, remove on clean shutdown
+- Stale PID detection: check if process exists via `kill(pid, 0)`
+
+## Process Spawning
+- Use `child_process.spawn()` with `detached: true`, `stdio: 'ignore'`
+- Call `child.unref()` to allow CLI to exit
+- Pass environment: REPL_CONTROL_PORT, REPL_DATA_DIR
+- Working directory: `~/.repl/`
+
+## Port Management
+- Default port: 8080
+- Port file location: `~/.repl/control.port` (written by control plane on bind)
+- CLI reads port file to determine API endpoint
+- Conflict detection: attempt bind before spawn
+
+## Health Check
+- `GET /health` endpoint returns `{ status: "ok", uptime: seconds }`
+- CLI polls every 100ms for 5s after spawn
+- Timeout = startup failure (check logs)
+
+## Shutdown
+- Graceful: Send SIGTERM, wait up to 30s, fallback to SIGKILL
+- Control plane handles SIGTERM: finish in-flight workflows, close DB, exit
+- Remove PID/port files on shutdown
+
+## Logging
+- Stdout/stderr redirect to `~/.repl/control.log`
+- Log rotation: 10MB max, 3 files
+- CLI `status` command shows last 20 lines + PID + uptime

@@ -1,0 +1,7 @@
+# workflow-snapshot.types.ts
+
+## SnapshotInput
+instanceId: number, name?: string
+
+## SnapshotOutput
+snapshotId: number, createdAt: Date

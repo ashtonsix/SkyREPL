@@ -1,0 +1,13 @@
+# executor.py - Run Executor
+
+## start_run Handler
+1. Clean workdir (critical for warm pool)
+2. Download files (parallel, verify checksums)
+3. Send sync_complete
+4. Execute command (subprocess.Popen)
+5. Stream stdout/stderr to log buffer
+6. Send run_complete with exit_code
+7. Collect and upload artifacts
+
+## cancel_run Handler
+SIGTERM, wait, SIGKILL if needed

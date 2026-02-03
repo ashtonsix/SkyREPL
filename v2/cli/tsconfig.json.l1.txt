@@ -1,0 +1,10 @@
+# tsconfig.json - CLI TypeScript Config
+
+## Compiler Options
+- target: ES2022
+- module: ESNext
+- strict: true
+- outDir: dist
+
+## References
+- shared package

@@ -1,0 +1,36 @@
+# manifest.ts - Ownership Boundaries (Ch4)
+
+## Purpose
+- Track workflow-created resources
+- Establish ownership for clean handoff and cleanup
+- Enable orphan-free operation (every resource has explicit owner)
+
+## States
+- DRAFT: Mutable, workflow adding resources
+- SEALED: Immutable, resources available for query/claim
+- EXPIRED (derived): No resources with owner_type='manifest' remaining
+
+## Schema
+- manifests: workflow_id, status, default_cleanup_priority, retention_ms, expires_at
+- manifest_resources: manifest_id, resource_type, resource_id, cleanup_priority, owner_type, owner_id
+
+## Retention
+- retention_ms: Time after sealing before cleanup eligible
+- Default: 1 hour for runs, 24 hours for snapshots
+- null = never auto-cleanup (explicit deletion only)
+- expires_at = released_at + retention_ms
+
+## Resource Claiming
+- Within workflow: nodes reference directly (same manifest)
+- Between workflows: query SEALED manifests, claim via owner_type/owner_id update
+- Claiming transfers ownership, prevents cleanup
+
+## Key Functions
+- sealManifest(id): DRAFT → SEALED, set released_at and expires_at
+- isManifestExpired(id): derived from resource owner counts
+- triggerCleanup(id): spawn cleanup-manifest workflow
+
+## Cleanup Priority
+- Higher number = cleaned first (default: 50)
+- Order: allocations(90) → runs(80) → artifacts(70) → objects(60) → instances(40) → snapshots(30)
+- Per-resource override via cleanup_priority in join table

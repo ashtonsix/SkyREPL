@@ -1,0 +1,275 @@
+================================================================================
+14. IMPLEMENTATION
+================================================================================
+
+## Purpose
+
+This section provides guidance for implementing the redesigned system. The phases
+suggest a logical grouping of work, but implementation order is flexible and will
+adapt to practical needs discovered during development.
+
+**Key Principle**: Run new code alongside legacy until stable.
+
+**Note**: For operational deployment concerns (monitoring, security, migrations), see Chapter 15 Operations.
+
+**Implementation Flexibility**:
+- Phases are guidance, not strict requirements
+- Work can proceed in parallel where sensible
+- The actual sequence will emerge from practical constraints
+- Focus on what needs to exist, not when it must happen
+
+Strategy: Ground-up rewrite, not migration (no live deployments exist). We
+maintain functional parity between versions, but all details/mechanisms are
+free to change.
+
+Implementation will happen in a v2/ folder with pseudo-implementation files
+using fidelity level suffixes (e.g., main.ts.l1.txt, agent.py.l2.txt). These
+files contain plain English, outlines, and pseudo-code sketches, citing real
+code to copy over. Fidelity levels:
+
+- `.l1.txt` - Bullet-point outlines (structure exploration)
+- `.l2.txt` - Detailed pseudocode (algorithm design)
+- `.l3.txt` - Partial implementation (core logic, stubbed deps)
+- (no suffix) - Working code (remove suffix when complete)
+
+The v2/ directory is organized by component:
+- `v2/control/` - Control plane (VPS deployment)
+- `v2/cli/` - CLI client (user machine)
+- `v2/shared/` - Types shared between control + CLI
+- `v2/agent/` - Python agent (on instances)
+- `v2/tests/` - Test files organized by component
+
+This is reference material, not a detailed project plan.
+
+## 14.1 Phase Overview
+
+### Phase Groupings (Suggested)
+
+The phases below represent logical groupings of work. They can be approached in
+roughly this order, but parallel development is expected where dependencies allow.
+
+| Phase | Name                | Scope                                           |
+|-------|---------------------|-------------------------------------------------|
+| 0     | Foundation          | Database schema, type definitions               |
+| 1     | Material            | Core tables operational, content-addressing     |
+| 2     | Workflows           | Pattern library, workflow execution             |
+| 3     | Allocations         | HELD state, SSH routing, warm pool              |
+| 4     | Provider Refinement | Type enhancement, provider workflows, hooks     |
+| 5     | Final Integration   | End-to-end flows, cleanup, documentation        |
+
+**Typical Build Order**:
+- Foundation and Material typically come first (data model must exist)
+- Workflows builds on material concepts but can start in parallel
+- Allocations and Provider Refinement can proceed in parallel
+- Final Integration happens when components stabilize
+
+### Core Principles
+
+- Start small, expand carefully
+- Careful with interfaces we'll regret later
+- Property-based testing: "Kill at any step → no orphans"
+- Ground-up rewrite means freedom to change everything
+- Avoid overengineering phase details
+- Run new code alongside legacy until stable
+
+================================================================================
+
+## 14.2 Phase 0: Foundation
+
+**Scope**: Database schema, type definitions, workflow engine scaffolding.
+
+**Deliverables**:
+- New database tables (manifests, allocations, workflows, objects, etc.)
+- Type foundation files (db.types.ts, workflow types, provider types)
+- Workflow engine core skeleton (isolated, not yet integrated)
+- Pattern library interfaces (4 patterns, no implementations yet)
+
+**Note**: All new code runs alongside existing code. No breaking changes.
+Tables are created empty. Types compile but aren't used yet.
+
+================================================================================
+
+## 14.3 Phase 1: Material
+
+**Scope**: Core tables operational, content-addressable material, data model active.
+
+**Typical Dependencies**: Builds on Phase 0 foundation (schema and types must exist).
+
+**Deliverables**:
+- Runs table (was jobs) with new schema
+- Allocations table populated and active
+- Objects table for generic payloads (Tailscale records, etc.)
+- Run files and blobs tables for content-addressable material
+- Manifests table tracking resource ownership
+
+**Note**: Compatibility layer (jobs view) may exist temporarily if useful.
+Focus on getting the data model working, not on perfect migration paths.
+
+================================================================================
+
+## 14.4 Phase 2: Workflows
+
+**Scope**: Pattern library complete, workflow execution integrated with control plane.
+
+**Typical Dependencies**: Benefits from material layer concepts, but core engine can
+be built independently and integrated later.
+
+**Deliverables**:
+- All 4 workflow patterns implemented and tested
+- Intent blueprints (launch-run, terminate, cleanup)
+- Subworkflow support operational
+- Crash recovery and persistence
+- Basic observability (topology signatures, audit logs)
+
+**Note**: This is where the orchestration logic moves from imperative control.ts
+code to declarative workflow definitions. Property tests validate "no orphans"
+invariant under arbitrary kill points.
+
+================================================================================
+
+## 14.5 Phase 3: Allocations
+
+**Scope**: HELD state, SSH per-allocation, warm pool via allocations query.
+
+**Typical Dependencies**: Uses material layer and workflow engine concepts. Can be
+developed in parallel with Phase 4 once foundational pieces are in place.
+
+**Deliverables**:
+- HELD state transitions (ACTIVE → HELD → COMPLETE)
+- Hold duration management with tiered extensions
+- SSH config keyed by allocation ID (short form)
+- SSH activity detection for auto-extension
+- Warm pool = allocations WHERE status='AVAILABLE'
+- Remove grace_period from run input (or keep with deprecation warning)
+
+**Note**: This changes user-facing CLI behavior. SSH routing and extend command
+are new workflows. Warm pool is now a query result, not a separate concept.
+
+================================================================================
+
+## 14.6 Phase 4: Provider Refinement
+
+**Scope**: Type enhancement pattern, provider workflows, extension hooks.
+
+**Typical Dependencies**: Uses workflow engine patterns. Can be developed in
+parallel with Phase 3 once workflow foundation exists.
+
+**Deliverables**:
+- Provider-specific type extensions (AWS, Lambda Labs, OrbStack)
+- Workflow contracts (SpawnInstance, TerminateInstance, CreateSnapshot)
+- Provider workflows (AWS spawn-with-warm-volume, etc.)
+- Extension framework (lifecycle hooks: onStartup, onShutdown, onHeartbeat with expectations/receipts)
+- Error taxonomy (CapacityError, AuthError, RateLimitError, etc.)
+
+**Note**: Providers can opt into workflow features independently. Tier 2 providers
+(Lambda Labs) can stick with simple interface. Type enhancement is compile-time,
+not runtime overhead.
+
+================================================================================
+
+## 14.7 Phase 5: Final Integration
+
+**Scope**: End-to-end flows working, legacy code removed, documentation current.
+
+**Typical Dependencies**: Happens after other components are stable and working
+together. This is a consolidation phase, not a development phase.
+
+**Deliverables**:
+- All CLI commands work via new system
+- Legacy code paths removed (or feature-flagged off)
+- Deprecated tables/columns dropped
+- Documentation updated to reflect new architecture
+- Performance benchmarks validate no regression
+- Full test suite passing
+
+**Note**: This is when we clean up. Remove compatibility shims, drop old tables
+(step 0 is DROP ALL TABLES since this is ground-up rewrite), finalize documentation.
+Not reversible without full backup/restore.
+
+================================================================================
+
+## 14.8 Testing Strategy
+
+### Per Phase
+
+- **Phase 0**: Unit tests (types, engine core), integration tests (table creation)
+- **Phase 1**: Data model tests on demo data, property tests (integrity)
+- **Phase 2**: Pattern unit tests, property tests (orphan invariant), E2E CLI tests
+- **Phase 3**: HELD state unit tests, SSH E2E tests, warm pool matching tests
+- **Phase 4**: Provider workflow E2E tests per provider, type tests
+- **Phase 5**: Full regression suite, performance benchmarks
+
+### Key Property Test
+
+"Kill workflow at any step → no orphaned resources"
+
+This validates crash recovery and cleanup logic. Use fast-check or similar
+property-based testing library. Arbitrary kill points, verify allocations/instances
+cleaned up correctly.
+
+================================================================================
+
+## 14.9 Observability During Implementation
+
+### Debug Logging Convention
+
+Use task-prefixed debug logs for grepability:
+
+```typescript
+debug("PHASE1_STORAGE/allocations-backfill", {
+  runId: run.id,
+  allocationId: allocation.id,
+});
+
+debug("PHASE2_WORKFLOW/pattern-applied", {
+  workflowId: workflow.id,
+  pattern: 'conditional-branch',
+  branchTaken: 'claim-warm',
+});
+```
+
+### Key Metrics
+
+Monitor throughout:
+- Query latency (P50, P99)
+- Workflow success/failure rates
+- Orphaned resource count (should be 0)
+- Deprecation warning counts (track legacy code path usage)
+
+================================================================================
+
+## 14.10 Future Work
+
+Items deferred from v1 specification, noted here for future development:
+
+### Error Message Guidelines
+
+- CLI error presentation standards
+- User-facing recovery suggestions
+- Structured error codes for programmatic handling
+
+### Onboarding Flow
+
+- `repl init` wizard for first-time setup
+- Step-by-step configuration validation
+- Provider credential verification
+
+### Diagnostic Tooling
+
+- `repl doctor` command for configuration validation
+- Network connectivity verification
+- Enhanced troubleshooting commands
+
+### Scaling Thresholds
+
+- SQLite performance limits documentation
+- Migration path to PostgreSQL
+- Concurrent request handling guidance
+
+### Onboarding Improvements
+
+- Enhanced `repl init` wizard features
+- Interactive provider credential testing
+- Improved setup validation
+
+================================================================================

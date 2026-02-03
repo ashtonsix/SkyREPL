@@ -1,0 +1,713 @@
+================================================================================
+4. MANIFEST
+================================================================================
+
+## Purpose
+
+Manifests prevent zombie resources by tracking workflow-created resources and
+managing their lifecycle. They establish clear ownership boundaries between
+workflows, enabling clean handoff without coupling, and ensure proper cleanup
+when resources are no longer needed.
+
+Core Value: Every workflow-created resource has a clear owner (manifest) with
+explicit lifecycle policies. No ambiguity, no orphans, no manual cleanup.
+
+## 4.1 Manifest Schema & Lifecycle
+
+### Schema Reference
+
+The manifest tables were defined in Section 2.3. Here we detail their semantics.
+
+**manifests table** - Ownership boundary for workflow-created resources:
+
+```sql
+CREATE TABLE manifests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id INTEGER NOT NULL,           -- Workflow that created this manifest
+    status TEXT NOT NULL,                   -- DRAFT, SEALED (EXPIRED is derived)
+    default_cleanup_priority INTEGER NOT NULL DEFAULT 50,
+    retention_ms INTEGER,                   -- Time to keep after SEALED (null = indefinite)
+    created_at INTEGER NOT NULL,
+    released_at INTEGER,                    -- When workflow released ownership (sealed)
+    expires_at INTEGER,                     -- When eligible for cleanup
+    FOREIGN KEY (workflow_id) REFERENCES workflows(id)
+);
+```
+
+**manifest_resources table** - Links manifests to owned resources:
+
+```sql
+CREATE TABLE manifest_resources (
+    manifest_id INTEGER NOT NULL,
+    resource_type TEXT NOT NULL,            -- 'instance', 'run', 'allocation', 'object'
+    resource_id TEXT NOT NULL,
+    cleanup_priority INTEGER,               -- Override manifest default (per-resource)
+    added_at INTEGER NOT NULL,
+    owner_type TEXT DEFAULT 'manifest',     -- 'manifest', 'workflow', 'policy'
+    owner_id INTEGER,                       -- workflow_id or null (null = manifest owns it)
+    FOREIGN KEY (manifest_id) REFERENCES manifests(id) ON DELETE CASCADE,
+    PRIMARY KEY (manifest_id, resource_type, resource_id)
+);
+```
+
+The join table enables:
+1. Per-resource cleanup_priority (cleanup order within a manifest)
+2. "Find manifests containing resource X" queries (useful for debugging)
+3. Per-resource ownership tracking (owner_type/owner_id)
+
+**Per-Resource Ownership**: When a resource is claimed by a workflow or policy, the
+owner_type and owner_id columns are updated. The manifest itself is considered
+"expired" (eligible for deletion) when no resources have owner_type='manifest':
+
+```sql
+-- Manifest is expired when all resources have been claimed
+SELECT COUNT(*) = 0 as is_expired
+FROM manifest_resources
+WHERE manifest_id = ? AND owner_type = 'manifest';
+```
+
+### Manifest States
+
+```
+DRAFT → SEALED (EXPIRED is derived from resource count)
+```
+
+Like scratch segment vs read-optimized segment in OLAP engines: DRAFT manifests are
+mutable working sets, SEALED manifests are immutable for querying/claiming.
+
+**DRAFT** - Manifest owned by running workflow
+- Workflow can add/remove resources
+- Transitions to: SEALED (workflow completes)
+
+**SEALED** - Workflow completed, resources awaiting cleanup or reuse
+- Resources detached from workflow ownership
+- Other workflows can query and claim resources
+- Retention timer starts (expires_at = now + retention_ms)
+- SEALED manifests can exist indefinitely
+- SEALED with retention_ms=null never expires (e.g., snapshot manifests may stay
+  SEALED for weeks/months)
+- SEALED does NOT imply "needs action soon" - it simply means the manifest is
+  no longer being actively modified
+- Transitions to: deleted (when expired and all resources cleaned up)
+
+**EXPIRED (Derived State)** - Not stored explicitly, derived from resource ownership:
+- A manifest is "expired" when COUNT(*) WHERE owner_type='manifest' = 0
+- Expiry is derived: manifest is expired when no resources have owner_type='manifest'
+- When expired AND retention elapsed, cleanup workflow destroys remaining resources
+- After cleanup completes, manifest is deleted
+
+### 4.1.1 Manifest Creation Timing
+
+Manifests are created at workflow submission, before any node executes. This ensures
+resources always have an owner from the moment they're created.
+
+- **Manifest created at workflow submission** (before first node executes)
+- **Resources added via ctx.emitResource()** during node execution
+- **Manifest stays DRAFT during compensation** (allows recovery attempts before sealing)
+
+This timing is important: if a workflow fails partway through, all resources created
+so far are already tracked in the DRAFT manifest, enabling proper cleanup.
+
+### State Transition Functions
+
+```typescript
+// Workflow completion - seal manifest
+async function sealManifest(manifestId: number): Promise<void> {
+  const manifest = await db.getManifest(manifestId);
+  if (manifest.status !== 'DRAFT') {
+    throw new Error(`Cannot seal manifest in ${manifest.status} state`);
+  }
+
+  const expiresAt = manifest.retention_ms
+    ? Date.now() + manifest.retention_ms
+    : null;
+
+  await db.updateManifest(manifestId, {
+    status: 'SEALED',
+    released_at: Date.now(),
+    expires_at: expiresAt,
+  });
+
+  // Detach resources (set current_manifest_id = null on resources)
+  // But keep manifest_resources links for cleanup tracking
+  await db.detachManifestResources(manifestId);
+}
+
+// Check if manifest is expired (derived state)
+async function isManifestExpired(manifestId: number): Promise<boolean> {
+  const manifest = await db.getManifest(manifestId);
+  if (manifest.status !== 'SEALED') return false;
+  if (!manifest.expires_at) return false;  // null retention = never expires
+  if (Date.now() < manifest.expires_at) return false;
+
+  // Check if any resources still owned by manifest
+  const ownedCount = await db.query(`
+    SELECT COUNT(*) as count FROM manifest_resources
+    WHERE manifest_id = ? AND owner_type = 'manifest'
+  `, [manifestId]);
+
+  return ownedCount[0].count === 0;
+}
+
+// Trigger cleanup for expired manifest
+async function triggerCleanup(manifestId: number): Promise<number> {
+  const manifest = await db.getManifest(manifestId);
+  if (manifest.status !== 'SEALED') {
+    throw new Error(`Cannot cleanup manifest in ${manifest.status} state`);
+  }
+
+  // Spawn cleanup workflow (no status change - EXPIRED is derived)
+  const workflowId = await submitWorkflow({
+    type: 'cleanup-manifest',
+    input: { manifest_id: manifestId },
+  });
+
+  return workflowId;
+}
+```
+
+## 4.2 Resource Claiming Protocol
+
+Resources move between workflows through a simple claim protocol. No manifest
+absorption - workflows query SEALED manifests and claim individual resources.
+
+### Within-Workflow Resource Sharing
+
+Within a single workflow execution, nodes can reference resources created by other
+nodes directly. No manifest ceremony needed - it's the same manifest.
+
+```typescript
+// Example: allocate-run node uses instance from spawn-instance node
+async function nodeA_spawnInstance(ctx: NodeContext): Promise<NodeOutput> {
+  const instance = await provider.spawn(ctx.input.spec);
+  ctx.emitResource('instance', instance.id);
+  return { instance_id: instance.id };
+}
+
+async function nodeB_allocateRun(ctx: NodeContext): Promise<NodeOutput> {
+  const instanceId = ctx.input.instance_id; // From node A's output
+  const allocation = await createAllocation(instanceId, ctx.input.run_id);
+  ctx.emitResource('allocation', allocation.id);
+  return { allocation_id: allocation.id };
+}
+```
+
+### Between-Workflow Resource Claiming
+
+Workflows claim resources from SEALED manifests. The claiming workflow creates
+its own manifest and links claimed resources to it.
+
+**Key principle**: Resources are claimed individually, not manifest-level. When a
+resource is claimed:
+1. The manifest_resources row transfers from old manifest to new manifest
+2. The original manifest keeps any unclaimed resources with its retention timer
+3. Empty manifests are deleted immediately
+4. Non-empty manifests continue toward expiration normally
+5. Cleanup workflows handle whatever resources remain when retention expires
+
+This means "delete manifest immediately" only applies when ALL resources have been
+claimed. Partial claims leave the original manifest intact with reduced resources.
+
+```typescript
+// Workflow B claims instance from released manifest
+async function claimWarmInstance(
+  ctx: NodeContext,
+  spec: InstanceSpec
+): Promise<{ claimed: boolean; instance_id?: string }> {
+  // Find sealed manifests with available instances
+  const candidates = await db.query(`
+    SELECT m.id as manifest_id, mr.resource_id, i.id
+    FROM manifests m
+    JOIN manifest_resources mr ON m.id = mr.manifest_id
+    JOIN instances i ON i.id = mr.resource_id
+    WHERE m.status = 'SEALED'
+      AND mr.resource_type = 'instance'
+      AND mr.owner_type = 'manifest'
+      AND i.spec = ?
+      AND i.workflow_state LIKE '%:complete' AND i.current_manifest_id IS NULL
+    LIMIT 1
+  `, [JSON.stringify(spec)]);
+
+  if (candidates.length === 0) {
+    return { claimed: false };
+  }
+
+  const { manifest_id: oldManifestId, resource_id: instanceId } = candidates[0];
+
+  return db.transaction(async () => {
+    // Lock the old manifest
+    const manifest = await db.getManifestForUpdate(oldManifestId);
+    if (manifest.status !== 'SEALED') {
+      return { claimed: false }; // Lost race
+    }
+
+    // Claim the instance (update ownership in manifest_resources)
+    await db.updateResourceOwnership(oldManifestId, 'instance', instanceId, {
+      owner_type: 'workflow',
+      owner_id: ctx.workflow.id,
+    });
+    await db.addManifestResource(ctx.workflow.manifestId, 'instance', instanceId);
+
+    // Check if old manifest has any manifest-owned resources left
+    const remaining = await db.query(`
+      SELECT COUNT(*) as count FROM manifest_resources
+      WHERE manifest_id = ? AND owner_type = 'manifest'
+    `, [oldManifestId]);
+
+    if (remaining[0].count === 0) {
+      // All resources claimed - delete old manifest (now expired)
+      await db.deleteManifest(oldManifestId);
+    }
+    // Otherwise: old manifest keeps remaining resources and continues
+    // toward expiration with its original retention timer
+
+    return { claimed: true, instance_id: instanceId };
+  });
+}
+```
+
+### Conflict Resolution
+
+Multiple workflows may try to claim the same resource. Transaction isolation
+handles this naturally.
+
+```typescript
+async function claimResourceAtomic(
+  newManifestId: number,
+  resourceType: string,
+  resourceId: string
+): Promise<{ success: boolean; reason?: string }> {
+  return db.transaction(async () => {
+    // Lock the resource
+    const resource = await db.getResourceForUpdate(resourceType, resourceId);
+
+    if (resource.current_manifest_id !== null) {
+      return {
+        success: false,
+        reason: 'Resource already claimed',
+      };
+    }
+
+    // Claim it
+    await db.updateResourceManifest(resourceType, resourceId, newManifestId);
+    await db.addManifestResource(newManifestId, resourceType, resourceId);
+
+    return { success: true };
+  });
+}
+```
+
+Retry strategy for warm pool claims:
+1. Try to claim available resource
+2. If conflict (already claimed), retry with next candidate
+3. If no candidates, fall back to spawn
+
+### Subworkflow Manifest Independence
+
+Subworkflows are independent by default. They create their own manifests and
+seal them on completion. No hierarchy, no absorption.
+
+If a parent workflow needs resources from a completed subworkflow, it queries
+SEALED manifests like any other warm pool claim.
+
+```typescript
+// Subworkflow completes - always seals independently
+async function handleSubworkflowComplete(subworkflowId: number): Promise<void> {
+  const subworkflow = await db.getWorkflow(subworkflowId);
+  const childManifest = subworkflow.manifest_id;
+
+  // Always seal - subworkflows are independent
+  await sealManifest(childManifest);
+}
+
+// Parent workflow can claim resources if needed
+async function parentClaimSubworkflowResource(
+  parentCtx: NodeContext,
+  subworkflowId: number,
+  resourceType: string
+): Promise<string | null> {
+  const subworkflow = await db.getWorkflow(subworkflowId);
+  const childManifestId = subworkflow.manifest_id;
+
+  // Query sealed manifest for resource
+  const resources = await db.query(`
+    SELECT resource_id
+    FROM manifest_resources
+    WHERE manifest_id = ?
+      AND resource_type = ?
+      AND owner_type = 'manifest'
+    LIMIT 1
+  `, [childManifestId, resourceType]);
+
+  if (resources.length === 0) {
+    return null;
+  }
+
+  const resourceId = resources[0].resource_id;
+
+  // Claim it
+  const result = await claimResourceAtomic(
+    parentCtx.workflow.manifestId,
+    resourceType,
+    resourceId
+  );
+
+  return result.success ? resourceId : null;
+}
+```
+
+## 4.3 Cleanup System
+
+Manifests enable deterministic cleanup. When retention expires, resources are
+destroyed in priority order.
+
+### DOS Prevention
+
+The cleanup system includes safeguards against resource exhaustion:
+
+- **Priority ordering prevents single workflow blocking others**: Cleanup processes
+  resources in priority order across all manifests, not manifest-by-manifest
+- **Rate limiting per-manifest cleanup operations**: Each manifest gets bounded
+  cleanup throughput to prevent monopolization
+- **Future: tenant-level priority queuing for multi-user**: When supporting multiple
+  tenants, each tenant gets fair share of cleanup bandwidth
+
+### Retention Policy
+
+Retention is set once when the manifest is sealed. No extension complexity.
+
+```typescript
+interface RetentionPolicy {
+  // Time to keep resources after workflow release (null = indefinite)
+  retention_ms: number | null;
+}
+
+// Default policies by workflow type
+const DEFAULT_RETENTION_POLICIES: Record<string, RetentionPolicy> = {
+  // Warm pool instances: keep for 30 minutes for reuse
+  'launch-run': {
+    retention_ms: 30 * 60 * 1000,
+  },
+
+  // Snapshots: keep indefinitely (may stay SEALED for weeks/months)
+  'create-snapshot': {
+    retention_ms: null,
+  },
+
+  // Feature installations: 1 hour
+  'install-feature': {
+    retention_ms: 60 * 60 * 1000,
+  },
+};
+
+// Apply policy when sealing
+async function sealManifestWithPolicy(
+  manifestId: number,
+  workflowType: string
+): Promise<void> {
+  const policy = DEFAULT_RETENTION_POLICIES[workflowType] ?? {
+    retention_ms: 60 * 60 * 1000, // Default: 1 hour
+  };
+
+  const expiresAt = policy.retention_ms
+    ? Date.now() + policy.retention_ms
+    : null;
+
+  await db.updateManifest(manifestId, {
+    status: 'SEALED',
+    released_at: Date.now(),
+    expires_at: expiresAt,
+  });
+
+  await db.detachManifestResources(manifestId);
+}
+```
+
+### Cleanup Priority
+
+Priority determines deletion order within an expired manifest. Higher priority
+resources are deleted first.
+
+```typescript
+// Cleanup priority: 0-100, higher = delete sooner
+const CLEANUP_PRIORITY_DEFAULTS: Record<string, number> = {
+  'allocation': 90,     // Clean allocations first (release instance slots)
+  'run': 80,            // Then runs (free up file storage)
+  'artifact': 70,       // Then artifacts (S3 storage)
+  'object': 60,         // Then generic objects
+  'instance': 50,       // Then instances (provider resources)
+  'snapshot': 10,       // Snapshots last (may be needed for new runs)
+};
+
+// Cleanup execution order
+async function cleanupManifest(manifestId: number): Promise<void> {
+  const resources = await db.query(`
+    SELECT resource_type, resource_id,
+           COALESCE(cleanup_priority, ?) as priority
+    FROM manifest_resources
+    WHERE manifest_id = ?
+    ORDER BY priority DESC
+  `, [50, manifestId]);
+
+  for (const resource of resources) {
+    await cleanupResource(resource.resource_type, resource.resource_id);
+    await db.removeManifestResource(manifestId, resource.resource_type, resource.resource_id);
+  }
+
+  // Delete manifest itself
+  await db.deleteManifest(manifestId);
+}
+```
+
+### Cleanup Workflow
+
+Expired manifests trigger cleanup workflows.
+
+```typescript
+// cleanup-manifest workflow blueprint
+const CLEANUP_MANIFEST_WORKFLOW = {
+  type: 'cleanup-manifest',
+  nodes: {
+    'get-resources': {
+      handler: 'getManifestResources',
+      next: 'cleanup-loop',
+    },
+    'cleanup-loop': {
+      handler: 'cleanupResourceBatch',
+      pattern: 'parallel-fan-out',
+      next: 'finalize',
+    },
+    'finalize': {
+      handler: 'deleteManifest',
+      next: null,
+    },
+  },
+};
+
+// Resource-specific cleanup handlers
+const CLEANUP_HANDLERS: Record<string, (id: string) => Promise<void>> = {
+  'instance': async (id) => {
+    const instance = await db.getInstance(id);
+    if (instance && !instance.workflow_state?.startsWith('terminate:')) {
+      await provider.terminate(instance.provider, instance.provider_id);
+    }
+    await db.deleteInstance(id);
+  },
+
+  'allocation': async (id) => {
+    await db.deleteAllocation(id);
+  },
+
+  'run': async (id) => {
+    await db.deleteRunFiles(id);
+    await db.deleteRunLogs(id);
+    await db.deleteRun(id);
+  },
+
+  'object': async (id) => {
+    const obj = await db.getObject(id);
+    if (obj?.s3_key) {
+      await s3.delete(obj.s3_bucket, obj.s3_key);
+    }
+    await db.deleteObject(id);
+  },
+};
+```
+
+### Expiry Scanner
+
+The scanner is a simple CRON job with a fail counter. No complex monitoring
+infrastructure required - failure is non-critical since the next scheduled CRON
+catches up automatically.
+
+```typescript
+// Simple CRON - runs every minute
+// Failure is non-critical; next scheduled run catches up
+let consecutiveFailures = 0;
+const MAX_FAILURES_BEFORE_ALERT = 5;
+
+async function scanExpiredManifests(): Promise<void> {
+  try {
+    const now = Date.now();
+
+    // Find SEALED manifests past retention that have no manifest-owned resources
+    const candidates = await db.query(`
+      SELECT m.id FROM manifests m
+      WHERE m.status = 'SEALED'
+        AND m.expires_at IS NOT NULL
+        AND m.expires_at < ?
+        AND NOT EXISTS (
+          SELECT 1 FROM manifest_resources mr
+          WHERE mr.manifest_id = m.id AND mr.owner_type = 'manifest'
+        )
+    `, [now]);
+
+    for (const manifest of candidates) {
+      // Check if cleanup workflow already running
+      const existingCleanup = await db.query(`
+        SELECT id FROM workflows
+        WHERE type = 'cleanup-manifest'
+          AND status = 'running'
+          AND json_extract(input_json, '$.manifest_id') = ?
+      `, [manifest.id]);
+
+      if (existingCleanup.length === 0) {
+        await triggerCleanup(manifest.id);
+      }
+    }
+
+    consecutiveFailures = 0;
+  } catch (error) {
+    consecutiveFailures++;
+    if (consecutiveFailures >= MAX_FAILURES_BEFORE_ALERT) {
+      // Only alert after sustained failures
+      console.error('SCANNER/expiry-scan', { consecutiveFailures, error });
+    }
+    // Don't rethrow - next CRON run will retry
+  }
+}
+```
+
+### Cost Attribution
+
+Manifests track cost for billing and analysis.
+
+```typescript
+// Cost attribution query
+async function getManifestCost(manifestId: number): Promise<CostBreakdown> {
+  const resources = await db.getManifestResources(manifestId);
+
+  const breakdown: CostBreakdown = {
+    compute: 0,
+    storage: 0,
+    network: 0,
+    byResource: [],
+  };
+
+  for (const r of resources) {
+    if (r.resource_type === 'instance') {
+      const usage = await db.getUsageRecords({ instance_id: r.resource_id });
+      const instanceCost = usage.reduce((sum, u) => sum + (u.estimated_cost_usd ?? 0), 0);
+      breakdown.compute += instanceCost;
+      breakdown.byResource.push({
+        type: 'instance',
+        id: r.resource_id,
+        cost: instanceCost,
+      });
+    } else if (r.resource_type === 'object') {
+      const obj = await db.getObject(r.resource_id);
+      const storageCost = estimateStorageCost(obj.size_bytes);
+      breakdown.storage += storageCost;
+      breakdown.byResource.push({
+        type: 'object',
+        id: r.resource_id,
+        cost: storageCost,
+      });
+    }
+    // ... other resource types
+  }
+
+  breakdown.total = breakdown.compute + breakdown.storage + breakdown.network;
+  return breakdown;
+}
+```
+
+## 4.4 Manifest Examples
+
+### Example 1: Simple Run Lifecycle
+
+```
+1. launch-run workflow submitted
+   - Manifest M1 created immediately (status: DRAFT)
+   - First node hasn't executed yet
+
+2. Workflow creates resources (via ctx.emitResource())
+   - Spawns instance I1 → manifest_resources: (M1, instance, I1, owner_type='manifest')
+   - Creates allocation A1 → manifest_resources: (M1, allocation, A1, owner_type='manifest')
+   - Creates run R1 → manifest_resources: (M1, run, R1, owner_type='manifest')
+
+3. Run completes, workflow seals manifest
+   - M1.status = SEALED
+   - M1.expires_at = now + 30min (retention policy)
+   - I1.current_manifest_id = null (detached, available for warm pool)
+
+4a. If another run claims warm instance:
+    - New workflow claims I1
+    - I1's owner_type = 'workflow', owner_id = new_workflow_id
+    - M1 still has A1, R1 with owner_type='manifest'
+    - M1 continues with retention timer
+
+4b. If retention expires and all resources claimed/cleaned:
+    - M1 is "expired" (derived: no resources with owner_type='manifest')
+    - Cleanup workflow terminates remaining resources (A1, R1, and I1 if unclaimed)
+    - M1 deleted
+```
+
+### Example 2: Warm Pool Reuse
+
+**Case A: Single resource - manifest deleted**
+```
+1. Run A completes (manifest M_A with instance I1 only)
+   - M_A sealed, I1 detached, status = 'available'
+
+2. Run B starts, finds warm pool candidate
+   - Query: manifests WHERE status=SEALED, has instance matching spec, owner_type='manifest'
+   - Found M_A with I1
+
+3. Run B claims I1 (manifest M_B)
+   - I1.owner_type = 'workflow', I1.owner_id = workflow_B
+   - manifest_resources: (M_B, instance, I1, owner_type='manifest')
+   - M_A had only I1 with owner_type='manifest' → M_A expired and deleted
+
+4. Run B uses I1 without spawn delay
+   - Creates allocation A2 for I1
+   - Runs command
+
+5. Run B completes
+   - M_B sealed
+   - I1 detached again (or terminated based on policy)
+```
+
+**Case B: Multiple resources - partial claim**
+```
+1. Run A completes (manifest M_A with I1, A1, R1)
+   - M_A sealed, I1 detached and available
+   - A1 and R1 remain with owner_type='manifest'
+   - M_A.expires_at = now + 30min
+
+2. Run B claims only I1
+   - I1.owner_type = 'workflow' (no longer owned by manifest)
+   - M_A still has: A1, R1 with owner_type='manifest'
+   - M_A continues with original retention timer
+
+3. After 30 minutes (if no further claims)
+   - M_A is expired (derived: still has manifest-owned resources but retention elapsed)
+   - Cleanup workflow destroys A1, R1
+   - M_A deleted
+```
+
+### Example 3: Independent Subworkflow
+
+```
+1. Parent workflow PW submitted (manifest M_P created as DRAFT)
+
+2. PW spawns subworkflow SW for feature installation
+   - SW creates manifest M_S (DRAFT)
+   - SW creates feature_installation object F1 via ctx.emitResource()
+
+3. SW completes
+   - M_S sealed (status: SEALED)
+   - F1 detached (current_manifest_id = null)
+   - PW continues running
+
+4. PW needs F1 later
+   - Queries SEALED manifests for feature_installation where owner_type='manifest'
+   - Finds M_S with F1
+   - Claims F1 atomically (updates owner_type='workflow', owner_id=PW)
+   - M_S had only F1 with owner_type='manifest' → M_S expired and deleted
+
+5. PW completes
+   - M_P sealed with F1
+   - Cleanup handles F1 when retention expires
+```
+

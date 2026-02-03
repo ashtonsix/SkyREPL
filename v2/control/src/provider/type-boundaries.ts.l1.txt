@@ -1,0 +1,165 @@
+# types.ts - Type Boundaries
+
+Type definitions at control plane boundary (generic) and provider context (specific).
+Materialization converts generic -> provider-specific when entering provider context.
+Projection converts provider-specific -> generic when exiting provider context.
+
+## Generic Types (Control Plane Boundary)
+
+These are the types the control plane works with. Provider internals hidden.
+
+### ProviderInstance
+
+- id: string (provider-assigned ID)
+- status: 'pending' | 'starting' | 'running' | 'stopping' | 'stopped' | 'terminating' | 'terminated' | 'error'
+- spec: string (normalized instance type)
+- region?: string
+- ip?: string (public IP)
+- createdAt: number (timestamp)
+- isSpot: boolean
+
+### ProviderSnapshot
+
+- id: string (provider-assigned ID)
+- name: string
+- status: 'pending' | 'creating' | 'available' | 'failed'
+- createdAt: number
+- sizeBytes?: number
+
+## Provider-Specific Types
+
+Enhanced types with provider-specific fields. Only used inside provider context.
+
+### AWSInstance extends ProviderInstance
+
+- availabilityZone: string (e.g., 'us-east-1a')
+- subnetId?: string
+- vpcId?: string
+- securityGroups: string[]
+- volumes: AWSVolume[]
+- networkInterfaces: AWSNetworkInterface[]
+- instanceType: string (full EC2 type, e.g., 'p4d.24xlarge')
+- spotInstanceRequestId?: string
+
+### AWSVolume
+
+- volumeId: string
+- deviceName: string
+- sizeGb: number
+- volumeType: 'gp3' | 'io2' | 'st1'
+- iops?: number
+
+### RunPodInstance extends ProviderInstance
+
+- podId: string
+- gpuType: string (e.g., 'NVIDIA A100')
+- gpuCount: number
+- containerDiskGb: number
+- volumeGb?: number
+- sshPort?: number
+- jupyterPort?: number
+- secureCloud: boolean
+
+### LambdaInstance extends ProviderInstance
+
+- instanceTypeId: string (Lambda Labs type ID)
+- jupyterUrl?: string
+- sshKeyNames: string[]
+
+### OrbStackInstance extends ProviderInstance
+
+- vmName: string
+- arch: 'amd64' | 'arm64'
+- distro: string (e.g., 'ubuntu:22.04')
+- cpuCores: number
+- memoryMb: number
+- diskGb: number
+- hostMountPath?: string
+
+## Materialization (Generic -> Provider-Specific)
+
+Called when workflow enters provider context.
+Fetches provider-specific data, builds enhanced type.
+
+### materialize(instance: Instance, provider: ProviderName) -> Promise<ProviderInstance>
+
+Dispatcher that calls provider-specific materialization:
+- 'aws' -> materializeAWSInstance(instance)
+- 'lambda' -> materializeLambdaInstance(instance)
+- 'runpod' -> materializeRunPodInstance(instance)
+- 'orbstack' -> materializeOrbStackInstance(instance)
+
+### materializeAWSInstance(instance: Instance) -> Promise<AWSInstance>
+
+- Fetch EC2 DescribeInstances for provider_id
+- Extract availability zone, subnet, VPC, security groups
+- Map block device mappings to volumes
+- Map network interfaces
+- Return AWSInstance with enhanced fields
+
+### materializeLambdaInstance(instance: Instance) -> Promise<LambdaInstance>
+
+- Fetch Lambda Labs instance details
+- Extract Jupyter URL, SSH key names
+- Return LambdaInstance
+
+### materializeRunPodInstance(instance: Instance) -> Promise<RunPodInstance>
+
+- Fetch RunPod pod details
+- Extract GPU info, ports, container config
+- Return RunPodInstance
+
+### materializeOrbStackInstance(instance: Instance) -> Promise<OrbStackInstance>
+
+- Run `orbstack info` for VM
+- Extract architecture, distro, resources
+- Return OrbStackInstance
+
+## Projection (Provider-Specific -> Generic)
+
+Called when workflow exits provider context.
+Extracts essential fields, discards provider-specific details.
+
+### projectToGenericInstance(providerInstance: ProviderInstance, existingRecord?: Instance) -> Instance
+
+- Preserve id from existingRecord if provided (DB IDs not auto-generated)
+- Map provider status to workflow_state
+- Extract common fields: providerId, spec, region, ip, isSpot, createdAt
+- Discard provider-specific fields (availabilityZone, volumes, etc.)
+- Return generic Instance for control plane storage
+
+### projectToGenericSnapshot(providerSnapshot: ProviderSnapshot, existingRecord?: Snapshot) -> Snapshot
+
+- Preserve id from existingRecord if provided
+- Extract: providerSnapshotId, name, status, createdAt
+- Return generic Snapshot
+
+## Instance (DB Record Type)
+
+From src/types.ts, the type stored in database:
+- id: number (our DB ID)
+- provider: ProviderName
+- provider_id: string
+- spec: string
+- region?: string
+- ip?: string
+- workflow_state: WorkflowState
+- is_spot: boolean
+- created_at: number
+- last_heartbeat?: number
+- current_manifest_id?: number
+
+## Status Mapping
+
+Provider status -> WorkflowState mapping:
+
+| Provider Status | WorkflowState |
+|-----------------|---------------|
+| pending         | spawn:pending |
+| starting        | launch-run:provisioning |
+| running         | launch-run:running |
+| stopping        | terminate:draining |
+| stopped         | terminate:complete |
+| terminating     | terminate:terminating |
+| terminated      | terminate:complete |
+| error           | spawn:error |

@@ -1,0 +1,11 @@
+# sse.py - SSE Command Stream
+
+## Connection
+GET /v1/agent/commands?instance_id=xxx
+Accept: text/event-stream
+
+## Reading
+Byte-by-byte to avoid 8KB buffer deadlock (messages are ~150 bytes)
+
+## Reconnection
+Exponential backoff: 2s → 64s, max 10 retries

@@ -1,0 +1,890 @@
+================================================================================
+12. ORPHANS
+================================================================================
+
+## Purpose
+
+Orphan detection is a BACKUP SAFETY mechanism for identifying cloud resources
+that exist in providers but are not tracked in the database. It handles edge
+cases like database corruption, failed spawns, or control plane crashes during
+resource creation.
+
+Philosophy: Two-phase spawn protocol prevents most orphans. This system catches
+what slips through.
+
+**Design Philosophy:**
+- CONSERVATIVE by default - never auto-terminate cloud resources
+- Human-in-the-loop for destructive actions
+- Resource names encode enough information for partial recovery
+- Distinguishes between "my orphans" (current session) and "other orphans"
+- Provides audit trail for all orphan acknowledgments
+
+### File Organization
+
+Orphan management has its own directory in control/src/orphan/:
+
+```
+control/src/orphan/
+├── scanner.ts           # Scans providers for resources
+├── classifier.ts        # Classifies resources (tracked/orphan/foreign)
+├── whitelist.ts         # User acknowledgments and whitelisting
+└── nodes/               # Workflow nodes for orphan operations
+    ├── find-orphans.ts
+    ├── match-to-manifest.ts
+    ├── terminate-orphans.ts
+    └── expire-allocations.ts
+```
+
+## 12.1 Resource Naming Convention
+
+### v2 Naming Format
+
+All cloud resources MUST be named using this format:
+
+```
+repl-<control_id>-<manifest_id>-<instance_id>
+```
+
+**Components:**
+- `repl`: Fixed prefix for identification
+- `<control_id>`: Control plane identifier (version_tag + random env value, persisted to ~/.repl/control.env)
+- `<manifest_id>`: First 8 characters of owning manifest UUID (or "none")
+- `<instance_id>`: First 8 characters of internal instance UUID
+
+**Note:** Provider information is stored in cloud tags/metadata, not in the resource name.
+
+**Examples:**
+```
+repl-v2a1b2c3-mf5e6f7g-a1b2c3d4
+repl-v2a1b2c3-none-b2c3d4e5
+repl-v2a1b2c3-mf1a2b3c-c3d4e5f6
+```
+
+### Why This Matters
+
+Even with total database loss, resource names allow:
+1. **Control plane identification**: Answers "did I create this?" for orphan recovery after data loss
+2. **Partial instance matching**: Match orphans to recovered instance records
+3. **Manifest correlation**: Understand which workflow created the resource
+4. **Uniqueness**: control_id provides per-installation uniqueness
+
+The control_id is formed from version_tag + random_env, where:
+- version_tag is the application version (e.g., "v2")
+- random_env is a random value generated on first run and persisted to ~/.repl/control.env
+- This combination uniquely identifies a control plane installation
+
+### Implementation
+
+```typescript
+function generateResourceName(
+  controlId: string,
+  manifestId: string | null,
+  instanceId: string
+): string {
+  const shortManifestId = manifestId ? manifestId.substring(0, 8) : 'none';
+  const shortInstanceId = instanceId.substring(0, 8);
+
+  return `repl-${controlId}-${shortManifestId}-${shortInstanceId}`;
+}
+
+function parseResourceName(name: string): ResourceNameParts | null {
+  const match = name.match(/^repl-([a-z0-9]+)-([a-f0-9]{8}|none)-([a-f0-9]{8})$/);
+  if (!match) return null;
+
+  return {
+    controlId: match[1],
+    manifestIdPrefix: match[2] === 'none' ? null : match[2],
+    instanceIdPrefix: match[3],
+  };
+}
+```
+
+### Tailscale Naming
+
+Tailscale machines use a simpler convention:
+
+```
+repl-<control_id>-<instance_id>
+```
+
+Provider is implicit (Tailscale), and manifest is tracked separately in the database.
+
+## 12.2 Detection Algorithm
+
+### Reconciliation Cycle
+
+Orphan detection runs as part of the reconciliation cycle (default: every 60s).
+
+```typescript
+interface OrphanDetectionResult {
+  /** Resources in cloud but not in DB */
+  orphanedResources: OrphanedResource[];
+
+  /** Resources in DB but not in cloud (for reference) */
+  missingResources: MissingResource[];
+
+  /** Session that detected these orphans */
+  detectedBy: SessionInfo;
+
+  /** Timestamp of detection */
+  detectedAt: number;
+}
+
+interface OrphanedResource {
+  /** Provider's resource ID */
+  providerId: string;
+
+  /** Resource type (instance, volume, snapshot, tailscale_machine) */
+  resourceType: OrphanResourceType;
+
+  /** Provider name */
+  provider: ProviderName;
+
+  /** Parsed from resource name (if parseable) */
+  inferredInfo: ResourceNameParts | null;
+
+  /** Resource creation time (from provider) */
+  createdAt: number;
+
+  /** Resource age in ms */
+  ageMs: number;
+
+  /** Whether this is likely from current session (< 1 hour old) */
+  likelyCurrentSession: boolean;
+
+  /** Estimated hourly cost (if available) */
+  estimatedHourlyCost?: number;
+}
+
+type OrphanResourceType = 'instance' | 'volume' | 'snapshot' | 'tailscale_machine';
+```
+
+### Detection Process
+
+```typescript
+async function detectOrphans(
+  provider: ProviderName,
+  sessionStartTime: number
+): Promise<OrphanDetectionResult> {
+  const result: OrphanDetectionResult = {
+    orphanedResources: [],
+    missingResources: [],
+    detectedBy: getCurrentSessionInfo(),
+    detectedAt: Date.now(),
+  };
+
+  // 1. List all resources from provider with our prefix
+  const cloudResources = await listProviderResources(provider, {
+    namePrefix: 'repl-',
+    includeTerminated: false,
+  });
+
+  // 2. Get all tracked resources from DB
+  const dbResources = await db.query(`
+    SELECT provider_id, id, workflow_state FROM instances
+    WHERE provider = ? AND workflow_state NOT LIKE 'terminate:%' AND workflow_state NOT LIKE '%:error'
+    UNION ALL
+    SELECT provider_object_id, id, 'active' FROM objects
+    WHERE provider = ? AND type IN ('volume', 'snapshot', 'tailscale_machine')
+  `, [provider, provider]);
+
+  const trackedProviderIds = new Set(dbResources.map(r => r.provider_id));
+
+  // 3. Find orphans (in cloud but not in DB)
+  for (const cloudResource of cloudResources) {
+    if (!trackedProviderIds.has(cloudResource.id)) {
+      const inferredInfo = parseResourceName(cloudResource.name);
+      const ageMs = Date.now() - cloudResource.createdAt;
+
+      // Resources created after session start are likely from this session
+      const likelyCurrentSession = cloudResource.createdAt > sessionStartTime;
+
+      result.orphanedResources.push({
+        providerId: cloudResource.id,
+        resourceType: cloudResource.type,
+        provider: provider,
+        inferredInfo: inferredInfo,
+        createdAt: cloudResource.createdAt,
+        ageMs: ageMs,
+        likelyCurrentSession: likelyCurrentSession,
+        estimatedHourlyCost: getEstimatedCost(cloudResource),
+      });
+    }
+  }
+
+  // 4. Find missing (in DB but not in cloud) - for reference
+  const cloudProviderIds = new Set(cloudResources.map(r => r.id));
+  for (const dbResource of dbResources) {
+    if (!cloudProviderIds.has(dbResource.provider_id)) {
+      result.missingResources.push({
+        internalId: dbResource.id,
+        providerId: dbResource.provider_id,
+        workflow_state: dbResource.workflow_state,
+      });
+    }
+  }
+
+  return result;
+}
+```
+
+### Tailscale Orphan Detection
+
+Tailscale machines are tracked separately:
+
+```typescript
+async function detectTailscaleOrphans(): Promise<TailscaleOrphan[]> {
+  // 1. List all machines in Tailscale with our prefix
+  const tailscaleMachines = await tailscale.listMachines({
+    namePrefix: 'repl-',
+  });
+
+  // 2. Get tracked Tailscale machines from objects table
+  const trackedMachines = await db.query(`
+    SELECT provider_object_id, json_extract(tags_json, '$.instance_id') as instance_id
+    FROM objects
+    WHERE type = 'tailscale_machine'
+  `);
+
+  const trackedIds = new Set(trackedMachines.map(m => m.provider_object_id));
+
+  // 3. Find orphans
+  const orphans: TailscaleOrphan[] = [];
+  for (const machine of tailscaleMachines) {
+    if (!trackedIds.has(machine.id)) {
+      const inferredInfo = parseTailscaleName(machine.name);
+
+      orphans.push({
+        machineId: machine.id,
+        machineName: machine.name,
+        tailscaleIp: machine.addresses[0],
+        inferredInstanceIdPrefix: inferredInfo?.instanceIdPrefix ?? null,
+        lastSeen: machine.lastSeen,
+        ageMs: Date.now() - machine.created,
+      });
+    }
+  }
+
+  return orphans;
+}
+```
+
+## 12.3 Session-Based Classification
+
+### Current Session vs Other Sessions
+
+Orphans are classified by likely origin:
+
+```typescript
+interface OrphanClassification {
+  /** Orphans likely from current control plane session */
+  currentSession: OrphanedResource[];
+
+  /** Orphans likely from previous sessions */
+  otherSessions: OrphanedResource[];
+
+  /** Orphans that can't be classified (no parseable name) */
+  unknown: OrphanedResource[];
+}
+
+function classifyOrphans(
+  orphans: OrphanedResource[],
+  sessionStartTime: number,
+  currentSessionThresholdMs: number = 3600_000  // 1 hour
+): OrphanClassification {
+  const classification: OrphanClassification = {
+    currentSession: [],
+    otherSessions: [],
+    unknown: [],
+  };
+
+  for (const orphan of orphans) {
+    if (!orphan.inferredInfo) {
+      // Can't parse name - unknown origin
+      classification.unknown.push(orphan);
+    } else if (orphan.likelyCurrentSession) {
+      // Created after session start - likely ours
+      classification.currentSession.push(orphan);
+    } else if (orphan.ageMs < currentSessionThresholdMs) {
+      // Recent but before session - could be ours from restart
+      classification.currentSession.push(orphan);
+    } else {
+      // Older - from previous session
+      classification.otherSessions.push(orphan);
+    }
+  }
+
+  return classification;
+}
+```
+
+### Severity Levels
+
+```
+CURRENT SESSION ORPHANS: WARNING
+- Recent resources that may indicate active spawn failures
+- Higher priority for investigation
+- May be actively costing money
+
+OTHER SESSION ORPHANS: INFO
+- Historical resources from previous runs
+- Lower priority but should be addressed
+- May represent accumulated technical debt
+
+UNKNOWN ORPHANS: CAUTION
+- Resources with our prefix but unparseable names
+- May be from very old version or manual creation
+- Investigate before any action
+```
+
+## 12.4 Orphan Whitelist
+
+### Purpose
+
+The whitelist allows operators to acknowledge orphans they've investigated
+and decided to keep. This provides:
+1. Audit trail of decisions
+2. Prevents repeated warnings
+3. Documents intentional exceptions
+
+### Schema
+
+```sql
+CREATE TABLE orphan_whitelist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    resource_type TEXT NOT NULL,
+    resource_name TEXT,
+
+    -- Why this orphan is being kept
+    reason TEXT NOT NULL,
+
+    -- Who made the decision
+    acknowledged_by TEXT NOT NULL,
+    acknowledged_at INTEGER NOT NULL,
+
+    -- Optional expiry (re-evaluate after this time)
+    expires_at INTEGER,
+
+    -- Additional context
+    notes TEXT,
+
+    UNIQUE(provider, provider_id)
+);
+
+CREATE INDEX idx_whitelist_expires ON orphan_whitelist(expires_at);
+CREATE INDEX idx_whitelist_provider ON orphan_whitelist(provider, resource_type);
+```
+
+### Whitelist Operations
+
+```typescript
+interface WhitelistEntry {
+  provider: ProviderName;
+  providerId: string;
+  resourceType: OrphanResourceType;
+  resourceName?: string;
+  reason: string;
+  acknowledgedBy: string;
+  acknowledgedAt: number;
+  expiresAt?: number;
+  notes?: string;
+}
+
+async function whitelistOrphan(entry: WhitelistEntry): Promise<void> {
+  // Note: id is auto-generated by database (INTEGER PRIMARY KEY AUTOINCREMENT)
+  await db.query(`
+    INSERT INTO orphan_whitelist
+    (provider, provider_id, resource_type, resource_name, reason,
+     acknowledged_by, acknowledged_at, expires_at, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(provider, provider_id) DO UPDATE SET
+      reason = excluded.reason,
+      acknowledged_by = excluded.acknowledged_by,
+      acknowledged_at = excluded.acknowledged_at,
+      expires_at = excluded.expires_at,
+      notes = excluded.notes
+  `, [
+    entry.provider,
+    entry.providerId,
+    entry.resourceType,
+    entry.resourceName,
+    entry.reason,
+    entry.acknowledgedBy,
+    entry.acknowledgedAt,
+    entry.expiresAt,
+    entry.notes,
+  ]);
+}
+
+async function getActiveWhitelist(): Promise<WhitelistEntry[]> {
+  return db.query(`
+    SELECT * FROM orphan_whitelist
+    WHERE expires_at IS NULL OR expires_at > ?
+  `, [Date.now()]);
+}
+
+async function removeFromWhitelist(provider: ProviderName, providerId: string): Promise<void> {
+  await db.query(`
+    DELETE FROM orphan_whitelist WHERE provider = ? AND provider_id = ?
+  `, [provider, providerId]);
+}
+```
+
+### Filtering Whitelisted Orphans
+
+```typescript
+async function getUnacknowledgedOrphans(): Promise<OrphanedResource[]> {
+  const allOrphans = await detectAllOrphans();
+  const whitelist = await getActiveWhitelist();
+
+  const whitelistedIds = new Set(
+    whitelist.map(w => `${w.provider}:${w.providerId}`)
+  );
+
+  return allOrphans.filter(
+    orphan => !whitelistedIds.has(`${orphan.provider}:${orphan.providerId}`)
+  );
+}
+```
+
+## 12.5 CLI Commands
+
+### List Orphans
+
+```bash
+# List all orphans
+repl orphans list
+
+# List orphans for specific provider
+repl orphans list --provider aws
+
+# Include whitelisted orphans
+repl orphans list --include-whitelisted
+
+# Output as JSON for scripting
+repl orphans list --json
+```
+
+**Output Format:**
+
+```
+Orphaned Resources (3 found)
+
+CURRENT SESSION (WARNING):
+  [aws] i-0abc123def456  repl-v2a1b2c3-mf5e6f7g-a1b2c3d4
+        Age: 15m | Est. Cost: $1.23/hr | Type: instance
+
+OTHER SESSIONS (INFO):
+  [aws] i-0xyz789abc012  repl-v2a1b2c3-none-b2c3d4e5
+        Age: 2d 4h | Est. Cost: $0.45/hr | Type: instance
+
+  [aws] vol-0123456789   repl-v2a1b2c3-mf1a2b3c-c3d4e5f6
+        Age: 5d | Est. Cost: $0.02/hr | Type: volume
+
+TAILSCALE:
+  [ts] repl-v2a1b2c3-d4e5f6g7
+       IP: 100.64.0.15 | Last Seen: 3h ago
+
+Run 'repl orphans inspect <provider_id>' for details.
+Run 'repl orphans whitelist <provider_id> --reason "..."' to acknowledge.
+```
+
+### Inspect Orphan
+
+```bash
+repl orphans inspect i-0abc123def456
+```
+
+**Output:**
+
+```
+Orphan Details: i-0abc123def456
+
+Provider:     aws
+Resource:     EC2 Instance
+Name:         repl-v2a1b2c3-mf5e6f7g-a1b2c3d4
+Created:      2024-01-31 14:32:15 UTC (15 minutes ago)
+Status:       running
+Instance Type: g5.xlarge
+Region:       us-east-1
+Est. Cost:    $1.23/hr ($29.52/day)
+
+Inferred Information:
+  Control ID: v2a1b2c3 (matches current installation)
+  Manifest ID prefix: mf5e6f7g
+  Instance ID prefix: a1b2c3d4
+
+Possible Matches in DB:
+  inst-a1b2c3d4-... (workflow_state: terminate:complete) - 95% confidence
+
+Actions:
+  repl orphans whitelist i-0abc123def456 --reason "..."
+  repl orphans open i-0abc123def456   # Open in AWS Console
+```
+
+### Whitelist Orphan
+
+```bash
+# Add to whitelist with reason (required)
+repl orphans whitelist i-0abc123def456 --reason "Test instance for debugging"
+
+# Add with expiry
+repl orphans whitelist i-0abc123def456 \
+  --reason "Temporary keep for investigation" \
+  --expires "2024-02-07"
+
+# Add with notes
+repl orphans whitelist i-0abc123def456 \
+  --reason "Production backup" \
+  --notes "Contact ops@example.com before removing"
+```
+
+### Remove from Whitelist
+
+```bash
+repl orphans unwhitelist i-0abc123def456
+```
+
+### Open in Provider Console
+
+```bash
+# Open resource in cloud provider's web console
+repl orphans open i-0abc123def456
+```
+
+This opens the appropriate URL:
+- AWS: `https://console.aws.amazon.com/ec2/v2/home?region=us-east-1#InstanceDetails:instanceId=i-0abc123def456`
+- Lambda: Not supported (no web console for individual instances)
+- RunPod: `https://www.runpod.io/console/pods/<pod_id>`
+
+### Scan Command
+
+```bash
+# Force immediate orphan scan
+repl orphans scan
+
+# Scan specific provider
+repl orphans scan --provider aws
+
+# Scan with verbose output
+repl orphans scan --verbose
+```
+
+## 12.6 Preflight Warnings
+
+### Before Operations
+
+Certain operations should warn about orphaned resources:
+
+```typescript
+async function preflightOrphanCheck(
+  operation: 'launch-run' | 'terminate-all' | 'cleanup'
+): Promise<PreflightWarning[]> {
+  const orphans = await getUnacknowledgedOrphans();
+  const classified = classifyOrphans(orphans, getSessionStartTime());
+
+  const warnings: PreflightWarning[] = [];
+
+  if (classified.currentSession.length > 0) {
+    warnings.push({
+      severity: 'WARNING',
+      message: `${classified.currentSession.length} orphaned resource(s) detected from current session`,
+      suggestion: 'Run "repl orphans list" to investigate',
+      resources: classified.currentSession.map(o => o.providerId),
+    });
+  }
+
+  if (classified.otherSessions.length > 0) {
+    warnings.push({
+      severity: 'INFO',
+      message: `${classified.otherSessions.length} orphaned resource(s) from previous sessions`,
+      suggestion: 'Consider investigating with "repl orphans list"',
+    });
+  }
+
+  return warnings;
+}
+```
+
+### CLI Integration
+
+```typescript
+// In launch-run workflow submission
+async function submitLaunchRun(input: LaunchRunInput): Promise<void> {
+  const warnings = await preflightOrphanCheck('launch-run');
+
+  for (const warning of warnings) {
+    if (warning.severity === 'WARNING') {
+      console.warn(`[WARNING] ${warning.message}`);
+      console.warn(`  ${warning.suggestion}`);
+    } else {
+      console.info(`[INFO] ${warning.message}`);
+    }
+  }
+
+  // Proceed with launch
+  // ...
+}
+```
+
+**Example Output:**
+
+```
+$ repl run python train.py
+
+[WARNING] 2 orphaned resource(s) detected from current session
+  Run "repl orphans list" to investigate
+
+Launching run...
+```
+
+## 12.7 Safety Constraints
+
+### NEVER Auto-Terminate
+
+**CRITICAL DESIGN CONSTRAINT**: The orphan detection system MUST NOT
+automatically terminate cloud resources. All termination must be:
+
+1. Explicitly requested by the user
+2. Performed through provider console (user action)
+3. Documented in audit log
+
+**Why?**
+- False positives could destroy production workloads
+- Database recovery might reveal orphans are actually tracked
+- User may have intentionally created resources outside SkyREPL
+- Cost of accidental termination far exceeds orphan cost
+
+### Allowed Automatic Actions
+
+The system MAY automatically:
+- Detect and report orphans
+- Send notifications/alerts
+- Update orphan tracking records
+- Expire old whitelist entries
+
+### Prohibited Automatic Actions
+
+The system MUST NOT automatically:
+- Terminate instances
+- Delete volumes
+- Remove snapshots
+- Deregister Tailscale machines
+- Modify cloud resources in any way
+
+## 12.8 Failed Spawn Detection
+
+### Error Classification for Orphan Risk
+
+```typescript
+interface SpawnErrorClassification {
+  /** Whether this error type can leave orphans */
+  orphanRisk: boolean;
+
+  /** How confident we are the resource was never created */
+  confidenceNoResource: 'high' | 'medium' | 'low';
+
+  /** Recommended action */
+  action: 'none' | 'scan_immediately' | 'scan_delayed';
+}
+
+const SPAWN_ERROR_CLASSIFICATIONS: Record<string, SpawnErrorClassification> = {
+  // Pre-API errors - no orphan risk
+  'INVALID_SPEC': { orphanRisk: false, confidenceNoResource: 'high', action: 'none' },
+  'AUTH_ERROR': { orphanRisk: false, confidenceNoResource: 'high', action: 'none' },
+  'BUDGET_EXCEEDED': { orphanRisk: false, confidenceNoResource: 'high', action: 'none' },
+
+  // API errors with partial execution - possible orphans
+  'TIMEOUT': { orphanRisk: true, confidenceNoResource: 'low', action: 'scan_immediately' },
+  'NETWORK_ERROR': { orphanRisk: true, confidenceNoResource: 'medium', action: 'scan_immediately' },
+  'PROVIDER_INTERNAL': { orphanRisk: true, confidenceNoResource: 'low', action: 'scan_immediately' },
+
+  // Post-creation errors - orphan very likely
+  'WAIT_FOR_BOOT_TIMEOUT': { orphanRisk: true, confidenceNoResource: 'low', action: 'scan_immediately' },
+  'AGENT_REGISTRATION_FAILED': { orphanRisk: true, confidenceNoResource: 'low', action: 'scan_immediately' },
+
+  // Capacity errors - no orphan risk
+  'CAPACITY_ERROR': { orphanRisk: false, confidenceNoResource: 'high', action: 'none' },
+  'SPOT_INTERRUPTED': { orphanRisk: false, confidenceNoResource: 'high', action: 'none' },
+};
+```
+
+### Handling Spawn Failures
+
+```typescript
+async function handleSpawnFailure(
+  provider: ProviderName,
+  error: ProviderError,
+  spawnAttemptInfo: SpawnAttemptInfo
+): Promise<void> {
+  const classification = SPAWN_ERROR_CLASSIFICATIONS[error.code] ?? {
+    orphanRisk: true,
+    confidenceNoResource: 'low',
+    action: 'scan_immediately',
+  };
+
+  if (classification.orphanRisk) {
+    debug('ORPHAN_DETECTION/spawn-failure', {
+      provider,
+      errorCode: error.code,
+      classification,
+      expectedResourceName: spawnAttemptInfo.expectedName,
+    });
+
+    if (classification.action === 'scan_immediately') {
+      // Trigger immediate orphan scan for this provider
+      const orphans = await detectOrphans(provider, Date.now() - 300_000);
+
+      // Look for resource with our expected name
+      const possibleOrphan = orphans.orphanedResources.find(
+        o => o.inferredInfo?.instanceIdPrefix === spawnAttemptInfo.instanceIdPrefix
+      );
+
+      if (possibleOrphan) {
+        // Log the potential orphan for user attention
+        console.warn(`[ORPHAN WARNING] Potential orphan detected after spawn failure:`);
+        console.warn(`  Provider ID: ${possibleOrphan.providerId}`);
+        console.warn(`  Run "repl orphans inspect ${possibleOrphan.providerId}" for details`);
+      }
+    }
+  }
+}
+```
+
+## 12.9 Database Recovery Scenario
+
+### Partial Recovery with Resource Names
+
+If the database is lost but cloud resources remain, resource names provide
+recovery hints:
+
+```typescript
+interface RecoveryHint {
+  providerId: string;
+  provider: ProviderName;
+  inferredInstanceIdPrefix: string;
+  inferredManifestIdPrefix: string | null;
+  resourceType: OrphanResourceType;
+  createdAt: number;
+}
+
+async function generateRecoveryHints(): Promise<RecoveryHint[]> {
+  const hints: RecoveryHint[] = [];
+
+  for (const provider of ENABLED_PROVIDERS) {
+    const cloudResources = await listProviderResources(provider, {
+      namePrefix: 'repl-',
+    });
+
+    for (const resource of cloudResources) {
+      const parsed = parseResourceName(resource.name);
+      if (parsed) {
+        hints.push({
+          providerId: resource.id,
+          provider: parsed.provider,
+          inferredInstanceIdPrefix: parsed.instanceIdPrefix,
+          inferredManifestIdPrefix: parsed.manifestIdPrefix,
+          resourceType: resource.type,
+          createdAt: resource.createdAt,
+        });
+      }
+    }
+  }
+
+  return hints;
+}
+```
+
+### Recovery Report
+
+```bash
+repl orphans recovery-report
+```
+
+**Output:**
+
+```
+Database Recovery Report
+========================
+
+Found 5 cloud resources with SkyREPL naming:
+
+AWS Instances (3):
+  i-0abc123  repl-v2a1b2c3-mf5e6f7g-a1b2c3d4  running   g5.xlarge
+  i-0def456  repl-v2a1b2c3-mf8h9i0j-b2c3d4e5  running   g5.xlarge
+  i-0ghi789  repl-v2a1b2c3-none-c3d4e5f6      stopped   t3.micro
+
+AWS Volumes (1):
+  vol-012345  repl-v2a1b2c3-mf5e6f7g-a1b2c3d4  attached  100GB
+
+Tailscale Machines (1):
+  repl-v2a1b2c3-a1b2c3d4  100.64.0.15  online
+
+Control ID Found:
+  v2a1b2c3 - matches current installation (all resources created by this control plane)
+
+Instance ID Prefixes Found:
+  a1b2c3d4 - 2 resources (1 instance, 1 volume)
+  b2c3d4e5 - 1 resource
+  c3d4e5f6 - 1 resource
+
+Manifest ID Prefixes Found:
+  mf5e6f7g - 2 resources
+  mf8h9i0j - 1 resource
+  none     - 1 resource (no manifest association)
+
+To import these resources into a fresh database, use:
+  repl orphans import --confirm
+```
+
+## 12.10 Property Test: Kill at Any Step
+
+This orphan detection system supports the architecture's key testability property:
+"Kill at any step → no orphans"
+
+### How It Works
+
+1. **Resource names encode recovery info**: Even with total DB loss, resource names
+   contain enough information (provider, instance prefix, manifest prefix) to
+   identify and correlate cloud resources.
+
+2. **Two-phase spawn + reconciliation**: The provider system's two-phase spawn
+   (reserve in DB before API call) combined with reconciliation means:
+   - Kill before Phase 1: Nothing created
+   - Kill during Phase 1: DB has spawn:pending, reconciliation detects
+   - Kill after Phase 1, before Phase 2: Reconciliation marks as failed
+   - Kill during Phase 2: Reconciliation finds by name/tags
+   - Kill after Phase 2: Normal completion
+
+3. **Conservative detection**: Orphan detection REPORTS but does not ACT. Human
+   reviews orphan list and decides disposition. This prevents false positive
+   terminations that could destroy legitimate workloads.
+
+### Testing Strategy
+
+**Note**: For chaos testing infrastructure, see Chapter 15.2 CI/CD and Testing.
+
+```typescript
+// Property test: any crash should leave system in recoverable state
+async function propertyTestKillAtAnyStep(): Promise<boolean> {
+  // 1. Start spawn workflow
+  // 2. Kill at random point
+  // 3. Restart control plane
+  // 4. Run orphan detection
+  // 5. Verify: either resource in DB, or reported as orphan
+  // 6. Human simulation: terminate orphan or recover to DB
+  // 7. Final state: no untracked cloud resources
+}
+```
+
+The key insight: orphan detection is the SAFETY NET, not the primary mechanism.
+The primary mechanism is the two-phase spawn protocol with reconciliation.
+Orphan detection catches edge cases and provides visibility.
+
+Resource names now include control_id to answer "did I create this?" which helps
+distinguish between resources from the current control plane installation versus
+other installations (e.g., different machines, different environments). Provider
+information is stored in cloud tags/metadata, not in the resource name.
+

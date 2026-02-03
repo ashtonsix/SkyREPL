@@ -1,0 +1,16 @@
+# workflow-launch-run.ts - Launch Run Workflow
+
+## Purpose
+Acquire instance (warm pool or spawn), sync files, execute command, collect artifacts
+
+## Nodes
+1. resolve-instance: Check warm pool, apply conditional-branch
+2. spawn-instance: Two-phase spawn (DB then cloud)
+3. claim-allocation: Atomic claim of AVAILABLE allocation
+4. create-allocation: Create allocation record
+5. sync-files: Download files to instance
+6. start-run: Send command via SSE, wait for sync_complete
+7. wait-completion: Wait for run_complete or timeout
+8. collect-artifacts: Upload matching files
+9. transition-hold: ACTIVE → HELD
+10. finalize: Seal manifest, create snapshot if requested

@@ -1,0 +1,17 @@
+# usage.ts - Usage Reporting Command
+
+## Query
+- GET /v1/usage with period filter
+
+## Period Options
+- --period: current, last-month, YYYY-MM
+
+## Output
+- Total cost
+- Provider breakdown
+- Instance type breakdown
+- Spot vs on-demand utilization
+- Run count and success rate
+
+## Export
+- --export FILE.csv: CSV export

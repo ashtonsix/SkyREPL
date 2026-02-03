@@ -1,0 +1,95 @@
+# lambda.ts - Lambda Labs Provider
+
+Simple provider with minimal capabilities.
+Demonstrates 80% homogeneous path with minimal provider-specific code.
+
+## Capabilities
+
+- snapshots: false (not supported)
+- spot: false (not supported)
+- gpu: true (primary offering)
+- multiRegion: true
+- persistentVolumes: false
+- idempotentSpawn: false (manual reconciliation via tags)
+
+## LambdaProvider implements Provider<LambdaInstance>
+
+### spawn(options)
+
+- Build Lambda Labs API request
+- instance_type_name: from options.spec
+- region_name: from options.region
+- name: repl-${controlId}-${manifestIdShort}-${instanceIdShort}
+- ssh_key_names: configured SSH keys
+- Call POST /instance-operations/launch
+- Return LambdaInstance
+
+Note: No native idempotency. Idempotent spawn achieved via:
+1. Check existing by name tag before spawn
+2. On crash recovery, reconcile via list()
+
+### terminate(providerId)
+
+- Call POST /instance-operations/terminate
+- Body: { instance_ids: [providerId] }
+- Idempotent (not found = no-op)
+
+### list(filter?)
+
+- Call GET /instances
+- Filter client-side by name prefix 'repl-'
+- Return LambdaInstance[]
+
+### get(providerId)
+
+- Call GET /instances/{providerId}
+- Return LambdaInstance or null
+
+### generateBootstrap(config)
+
+- Format: shell script (Lambda uses SSH exec, not cloud-init)
+- Install dependencies, download agent
+- Register with control plane
+- Start agent via systemd
+- Return: { content: bash, format: 'shell', checksum: SHA256 }
+
+## Lambda Labs Lifecycle Hooks
+
+### onStartup()
+
+- Verify API key: Call GET /instances (check auth)
+- Fetch available instance types, cache
+
+### onReconcile(context)
+
+- Compare DB instances vs API /instances
+- Detect orphans by name pattern
+- Detect drift
+- Return recommendations
+
+### onHeartbeat()
+
+- Refresh instance types cache if stale
+
+## Error Mapping
+
+| Lambda Labs Error | Provider Error |
+|-------------------|----------------|
+| 429 response | RateLimitError |
+| 401/403 | AuthError |
+| "no capacity" in message | CapacityError |
+| "not found" | NotFoundError |
+| "invalid instance type" | InvalidSpecError |
+
+## Cache TTL
+
+- 'lambda:instance_types': 3_600_000 (1 hour, rarely changes)
+- 'lambda:instance:*': 30_000 (30s)
+
+## Notes
+
+Lambda Labs is a simple provider:
+- No snapshots, no spot, no persistent volumes
+- GPU cloud with straightforward API
+- Good example of minimal 80% implementation
+- No provider-specific workflows needed

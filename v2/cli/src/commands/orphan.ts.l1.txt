@@ -1,0 +1,27 @@
+# orphan.ts - Orphan Commands
+
+## Subcommands
+- list: GET /v1/preflight (orphan section)
+- whitelist: POST /v1/orphans/:id/whitelist
+- terminate: POST /v1/orphans/:id/terminate (with confirmation)
+
+## List Options
+- --provider: Filter by provider
+- --severity: Filter by WARNING, INFO, CAUTION
+- --json: Raw JSON output
+
+## List Output
+- Table: resource ID, provider, type, age, estimated cost
+- Severity indicators (WARNING=recent, INFO=old, CAUTION=unknown)
+- Total estimated monthly cost
+
+## Whitelist
+- Requires --reason "explanation"
+- Optional --notes "additional context"
+- Optional --expires DURATION (e.g., "7d")
+- Confirmation prompt (skip with --yes)
+
+## Terminate
+- Requires confirmation (dangerous action)
+- --yes to skip confirmation
+- Shows estimated cost savings

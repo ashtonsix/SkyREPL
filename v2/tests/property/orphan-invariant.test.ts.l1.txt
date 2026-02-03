@@ -1,0 +1,125 @@
+# property/orphan-invariant.test.ts - Property-based tests
+
+## PROPERTY
+"Kill at any step → no orphaned resources"
+
+Invariant: At any point in workflow execution, if the control plane crashes and recovers, reconciliation MUST find zero orphaned cloud resources.
+
+## SETUP
+- fast-check library for property-based testing
+- OrbStack provider with fault injection capability
+- Control plane with crash/restart capability
+- Reconciliation engine enabled
+- Extended timeout for property tests (e.g., 60s per case)
+- Comprehensive logging for failure reproduction
+
+## GENERATORS
+- Random workflow inputs
+  - fc.record({command, spec, files, init_checksum})
+  - Command: fc.constantFrom(['echo test', 'sleep 5', 'exit 1'])
+  - Spec: fc.constantFrom([small, medium, large])
+  - Files: fc.array(fc.record({path, checksum, size}))
+  - Init checksum: fc.hexaString({minLength: 64, maxLength: 64})
+- Random kill points (node boundaries)
+  - fc.integer({min: 0, max: num_nodes - 1})
+  - Kill before node N executes
+  - Kill after node N completes
+  - Kill during node N execution
+- Random retry scenarios
+  - fc.boolean() for whether to retry after kill
+  - fc.integer({min: 0, max: 3}) for retry attempts
+  - fc.boolean() for force recovery vs graceful
+
+## TEST STRATEGY
+For many random scenarios (e.g., 100 iterations):
+1. Generate random workflow input
+2. Generate random kill point
+3. Start workflow execution
+4. Wait until kill point reached
+5. Kill control plane (SIGKILL or crash injection)
+6. Optionally wait random delay (0-10s)
+7. Restart control plane
+8. Wait for crash recovery to complete
+9. Run reconciliation
+10. Assert invariants hold
+
+## KILL POINTS
+- Before Phase 1 (DB insert)
+  - Kill before workflow record created
+  - No database records
+  - No cloud resources
+  - Should be clean state
+- After Phase 1, before Phase 2 (cloud API)
+  - Workflow in database
+  - No cloud resources yet
+  - Recovery should clean up DB or complete
+- During Phase 2 (cloud API in progress)
+  - Instance creation API called
+  - Response not yet received
+  - Hardest case: provider may or may not have created
+  - Reconciliation must query provider
+- After Phase 2, before node complete
+  - Instance exists in provider
+  - Instance exists in database
+  - Node still RUNNING
+  - Recovery resumes or compensates
+- During pattern application
+  - DAG modification in progress
+  - Some nodes created, some not
+  - Recovery completes pattern or rolls back
+- During compensation
+  - Failure occurred, compensation started
+  - Compensation node RUNNING
+  - Recovery completes compensation or marks failed
+
+## VERIFICATION
+Query provider for all resources:
+- OrbStack: list all containers
+- Filter by SkyREPL tags/labels
+- Extract instance IDs
+
+Query database for all instances:
+- SELECT * FROM instances
+- Extract instance IDs and provider_ids
+
+Compare bidirectionally:
+1. For each provider instance:
+   - Assert exists in database
+   - Assert status consistent
+   - Assert not marked for deletion
+
+2. For each database instance:
+   - If status=running or pending: assert exists in provider
+   - If status=terminated: assert NOT in provider
+   - If status=failed: provider may or may not exist (check manifest)
+
+3. For each allocation:
+   - Assert instance_id references valid instance
+   - If status=ACTIVE: assert instance running
+   - If status=COMPLETE: instance can be any state
+
+4. For each manifest:
+   - If SEALED: all resources resolved (success or compensated)
+   - If DRAFT: either complete it or clean up all resources
+
+## ADDITIONAL ASSERTIONS
+- No instances without allocations (unless just spawned)
+- No allocations with invalid instance_id
+- No running instances with status=terminated
+- No terminated instances with status=running
+- Total provider count ≤ total database count
+- All provider instances have SkyREPL metadata
+- Manifest resource counts match actual resources
+
+## FAILURE REPRODUCTION
+On assertion failure:
+- Log the exact random seed
+- Log the workflow input
+- Log the kill point
+- Log database state before kill
+- Log provider state before kill
+- Log database state after recovery
+- Log provider state after recovery
+- Log reconciliation output
+- Save logs to file for debugging
+- Shrink to minimal failing case (fast-check)

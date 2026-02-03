@@ -1,0 +1,1099 @@
+================================================================================
+5. ALLOCATIONS
+================================================================================
+
+## Purpose
+
+The allocation system provides the fundamental lifecycle primitive for run
+execution. It replaces the implicit grace_period mechanism with an explicit
+state machine that tracks run-to-instance bindings through their complete
+lifecycle: from warm pool availability, through active execution, to post-run
+hold states for debugging.
+
+Key Innovation: Allocations in AVAILABLE state ARE the warm pool. No separate
+concept needed. The warm pool query is just: SELECT * FROM allocations WHERE
+status='AVAILABLE'.
+
+## 5.1 Core Schema
+
+```typescript
+interface Allocation {
+  id: string;
+  run_id: string | null;        // NULL = AVAILABLE state
+  instance_id: string;
+  status: AllocationStatus;
+  user: string;                  // SSH user for this allocation
+  workdir: string;               // Isolated workdir path
+  current_manifest_id: string | null;
+  hold_until: number | null;     // Timestamp for HELD expiry
+  hold_reason: string | null;    // 'ssh_active' | 'explicit' | 'default'
+  created_at: number;            // Allocation creation
+  updated_at: number;            // Last status change
+}
+```
+
+PRINCIPLES:
+- Two timestamps (created_at, updated_at) - no per-state timestamps
+- Detailed timeline derived from workflow nodes if needed
+- Allocation is the lifecycle primitive - keep it clean
+
+## 5.2 Allocation State Machine
+
+### State Definitions
+
+```
+AVAILABLE → CLAIMED → ACTIVE → HELD → COMPLETE
+                               ↘ FAILED
+```
+
+**AVAILABLE** - Instance advertises empty run slot
+- run_id is NULL
+- instance_id points to a ready instance
+- workdir prepared for new run
+- THIS IS THE WARM POOL (warm pool is a query result, not separate concept)
+
+**CLAIMED** - Run assigned, workdir being prepared
+- run_id set to target run
+- Files downloading, environment preparing
+- Short-lived transitional state
+- Agent emits sync_complete log when files ready
+
+**ACTIVE** - Run executing
+- Command running on instance
+- Logs streaming
+- Transition trigger: Control receives sync_complete from agent
+- Transitions to HELD on completion (normal), FAILED on lifecycle error
+
+**HELD** - Run finished but allocation preserved
+- Replaces grace_period mechanism
+- SSH access enabled for debugging
+- hold_until timestamp controls duration
+- Can be extended (SSH activity, explicit CLI command)
+- CRITICAL: HELD does NOT preclude new AVAILABLE allocations on same instance
+- HELD DOES preclude instance termination (cannot terminate while any allocation HELD)
+
+**COMPLETE** - Allocation finalized
+- Metrics and logs persisted
+- Workdir retained until instance termination (different workdirs per allocation enable post-run debugging)
+- Instance slot available for new allocations
+- Record kept for historical queries
+
+**FAILED** - Lifecycle failure (not run/workload error)
+- Something went wrong during lifecycle (file sync failed, etc.)
+- Instance may be in bad state, NOT suitable for future allocations
+- Triggers instance termination or investigation
+- Distinct from run failure (exit_code != 0) which is normal completion
+
+### State Transition Diagram
+
+```
+                            NORMAL FLOW (happy path)
+    ════════════════════════════════════════════════════════════════════════════
+
+           claim()              sync_complete           run finishes
+    ┌────────────┐         ┌────────────┐         ┌────────────┐
+    │ AVAILABLE  │────────→│  CLAIMED   │────────→│   ACTIVE   │
+    └────────────┘         └─────┬──────┘         └─────┬──────┘
+          ↑                      │                      │
+          │                      │                      │
+          │                      │ sync fails           │ finish (success/fail)
+          │                      │ or timeout           │
+          │                      ↓                      ↓
+          │               ┌────────────┐         ┌────────────┐
+          │               │   FAILED   │         │    HELD    │
+          │               └─────┬──────┘         └─────┬──────┘
+          │                     │                      │
+          │                     │                      │ hold expires
+          │                     │                      │ or released
+          │                     ↓                      ↓
+          │               ┌─────────────┐       ┌────────────┐
+          │               │ (terminate  │       │  COMPLETE  │
+          │               │  instance)  │       └─────┬──────┘
+          │               └─────────────┘             │
+          │                                           │
+          │            new allocation created         │
+          └───────────────────────────────────────────┘
+
+
+                         FAILURE PATHS (from any active state)
+    ════════════════════════════════════════════════════════════════════════════
+
+    ┌────────────┐         ┌────────────┐
+    │   ACTIVE   │────────→│   FAILED   │────────→ (terminate instance)
+    └────────────┘         └────────────┘
+                  lifecycle
+                   error
+
+    Note: FAILED indicates lifecycle failure (file sync error, agent crash),
+          NOT run/workload failure (exit_code != 0), which is normal completion.
+
+
+                                    LEGEND
+    ════════════════════════════════════════════════════════════════════════════
+
+      ────────→   State transition (labeled with trigger)
+      ↑ ↓         Vertical flow direction
+      ┌──┐ └──┘   State box
+      (...)       Side effect / action taken
+
+    TERMINAL STATES:
+      COMPLETE    Normal end state, allows new allocations + instance termination
+      FAILED      Error end state, typically triggers instance termination
+```
+
+KEY SEMANTICS:
+
+KEY SEMANTICS:
+- HELD allocations allow new AVAILABLE allocations on same instance
+- HELD allocations prevent instance termination
+- COMPLETE allocations are finalized, allow new allocations AND termination
+- FAILED allocations typically trigger instance termination (bad state)
+
+### Transition Triggers and Side Effects
+
+```typescript
+type AllocationStatus =
+  | 'AVAILABLE'
+  | 'CLAIMED'
+  | 'ACTIVE'
+  | 'HELD'
+  | 'COMPLETE'
+  | 'FAILED';  // Lifecycle failure (file sync error, etc.) - instance is suspect
+
+interface TransitionContext {
+  runId?: string;
+  holdDurationMs?: number;
+  holdReason?: 'ssh_active' | 'explicit' | 'debug' | 'default';
+  timestamp: number;
+}
+
+// Valid transitions map
+const VALID_TRANSITIONS: Record<AllocationStatus, AllocationStatus[]> = {
+  'AVAILABLE': ['CLAIMED'],
+  'CLAIMED': ['ACTIVE', 'FAILED'],  // ACTIVE triggered by sync_complete
+  'ACTIVE': ['HELD', 'FAILED'],
+  'HELD': ['COMPLETE'],
+  'COMPLETE': [],  // Terminal state (eventually archived)
+  'FAILED': [],    // Terminal state (instance terminated)
+};
+
+// Transition triggers
+const TRANSITION_TRIGGERS = {
+  'AVAILABLE→CLAIMED': 'Warm pool allocation claimed by workflow',
+  'CLAIMED→ACTIVE': 'Agent reports sync_complete (files downloaded successfully)',
+  'CLAIMED→FAILED': 'Agent reports sync failure or timeout',
+  'ACTIVE→HELD': 'Run completes (success or failure), hold period begins',
+  'ACTIVE→FAILED': 'Lifecycle error during execution (concrete triggers below)',
+  'HELD→COMPLETE': 'Hold period expires, allocation finalized',
+};
+
+// ACTIVE→FAILED concrete triggers:
+// - Agent heartbeat timeout (>30 seconds without heartbeat)
+// - SSH connection loss to instance (network partition)
+// - Instance termination by provider (spot interruption, maintenance)
+// - Fatal agent error (agent crash, OOM, unrecoverable error)
+```
+
+### State Validation
+
+```typescript
+function validateAllocationTransition(
+  currentStatus: AllocationStatus,
+  newStatus: AllocationStatus
+): { valid: boolean; error?: string } {
+  const allowed = VALID_TRANSITIONS[currentStatus];
+
+  if (!allowed.includes(newStatus)) {
+    return {
+      valid: false,
+      error: `Invalid allocation transition: ${currentStatus} → ${newStatus}`,
+    };
+  }
+
+  return { valid: true };
+}
+
+function allowsSSHAccess(status: AllocationStatus): boolean {
+  return status === 'ACTIVE' || status === 'HELD';
+}
+
+function isInWarmPool(status: AllocationStatus): boolean {
+  return status === 'AVAILABLE';
+}
+```
+
+## 5.3 Warm Pool Mechanics
+
+### Key Insight: AVAILABLE IS the Warm Pool
+
+An allocation in AVAILABLE state IS a warm pool advertisement. There is no
+separate "warm pool" table or concept. The warm pool is simply a query result:
+
+```sql
+SELECT * FROM allocations WHERE status = 'AVAILABLE' AND <matching criteria>
+```
+
+### Creating AVAILABLE Allocations
+
+```typescript
+async function createAvailableAllocation(
+  instanceId: string,
+  options: { user?: string; workdir?: string; manifestId?: string } = {}
+): Promise<Allocation> {
+  const instance = await db.getInstanceRecord(instanceId);
+
+  // Determine workdir (use counter for isolation)
+  const existingCount = await db.query(
+    'SELECT COUNT(*) as count FROM allocations WHERE instance_id = ?',
+    [instanceId]
+  );
+  const allocNumber = existingCount[0].count + 1;
+  const workdir = options.workdir ?? `/home/${options.user ?? 'ubuntu'}/work_${allocNumber}`;
+
+  // Insert allocation record - ID auto-generated by database (INTEGER PRIMARY KEY AUTOINCREMENT)
+  const result = await db.execute(`
+    INSERT INTO allocations (
+      run_id, instance_id, status, user, workdir, current_manifest_id,
+      hold_until, hold_reason, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [
+    null, // run_id is NULL for AVAILABLE
+    instanceId,
+    'AVAILABLE',
+    options.user ?? getDefaultUser(instance.provider),
+    workdir,
+    options.manifestId ?? null,
+    null, // hold_until
+    null, // hold_reason
+    Date.now(),
+    Date.now(),
+  ]);
+
+  const allocationId = result.lastInsertRowid;
+  await prepareWorkdir(instanceId, workdir, options.user ?? getDefaultUser(instance.provider));
+
+  return materializeAllocation(allocationId);
+}
+```
+
+### Spec/Checksum Matching Algorithm
+
+```typescript
+interface WarmPoolQuery {
+  provider?: string;
+  spec?: string;
+  initChecksum?: string;
+  region?: string;
+  excludeInstanceIds?: string[];
+}
+
+async function queryWarmPool(query: WarmPoolQuery, limit = 10): Promise<WarmPoolMatch[]> {
+  const sql = `
+    SELECT a.*, i.spec, i.init_checksum, i.region,
+      CASE
+        WHEN i.init_checksum = ? THEN 100  -- Exact checksum match
+        WHEN i.init_checksum IS NULL THEN 50  -- Vanilla instance
+        ELSE 0  -- Incompatible
+      END as checksum_score
+    FROM allocations a
+    JOIN instances i ON a.instance_id = i.id
+    WHERE a.status = 'AVAILABLE'
+      AND i.workflow_state LIKE '%:complete'
+      AND i.current_manifest_id IS NULL
+      AND (? IS NULL OR i.provider = ?)
+      AND (? IS NULL OR i.spec = ?)
+      AND (i.init_checksum IS NULL OR i.init_checksum = ? OR ? IS NULL)
+      AND i.last_heartbeat > ?
+    ORDER BY checksum_score DESC, a.created_at ASC
+    LIMIT ?
+  `;
+
+  return db.query(sql, [
+    query.initChecksum, query.provider, query.provider,
+    query.spec, query.spec, query.initChecksum, query.initChecksum,
+    Date.now() - HEARTBEAT_TIMEOUT_MS, limit
+  ]);
+}
+```
+
+### Atomic Claiming with Optimistic Concurrency
+
+```typescript
+async function claimWarmPoolAllocation(
+  query: WarmPoolQuery,
+  runId: string,
+  maxRetries = 3
+): Promise<{ success: boolean; allocation?: Allocation; error?: string }> {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const candidates = await queryWarmPool(query, 5);
+    if (candidates.length === 0) {
+      return { success: false, error: 'No warm pool allocations match criteria' };
+    }
+
+    for (const candidate of candidates) {
+      const result = await db.transaction(async () => {
+        const alloc = await db.getAllocationForUpdate(candidate.id);
+
+        if (!alloc || alloc.status !== 'AVAILABLE' || alloc.run_id !== null) {
+          return { success: false, error: 'Allocation no longer available' };
+        }
+
+        await db.updateAllocation(candidate.id, {
+          status: 'CLAIMED',
+          run_id: runId,
+          updated_at: Date.now(),
+        });
+
+        return { success: true, allocation: await materializeAllocation(candidate.id) };
+      });
+
+      if (result.success) return result;
+    }
+
+    await sleep(50 * (attempt + 1)); // Exponential backoff
+  }
+
+  return { success: false, error: 'Failed to claim after max retries' };
+}
+```
+
+## 5.4 SSH Integration
+
+### Per-Allocation SSH Routing
+
+**Key Principle:** SSH connections are per-allocation, not per-instance. Each allocation
+gets its own SSH host entry, workdir, and user context. Running `ssh <allocation_id>`
+lands you in the correct instance/user/workdir for that specific run.
+
+**Why Per-Allocation SSH:**
+- Different workdirs mean old runs remain accessible after completion
+- Multiple allocations can coexist on same instance (future capability)
+- Reduces HELD state importance (previous runs don't block new ones) but doesn't
+  eliminate it (still can't terminate instance with active SSH)
+- Clean separation between concurrent or sequential runs on same instance
+
+### Allocation SSH Properties
+
+Each allocation has three SSH-related properties:
+
+```typescript
+interface Allocation {
+  // ... other fields ...
+  instance_id: string;  // Which physical instance hosts this allocation
+  user: string;         // Unix user for SSH (default: platform native like "ubuntu")
+  workdir: string;      // Isolated working directory for this allocation
+}
+```
+
+**User Selection:**
+- Default: Native platform user (ubuntu@AWS, runpod@RunPod, etc.)
+- Future: Platform-specific user isolation (docker user, VM user, etc.)
+- Stored in allocation record for consistent SSH routing
+
+**Workdir Isolation:**
+- Each allocation gets unique workdir: `/home/ubuntu/work_1`, `/home/ubuntu/work_2`, etc.
+- Counter increments per instance to ensure uniqueness
+- Previous allocations' workdirs persist until instance termination
+- This is intentional: enables SSH access to old allocations for debugging while new work executes
+- Multiple workdirs accumulate (work_1, work_2, work_3...) during instance lifetime
+- Workdir cleanup timing: Instance termination, NOT allocation completion
+- Rationale: Users can SSH to previous run's workdir while new allocation executes
+
+### Per-Allocation SSH Entries
+
+SSH host entries are per-allocation, not per-instance:
+
+```typescript
+interface AllocationSSHEntry {
+  allocationId: string;
+  instanceId: string;
+  ip: string;
+  port: number;
+  user: string;
+  workdir: string;
+  identityFile?: string;
+}
+
+async function generateAllocationSSHConfig(allocation: Allocation): Promise<void> {
+  const instance = await materializeInstance(allocation.instanceId, { includeExternal: true });
+  const ip = instance.tailscaleIp ?? instance.ip;
+
+  const entry: AllocationSSHEntry = {
+    allocationId: allocation.id,
+    instanceId: instance.id,
+    ip: ip,
+    port: 22,
+    user: allocation.user,
+    workdir: allocation.workdir,
+    identityFile: getSSHKeyPath(instance.provider),
+  };
+
+  await db.upsertObject({
+    id: `ssh-config:${allocation.id}`,
+    type: 'ssh_config',
+    tags_json: JSON.stringify({ allocation_id: allocation.id }),
+    payload: Buffer.from(JSON.stringify(entry)),
+    content_type: 'application/json',
+    created_at: Date.now(),
+    updated_at: Date.now(),
+  });
+}
+
+function generateSSHConfigEntry(entry: AllocationSSHEntry): string {
+  const shortId = entry.allocationId.substring(0, 8);
+  return `Host ${shortId}
+    HostName ${entry.ip}
+    User ${entry.user}
+    Port ${entry.port}
+    IdentityFile ${entry.identityFile}
+    RequestTTY yes
+    RemoteCommand cd ${entry.workdir} && exec $SHELL -l`;
+}
+```
+
+**Usage:** `ssh <short_allocation_id>` automatically:
+1. Connects to correct instance IP (Tailscale or public)
+2. Authenticates as allocation's user
+3. Changes to allocation's workdir
+4. Starts shell in that context
+
+### Tailscale JIT Installation via ProxyCommand
+
+**Overview:**
+Tailscale provides secure mesh networking between control plane and instances. Installation
+happens Just-In-Time (JIT) on first SSH connection attempt, triggered transparently via
+SSH ProxyCommand. This ensures zero-latency for instances that don't need Tailscale while
+making it instantly available when SSH is needed.
+
+**ProxyCommand Integration:**
+
+SSH config entries include a ProxyCommand that intercepts connection attempts:
+
+```bash
+Host <allocation-id>
+    HostName <tailscale-ip-or-public-ip>
+    User <allocation-user>
+    Port 22
+    IdentityFile <key-path>
+    ProxyCommand /path/to/ssh_proxy_command.sh %n %h
+    RequestTTY yes
+    RemoteCommand cd <workdir> && exec $SHELL -l
+```
+
+The `ssh_proxy_command.sh` script runs on every SSH connection attempt and handles:
+1. Tailscale status checking
+2. JIT installation triggering if needed
+3. Connection establishment once ready
+
+**JIT Installation Flow:**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    TAILSCALE JIT INSTALLATION FLOW                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌──────────────┐                                      ┌──────────────────┐
+  │ SSH CLIENT   │                                      │ CONTROL PLANE    │
+  │ (ProxyCmd)   │                                      │                  │
+  └──────┬───────┘                                      └────────┬─────────┘
+         │                                                       │
+         │  1. POST /instances/{id}/tailscale-ensure             │
+         │══════════════════════════════════════════════════════>│
+         │                                                       │ 2. Check status
+         │                                                       │    If not_installed,
+         │                                                       │    enqueue message
+         │                                                       ↓
+         │                                              ┌────────────────┐
+         │                                              │ MESSAGE QUEUE  │
+         │                                              │ {type:         │
+         │                                              │  "trigger_     │
+         │                                              │   tailscale"}  │
+         │                                              └────────┬───────┘
+         │                                                       │
+         │                                              ┌────────▼───────┐
+         │                                              │ INSTANCE AGENT │
+         │                                              │                │
+         │                                              │ 3. Install TS  │
+         │                                              │ 4. Start daemon│
+         │                                              │ 5. Auth + join │
+         │                                              └────────┬───────┘
+         │                                                       │
+         │  6. Poll: POST /instances/{id}/tailscale-ensure       │
+         │  (every 2s, up to 120s)                               │
+         │══════════════════════════════════════════════════════>│
+         │                                                       │
+         │  7. Response: {"status": "installing"}                │
+         │<══════════════════════════════════════════════════════│
+         │                                                       │
+         │  ... (polling continues) ...                          │
+         │                                                       │
+         │  8. Response: {"status": "ready", "ip": "100.x.x.x"}  │
+         │<══════════════════════════════════════════════════════│
+         │                                                       │
+         │  9. Establish SSH: nc $tailscale_ip 22                │
+         │═══════════════════════════════════════════════════════>
+         │                                              ┌────────────────┐
+         │                                              │ SSH CONNECTION │
+         │<═════════════════════════════════════════════│   ESTABLISHED  │
+         └──────────────────────────────────────────────└────────────────┘
+
+  TIMING (example defaults)
+  ─────────────────────────
+    Poll interval:        configurable (e.g., 2 seconds)
+    Timeout:              configurable (e.g., 120 seconds)
+    Typical install:      15-30 seconds (varies by network)
+
+  STATUS VALUES
+  ─────────────
+    not_installed → installing → ready | failed
+```
+
+**Status Tracking:**
+
+Instance record includes Tailscale state:
+
+```typescript
+interface Instance {
+  // ... other fields ...
+  tailscale_status: 'not_installed' | 'installing' | 'ready' | 'failed';
+  tailscale_ip: string | null;  // 100.x.x.x format when ready
+}
+```
+
+**ProxyCommand Script Implementation:**
+
+```bash
+#!/bin/bash
+# ssh_proxy_command.sh - Handles Tailscale JIT installation and SSH proxying
+
+set -euo pipefail
+
+INSTANCE_ID="$1"
+TARGET_HOST="$2"
+CONTROL_PLANE_URL="${CONTROL_PLANE_URL:-http://localhost:3000}"
+
+# Call ensure endpoint - queries status and triggers install if needed
+status_response=$(curl -sf -X POST "${CONTROL_PLANE_URL}/api/v1/instances/${INSTANCE_ID}/tailscale-ensure" || echo '{"status":"error"}')
+status=$(echo "$status_response" | jq -r '.status')
+
+# If installation was triggered or already in progress, poll until ready
+if [[ "$status" == "installing" ]]; then
+  # Warn if this is during an active job
+  echo "SkyREPL: Installing Tailscale (first SSH connection). May affect benchmarks." >&2
+
+  # Poll until ready
+  echo "SkyREPL: Waiting for Tailscale installation (max 120s)..." >&2
+  timeout=120
+  elapsed=0
+  while [[ $elapsed -lt $timeout ]]; do
+    sleep 2
+    elapsed=$((elapsed + 2))
+
+    status_response=$(curl -sf -X POST "${CONTROL_PLANE_URL}/api/v1/instances/${INSTANCE_ID}/tailscale-ensure" || echo '{"status":"error"}')
+    status=$(echo "$status_response" | jq -r '.status')
+
+    if [[ "$status" == "ready" ]]; then
+      echo "SkyREPL: Tailscale ready!" >&2
+      break
+    elif [[ "$status" == "failed" ]]; then
+      echo "SkyREPL: Tailscale installation failed" >&2
+      exit 1
+    fi
+
+    echo -n "." >&2  # Progress indicator
+  done
+
+  if [[ "$status" != "ready" ]]; then
+    echo "SkyREPL: Timeout waiting for Tailscale installation" >&2
+    exit 1
+  fi
+fi
+
+# Extract Tailscale IP and establish connection
+tailscale_ip=$(echo "$status_response" | jq -r '.ip // empty')
+if [[ -z "$tailscale_ip" ]]; then
+  # Fallback to public IP if Tailscale IP not available
+  echo "SkyREPL: Tailscale IP not found, using public IP" >&2
+  exec nc "$TARGET_HOST" 22
+else
+  exec nc "$tailscale_ip" 22
+fi
+```
+
+**Control Plane API Endpoint:**
+
+```typescript
+// POST /api/v1/instances/:id/tailscale-ensure
+// Single endpoint that queries status and triggers installation if needed
+interface TailscaleStatusResponse {
+  status: 'not_installed' | 'installing' | 'ready' | 'failed';
+  ip?: string;  // Tailscale IP when status is 'ready'
+}
+
+app.post('/api/v1/instances/:id/tailscale-ensure', async (req, res) => {
+  const instance = await materializeInstance(req.params.id);
+
+  // Return current status if already installing or ready
+  if (instance.tailscale_status === 'installing' || instance.tailscale_status === 'ready') {
+    return res.json({
+      status: instance.tailscale_status,
+      ip: instance.tailscale_ip ?? undefined,
+    });
+  }
+
+  // If not installed, trigger installation
+  if (!instance.tailscale_status || instance.tailscale_status === 'not_installed') {
+    // Update status to 'installing'
+    await db.updateInstance(instance.id, {
+      tailscale_status: 'installing',
+      updated_at: Date.now(),
+    });
+
+    // Enqueue message to instance agent
+    await enqueueInstanceMessage(instance.id, {
+      type: 'trigger_tailscale',
+      timestamp: Date.now(),
+    });
+
+    return res.json({ status: 'installing' });
+  }
+
+  // Handle 'failed' status - return as-is but allow retry if explicitly requested
+  res.json({
+    status: instance.tailscale_status,
+    ip: instance.tailscale_ip ?? undefined,
+  });
+});
+```
+
+**Agent Message Handler:**
+
+```typescript
+// Instance agent handles trigger_tailscale message
+interface TriggerTailscaleMessage {
+  type: 'trigger_tailscale';
+  timestamp: number;
+}
+
+async function handleTriggerTailscale(message: TriggerTailscaleMessage): Promise<void> {
+  debug('TAILSCALE/install-triggered', { timestamp: message.timestamp });
+
+  try {
+    // Download Tailscale binary
+    await exec('curl -fsSL https://tailscale.com/install.sh | sh');
+
+    // Start Tailscale daemon
+    await exec('sudo tailscaled --state=/var/lib/tailscale/tailscaled.state &');
+
+    // Authenticate with auth key from environment
+    const authKey = process.env.TAILSCALE_AUTH_KEY;
+    if (!authKey) throw new Error('TAILSCALE_AUTH_KEY not set');
+
+    await exec(`sudo tailscale up --authkey=${authKey} --ssh`);
+
+    // Wait for IP assignment
+    let tailscaleIp: string | null = null;
+    for (let i = 0; i < 30; i++) {
+      const result = await exec('tailscale ip -4');
+      const ip = result.stdout.trim();
+      if (ip && ip.startsWith('100.')) {
+        tailscaleIp = ip;
+        break;
+      }
+      await sleep(1000);
+    }
+
+    if (!tailscaleIp) throw new Error('Failed to get Tailscale IP');
+
+    // Report success to control plane
+    await reportTailscaleStatus('ready', tailscaleIp);
+    debug('TAILSCALE/install-complete', { ip: tailscaleIp });
+
+  } catch (error) {
+    debug('TAILSCALE/install-failed', { error: error.message });
+    await reportTailscaleStatus('failed', null);
+  }
+}
+
+async function reportTailscaleStatus(status: string, ip: string | null): Promise<void> {
+  await fetch(`${CONTROL_PLANE_URL}/api/v1/instances/${INSTANCE_ID}/tailscale-status`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status, ip }),
+  });
+}
+```
+
+**User Experience:**
+
+From user perspective, Tailscale installation is completely transparent:
+
+```bash
+$ ssh a1b2c3d4
+SkyREPL: Tailscale not installed, triggering JIT installation...
+SkyREPL: Warning - Installing Tailscale during first SSH. May affect benchmarks.
+SkyREPL: Waiting for Tailscale installation (max 120s)...
+.........
+SkyREPL: Tailscale ready!
+Welcome to Ubuntu 22.04.3 LTS (GNU/Linux 5.15.0-1234-aws x86_64)
+ubuntu@instance:~/work_1$
+```
+
+**Key Design Points:**
+
+1. **Zero overhead for non-SSH workloads:** Instances don't install Tailscale unless user
+   attempts SSH connection. Batch jobs that never need debugging run without any Tailscale
+   overhead.
+
+2. **Transparent installation:** User doesn't need to know about Tailscale - they just run
+   `ssh <allocation-id>` and it works. First connection shows installation progress.
+
+3. **Benchmark warning:** Installation during active job is detected and warned about,
+   since Tailscale daemon startup consumes CPU/memory that may skew benchmark results.
+
+4. **Fallback to public IP:** If Tailscale installation fails or IP is unavailable,
+   ProxyCommand falls back to public IP for connection (if available).
+
+5. **Idempotent triggers:** Multiple SSH attempts during installation won't trigger
+   duplicate installations - status is tracked and checked before triggering.
+
+6. **Persistent across allocations:** Once installed, Tailscale remains active for all
+   future allocations on that instance. JIT installation is truly "just-in-time once".
+
+### HELD State Extension via SSH Activity
+
+SIMPLIFIED APPROACH: Heartbeat reports which allocations have active SSH. Control
+plane extends those. Simple bidirectional communication, no complex polling.
+
+**Architecture:**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        SSH ACTIVITY EXTENSION FLOW                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────┐                    ┌─────────────────────────┐
+  │      INSTANCE (Agent)   │                    │      CONTROL PLANE      │
+  ├─────────────────────────┤                    ├─────────────────────────┤
+  │                         │                    │                         │
+  │  1. Detect active SSH   │                    │                         │
+  │     sessions per user   │                    │                         │
+  │            │            │                    │                         │
+  │            ↓            │                    │                         │
+  │  2. Build allocation    │   POST /heartbeat  │                         │
+  │     ID list             │═══════════════════>│  3. Receive heartbeat   │
+  │                         │                    │            │            │
+  │                         │    {               │            ↓            │
+  │                         │      instance_id,  │  4. For each ID in      │
+  │                         │      active_ssh:   │     active_allocations: │
+  │                         │        [id1, id2]  │       extend hold_until │
+  │                         │    }               │            │            │
+  │                         │                    │            ↓            │
+  │                         │                    │  5. Update allocation   │
+  │                         │                    │     hold_reason =       │
+  │                         │                    │     'ssh_active'        │
+  │                         │                    │                         │
+  └─────────────────────────┘                    └─────────────────────────┘
+
+  TIMING (example defaults, configurable)
+  ───────────────────────────────────────
+    Heartbeat interval:     HEARTBEAT_INTERVAL (e.g., 30s)
+    SSH extension amount:   SSH_EXTENSION_MS (e.g., 5min per detection)
+    Max SSH extension:      MAX_SSH_EXTENSION_MS (e.g., 2h cumulative)
+    Absolute max hold:      ABSOLUTE_MAX_HOLD_MS (e.g., 24h)
+
+  CONSTRAINTS (normative)
+  ───────────────────────
+    SSH extension < max SSH extension < absolute max hold
+    Heartbeat interval < stale detection threshold
+
+  DETECTION METHOD
+  ────────────────
+    Agent runs: `who | grep -c "<user>"` to count active sessions
+    Returns allocation IDs where session count > 0
+```
+
+**Heartbeat Payload:**
+
+```typescript
+interface HeartbeatRequest {
+  instance_id: string;
+  provider_id: string;
+  status: string;
+  timestamp: number;
+  active_allocations: string[];  // List of allocation IDs with active SSH
+}
+```
+
+**Instance-Side Detection:**
+
+```typescript
+// Timing constants loaded from configuration (example defaults shown)
+const SSH_ACTIVITY_EXTENSION_MS = config.sshExtensionMs;      // e.g., 5 * 60 * 1000
+const MAX_SSH_EXTENSION_MS = config.maxSshExtensionMs;        // e.g., 2 * 60 * 60 * 1000
+
+// On instance agent (runs every heartbeat interval)
+async function detectActiveAllocations(): Promise<string[]> {
+  const allocations = await readLocalAllocations();  // From local state file
+  const activeAllocationIds: string[] = [];
+
+  for (const alloc of allocations) {
+    const hasActiveSSH = await checkActiveSSHConnection(alloc.user);
+    if (hasActiveSSH) {
+      activeAllocationIds.push(alloc.id);
+    }
+  }
+
+  return activeAllocationIds;
+}
+
+async function checkActiveSSHConnection(user: string): Promise<boolean> {
+  try {
+    // Simple check: look for active SSH sessions for this user
+    const result = await exec(`who | grep -c "${user}" || echo 0`);
+    const sessionCount = parseInt(result.stdout.trim(), 10);
+    return sessionCount > 0;
+  } catch (error) {
+    return false;
+  }
+}
+
+// Send heartbeat with active allocation list
+async function sendHeartbeat(): Promise<void> {
+  const activeAllocations = await detectActiveAllocations();
+
+  const payload: HeartbeatRequest = {
+    instance_id: LOCAL_INSTANCE_ID,
+    provider_id: LOCAL_PROVIDER_ID,
+    status: 'running',
+    timestamp: Date.now(),
+    active_allocations: activeAllocations,
+  };
+
+  await fetch(`${CONTROL_PLANE_URL}/api/v1/heartbeat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+```
+
+**Control Plane Processing:**
+
+```typescript
+async function handleHeartbeat(req: HeartbeatRequest): Promise<void> {
+  // Update instance last_heartbeat
+  await db.updateInstance(req.instance_id, {
+    last_heartbeat: req.timestamp,
+  });
+
+  // Extend holds for allocations with active SSH
+  for (const allocationId of req.active_allocations) {
+    await extendAllocationHold(allocationId, {
+      extensionMs: SSH_ACTIVITY_EXTENSION_MS,
+      reason: 'ssh_active',
+      maxExtensionMs: MAX_SSH_EXTENSION_MS,
+    });
+  }
+}
+
+async function extendAllocationHold(
+  allocationId: string,
+  options: { extensionMs: number; reason: string; maxExtensionMs?: number }
+): Promise<{ success: boolean; newHoldUntil?: number }> {
+  return db.transaction(async () => {
+    const allocation = await db.getAllocationForUpdate(allocationId);
+    if (!allocation || allocation.status !== 'HELD') {
+      return { success: false };
+    }
+
+    const now = Date.now();
+    const currentHoldUntil = allocation.hold_until ?? now;
+
+    // Calculate when hold started (use updated_at as proxy since we don't have held_at)
+    const heldAt = allocation.updated_at;
+
+    let newHoldUntil = Math.max(currentHoldUntil, now) + options.extensionMs;
+    const maxHoldUntil = heldAt + (options.maxExtensionMs ?? MAX_HOLD_DURATION_MS);
+
+    if (newHoldUntil > maxHoldUntil) newHoldUntil = maxHoldUntil;
+
+    // Absolute hard limit (24 hours)
+    const absoluteLimit = heldAt + MAX_HOLD_DURATION_MS;
+    if (newHoldUntil > absoluteLimit) newHoldUntil = absoluteLimit;
+
+    await db.updateAllocation(allocationId, {
+      hold_until: newHoldUntil,
+      hold_reason: options.reason,
+      updated_at: Date.now(),
+    });
+
+    return { success: true, newHoldUntil };
+  });
+}
+```
+
+### SSH Config Regeneration
+
+SSH config must be regenerated when allocations change to maintain IDE integration
+(VSCode Remote dropdowns, terminal autocomplete).
+
+**Triggers for regeneration:**
+- Allocation enters ACTIVE or HELD state (new SSH target available)
+- Allocation leaves HELD state (SSH target no longer valid)
+- Instance IP changes (Tailscale ready, public IP assigned)
+- New allocation created on existing instance (additional SSH entry)
+
+**Regeneration Process:**
+
+```typescript
+async function regenerateSSHConfig(): Promise<void> {
+  // Query all allocations with active SSH access
+  const activeAllocations = await db.query(`
+    SELECT a.*, i.ip, i.provider
+    FROM allocations a
+    JOIN instances i ON a.instance_id = i.id
+    WHERE a.status IN ('ACTIVE', 'HELD')
+      AND i.workflow_state NOT LIKE 'terminate:%'
+    ORDER BY a.created_at ASC
+  `);
+
+  // Generate SSH config entries
+  const entries = activeAllocations.map(alloc => {
+    const ip = alloc.tailscale_ip ?? alloc.ip;
+    return generateSSHConfigEntry({
+      allocationId: alloc.id,
+      instanceId: alloc.instance_id,
+      ip: ip,
+      port: 22,
+      user: alloc.user,
+      workdir: alloc.workdir,
+      identityFile: getSSHKeyPath(alloc.provider),
+    });
+  });
+
+  // Write to SSH config file
+  const configPath = path.join(os.homedir(), '.ssh', 'config.d', 'skyrepl');
+  await fs.promises.writeFile(configPath, entries.join('\n\n'));
+}
+```
+
+The CLI watches for these changes and regenerates ~/.ssh/config.d/skyrepl or
+equivalent. This is a client-side concern - the control plane just needs to expose
+current allocation state via API.
+
+**Multiple Allocations per Instance:**
+When instance has multiple allocations (HELD + new ACTIVE), SSH config includes
+entries for both:
+
+```
+Host a1b2c3d4
+    HostName 10.0.0.5
+    User ubuntu
+    RemoteCommand cd /home/ubuntu/work_1 && exec $SHELL -l
+    # ... (previous allocation in HELD)
+
+Host e5f6g7h8
+    HostName 10.0.0.5
+    User ubuntu
+    RemoteCommand cd /home/ubuntu/work_2 && exec $SHELL -l
+    # ... (new allocation in ACTIVE)
+```
+
+Same instance, different allocation IDs, different workdirs.
+
+## 5.5 Replacing Grace Period
+
+### Mapping from Current Behavior
+
+| Current Behavior | New Behavior |
+|------------------|--------------|
+| `grace_period_ms` on job | Allocation HELD with `hold_until` |
+| `grace_period_on_failure_ms` | Different hold duration config |
+| Instance stays running | Instance remains, allocation HELD |
+| Implicit countdown | Explicit `hold_until` timestamp |
+| No extension mechanism | SSH auto-extends, CLI explicit extend |
+
+### Configuration Options
+
+```typescript
+interface HoldDurationConfig {
+  defaultHoldMs: number;           // Short hold after normal completion
+  failureHoldMs: number;           // Longer hold after failure (debugging)
+  sshExtensionMs: number;          // Extension per SSH activity detection
+  maxSshExtensionMs: number;       // Cap on cumulative SSH extensions
+  explicitExtensionMs: number;     // Extension per explicit CLI command
+  maxExplicitExtensionMs: number;  // Cap on cumulative explicit extensions
+  absoluteMaxHoldMs: number;       // Hard limit (cost protection)
+}
+
+// Example defaults (non-normative, adjust based on operational experience)
+const EXAMPLE_HOLD_CONFIG: HoldDurationConfig = {
+  defaultHoldMs: 5 * 60 * 1000,           // 5 minutes
+  failureHoldMs: 15 * 60 * 1000,          // 15 minutes
+  sshExtensionMs: 5 * 60 * 1000,          // 5 minutes
+  maxSshExtensionMs: 2 * 60 * 60 * 1000,  // 2 hours
+  explicitExtensionMs: 30 * 60 * 1000,    // 30 minutes
+  maxExplicitExtensionMs: 8 * 60 * 60 * 1000,  // 8 hours
+  absoluteMaxHoldMs: 24 * 60 * 60 * 1000, // 24 hours
+};
+
+// CONSTRAINT: defaultHoldMs <= maxSshExtensionMs <= maxExplicitExtensionMs <= absoluteMaxHoldMs
+```
+
+### Tiered Extension System
+
+```
+Tier 1: Auto (SSH Active)
+- Trigger: Active SSH connection detected
+- Extension: sshExtensionMs per detection (e.g., 5 minutes)
+- Max: maxSshExtensionMs (e.g., 2 hours)
+
+Tier 2: Explicit Short
+- Trigger: `repl extend` (no duration)
+- Extension: explicitExtensionMs (e.g., 30 minutes)
+- Max: maxExplicitExtensionMs (e.g., 8 hours)
+
+Tier 3: Explicit Long
+- Trigger: `repl extend <duration>`
+- Extension: User-specified
+- Max: 24 hours absolute
+```
+
+### CLI Command: `repl extend`
+
+```typescript
+async function cliExtendCommand(allocationIdOrDuration?: string, durationArg?: string): Promise<void> {
+  let allocationId: string | undefined;
+  let durationStr: string | undefined;
+
+  if (allocationIdOrDuration && isDuration(allocationIdOrDuration)) {
+    durationStr = allocationIdOrDuration;
+  } else {
+    allocationId = allocationIdOrDuration;
+    durationStr = durationArg;
+  }
+
+  // Find target allocation
+  let allocation: Allocation;
+  if (allocationId) {
+    const config = await getSSHConfig(allocationId);
+    allocation = await materializeAllocation(config.allocationId);
+  } else {
+    const recent = await db.query(`
+      SELECT id FROM allocations WHERE status = 'HELD' ORDER BY updated_at DESC LIMIT 1
+    `);
+    allocation = await materializeAllocation(recent[0].id);
+  }
+
+  const extensionMs = durationStr ? parseDuration(durationStr) : holdConfig.explicitExtensionMs;
+  const result = await extendAllocationHold(allocation.id, {
+    extensionMs,
+    reason: 'explicit',
+    maxExtensionMs: durationStr ? holdConfig.absoluteMaxHoldMs : holdConfig.maxExplicitExtensionMs,
+  });
+
+  console.log(`Extended allocation ${allocation.id.substring(0, 8)}`);
+  console.log(`  Hold until: ${new Date(result.newHoldUntil).toLocaleString()}`);
+}
+

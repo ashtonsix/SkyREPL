@@ -1,0 +1,13 @@
+# package.json
+
+## Package
+name: skyrepl, version: 2.0.0
+
+## Dependencies
+elysia, better-sqlite3, @aws-sdk/client-ec2, @aws-sdk/client-s3, zod, commander
+
+## Dev Dependencies
+typescript, vitest, fast-check
+
+## Scripts
+build, dev, test, cli, control

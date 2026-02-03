@@ -1,0 +1,22 @@
+# client.ts - HTTP Client for Control Plane
+
+## Authentication
+- Bearer token from ~/.repl/auth.json
+- Auto token refresh when expired (refresh 5min before expiry)
+
+## Request Handling
+- Base URL from REPL_CONTROL_URL or ~/.repl/config
+- Timeout: 30s default, configurable per-request
+- Retry: exponential backoff (2s, 4s, 8s) for 5xx and network errors
+- Max retries: 3 for idempotent requests, 0 for non-idempotent
+- Idempotency key generation (UUID v4) for POST/PATCH/DELETE
+
+## Response Handling
+- Parse JSON responses
+- Extract error details from { error: { code, message, category } }
+- Map categories to user-friendly messages
+- Include request ID in error output for support
+
+## Endpoints
+- Local: http://localhost:3000
+- Cloud: https://control.skyrepl.io (configurable)

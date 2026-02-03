@@ -1,0 +1,16 @@
+# prompts.ts - User Prompts
+
+## Prompt Types
+- Confirmation (yes/no)
+- Selection (pick from list)
+- Input (free text)
+- Password (masked input)
+
+## Display
+- Severity indicators for warnings
+- Cost breakdown formatting
+
+## Behavior
+- Timeout handling for unattended prompts
+- Default values
+- Ctrl-C handling

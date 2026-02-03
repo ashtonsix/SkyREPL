@@ -1,0 +1,96 @@
+# unit/patterns.test.ts - Pattern library unit tests
+
+## SETUP
+- Create mock workflow DAG structure
+- Helper to create test nodes
+- Helper to verify DAG validity
+- Mock database for node persistence
+
+## INSERT-AND-RECONVERGE Tests
+- Inserts node before target
+  - Target node exists and is PENDING
+  - New node inserted before target
+  - New node has same dependencies as target
+  - Target now depends on new node
+  - Join node depends on both
+- Both complete before join
+  - Original node completes
+  - Inserted node completes
+  - Join node blocks until both done
+  - Join node has correct dependencies
+- Fails if target not pending
+  - Target in RUNNING state → error
+  - Target in COMPLETE state → error
+  - Target in FAILED state → error
+  - Error message indicates reason
+- Max 1 depth enforced
+  - Can insert once before target
+  - Cannot insert again before same target
+  - Error on second insert attempt
+  - Depth counter tracked correctly
+
+## CONDITIONAL-BRANCH Tests
+- Correct branch taken
+  - Condition evaluates true → branch A executes
+  - Condition evaluates false → branch B executes
+  - Condition has access to workflow state
+  - Only selected branch nodes created
+- Non-taken branch marked skipped
+  - Branch nodes created but marked SKIPPED
+  - SKIPPED nodes don't block downstream
+  - workflow_state records which branch taken
+  - Compensation doesn't run for SKIPPED
+- triggerOnError option
+  - Normal flow takes success branch
+  - Error in parent takes error branch
+  - Error branch has access to error info
+  - Both branches have same output contract
+- Exactly 2 branches enforced
+  - Pattern creation with 1 branch → error
+  - Pattern creation with 3 branches → error
+  - Branch labels must be unique
+  - Error message clear about requirement
+
+## PARALLEL-FAN-OUT Tests
+- All branches created
+  - N branches specified → N branch chains created
+  - Each branch gets unique namespace
+  - Each branch has correct dependencies
+  - Branches independent (no cross-deps)
+- All complete before join
+  - Join node created
+  - Join depends on all branch tails
+  - Join blocks until all complete
+  - Partial completion doesn't unblock
+- Max 16 enforced
+  - 16 branches allowed
+  - 17 branches → error
+  - Error message mentions limit
+  - Limit configurable in pattern config
+- Concurrent execution
+  - Branches can run in parallel
+  - No artificial sequencing
+  - Resource limits respected
+  - Execution order non-deterministic
+
+## RETRY-WITH-ALTERNATIVE Tests
+- Alternative on failure
+  - Primary node fails → alternative created
+  - Alternative has same input
+  - Alternative node type different
+  - Original node marked FAILED
+- Failed node compensated
+  - Primary fails → compensation runs
+  - Compensation runs before alternative
+  - Compensation failure logged but doesn't block
+  - Alternative proceeds regardless
+- Max 3 attempts enforced
+  - Attempt 1 fails → retry
+  - Attempt 2 fails → retry
+  - Attempt 3 fails → no retry, workflow fails
+  - Attempt count in workflow_state
+- Same output contract
+  - Primary and alternative produce same output shape
+  - Output types validated
+  - Downstream nodes don't know which ran
+  - Contract violation → error

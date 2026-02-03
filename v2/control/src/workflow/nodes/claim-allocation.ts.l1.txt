@@ -1,0 +1,29 @@
+# claim-allocation.ts - Claim Allocation Node
+
+## Input Type
+{ runId: string, spec: InstanceSpec, initChecksum?: string }
+
+## Output Type
+{ allocationId: string, instanceId: string, fromWarmPool: true }
+
+## Execute Steps
+- Call db.findWarmAllocation(spec, initChecksum) to find AVAILABLE allocation
+- Spec must match: instance type, region, GPU count, disk size
+- initChecksum must match if provided (ensures correct init script)
+- If found: Call db.claimAllocation(allocationId, runId) for atomic claim
+- Claim uses SQL: UPDATE allocations SET status='CLAIMED', run_id=?, claimed_at=? WHERE id=? AND status='AVAILABLE'
+- If affected rows = 0: Another workflow won the race, return null (triggers spawn path)
+- If affected rows = 1: Success, query instance_id from allocation
+- Add allocation to manifest via ctx.emitResource()
+- Return allocationId, instanceId, fromWarmPool=true
+
+## Compensation
+- Release allocation back to warm pool: db.updateAllocationStatus(allocationId, 'AVAILABLE')
+- Clear run_id and claimed_at fields
+- This allows another run to reuse the allocation
+
+## Key Calls
+- db.findWarmAllocation()
+- db.claimAllocation()
+- db.updateAllocationStatus()
+- ctx.emitResource('allocation', allocationId)

@@ -1,0 +1,52 @@
+# cli.ts - CLI Entry Point
+
+## Commands
+
+### Run Management
+- `run [profile]` - Submit launch-run workflow, stream progress
+  - Flags: --command, --timeout, --spot, --hold, --snapshot, --dry-run
+- `logs <run-id>` - Stream logs via WebSocket
+- `list` - List recent runs with pagination
+- `cancel <run-id>` - Cancel workflow with rollback
+- `extend <allocation-id>` - Extend hold duration
+
+### Artifacts & Resources
+- `artifact list [--run RUN_ID]` - List artifacts
+- `artifact pull <run-id>` - Download artifacts via presigned URLs
+- `instance list` - List instances
+- `instance terminate <instance-id>` - Terminate instance workflow
+- `snapshot list` - List snapshots
+- `orphan list` - List untracked provider resources
+- `usage [period]` - Usage and cost summary
+
+### Control Plane
+- `control start|stop|status` - Manage local control plane (via process-manager.ts)
+  - start: Spawn detached process, wait for health check
+  - stop: SIGTERM with graceful timeout, fallback SIGKILL
+  - status: Check PID file, query /health endpoint, show logs
+- `auth login|logout|status` - Authentication
+- `setup-provider <provider>` - Provider configuration wizard
+- `verify-setup` - Verify provider configuration
+
+## Global Flags
+- `--json` - JSON output mode
+- `--quiet` - Suppress non-essential output
+- `--config PATH` - Path to repl.toml
+- `--profile NAME` - Profile to use
+
+## Config Loading
+- `loadConfig(): ReplConfig` - Search upward for repl.toml, parse, validate
+- `resolveProfile(name?): ProfileConfig` - Resolve profile by name or use default
+
+## API Client
+- `ApiClient` - HTTP client with auth, error handling, SSE streaming
+- `submitWorkflow(type, input): { workflowId, ... }` - Submit workflow
+- `streamProgress(workflowId, callback): void` - SSE progress stream
+
+## Preflight
+- `runPreflightChecks(operation): PreflightWarning[]` - Check budget, orphans, credentials
+- `displayPreflightWarnings(warnings): boolean` - Prompt user to continue
+
+## SSH Config
+- `updateSSHConfig(): void` - Regenerate ~/.repl/ssh_config from active allocations
+- `generateSSHConfigEntry(allocation, instance): string` - Format config entry

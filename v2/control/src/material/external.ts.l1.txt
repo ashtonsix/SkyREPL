@@ -1,0 +1,21 @@
+# external.ts - Provider State Caching
+
+## Purpose
+- In-memory TTL cache for ephemeral provider state
+- NOT persisted to database (memory-only, cleared on restart)
+
+## Core Function
+- `getWithCache<T>(key, ttlMs, fetcher)` - TTL-based cache wrapper
+
+## Cache Keys
+- Format: `{provider}:{type}:{region}:{spec}` (e.g., `aws:spot_prices:us-east-1:g5.xlarge`)
+- Instance: `instance:{id}:external`
+
+## TTL Defaults
+- Spot prices: 5 minutes (300,000 ms)
+- Instance external state: 30 seconds
+- Snapshot external state: 5 minutes
+
+## Error Handling
+- Cache read failure → fetch fresh
+- Cache write failure → non-critical (fetch again next time)

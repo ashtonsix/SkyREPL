@@ -1,0 +1,28 @@
+# scanner.ts - Orphan Detection (Ch12)
+
+## Detection Process
+1. List all provider resources with 'repl-' prefix
+2. Query DB for tracked resources (instances, volumes, snapshots, tailscale_machines)
+3. Cross-reference: in cloud but not DB = orphan
+4. Also detect: in DB but not cloud = missing (for reference, not actionable)
+
+## Provider Scanning
+- AWS: EC2 instances, EBS volumes, AMI snapshots
+- Lambda Labs: Instances
+- RunPod: Pods
+- OrbStack: VMs (local only)
+- Tailscale: Machines in tailnet
+
+## Resource Name Parsing
+- Format: repl-{control_id}-{manifest_id}-{instance_id}
+- Tailscale: repl-{control_id}-{instance_id}
+- Unparseable names → classified as "unknown"
+
+## Output
+- OrphanDetectionResult: orphanedResources[], missingResources[], detectedAt
+- Each orphan: providerId, resourceType, provider, createdAt, ageMs, estimatedHourlyCost, likelyCurrentSession
+
+## Integration
+- Runs every 60s as part of background reconciliation cycle
+- Scans all enabled providers in parallel
+- Results cached for preflight endpoint

@@ -1,0 +1,20 @@
+### The "Workdir Isolation" Problem
+
+In **Chapter 5**, you mention that multiple allocations on one instance get separate workdirs (`work_1`, `work_2`) to allow post-run debugging.
+
+* **The Risk:** Filesystem/Environment pollution. If Allocation A runs `pip install --user`, it may affect Allocation B. If Allocation A fills `/tmp` or hits disk IOPS limits, it impacts the "warm" Allocation B.
+* **Recommendation:** If you aren't using containers (Docker/OrbStack), consider a "pre-claim" node in workflow that checks disk space or uses `chroot`/systemd units to provide harder isolation for sequential/parallel runs on the same "warm" hardware.
+
+### S3 Offload Threshold (4KB)
+
+You've set a **4KB threshold** for offloading payloads to S3.
+
+* **The Risk:** S3 latency and cost. S3's overhead (TTFB and per-request pricing) for a 5KB file is significantly higher than SQLite's overhead for a 5KB BLOB.
+* **Recommendation:** SQLite is extremely efficient with BLOBs up to ~100KB (especially with `incremental_vacuum`). You might find that a **64KB threshold** reduces S3 API noise and speeds up log retrieval without bloating the DB file significantly.
+
+### The "Held" Debugging Conflict
+
+If an allocation is in `HELD` status for debugging, and a new `ACTIVE` allocation is assigned to the same instance (Warm Pool reuse):
+
+* **The Risk:** A user debugging an old run via SSH might accidentally consume resources (VRAM, CPU) needed by the new active run.
+* **Recommendation:** Ensure the CLI `status` command clearly warns if a user is SSH-ed into a "shared" instance where a production run is currently active.

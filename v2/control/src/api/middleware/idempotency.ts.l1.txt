@@ -1,0 +1,22 @@
+# idempotency.ts - Idempotency Key Handling
+
+## Header Processing
+- Read Idempotency-Key header
+- Global scope: same key cannot be reused across ANY endpoint
+
+## Conflict Detection
+- Hash request parameters
+- Compare against stored hash for key
+- IDEMPOTENCY_CONFLICT if key exists with different params
+
+## Response Caching
+- Store: status code + response body
+- Return cached response on key match
+
+## Expiry Policies
+- Success (2xx): 24 hours
+- Client error (4xx): 1 hour
+- Server error (5xx): immediate (no cache)
+
+## Cleanup
+- Background task removes expired keys

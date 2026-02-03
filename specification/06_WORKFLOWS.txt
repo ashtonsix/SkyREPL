@@ -1,0 +1,819 @@
+================================================================================
+6. WORKFLOWS
+================================================================================
+
+## Purpose
+
+The Workflow Engine orchestrates multi-step operations that cannot be reduced to
+single atomic transactions. It provides DAG execution, pattern-based composition,
+node-level retry, and single-node compensation for complex operations like launching
+runs, creating snapshots, and cleaning up resources.
+
+Key Principle: Everything IS a workflow, but single-step workflows get helper
+functions that hide complexity. Ask: "Does this need orchestration overhead?" If
+no, use the single-step helper.
+
+Cross-Reference: See Chapter 7 (Intents) for WHAT workflows achieve. Intents define
+the expected outputs and verification requirements for workflows. This chapter
+focuses on HOW workflows are executed.
+
+## 6.1 Single-Step Workflows
+
+Everything is a workflow. Single-step operations use shared infrastructure but
+skip orchestration overhead.
+
+Helper pattern:
+```typescript
+async function runSingleStep<TInput, TOutput>(
+  type: string,
+  input: TInput,
+  handler: (ctx: SingleStepContext) => Promise<TOutput>
+): Promise<TOutput>
+```
+
+SingleStepContext provides:
+- emitResource(): Track resources created
+- claimResource(): Claim from manifest
+- log(): Structured logging
+
+SingleStepContext lacks (no need for single step):
+- applyPattern(): DAG manipulation
+- spawnSubworkflow(): Nesting
+- compensate(): Single-node cleanup (atomic = no partial failure)
+
+Benefits:
+- Shared machinery (manifests, resource tracking, audit)
+- No orchestration overhead (no DAG, no compensation logic)
+- Clean API for simple operations
+
+## 6.2 Engine Architecture
+
+### Core Interface
+
+```typescript
+interface WorkflowEngine {
+  submit(request: WorkflowSubmission): Promise<WorkflowSubmissionResult>;
+  get(workflowId: string): Promise<Workflow | null>;
+  cancel(workflowId: string, reason: string): Promise<void>;
+  pause(workflowId: string): Promise<void>;
+  resume(workflowId: string): Promise<void>;
+  retry(workflowId: string): Promise<void>;
+}
+
+interface WorkflowSubmission {
+  type: string;                         // launch-run, terminate, etc.
+  input: Record<string, unknown>;
+  idempotencyKey?: string;
+  parentWorkflowId?: string;            // For subworkflows
+  priority?: 'low' | 'normal' | 'high';
+  timeout?: number;
+}
+```
+
+### Execution Loop
+
+The engine continuously evaluates which nodes are ready to execute:
+
+```typescript
+private async executeLoop(workflowId: string): Promise<void> {
+  await db.updateWorkflow(workflowId, { status: 'running', started_at: Date.now() });
+
+  while (true) {
+    const workflow = await db.getWorkflow(workflowId);
+    if (workflow.status === 'cancelled') {
+      await handleCancellation(workflowId);
+      break;
+    }
+
+    const nodes = await db.getWorkflowNodes(workflowId);
+    const readyNodes = findReadyNodes(nodes);
+
+    if (readyNodes.length === 0) {
+      const pending = nodes.filter(n => n.status === 'pending').length;
+      const running = nodes.filter(n => n.status === 'running').length;
+      const failed = nodes.filter(n => n.status === 'failed').length;
+
+      if (running > 0) {
+        await waitForNodeCompletion(workflowId);
+        continue;
+      }
+      if (pending === 0 && failed === 0) {
+        await completeWorkflow(workflowId, nodes);
+        break;
+      }
+      if (failed > 0) {
+        await handleWorkflowFailure(workflowId, nodes);
+        break;
+      }
+    }
+
+    // Concurrent node execution - why workflow_nodes is a separate table
+    await Promise.all(readyNodes.map(node => executeNode(workflowId, node)));
+  }
+}
+```
+
+### Why workflow_nodes is a Separate Table
+
+The Promise.all pattern above is critical: multiple nodes execute concurrently.
+If node state were stored in a JSON blob on the workflow record, concurrent
+updates would create read-modify-write races:
+
+```
+Node A reads workflow.nodes_json -> [{id: 'a', status: 'pending'}, {id: 'b', status: 'pending'}]
+Node B reads workflow.nodes_json -> [{id: 'a', status: 'pending'}, {id: 'b', status: 'pending'}]
+Node A completes, writes -> [{id: 'a', status: 'completed'}, {id: 'b', status: 'pending'}]
+Node B completes, writes -> [{id: 'a', status: 'pending'}, {id: 'b', status: 'completed'}]  // A's update lost!
+```
+
+With a separate workflow_nodes table, SQLite handles row-level concurrency:
+```sql
+UPDATE workflow_nodes SET status = 'completed' WHERE id = ?
+```
+Each node updates its own row. No races. SQLite handles it for free.
+
+### Node Execution Model
+
+```typescript
+interface NodeExecutor {
+  execute(ctx: NodeContext): Promise<NodeOutput>;
+  compensate?(ctx: CompensationContext): Promise<void>;
+  validate?(input: unknown): ValidationResult;
+}
+
+interface NodeContext {
+  workflowId: string;
+  nodeId: string;
+  nodeType: string;
+  attempt: number;
+  input: Record<string, unknown>;
+  manifestId: string;
+  depth: number;
+
+  // Resource management
+  emitResource(type: string, id: string, priority?: number): Promise<void>;
+  claimResource(nodeId: string, type: string): Promise<string>;
+
+  // Pattern application
+  applyPattern(pattern: PatternType, config: PatternConfig): void;
+
+  // Subworkflow
+  spawnSubworkflow(type: string, input: Record<string, unknown>): Promise<SubworkflowHandle>;
+
+  // Utilities
+  getNodeOutput(nodeId: string): Promise<NodeOutput | null>;
+  log(level: string, message: string, data?: unknown): void;  // Emits OTel span events
+}
+```
+
+### Two-Phase Spawn in Node Execution
+
+Instance spawning uses a two-phase protocol to prevent orphaned resources:
+
+**Phase 1: Reserve in DB**
+```typescript
+async function executeSpawnNode(ctx: NodeContext): Promise<NodeOutput> {
+  const options = ctx.input as SpawnOptions;
+
+  // Phase 1: Create DB record with spawn:pending workflow_state BEFORE cloud call
+  // Note: id is auto-generated by database (INTEGER PRIMARY KEY AUTOINCREMENT)
+  const idempotencyKey = `${ctx.workflowId}:${ctx.nodeId}`;
+
+  const result = await db.execute(`
+    INSERT INTO instances (
+      provider, provider_id, spec, region, workflow_state,
+      spawn_idempotency_key, current_manifest_id, created_at, last_heartbeat
+    ) VALUES (?, '', ?, ?, 'spawn:pending', ?, ?, ?, ?)
+  `, [
+    options.provider,
+    options.spec,
+    options.region,
+    idempotencyKey,
+    ctx.manifestId,
+    Date.now(),
+    Date.now()
+  ]);
+
+  const instanceId = result.lastInsertRowid;
+
+  // Add to manifest BEFORE cloud call
+  await ctx.emitResource('instance', instanceId);
+
+  // Phase 2: Execute cloud API call
+  const provider = getProvider(options.provider);
+  const providerOptions = {
+    ...options,
+    clientRequestId: provider.capabilities.idempotentSpawn
+      ? idempotencyKey
+      : undefined
+  };
+
+  try {
+    const providerInstance = await provider.spawn(providerOptions);
+
+    // Update with provider_id and transition to provisioning
+    await db.execute(`
+      UPDATE instances
+      SET provider_id = ?,
+          workflow_state = 'launch-run:provisioning',
+          ip = ?,
+          last_heartbeat = ?
+      WHERE id = ? AND workflow_state = 'spawn:pending'
+    `, [
+      providerInstance.id,
+      providerInstance.ip,
+      Date.now(),
+      instanceId
+    ]);
+
+    return {
+      instanceId,
+      providerId: providerInstance.id,
+      ip: providerInstance.ip,
+      workflow_state: 'launch-run:provisioning'
+    };
+  } catch (error) {
+    // Mark as failed but keep record for reconciliation
+    await db.execute(`
+      UPDATE instances SET workflow_state = 'spawn:error', last_heartbeat = ?
+      WHERE id = ? AND workflow_state = 'spawn:pending'
+    `, [Date.now(), instanceId]);
+    throw error;
+  }
+}
+```
+
+**Retry Handling:**
+```typescript
+async function retrySpawnNode(ctx: NodeContext): Promise<NodeOutput> {
+  const idempotencyKey = `${ctx.workflowId}:${ctx.nodeId}`;
+
+  // Check for existing spawn attempt
+  const existingInstance = await db.queryOne(`
+    SELECT * FROM instances WHERE spawn_idempotency_key = ?
+  `, [idempotencyKey]);
+
+  if (existingInstance) {
+    if (existingInstance.workflow_state === 'spawn:pending') {
+      // Attempt reconciliation with provider
+      const reconciled = await reconcilePendingSpawn(existingInstance);
+      if (reconciled) {
+        // Found in provider, return existing instance
+        return {
+          instanceId: reconciled.id,
+          providerId: reconciled.provider_id,
+          ip: reconciled.ip,
+          workflow_state: reconciled.workflow_state
+        };
+      }
+      // Not found, mark as failed and create new attempt
+      await db.execute(`
+        UPDATE instances SET workflow_state = 'spawn:error' WHERE id = ?
+      `, [existingInstance.id]);
+    } else if (!existingInstance.workflow_state?.endsWith(':error')) {
+      // Existing instance is viable, return it
+      return {
+        instanceId: existingInstance.id,
+        providerId: existingInstance.provider_id,
+        ip: existingInstance.ip,
+        workflow_state: existingInstance.workflow_state
+      };
+    }
+  }
+
+  // No viable existing instance, execute new spawn
+  return await executeSpawnNode(ctx);
+}
+```
+
+**Compensation (Single-Node Cleanup):**
+```typescript
+async function compensateSpawnNode(ctx: CompensationContext): Promise<void> {
+  const output = ctx.output as SpawnNodeOutput;
+
+  // If we have provider_id, terminate in provider
+  if (output.providerId) {
+    const provider = getProvider(output.provider);
+    try {
+      await provider.terminate(output.providerId);
+    } catch (error) {
+      if (error.code !== 'NOT_FOUND') throw error;
+    }
+  }
+
+  // Mark as terminated in DB
+  await db.execute(`
+    UPDATE instances SET workflow_state = 'terminate:complete'
+    WHERE id = ?
+  `, [output.instanceId]);
+}
+```
+
+**Key Properties:**
+- DB record + manifest entry created BEFORE cloud API call
+- Idempotency key prevents duplicate spawns on retry
+- Reconciliation finds instances if DB update fails
+- Compensation handles both phases (DB only or DB + cloud)
+- Kill at any step guarantees no orphans
+
+### Persistence Strategy (Crash Recovery)
+
+All state persisted before action:
+- Node marked 'running' BEFORE execution begins
+- Node marked 'completed' AFTER execution succeeds
+- Pattern applications persisted before DAG modification
+
+Recovery on startup:
+```typescript
+async function recoverWorkflows(): Promise<void> {
+  const runningWorkflows = await db.query(
+    `SELECT id FROM workflows WHERE status = 'running'`
+  );
+
+  for (const workflow of runningWorkflows) {
+    const nodes = await db.getWorkflowNodes(workflow.id);
+    const runningNodes = nodes.filter(n => n.status === 'running');
+
+    for (const node of runningNodes) {
+      if (isIdempotent(node.node_type)) {
+        await db.updateWorkflowNode(node.id, {
+          status: 'pending',
+          attempt: node.attempt + 1,
+          retry_reason: 'crash_recovery',
+        });
+      } else {
+        await db.updateWorkflowNode(node.id, {
+          status: 'failed',
+          error_json: JSON.stringify({ code: 'CRASH_RECOVERY' }),
+        });
+      }
+    }
+
+    engine.resumeExecutionLoop(workflow.id);
+  }
+}
+```
+
+## 6.3 Pattern Library
+
+Starting with 4 patterns. More added as need arises.
+
+Restricted palette signposts good workflow design (minimize moving parts).
+
+### 6.3.1 Insert-and-Reconverge (IAR)
+
+**Purpose**: Insert parallel node that must complete before downstream.
+
+**Transform**:
+```
+A -> B -> C  becomes  A -> A' -> B -> C
+                         \______/
+```
+
+**Constraints**: Max 1 insertion depth; target node must be pending.
+
+```typescript
+ctx.applyPattern('insert-and-reconverge', {
+  insertedNode: { id: 'install-tailscale', type: 'subworkflow', ... },
+  beforeNode: 'start-run'
+});
+```
+
+### 6.3.2 Conditional-Branch (CB)
+
+**Purpose**: Choose between 2 mutually exclusive paths, or try-fallback on error.
+
+**Transform**:
+```
+A -> B -> C  becomes  A -> B_opt1 -> C  (B_opt2 skipped)
+```
+
+**Constraints**: Exactly 2 branches; deterministic condition.
+
+**Configuration**:
+```typescript
+interface ConditionalBranchConfig {
+  triggerOnError?: boolean;  // If true, option2 runs only on option1 failure
+  condition?: boolean;        // Required if triggerOnError=false (default)
+  option1: NodeDefinition;
+  option2: NodeDefinition;
+  joinNode: string;
+}
+```
+
+**Examples**:
+
+Standard conditional branch:
+```typescript
+ctx.applyPattern('conditional-branch', {
+  condition: warmAvailable,
+  option1: { id: 'claim-warm', type: 'claim-warm-allocation', ... },
+  option2: { id: 'spawn', type: 'spawn-instance', ... },
+  joinNode: 'create-allocation'
+});
+```
+
+Try-fallback (triggerOnError=true):
+```typescript
+ctx.applyPattern('conditional-branch', {
+  triggerOnError: true,
+  option1: { id: 'sync-s3-direct', type: 'sync-files-s3', ... },
+  option2: { id: 'sync-tailscale', type: 'sync-files-tailscale', ... },
+  joinNode: 'start-run'
+});
+```
+
+### 6.3.3 Parallel-Fan-Out (PFO)
+
+**Purpose**: Spawn multiple independent parallel work items.
+
+**Transform**:
+```
+A -> B  becomes  A -> A1 -> B
+                   -> A2 -/
+                   -> A3 -/
+```
+
+**Constraints**: MAX_PARALLEL_BRANCHES = 16
+
+```typescript
+ctx.applyPattern('parallel-fan-out', {
+  branches: workers.map((w, i) => ({
+    id: `spawn-worker-${i}`,
+    type: 'spawn-instance',
+    input: { ...w, workerIndex: i }
+  })),
+  joinNode: 'configure-cluster'
+});
+```
+
+### 6.3.4 Retry-with-Alternative (RWA)
+
+**Purpose**: On failure, retry with different parameters.
+
+**Transform**:
+```
+Attempt 1: A_primary (fails, compensated)
+Attempt 2: A_alternative
+```
+
+**Constraints**: MAX_RETRY_ATTEMPTS = 3; same output contract.
+
+```typescript
+ctx.applyPattern('retry-with-alternative', {
+  failedNodeId: 'spawn-instance-us-east-1',
+  alternativeNode: {
+    id: 'spawn-instance-us-west-2',
+    type: 'spawn-instance',
+    input: { ...input, region: 'us-west-2' }
+  },
+  reason: 'Spot capacity unavailable'
+});
+```
+
+
+## 6.4 Subworkflow Contract
+
+### Parent/Child Visibility
+
+**Parent sees**: status, output, resource summary (black box)
+**Parent cannot see**: internal nodes, execution order
+
+**Child sees**: input, parent manifest ID (read-only)
+**Child cannot see**: parent internals, siblings
+
+### Manifest Independence
+
+Subworkflows are independent by default - they release their own manifests on
+completion. Parents can claim resources if needed by querying SEALED manifests.
+
+```typescript
+// Subworkflow always releases independently
+async function handleSubworkflowComplete(childWorkflowId: string): Promise<void> {
+  const childWorkflow = await db.getWorkflow(childWorkflowId);
+  await releaseManifest(childWorkflow.manifest_id);
+}
+
+// Parent can claim resources if needed
+async function parentClaimSubworkflowResource(
+  parentCtx: NodeContext,
+  childWorkflowId: string,
+  resourceType: string
+): Promise<string | null> {
+  const childWorkflow = await db.getWorkflow(childWorkflowId);
+
+  const resources = await db.query(`
+    SELECT resource_id FROM manifest_resources
+    WHERE manifest_id = ? AND resource_type = ?
+    LIMIT 1
+  `, [childWorkflow.manifest_id, resourceType]);
+
+  if (resources.length === 0) return null;
+
+  // Claim resource atomically
+  const result = await claimResourceAtomic(
+    parentCtx.workflow.manifestId,
+    resourceType,
+    resources[0].resource_id
+  );
+
+  return result.success ? resources[0].resource_id : null;
+}
+```
+
+### Max Depth
+
+```
+MAX_SUBWORKFLOW_DEPTH = 3
+
+Root (depth 0) -> Child (1) -> Grandchild (2) -> Great-grandchild (3) [MAX]
+```
+
+## 6.5 Compensation vs Teardown
+
+### Compensation Scope
+
+Compensation applies to ONE node only - the failed node. When a node fails:
+1. Execute that node's compensation handler (if defined)
+2. Emit manifest annotated with failure
+3. Manifest policies handle broader cleanup (terminate instances, etc.)
+
+Workflows do NOT cascade compensation through multiple completed nodes.
+This keeps workflows simple and predictable. Complex teardown logic
+belongs at the manifest/policy level, not embedded in workflow execution.
+
+### Compensation
+
+**COMPENSATION**: Error correction DURING workflow
+- Triggered by node failure, user abort, timeout
+- Only compensates the ONE failed node (no cascade)
+- If retries fail and no failover path, emit manifest annotated as failed run output
+- The manifest documents what was created, even on failure
+- Respects ownership (skips transferred resources)
+
+### Teardown
+
+**TEARDOWN**: Scheduled cleanup AFTER workflow
+- Triggered by manifest expiry
+- Separate cleanup workflow claims manifest
+- Destroys resources by cleanup priority
+
+Multi-step cleanup of failed workflows is handled at the manifest/policy level,
+not by workflow compensation. The manifest tracks all resources created during
+workflow execution, enabling proper cleanup regardless of where the workflow failed.
+
+```typescript
+async function compensateFailedNode(workflowId: string, failedNodeId: string): Promise<void> {
+  const node = await db.getWorkflowNode(failedNodeId);
+
+  if (node.status !== 'failed') return;
+
+  // Skip if resource transferred to another workflow
+  if (!shouldCompensate(workflowId, node)) return;
+
+  // Compensate ONLY this single failed node
+  const executor = nodeExecutors.get(node.node_type);
+  if (executor?.compensate) {
+    await executor.compensate({
+      nodeId: node.node_id,
+      output: JSON.parse(node.output_json),
+    });
+  }
+
+  // NOTE: We do NOT cascade to other completed nodes.
+  // Manifest policies handle broader resource cleanup.
+}
+```
+
+## 6.6 Error Handling and Retry Strategy
+
+### 6.6.1 Error → Retry Mapping
+
+The workflow engine uses a standardized error handling strategy that determines
+whether errors trigger retry, fallback, or immediate failure.
+
+**Error Handling Table:**
+
+| Error Code              | Retryable | Strategy                                          | Max Retries |
+|-------------------------|-----------|---------------------------------------------------|-------------|
+| CAPACITY_UNAVAILABLE    | Yes       | Retry-with-Alternative (different region)         | 3           |
+| PROVIDER_API_ERROR      | Yes       | Exponential backoff, retry same params            | 3           |
+| RATE_LIMITED            | Yes       | Exponential backoff with retry_after_ms           | 5           |
+| SPOT_INTERRUPTED        | Yes       | Retry or fallback to on-demand                    | 1           |
+| OPERATION_TIMEOUT       | Yes       | Retry with increased timeout                      | 2           |
+| VALIDATION_ERROR        | No        | Fail immediately (input validation)               | 0           |
+| INVALID_STATE_TRANSITION| No        | Fail immediately (state machine violation)        | 0           |
+| DATABASE_ERROR          | No        | Fail immediately (critical infrastructure)        | 0           |
+| INSUFFICIENT_PERMISSIONS| No        | Fail immediately (auth/config error)              | 0           |
+
+**Retry Strategies Explained:**
+
+1. **Retry-with-Alternative (region):**
+   - On failure: Apply `retry-with-alternative` pattern
+   - Alternative uses different region from `details.alternative_regions`
+   - Example: us-east-1 fails → retry us-west-2
+
+2. **Exponential backoff:**
+   - Delays: 2s, 4s, 8s, 16s, 32s (capped at 60s)
+   - Respects `retry_after_ms` from error response if present
+   - Formula: `min(2^attempt * base_ms, max_backoff_ms)`
+
+3. **Retry or fallback:**
+   - First attempt: Retry spot instance spawn
+   - Second attempt: Apply `conditional-branch` pattern to fallback to on-demand
+
+4. **Fail immediately:**
+   - No retry attempted
+   - Workflow state → 'failed'
+   - Compensation applied to failed node only
+   - Manifest preserved with resources for cleanup
+
+**Implementation:**
+
+```typescript
+interface RetryDecision {
+  shouldRetry: boolean;
+  strategy: 'same_params' | 'alternative' | 'fallback' | null;
+  delayMs: number;
+  maxAttempts: number;
+}
+
+function determineRetryStrategy(error: NodeError, attempt: number): RetryDecision {
+  const mapping = ERROR_RETRY_MAPPING[error.code];
+
+  if (!mapping || !mapping.retryable) {
+    return { shouldRetry: false, strategy: null, delayMs: 0, maxAttempts: 0 };
+  }
+
+  if (attempt >= mapping.maxRetries) {
+    return { shouldRetry: false, strategy: null, delayMs: 0, maxAttempts: mapping.maxRetries };
+  }
+
+  const delayMs = mapping.strategy === 'exponential_backoff'
+    ? Math.min(Math.pow(2, attempt) * 2000, 60000)  // 2s base, 60s max
+    : error.details?.retry_after_ms ?? 0;
+
+  return {
+    shouldRetry: true,
+    strategy: mapping.strategy,
+    delayMs,
+    maxAttempts: mapping.maxRetries,
+  };
+}
+
+const ERROR_RETRY_MAPPING: Record<string, {
+  retryable: boolean;
+  strategy: 'exponential_backoff' | 'alternative' | 'fallback';
+  maxRetries: number;
+}> = {
+  CAPACITY_UNAVAILABLE: { retryable: true, strategy: 'alternative', maxRetries: 3 },
+  PROVIDER_API_ERROR: { retryable: true, strategy: 'exponential_backoff', maxRetries: 3 },
+  RATE_LIMITED: { retryable: true, strategy: 'exponential_backoff', maxRetries: 5 },
+  SPOT_INTERRUPTED: { retryable: true, strategy: 'fallback', maxRetries: 1 },
+  OPERATION_TIMEOUT: { retryable: true, strategy: 'exponential_backoff', maxRetries: 2 },
+  VALIDATION_ERROR: { retryable: false, strategy: 'exponential_backoff', maxRetries: 0 },
+  INVALID_STATE_TRANSITION: { retryable: false, strategy: 'exponential_backoff', maxRetries: 0 },
+  DATABASE_ERROR: { retryable: false, strategy: 'exponential_backoff', maxRetries: 0 },
+  INSUFFICIENT_PERMISSIONS: { retryable: false, strategy: 'exponential_backoff', maxRetries: 0 },
+};
+```
+
+### 6.6.2 Workflow → API Error Mapping
+
+When workflow nodes fail, the errors propagate to the API layer with appropriate
+HTTP status codes.
+
+**Node Failure → HTTP Response Mapping:**
+
+| Node Failure Scenario              | HTTP Status | Error Code              | Details                                    |
+|------------------------------------|-------------|-------------------------|--------------------------------------------|
+| spawn-instance timeout             | 504         | OPERATION_TIMEOUT       | Gateway timeout waiting for provider       |
+| spawn-instance capacity error      | 429         | CAPACITY_UNAVAILABLE    | Rate limit (resource unavailable)          |
+| spawn-instance provider API error  | 502         | PROVIDER_API_ERROR      | Bad gateway (upstream failure)             |
+| validation failure in node         | 400         | VALIDATION_ERROR        | Invalid workflow input                     |
+| state transition violation         | 409         | INVALID_STATE_TRANSITION| Conflict (resource in wrong state)         |
+| database error in node             | 500         | DATABASE_ERROR          | Internal server error                      |
+| workflow cancelled by user         | 200         | N/A                     | Success response with status='cancelled'   |
+
+**Error Propagation Flow:**
+
+```
+Node fails with error
+     |
+     v
+NodeError { code, message, category, details, retryable }
+     |
+     v
+Retry logic (if retryable)
+     |
+     v (if exhausted)
+Workflow fails, sets workflow.error = NodeError
+     |
+     v
+API endpoint returns ErrorResponse with appropriate HTTP status
+     |
+     v
+Client receives:
+{
+  "error": {
+    "code": "OPERATION_TIMEOUT",
+    "message": "Instance spawn timed out after 5 minutes",
+    "category": "timeout",
+    "details": {
+      "node_id": "spawn-instance",
+      "workflow_id": "wf-abc123",
+      "timeout_ms": 300000
+    }
+  }
+}
+```
+
+**Implementation in API Handlers:**
+
+```typescript
+async function handleWorkflowSubmission(req: Request): Promise<Response> {
+  const workflowId = await engine.submit(req.body);
+
+  // Wait for workflow completion (or poll/stream)
+  const workflow = await engine.waitForCompletion(workflowId);
+
+  if (workflow.status === 'failed') {
+    const httpStatus = mapErrorToHttpStatus(workflow.error);
+    return new Response(JSON.stringify({ error: workflow.error }), {
+      status: httpStatus
+    });
+  }
+
+  return new Response(JSON.stringify({ data: workflow.output }), { status: 200 });
+}
+
+function mapErrorToHttpStatus(error: WorkflowError): number {
+  switch (error.category) {
+    case 'validation': return 400;
+    case 'auth': return error.code === 'UNAUTHORIZED' ? 401 : 403;
+    case 'not_found': return 404;
+    case 'conflict': return 409;
+    case 'rate_limit': return 429;
+    case 'timeout': return 504;
+    case 'provider': return 502;
+    case 'internal': return 500;
+    default: return 500;
+  }
+}
+```
+
+## 6.7 Observability
+
+**Core principle**: OTel/Loki handles observability, not the core database.
+
+The workflow itself IS the audit trail. Nodes describe outcomes and emit
+OpenTelemetry spans/events. This data flows to Loki for analysis. We do NOT
+store dedicated audit tables in the database.
+
+Pattern applications are emitted as OTel span events. The workflow_nodes table
+provides the execution audit trail.
+
+**Note**: For production observability deployment, see Chapter 15.1 Observability.
+
+### 6.7.1 OpenTelemetry Integration
+
+Workflow nodes emit OpenTelemetry spans to external observability systems
+(Grafana/Loki). Pattern applications are emitted as span events.
+
+The core database focuses on operational state. OTel provides auditability
+without polluting the schema. Span schema details (attribute names, event
+structures) will be finalized based on observability tooling requirements.
+
+### 6.7.2 Topology Signatures (Observability Extension)
+
+Topology signatures are useful for Grafana dashboards but are NOT part of
+the core workflow engine. They're computed on-demand or by an observability
+sidecar, not stored in the workflows table.
+
+```typescript
+// Observability helper - NOT core workflow state
+function calculateTopologySignature(workflowId: string): string {
+  const nodes = await db.getWorkflowNodes(workflowId);
+
+  const structure = {
+    nodes: nodes
+      .filter(n => n.status !== 'skipped')
+      .map(n => ({ type: n.node_type, deps: getDeps(n).sort() }))
+      .sort((a, b) => a.type.localeCompare(b.type)),
+  };
+
+  return crypto.createHash('sha256')
+    .update(JSON.stringify(structure))
+    .digest('hex')
+    .slice(0, 16);  // Short hash sufficient for grouping
+}
+```
+
+Use cases (all served via Grafana/Loki queries):
+- "Show all workflows with same topology"
+- "Which topology has highest failure rate?"
+- "Has this topology been seen before?"
+
+The signature can be emitted as a span attribute on workflow completion,
+enabling these queries without polluting the core database schema.
+

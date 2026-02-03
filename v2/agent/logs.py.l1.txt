@@ -1,0 +1,10 @@
+# logs.py - Log Flusher Thread
+
+## Batching
+Collect stdout/stderr, flush every 100ms
+
+## POST /v1/agent/logs
+Array of: run_id, allocation_id, stream, data, timestamp
+
+## sync_complete
+Special stream value that triggers CLAIMED → ACTIVE transition

@@ -1,0 +1,20 @@
+# manifest-cleanup.ts - Manifest Cleanup Task
+
+## Scan
+- Query: manifests WHERE status='SEALED' AND expires_at < NOW
+
+## Expiry Check
+- Derived EXPIRED: no resources with owner_type='manifest'
+- Only cleanup truly expired manifests
+
+## Cleanup Workflow
+- Submit cleanup-manifest workflow for each expired manifest
+- Pass manifest_id as input
+
+## Duplicate Prevention
+- Check for existing running cleanup workflow
+- Skip if already in progress
+
+## Cycle
+- Every minute (configurable)
+- Alert after 5+ consecutive failures

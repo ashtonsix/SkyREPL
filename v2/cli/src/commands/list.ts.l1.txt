@@ -1,0 +1,16 @@
+# list.ts - List Runs Command
+
+## Query
+- GET /v1/runs with cursor-based pagination
+- Filters:
+  - --status: running, completed, failed, cancelled (comma-separated)
+  - --provider: Filter by provider
+  - --since: Filter by created_at (e.g., "1h", "7d")
+- --limit N: Max results (default 20, max 100)
+- --cursor: Pagination cursor from previous response
+- --sort: Sort order (default: -created_at)
+
+## Output
+- Table: ID (slug), status, duration, cost, created
+- --json: Raw JSON output
+- --no-header: Omit table header (for scripting)

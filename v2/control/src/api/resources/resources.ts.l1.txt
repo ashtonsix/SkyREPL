@@ -1,0 +1,40 @@
+# resources.ts - Layer 1 API (CRUD Endpoints)
+
+## Runs
+- `GET /v1/runs` - List runs with pagination, filtering
+- `POST /v1/runs` - Create run (typically via workflow)
+- `GET /v1/runs/:id` - Fetch single run with includes (allocation, files, artifacts)
+- `PUT /v1/runs/:id` - Update metadata (name, tags)
+- `DELETE /v1/runs/:id` - Soft delete (set deleted_at)
+
+## Instances
+- `GET /v1/instances` - List instances with filtering
+- `POST /v1/instances` - Create instance (warm pool)
+- `GET /v1/instances/:id` - Fetch instance with includes (current_allocation, allocations, runs)
+- `PUT /v1/instances/:id` - Update metadata
+- `DELETE /v1/instances/:id` - Terminate (delegates to workflow)
+
+## Allocations
+- `GET /v1/allocations` - List allocations with filtering
+- `POST /v1/allocations` - Create allocation (bind run to instance)
+- `GET /v1/allocations/:id` - Fetch allocation with includes (instance, run, ssh_config)
+- `PUT /v1/allocations/:id` - Update status, extend hold
+- `DELETE /v1/allocations/:id` - Release allocation
+
+## Workflows (Read-Only)
+- `GET /v1/workflows` - List workflows
+- `GET /v1/workflows/:id` - Fetch workflow
+- `GET /v1/workflows/:id/nodes` - Fetch execution graph nodes
+
+## Manifests (Read-Only)
+- `GET /v1/manifests` - List manifests
+- `GET /v1/manifests/:id` - Fetch manifest
+- `GET /v1/manifests/:id/resources` - Fetch owned resources
+
+## Objects
+- `GET /v1/objects` - List objects with type/tag filtering
+- `GET /v1/objects/:id` - Fetch object metadata
+- `DELETE /v1/objects/:id` - Delete object and blob
+
+## Blobs
+- `POST /v1/blobs/check` - Check existing blobs by checksum, return upload URLs for missing

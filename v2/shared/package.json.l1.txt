@@ -1,0 +1,11 @@
+# package.json - Shared Package
+
+## Identity
+- name: @skyrepl/shared
+- version: workspace version
+
+## Dependencies
+- None (zero runtime dependencies)
+
+## Scripts
+- build, dev

@@ -1,0 +1,38 @@
+# terminate-orphans.ts - Terminate Orphans Node
+
+## Input Type
+{ orphans: OrphanedResource[], autoTerminate: boolean }
+
+## Output Type
+{ terminated: string[], skipped: string[], errors: Array<{ providerId: string, error: string }> }
+
+## Execute Steps
+- Initialize result arrays: terminated = [], skipped = [], errors = []
+- If autoTerminate is false:
+  - Log warning: "Auto-termination disabled, skipping all orphans"
+  - Add all orphan providerIds to skipped array
+  - Return { terminated: [], skipped, errors: [] }
+- For each orphan in orphans:
+  - Check if orphan is whitelisted via db.isOrphanWhitelisted(orphan.provider, orphan.providerId)
+  - If whitelisted:
+    - Add to skipped array
+    - Continue to next orphan
+  - Try to terminate:
+    - Call provider.terminate(orphan.providerId) with force=true
+    - On success: Add providerId to terminated array
+    - On error: Add { providerId, error } to errors array
+- Return { terminated, skipped, errors }
+
+## Compensation
+- WARNING: Termination is destructive and cannot be easily compensated
+- Log all terminations to audit trail via db.logOrphanTermination()
+- On workflow failure/rollback: Do NOT attempt to recreate terminated resources
+- Orphan termination is final and irreversible
+
+## Key Calls
+- db.isOrphanWhitelisted(provider, providerId)
+- provider.terminate(providerId, { force: true })
+- db.logOrphanTermination(providerId, provider, resourceType, reason='cleanup_workflow')
+- Context: ctx.emitMetadata('terminated_count', terminated.length)
+- Context: ctx.emitMetadata('skipped_count', skipped.length)
+- Context: ctx.emitMetadata('error_count', errors.length)

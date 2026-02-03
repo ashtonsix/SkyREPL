@@ -1,0 +1,343 @@
+================================================================================
+WORKLOG: L1→L2 Preparation - Structure & Coverage Review
+================================================================================
+Status: COMPLETE
+Started: 2026-02-03
+Updated: 2026-02-03
+
+OBJECTIVE
+---------
+1. Improve v2/ file structure for L2 transition
+2. Check coverage/completeness against spec (areas of concern, not granular detail)
+
+DECISION LOG
+------------
+D1. Component-based split (control/cli/shared/agent) — APPROVED
+D2. Layer-based organization within control/ — APPROVED
+D3. Intents separate from workflow engine — APPROVED
+D4. Orphan management gets own directory — APPROVED
+D5. API directories: resources/ and operations/ (not layer1/layer2) — APPROVED
+
+================================================================================
+PART 1: FINAL STRUCTURE (128 files)
+================================================================================
+
+```
+v2/
+├── control/                          # Control plane (VPS deployment)
+│   ├── package.json.l1.txt
+│   ├── tsconfig.json.l1.txt
+│   ├── migrations/
+│   │   ├── 001_initial.sql.l1.txt
+│   │   └── 002_idempotency_keys.sql.l1.txt
+│   └── src/
+│       ├── main.ts.l1.txt
+│       ├── main.types.ts.l1.txt
+│       ├── network.ts.l1.txt
+│       │
+│       ├── material/                 # LAYER 1: Data sources (Ch2)
+│       │   ├── db.ts.l1.txt
+│       │   ├── db.types.ts.l1.txt
+│       │   ├── storage.ts.l1.txt
+│       │   └── external.ts.l1.txt    # [NEW]
+│       │
+│       ├── resource/                 # LAYER 2: Domain objects (Ch3-5)
+│       │   ├── types.ts.l1.txt       # [NEW]
+│       │   ├── instance.ts.l1.txt    # [NEW]
+│       │   ├── run.ts.l1.txt         # [NEW]
+│       │   ├── allocation.ts.l1.txt  # [NEW]
+│       │   ├── manifest.ts.l1.txt    # [NEW]
+│       │   ├── snapshot.ts.l1.txt    # [NEW]
+│       │   └── artifact.ts.l1.txt    # [NEW]
+│       │
+│       ├── provider/                 # LAYER 3: Cloud abstraction (Ch8)
+│       │   ├── types.ts.l1.txt
+│       │   ├── type-boundaries.ts.l1.txt
+│       │   ├── registry.ts.l1.txt
+│       │   ├── errors.ts.l1.txt
+│       │   ├── contracts.ts.l1.txt
+│       │   ├── extensions.ts.l1.txt
+│       │   ├── compute/
+│       │   │   ├── aws.ts.l1.txt
+│       │   │   ├── lambda.ts.l1.txt
+│       │   │   ├── runpod.ts.l1.txt
+│       │   │   └── orbstack.ts.l1.txt
+│       │   └── feature/
+│       │       └── tailscale.ts.l1.txt
+│       │
+│       ├── workflow/                 # LAYER 4: Execution engine (Ch6)
+│       │   ├── engine.ts.l1.txt
+│       │   ├── engine.types.ts.l1.txt
+│       │   ├── patterns.ts.l1.txt
+│       │   ├── compensation.ts.l1.txt    # [NEW]
+│       │   ├── state-transitions.ts.l1.txt
+│       │   └── nodes/
+│       │       ├── spawn-instance.ts.l1.txt
+│       │       ├── sync-files.ts.l1.txt
+│       │       ├── start-run.ts.l1.txt
+│       │       ├── wait-completion.ts.l1.txt
+│       │       ├── collect-artifacts.ts.l1.txt
+│       │       ├── claim-allocation.ts.l1.txt
+│       │       ├── create-allocation.ts.l1.txt
+│       │       ├── transition-hold.ts.l1.txt
+│       │       └── finalize.ts.l1.txt
+│       │
+│       ├── intent/                   # LAYER 5: Workflow compositions (Ch7)
+│       │   ├── launch-run.ts.l1.txt
+│       │   ├── launch-run.types.ts.l1.txt
+│       │   ├── terminate.ts.l1.txt
+│       │   ├── terminate.types.ts.l1.txt
+│       │   ├── snapshot.ts.l1.txt
+│       │   ├── snapshot.types.ts.l1.txt
+│       │   ├── cleanup.ts.l1.txt
+│       │   └── cleanup.types.ts.l1.txt
+│       │
+│       ├── orphan/                   # LAYER 5: Orphan management (Ch12)
+│       │   ├── scanner.ts.l1.txt     # [NEW]
+│       │   ├── classifier.ts.l1.txt  # [NEW]
+│       │   ├── whitelist.ts.l1.txt   # [NEW]
+│       │   └── nodes/
+│       │       ├── find-orphans.ts.l1.txt
+│       │       ├── match-to-manifest.ts.l1.txt
+│       │       ├── terminate-orphans.ts.l1.txt
+│       │       └── expire-allocations.ts.l1.txt
+│       │
+│       ├── api/                      # LAYER 6: HTTP interface (Ch9)
+│       │   ├── routes.ts.l1.txt      # [NEW]
+│       │   ├── resources/
+│       │   │   └── resources.ts.l1.txt
+│       │   ├── operations/
+│       │   │   └── workflows.ts.l1.txt
+│       │   ├── agent/
+│       │   │   ├── agent.ts.l1.txt
+│       │   │   └── sse-protocol.ts.l1.txt
+│       │   └── middleware/
+│       │       ├── auth.ts.l1.txt        # [NEW]
+│       │       ├── errors.ts.l1.txt
+│       │       └── idempotency.ts.l1.txt # [NEW]
+│       │
+│       └── background/               # Periodic tasks
+│           ├── reconciliation.ts.l1.txt  # [NEW]
+│           ├── hold-expiry.ts.l1.txt     # [NEW]
+│           ├── manifest-cleanup.ts.l1.txt # [NEW]
+│           └── garbage-collection.ts.l1.txt # [NEW]
+│
+├── cli/                              # CLI client (user machine)
+│   ├── package.json.l1.txt           # [NEW]
+│   ├── tsconfig.json.l1.txt          # [NEW]
+│   └── src/
+│       ├── main.ts.l1.txt
+│       ├── config.ts.l1.txt
+│       ├── process.ts.l1.txt
+│       ├── client.ts.l1.txt          # [NEW]
+│       ├── preflight.ts.l1.txt       # [NEW]
+│       ├── ssh.ts.l1.txt             # [NEW]
+│       ├── ui/
+│       │   ├── formatters.ts.l1.txt
+│       │   ├── progress.ts.l1.txt    # [NEW]
+│       │   └── prompts.ts.l1.txt     # [NEW]
+│       └── commands/
+│           ├── run.ts.l1.txt         # [NEW]
+│           ├── logs.ts.l1.txt        # [NEW]
+│           ├── list.ts.l1.txt        # [NEW]
+│           ├── cancel.ts.l1.txt      # [NEW]
+│           ├── extend.ts.l1.txt      # [NEW]
+│           ├── artifact.ts.l1.txt    # [NEW]
+│           ├── instance.ts.l1.txt    # [NEW]
+│           ├── snapshot.ts.l1.txt    # [NEW]
+│           ├── orphan.ts.l1.txt      # [NEW]
+│           ├── usage.ts.l1.txt       # [NEW]
+│           ├── control.ts.l1.txt     # [NEW]
+│           └── setup.ts.l1.txt       # [NEW]
+│
+├── shared/                           # Types shared between control + CLI
+│   ├── package.json.l1.txt           # [NEW]
+│   ├── tsconfig.json.l1.txt          # [NEW]
+│   └── src/
+│       ├── types.ts.l1.txt
+│       ├── resources.ts.l1.txt       # [NEW]
+│       ├── errors.ts.l1.txt          # [NEW]
+│       ├── utils.ts.l1.txt           # [NEW]
+│       └── api/
+│           ├── resources.ts.l1.txt
+│           ├── workflows.ts.l1.txt
+│           └── agent.ts.l1.txt
+│
+├── agent/                            # Python agent
+│   ├── agent.py.l1.txt
+│   ├── sse.py.l1.txt
+│   ├── heartbeat.py.l1.txt
+│   ├── logs.py.l1.txt
+│   ├── executor.py.l1.txt
+│   ├── spot.py.l1.txt
+│   ├── checkpoint.py.l1.txt          # [NEW]
+│   ├── artifacts.py.l1.txt           # [NEW]
+│   ├── tailscale.py.l1.txt
+│   └── requirements.txt.l1.txt
+│
+├── tests/
+│   ├── control/
+│   │   ├── unit/
+│   │   │   ├── db.test.ts.l1.txt
+│   │   │   ├── storage.test.ts.l1.txt
+│   │   │   ├── patterns.test.ts.l1.txt
+│   │   │   └── engine.test.ts.l1.txt
+│   │   ├── integration/
+│   │   │   ├── api-resources.test.ts.l1.txt
+│   │   │   ├── api-workflows.test.ts.l1.txt
+│   │   │   └── api-agent.test.ts.l1.txt
+│   │   └── e2e/
+│   │       ├── launch-run.test.ts.l1.txt
+│   │       ├── terminate.test.ts.l1.txt
+│   │       └── warm-pool.test.ts.l1.txt
+│   ├── cli/
+│   │   └── unit/
+│   └── property/
+│       └── orphan-invariant.test.ts.l1.txt
+│
+├── docs/
+│   └── timeouts.md.l1.txt
+├── package.json.l1.txt
+├── tsconfig.json.l1.txt
+└── README.md.l1.txt
+```
+
+================================================================================
+PART 2: EXECUTION STATUS
+================================================================================
+
+Phase A: Create directory structure
+-----------------------------------
+[x] Create control/src/{material,resource,provider,workflow,intent,orphan,api,background}/
+[x] Create control/src/provider/{compute,feature}/
+[x] Create control/src/api/{resources,operations,agent,middleware}/
+[x] Create control/src/workflow/nodes/
+[x] Create control/src/orphan/nodes/
+[x] Create cli/src/{ui,commands}/
+[x] Create shared/src/api/
+[x] Create tests/{control,cli}/
+
+Phase B: Move existing files
+----------------------------
+[x] Material layer (db.ts, db.types.ts, storage.ts)
+[x] Provider layer (types, registry, errors, contracts, extensions)
+[x] Provider compute (aws, lambda, runpod, orbstack)
+[x] Provider feature (tailscale)
+[x] Provider type-boundaries.ts
+[x] Workflow engine (engine, patterns, state-transitions)
+[x] Workflow nodes (9 files)
+[x] Intent files (8 files: 4 intents × 2)
+[x] Orphan nodes (4 files)
+[x] API files (resources, workflows, agent, errors)
+[x] CLI files (main, config, formatters, process)
+[x] Control entry (main, types, network)
+[x] Shared types
+[x] Migrations
+[x] Tests
+
+Phase C: Create placeholder files
+---------------------------------
+[x] control/src/material/external.ts
+[x] control/src/resource/*.ts (7 files)
+[x] control/src/workflow/compensation.ts
+[x] control/src/orphan/{scanner,classifier,whitelist}.ts
+[x] control/src/api/routes.ts
+[x] control/src/api/middleware/{auth,idempotency}.ts
+[x] control/src/background/*.ts (4 files)
+[x] cli/src/{client,preflight,ssh}.ts
+[x] cli/src/ui/{progress,prompts}.ts
+[x] cli/src/commands/*.ts (12 files)
+[x] shared/src/{resources,errors,utils}.ts
+[x] agent/{artifacts,checkpoint}.py
+[x] Config files (6 package.json/tsconfig.json)
+
+Phase D: Expand thin files (add missing bullets)
+------------------------------------------------
+[x] control/src/material/storage.ts - Already adequate (36 lines, covers S3/presigned/dedup)
+[x] control/src/workflow/state-transitions.ts - Already adequate (328 lines, has crash recovery)
+[x] control/src/api/middleware/errors.ts - Already adequate (147 lines, has HTTP mapping)
+
+Phase E: Delete old structure
+-----------------------------
+[x] Remove src/ directory
+[x] Remove old tests/ structure
+
+================================================================================
+PART 3: SPEC ALIGNMENT - DETAILED INCONSISTENCIES
+================================================================================
+
+## CRITICAL - FIXED
+
+[x] Cr.1: Ch13 Lines 19-51 - Rewrote directory structure with component-based layout
+[x] Cr.2: Ch13 Lines 55-67 - Added 13.1.3 explaining control/shared type split
+[x] Cr.3: Ch13 Lines 2053-2125 - Updated to intent/ paths, renamed section to "Intent-Specific"
+[x] Cr.4: Ch8 Lines 3038-3066 - Updated provider paths to control/src/provider/compute/
+
+## MEDIUM - FIXED
+
+[x] Ch6-7: Intent vs workflow - Absorbed into Cr.1 (Ch13 directory structure shows separation)
+[x] Ch9: API Organization - Added "File Organization" section with directory tree
+[x] Ch12: Orphan Management - Added "File Organization" section with directory tree
+
+## LOW - FIXED
+
+[x] Ch10: CLI Commands - Added "File Organization" section with commands/ directory
+[x] Ch14: Pseudo-Implementation - Updated to show .l1/.l2/.l3 suffixes and component dirs
+[x] Ch15: Migrations - Updated to control/migrations/ with 001_ numbering
+
+================================================================================
+PART 4: STATISTICS
+================================================================================
+
+File counts:
+- Total files: 128 (was 80)
+- Moved files: ~55
+- New placeholder files: ~48
+- Deleted/merged: 0
+
+Directory structure:
+- Components: 4 (control, cli, shared, agent)
+- Layers in control/: 6 (material, resource, provider, workflow, intent, orphan) + api + background
+
+Dependency rules:
+- material/ ← resource/ ← provider/ ← workflow/ ← intent/
+                                     ↖ orphan/ ↗
+- cli/ imports from shared/ only (never control/)
+- control/ imports from shared/ only (never cli/)
+- shared/ has zero runtime dependencies
+
+Intent type layering (clarification):
+- CLI uses intent API types from shared/src/api/workflows.ts (LaunchRunRequest/Response)
+- Control uses internal workflow types from control/src/intent/*.types.ts (LaunchRunInput/Output)
+- The shared API types are HTTP contract; internal types are workflow engine contract
+- This maintains the dependency rule: CLI → shared (HTTP types), not CLI → control
+
+================================================================================
+COMPLETED WORK
+================================================================================
+
+1. [DONE] All [NEW] placeholder files populated with L1 outlines from spec
+   - 47 files expanded from 2-line stubs to 15-60 line outlines
+   - Content sourced from spec chapters via parallel exploration agents
+   - Organized by area of concern (not granular implementation detail)
+
+2. [DONE] Reviewed 3 "thin" files - already adequate, no expansion needed
+   - storage.ts: 36 lines, covers S3 offload, presigned URLs, dedup
+   - state-transitions.ts: 328 lines, covers crash recovery (lines 226-243)
+   - errors.ts: 147 lines, covers HTTP mapping, error envelope
+
+Final statistics:
+- Total L1 files: 128
+- Total lines: ~6,761
+- Average: ~53 lines/file
+- No remaining 2-line placeholders
+
+3. [DONE] Self-review improvements
+   - Added spec chapter references (Ch3, Ch4, Ch5, Ch12) to key resource files
+   - Expanded thin CLI command files (list.ts, run.ts, orphan.ts)
+   - Added default values and constants throughout (timeouts, retry counts, etc.)
+   - Improved allocation.ts with explicit state enum values and transitions
+   - Enhanced manifest.ts with retention defaults and cleanup priority order
+   - Added more detail to preflight.ts warning types
+
+================================================================================

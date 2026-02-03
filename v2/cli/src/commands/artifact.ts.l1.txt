@@ -1,0 +1,15 @@
+# artifact.ts - Artifact Commands
+
+## Subcommands
+- list: GET /v1/objects?type=artifact&run_id=X
+- pull: Download via presigned URLs
+
+## List Options
+- --pattern: Glob filter (e.g., "*.pt")
+- --run: Filter by run ID
+
+## Pull Options
+- --dest: Destination directory
+- Parallel downloads for multiple files
+- Progress bars for large artifacts
+- Checksum verification

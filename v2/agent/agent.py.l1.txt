@@ -1,0 +1,15 @@
+# agent.py - Main Entry Point
+
+## Startup
+1. Acquire lock (/tmp/repl-agent.lock)
+2. Start threads: heartbeat, log_flusher, spot_monitor (AWS only)
+3. Connect to SSE command stream
+
+## Main Loop
+Read SSE commands, dispatch: start_run, cancel_run, capture_artifacts, trigger_tailscale
+
+## Shutdown Triggers
+Heartbeat timeout, SSE connection loss, SIGTERM, spot interruption
+
+## Shutdown Sequence
+Send panic diagnostics, flush logs, tailscale logout, self-terminate

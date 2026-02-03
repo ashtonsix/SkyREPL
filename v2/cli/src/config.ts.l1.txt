@@ -1,0 +1,28 @@
+# cli.types.ts - CLI Types
+
+## Config Types
+- `ReplConfig` - profiles, files, control?
+- `ProfileConfig` - provider, spec, command, region?, timeout?, workdir?, spot?, init?, hold?, snapshot?
+- `FilesConfig` - include[], exclude[], artifacts[]
+- `ControlPlaneConfig` - url, auth?
+- `AuthConfig` - type ('token' | 'oauth'), token?, oauth_provider?
+
+## Output
+- `OutputMode` - 'pretty' | 'json' | 'quiet'
+- `OutputFormatter` - Interface for formatting runs, instances, allocations, workflow progress
+
+## Preflight
+- `PreflightWarning` - type, message, severity, details
+- `PreflightResponse` - ok, warnings[], errors?[]
+
+## File Sync
+- `LocalFile` - path, checksum, sizeBytes, lastModified
+- `FileSyncResult` - uploaded, skipped, totalBytes, duration
+
+## Workflow Submission
+- `WorkflowSubmissionRequest` - type, input, idempotencyKey?, priority?
+- `WorkflowSubmissionResponse` - workflowId, status, existingWorkflowId?
+
+## Progress Events
+- `WorkflowEvent` - timestamp, type, nodeId?, message, details?
+- `WorkflowProgress` - workflowId, type, status, currentNode, nodesTotal, nodesCompleted, nodesFailed, startedAt, estimatedRemainingMs, recentEvents[]

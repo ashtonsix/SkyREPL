@@ -1,0 +1,120 @@
+# errors.ts - Provider Error Taxonomy
+
+Standardized error classes that all providers map to.
+Enables consistent retry logic across providers.
+
+## Error Classes
+
+### CapacityError
+- Insufficient capacity in region/zone
+- Retryable with alternative (different region)
+- Example: AWS InsufficientInstanceCapacity
+
+### AuthError
+- Invalid or expired credentials
+- NOT retryable (requires user intervention)
+- Example: AWS UnauthorizedOperation, Lambda invalid API key
+
+### RateLimitError
+- API throttling
+- Retryable with exponential backoff
+- May include retry_after_ms hint
+- Example: AWS RequestLimitExceeded
+
+### SpotInterruptedError
+- Spot/preemptible instance terminated by provider
+- Retryable (try spot again, then on-demand fallback)
+- Example: AWS SpotInstanceInterruption EventBridge event
+
+### QuotaExceededError
+- Account quota hit
+- NOT retryable (requires quota increase)
+- Example: AWS InstanceLimitExceeded
+
+### InvalidSpecError
+- Invalid instance type/config
+- NOT retryable (bad input)
+- Example: AWS Unsupported, invalid GPU type
+
+### NotFoundError
+- Instance/snapshot doesn't exist
+- NOT retryable
+- Example: AWS InvalidInstanceID.NotFound
+
+### InvalidStateError
+- Resource in wrong state for operation
+- May be retryable after wait
+- Example: Trying to snapshot a terminating instance
+
+### UnsupportedOperationError
+- Operation not available for this provider/region
+- NOT retryable
+- Example: Snapshots on Lambda Labs
+
+## ProviderError Base
+
+All error classes extend ProviderError:
+- code: ErrorCode (enum of all error types)
+- message: string
+- retryable: boolean
+- retryStrategy?: 'same_params' | 'alternative' | 'fallback'
+- retryAfterMs?: number
+- details?: Record<string, unknown> (provider-specific)
+
+## Error -> Retry Strategy Mapping
+
+| Error Code              | Retryable | Strategy        | Max Retries | Pattern Applied        |
+|-------------------------|-----------|-----------------|-------------|------------------------|
+| CAPACITY_UNAVAILABLE    | yes       | alternative     | 3           | retry-with-alternative |
+| PROVIDER_API_ERROR      | yes       | same_params     | 3           | (simple retry)         |
+| RATE_LIMITED            | yes       | same_params     | 5           | (respect retry_after)  |
+| SPOT_INTERRUPTED        | yes       | fallback        | 1           | conditional-branch     |
+| OPERATION_TIMEOUT       | yes       | same_params     | 2           | (simple retry)         |
+| VALIDATION_ERROR        | no        | -               | 0           | fail immediately       |
+| INVALID_STATE           | no        | -               | 0           | fail immediately       |
+| DATABASE_ERROR          | no        | -               | 0           | fail immediately       |
+| AUTH_ERROR              | no        | -               | 0           | fail immediately       |
+| QUOTA_EXCEEDED          | no        | -               | 0           | fail immediately       |
+
+## Helper Functions
+
+### shouldRetry(error, attempt)
+- Check if error is retryable
+- Check if attempt < maxRetries for error type
+- Returns boolean
+
+### shouldRetryWithAlternative(error)
+- Check if error suggests trying different params
+- Returns true for: CAPACITY_UNAVAILABLE, SPOT_INTERRUPTED, region-specific errors
+
+### calculateBackoff(attempt, error?)
+- Base: 2^attempt * 2000ms
+- Cap: 60000ms
+- Override: Use error.retryAfterMs if present
+- Returns delay in ms
+
+## Provider Error Mapping
+
+Each provider maps its native errors to these classes:
+
+AWS:
+- InsufficientInstanceCapacity -> CapacityError
+- UnauthorizedOperation -> AuthError
+- RequestLimitExceeded -> RateLimitError
+- InstanceLimitExceeded -> QuotaExceededError
+- Unsupported -> InvalidSpecError
+
+Lambda Labs:
+- 429 response -> RateLimitError
+- 401/403 -> AuthError
+- "no capacity" -> CapacityError
+
+RunPod:
+- "insufficient capacity" -> CapacityError
+- "invalid API key" -> AuthError
+- "pod not found" -> NotFoundError
+
+OrbStack:
+- "machine not found" -> NotFoundError
+- "OrbStack not running" -> AuthError (provider unavailable)
+- Chaos-injected errors -> Respective types

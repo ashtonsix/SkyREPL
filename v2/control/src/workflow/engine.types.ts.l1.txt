@@ -1,0 +1,16 @@
+# engine.types.ts - Workflow Engine Types
+
+## WorkflowBlueprint
+type, nodes: NodeDefinition[], entryNode
+
+## NodeDefinition
+id, type, next: string[], dependencies?: string[], timeout?, retryPolicy?, compensation?
+
+## NodeContext
+workflowId, nodeId, input, manifestId
+Methods: emitResource(), claimResource(), applyPattern(), getNodeOutput(), log()
+
+## NodeExecutor
+execute(ctx): Promise<output>
+compensate?(ctx): Promise<void>
+idempotent: boolean

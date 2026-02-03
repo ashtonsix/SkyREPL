@@ -1,0 +1,139 @@
+================================================================================
+BIG_REDESIGN STATUS
+================================================================================
+Last updated: 2026-02-03
+
+1. SPEC OVERVIEW
+----------------
+
+SkyREPL v2 is a cloud orchestration platform for running computational workloads
+on ephemeral compute instances. Part of the Sky Computing ecosystem (SkyPilot as
+prominent touchstone), SkyREPL focuses specifically on lifecycle management.
+
+The spec (~15,000 lines, 15 chapters) is complete and ready for implementation.
+
+Key design goals:
+- Explicit ALLOCATIONS replace implicit grace periods (6-state machine)
+- Explicit workflow DAGs replace scattered state machines
+- Warm pool optimization (multiple runs per instance)
+- Multi-user/team support (development-focused but collaboration-ready)
+
+2. ARCHITECTURE
+---------------
+
+Three-tier ownership model: MANIFEST → RESOURCE → MATERIAL
+
+MATERIAL (Ch 2):
+  - RECORDS: SQL tables (instances, runs, allocations, workflows)
+  - OBJECTS: Blobs with tags (INTEGER PK, checksum as tag for dedup)
+  - EXTERNAL: Provider state via API (cached in-memory)
+
+RESOURCE (Ch 3):
+  - Logical entities: Instance, Run, Allocation, Workflow, Snapshot, Artifact
+  - Materialized from MATERIAL sources
+
+MANIFEST (Ch 4):
+  - Ownership boundary between workflows
+  - States: DRAFT → SEALED (expired derived from resource count)
+
+ALLOCATIONS (Ch 5):
+  - Run-to-instance bindings
+  - AVAILABLE → CLAIMED → ACTIVE → HELD → COMPLETE (+ FAILED)
+  - Warm pool = allocations WHERE status='AVAILABLE'
+  - Tailscale JIT install via ProxyCommand on first SSH
+
+WORKFLOWS (Ch 6):
+  - DAG execution engine
+  - 4 patterns: Insert-and-Reconverge, Conditional-Branch, Parallel-Fan-Out,
+    Retry-with-Alternative
+  - Single-step helpers hide complexity for simple operations
+
+INTENTS (Ch 7):
+  - Offline types/interfaces for provider implementation
+  - Testing/verification framework
+  - Providers compose helpers with provider-specific API calls
+
+3. FILE STRUCTURE
+-----------------
+
+Spec chapters:
+  01_INTRODUCTION.txt     08_PROVIDERS.txt
+  02_MATERIAL.txt         09_API.txt
+  03_RESOURCES.txt        10_CLI.txt
+  04_MANIFEST.txt         11_AGENT.txt
+  05_ALLOCATIONS.txt      12_ORPHANS.txt
+  06_WORKFLOWS.txt        13_TYPES.txt
+  07_INTENTS.txt          14_IMPLEMENTATION.txt
+                          15_OPERATIONS.txt
+
+Supporting docs:
+  STATUS.txt              - This file (current state)
+  WORKLOG_REVISIONS.txt   - Detailed revision history
+
+Pseudo-implementation (v2/):
+  control/                - Control plane (VPS deployment)
+  cli/                    - CLI client (user machine)
+  shared/                 - Types shared between control + CLI
+  agent/                  - Python agent (on instances)
+  tests/                  - Tests organized by component
+
+4. REVISION SUMMARY
+-------------------
+
+112 revision items completed across 9 rounds:
+
+Round 1-5: Foundation and polish (70 items)
+  - Resource naming, INTEGER IDs + base-36 slugs
+  - DRAFT/SEALED manifest states, workflow_state format
+  - Storage → Material, Core Workflows → Intents
+  - 12 files renamed (dropped _LAYER/_SYSTEM/_SPECIFICATION suffixes)
+  - OrbStack elevated to critical testing provider
+  - Checkpoint script support, testing consistency
+
+Round 6: Agent failsafe (1 item)
+  - Added /panic endpoint for pre-shutdown diagnostics
+
+Round 7: Timeout non-normative (12 items)
+  - Timing values marked as examples, not requirements
+  - Constraint relationships made normative
+
+Round 8: Schema alignment (14 items)
+  - Objects table: reservation, checksum columns
+  - Blob deduplication queries fixed
+  - Cross-reference consistency
+
+Round 9: v2 structure alignment (15 items)
+  - Ch13: Component-based directory structure (control/cli/shared/agent)
+  - Ch13: Control/shared type split documented
+  - Ch8: Provider paths updated (control/src/provider/compute/)
+  - Ch9/10/12: File organization sections added
+  - Ch14/15: Pseudo-impl and migration paths updated
+
+See WORKLOG_REVISIONS.txt for detailed execution log.
+
+5. IMPLEMENTATION STATUS
+------------------------
+
+Pseudo-implementation exists in v2/ with .l1.txt files (bullet-point outlines).
+Structure reorganization complete. Ready for L1→L2 content expansion.
+
+Fidelity levels:
+  .l1.txt  - Bullet-point outlines (current state)
+  .l2.txt  - Detailed pseudocode
+  .l3.txt  - Partial implementation
+  (none)   - Working code
+
+Minimum Viable Kernel:
+  - Single intent (launch-run) + OrbStack provider
+  - Workflow engine with Conditional-Branch pattern
+  - Allocations: CLAIMED → ACTIVE → COMPLETE (skip HELD initially)
+  - Manifests: DRAFT → SEALED
+  - Basic material layer (instances, runs, allocations)
+
+The Core Insight:
+  Cloud compute orchestration isn't fundamentally a compute problem - it's a
+  lifecycle chaos problem. Everyone can spin up instances. The hard part is
+  tracking what's running, ensuring cleanup on failure, and avoiding cost
+  surprises. SkyREPL treats resource lifecycle as a first-class problem.
+
+================================================================================

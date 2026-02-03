@@ -1,0 +1,98 @@
+# db.ts - Database Layer
+
+## Connection
+- `initDatabase(path: string): Database` - Open SQLite with WAL mode, foreign keys enabled
+- `getDatabase(): Database` - Get singleton instance
+- `closeDatabase(): void` - Close connection
+
+## Migrations
+- `runMigrations(): void` - Apply schema migrations from version files
+- `getMigrationVersion(): number` - Current schema version
+
+## Query Helpers
+- `queryOne<T>(sql, params): T | null` - Single row with JSON parsing
+- `queryMany<T>(sql, params): T[]` - Multiple rows
+- `execute(sql, params): void` - Non-query statements
+- `transaction<T>(fn): T` - Atomic transaction
+
+## Instance Operations
+- `getInstance(id): Instance | null`
+- `getInstanceByProviderId(provider, providerId): Instance | null`
+- `createInstance(data): Instance`
+- `updateInstance(id, updates): Instance`
+- `listInstances(filter?): Instance[]`
+
+## Run Operations
+- `getRun(id): Run | null`
+- `createRun(data): Run`
+- `updateRun(id, updates): Run`
+- `listRuns(filter?): Run[]`
+
+## Allocation Operations
+- `getAllocation(id): Allocation | null`
+- `createAllocation(data): Allocation`
+- `updateAllocationStatus(id, status): Allocation`
+- `claimAllocation(id, runId): Allocation | null` - Atomic claim with race protection
+  # CONCURRENCY: Optimistic locking strategy for allocation claims
+  # Multiple workflows may attempt to claim the same allocation simultaneously.
+  # This function ensures exactly one succeeds using a compare-and-swap approach.
+  #
+  # Implementation:
+  # 1. SELECT allocation WHERE id = ? AND status = 'AVAILABLE' AND run_id IS NULL
+  #    - Read current state including updated_at timestamp
+  #    - If not found or status/run_id mismatch, return null immediately (claim failed)
+  #
+  # 2. UPDATE allocations
+  #    SET run_id = ?, status = 'CLAIMED', updated_at = <current_timestamp>
+  #    WHERE id = ? AND updated_at = <original_updated_at>
+  #    - The WHERE clause includes the original updated_at value from step 1
+  #    - This ensures the UPDATE only succeeds if no other transaction modified the row
+  #
+  # 3. Check UPDATE result (rows affected)
+  #    - If 0 rows affected: Another transaction won the race, return null (claim failed)
+  #    - If 1 row affected: Claim succeeded, return updated allocation
+  #
+  # Race conditions handled:
+  # - Two workflows claim same allocation: First UPDATE wins, second gets 0 rows affected
+  # - Allocation deleted between SELECT and UPDATE: 0 rows affected, claim fails gracefully
+  # - Allocation status changed (e.g., FAILED): 0 rows affected, claim fails
+  #
+  # Performance notes:
+  # - SQLite's default isolation (SERIALIZABLE) ensures atomicity
+  # - Index on (status, run_id) enables fast AVAILABLE allocation queries
+  # - updated_at index (idx_allocations_updated) enables efficient race detection
+  #
+  # Example usage:
+  #   const allocation = claimAllocation(allocId, runId)
+  #   if (!allocation) {
+  #     // Claim failed - allocation unavailable or race lost
+  #     // Workflow should find another allocation or create new one
+  #   }
+  #
+- `findAvailableAllocation(spec): Allocation | null`
+
+## Workflow Operations
+- `getWorkflow(id): Workflow | null`
+- `createWorkflow(data): Workflow`
+- `updateWorkflow(id, updates): Workflow`
+- `getWorkflowNodes(workflowId): WorkflowNode[]`
+- `createWorkflowNode(data): WorkflowNode`
+- `updateWorkflowNode(id, updates): WorkflowNode`
+
+## Manifest Operations
+- `getManifest(id): Manifest | null`
+- `createManifest(type): Manifest` - Create in DRAFT state
+- `sealManifest(id): void` - DRAFT → SEALED
+- `addResourceToManifest(manifestId, resourceType, resourceId): void`
+- `getManifestResources(manifestId): ManifestResource[]`
+
+## Object Operations
+- `getObject(id): Object | null`
+- `createObject(data): Object`
+- `addObjectTag(objectId, key, value): void`
+- `findObjectByTag(key, value): Object | null`
+- `findBlobByChecksum(checksum): Object | null` - Deduplication helper
+
+## Warm Pool
+- `findWarmAllocation(spec, initChecksum?): Allocation | null` - Match spec and optional init script
+- `getWarmPoolStats(): { available: number, bySpec: Record<string, number> }`

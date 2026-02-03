@@ -1,0 +1,7 @@
+# workflow-launch-run.types.ts
+
+## LaunchRunInput
+runId: number, command, workdir, spec, provider, region, initChecksum, maxDurationMs, holdDurationMs, createSnapshot, files[], artifactPatterns[], env?
+
+## LaunchRunOutput
+runId: number, instanceId: number, allocationId: number, exitCode, snapshotId?: number, spotInterrupted

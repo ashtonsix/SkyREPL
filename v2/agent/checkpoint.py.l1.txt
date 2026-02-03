@@ -1,0 +1,18 @@
+# checkpoint.py - Checkpoint Handling
+
+## Script Execution
+- Execute checkpoint_script from repl.toml on spot interruption
+- Path relative to repl.toml location
+- Timeout enforcement via checkpoint_timeout
+
+## Environment Variables
+- SKYREPL_CHECKPOINT_REASON=spot_termination
+- SKYREPL_RUN_ID, SKYREPL_WORKDIR
+
+## Output Handling
+- Stream stdout/stderr as regular logs
+- Terminate script if timeout exceeded
+
+## Integration
+- Runs after spot interruption detection
+- Runs before artifact upload

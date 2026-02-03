@@ -1,0 +1,146 @@
+# errors.ts - Error handling and HTTP status mapping
+
+## ERROR CATEGORIES
+
+- ErrorCategory enum (imported from types.ts):
+  - 'validation' - Invalid input, malformed requests
+  - 'auth' - Authentication/authorization failures
+  - 'not_found' - Resource does not exist
+  - 'conflict' - State conflicts, race conditions
+  - 'rate_limit' - Rate limiting, capacity unavailable
+  - 'provider' - Cloud provider API errors
+  - 'timeout' - Operation timeouts
+  - 'internal' - Internal server errors
+
+## HTTP STATUS MAPPING
+
+### mapErrorToHttpStatus(error: WorkflowError | NodeError): number
+
+Maps error categories to appropriate HTTP status codes:
+
+- validation → 400 Bad Request
+  - Invalid workflow input
+  - Schema validation failures
+  - Malformed parameters
+
+- auth → 401 Unauthorized
+  - Missing or invalid credentials
+  - Expired auth tokens
+  - Note: 403 Forbidden for insufficient permissions (use details.code)
+
+- not_found → 404 Not Found
+  - Resource ID does not exist
+  - Workflow not found
+  - Instance not found
+
+- conflict → 409 Conflict
+  - Invalid state transition
+  - Resource already claimed
+  - Concurrent modification
+
+- rate_limit → 429 Too Many Requests
+  - API rate limit exceeded
+  - Capacity unavailable (spot instances)
+  - Provider quota exceeded
+
+- provider → 502 Bad Gateway
+  - Cloud provider API errors
+  - Upstream service failures
+  - Provider timeout (different from our timeout)
+
+- timeout → 504 Gateway Timeout
+  - Operation timeout waiting for provider
+  - Workflow execution timeout
+  - Long-running operation exceeded limit
+
+- internal → 500 Internal Server Error
+  - Database errors
+  - Unexpected exceptions
+  - Critical infrastructure failures
+
+## ERROR RESPONSE FORMAT
+
+### ErrorResponse
+
+JSON structure returned to clients:
+
+```typescript
+{
+  "error": {
+    "code": string,              // Error code (e.g., "OPERATION_TIMEOUT")
+    "message": string,           // Human-readable message
+    "category": ErrorCategory,   // Error category for client handling
+    "details": {                 // Optional additional context
+      "node_id"?: string,
+      "workflow_id"?: string,
+      "resource_id"?: string,
+      "retry_after_ms"?: number, // For rate_limit errors
+      [key: string]: unknown
+    }
+  }
+}
+```
+
+### Success Response Format
+
+For comparison, successful responses:
+
+```typescript
+{
+  "data": {
+    // Resource-specific payload
+  }
+}
+```
+
+## IMPLEMENTATION NOTES
+
+- Error mapping happens at API layer, not workflow layer
+- Workflow errors propagate up with category preserved
+- HTTP status determined by category, not specific error code
+- Retry-After header set for 429 responses (from details.retry_after_ms)
+- Auth errors: check details.code for 401 vs 403 distinction
+- Provider errors: always 502 (upstream failure), not 503 (our service down)
+- Timeouts: 504 for operations waiting on external systems, not our processing
+- All errors include correlation/trace ID from workflow if available
+
+## USAGE EXAMPLE
+
+```typescript
+// In API handler
+try {
+  const workflow = await engine.submit(request);
+  const result = await engine.waitForCompletion(workflow.id);
+
+  if (result.status === 'failed') {
+    const httpStatus = mapErrorToHttpStatus(result.error);
+    return new Response(
+      JSON.stringify({ error: result.error }),
+      {
+        status: httpStatus,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Trace-Id': result.traceId
+        }
+      }
+    );
+  }
+
+  return new Response(
+    JSON.stringify({ data: result.output }),
+    { status: 200 }
+  );
+} catch (error) {
+  // Unexpected errors not from workflow
+  return new Response(
+    JSON.stringify({
+      error: {
+        code: 'INTERNAL_ERROR',
+        message: error.message,
+        category: 'internal'
+      }
+    }),
+    { status: 500 }
+  );
+}
+```

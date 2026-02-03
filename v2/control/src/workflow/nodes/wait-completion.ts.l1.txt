@@ -1,0 +1,27 @@
+# wait-completion.ts - Wait Completion Node
+
+## Input Type
+{ runId: string, instanceId: string, timeout?: number }
+
+## Output Type
+{ exitCode: number, completedAt: number, duration: number }
+
+## Execute Steps
+- Default timeout: 24 hours (configurable via run spec)
+- Poll run record for completed_at field (agent sets this on run_complete event)
+- Or poll agent SSE events for run_complete message
+- On completion: Read run record for exit_code, completed_at
+- Calculate duration = completed_at - started_at
+- If timeout exceeded: Send cancel_run, mark run as 'timeout', exit_code=124
+- Return exit code and timing data
+
+## Compensation
+- Send CancelRunMessage via SSE if still running
+- Update run status to 'cancelled'
+- Note: This is best-effort, agent may have already completed
+
+## Key Calls
+- db.getRun()
+- db.updateRun()
+- sse.waitForEvent(instanceId, 'run_complete', { runId })
+- sse.sendMessage(instanceId, { type: 'cancel_run', runId })

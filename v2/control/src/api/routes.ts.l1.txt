@@ -1,0 +1,18 @@
+# routes.ts - Route Registration
+
+## Server Setup
+- ElysiaJS with type-safe request/response
+- Port, CORS, body size limits configuration
+
+## Endpoint Categories
+- /v1/resources/* - Layer 1 CRUD (instances, runs, allocations, objects)
+- /v1/operations/* - Layer 2 workflow submission
+- /v1/agent/* - Agent communication (SSE, heartbeat)
+- /v1/status, /v1/health - Health checks
+
+## Two-Layer Architecture
+- Layer 1: Direct resource access (GET/POST/PATCH)
+- Layer 2: Workflow-mediated operations (launch-run, terminate, etc.)
+
+## Middleware Stack
+- auth → idempotency → errors → handler

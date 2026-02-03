@@ -1,0 +1,28 @@
+# workflows.ts - Layer 2 API (Workflow Submission)
+
+## Workflow Endpoints
+- `POST /v1/workflows/launch-run` - Submit launch-run workflow
+  - Returns: workflowId, runId, status, statusUrl, streamUrl
+- `POST /v1/workflows/terminate-instance` - Terminate instance gracefully
+- `POST /v1/workflows/create-snapshot` - Create instance snapshot
+- `POST /v1/workflows/extend-hold` - Extend allocation hold duration
+- `POST /v1/workflows/cancel` - Cancel running workflow with optional rollback
+
+## Status & Streaming
+- `GET /v1/workflows/:id/status` - Poll workflow status
+  - Returns: workflowId, type, status, currentNode, progress, output?, error?, timestamps
+- `GET /v1/workflows/:id/stream` - SSE stream for real-time progress
+  - Events: node_started, node_completed, node_failed, progress, workflow_completed, workflow_failed
+
+## Preflight
+- `GET /v1/preflight` - Run preflight checks before submission
+  - Checks: orphans, budget, credentials, capacity
+  - Returns: ok, warnings[], errors?[]
+
+## Workflow Patterns
+All workflows return 202 Accepted immediately with workflowId and URLs for status/streaming.
+Execution happens asynchronously with compensation on failure.
+
+## Idempotency
+All POST endpoints support `Idempotency-Key` header to prevent duplicate submissions.
+Keys stored for 24h with request hash for validation.

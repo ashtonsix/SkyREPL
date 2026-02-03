@@ -1,0 +1,28 @@
+# network.ts - Tailscale Integration
+
+## TailscaleClient
+- `createAuthKey(tags?): { key, expiresAt }` - Generate ephemeral auth key for instance
+- `getDevice(instanceId): TailscaleDevice | null` - Query device by tag
+- `deleteDevice(deviceId): void` - Deregister device from Tailnet
+
+## JIT Installation
+- `triggerTailscaleInstall(instanceId, allocationId): void`
+  - Generate auth key
+  - Send SSE command to agent with key
+  - Create TailscaleMachine object (status: 'installing')
+- `checkTailscaleStatus(instanceId): TailscaleStatus`
+  - Query TailscaleMachine object and API
+  - Update status based on device.online
+
+## SSH Config Generation
+- `generateSSHConfig(allocations): string`
+  - For each ACTIVE/HELD allocation
+  - Generate SSH config entry with Tailscale IP
+  - Write to ~/.repl/ssh_config
+- Format:
+  ```
+  Host alloc-{id} alloc-{short-id}
+    HostName {tailscale_ip}
+    User {allocation.user}
+    ProxyCommand ~/.repl/bin/ssh_proxy_command.sh %n
+  ```

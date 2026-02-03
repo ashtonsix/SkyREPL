@@ -1,0 +1,23 @@
+# sync-files.ts - Sync Files Node
+
+## Input Type
+{ runId: string, instanceId: string, files: { path: string, checksum: string }[] }
+
+## Output Type
+{ fileCount: number, totalBytes: number }
+
+## Execute Steps
+- Call storage.prepareFilesForRun(runId, files) to get download URLs
+- Query instance to get SSE endpoint details
+- Send SyncFilesMessage via agent SSE stream with { runId, files: [{ path, url, checksum }] }
+- Agent will download files in parallel, verify checksums, write to workdir
+- No wait needed here - start-run node waits for sync_complete
+
+## Compensation
+- No compensation needed (files are cleaned up during allocation cleanup)
+- Workdir will be wiped on next run via warm pool reuse
+
+## Key Calls
+- storage.prepareFilesForRun()
+- db.getInstance()
+- sse.sendMessage(instanceId, { type: 'sync_files', runId, files })

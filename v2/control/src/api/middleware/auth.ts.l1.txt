@@ -1,0 +1,23 @@
+# auth.ts - Authentication Middleware
+
+## Token Validation
+- Extract Bearer token from Authorization header
+- Validate token signature and expiry
+- Extract user ID and scopes
+
+## API Key Scopes
+- run-only: Can submit runs, view own resources
+- admin: Full access
+- viewer: Read-only access
+
+## Rate Limiting
+- Default: 100 requests/minute per user
+- Configurable per endpoint
+
+## Bypass
+- Internal endpoints skip auth
+- Health/status endpoints public
+
+## Output
+- Attach user context to request
+- Generate request ID for audit trail

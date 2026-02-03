@@ -1,0 +1,210 @@
+# db.types.ts - Database record types (raw SQL rows)
+
+## CONVENTIONS
+
+- snake_case field names matching SQL columns
+- number for SQLite booleans (0 or 1)
+- string for JSON (will be parsed on read)
+- All IDs are INTEGER AUTOINCREMENT
+
+## RECORD TYPES
+
+### InstanceRecord
+- id: UUID (INTEGER AUTOINCREMENT)
+- provider: string
+- provider_id: string (empty during spawn:pending)
+- spec: string
+- region: string | null
+- ip: string | null
+- workflow_state: string (format: <workflow>:<phase>)
+- workflow_error: string | null (JSON-serialized error)
+- current_manifest_id: UUID | null
+- spawn_idempotency_key: string | null (format: ${workflow_id}:${node_id})
+- is_spot: number (SQLite boolean)
+- spot_request_id: string | null
+- init_checksum: string | null
+- created_at: TimestampMs
+- last_heartbeat: TimestampMs
+
+### RunRecord
+- id: UUID
+- command: string
+- workdir: string
+- max_duration_ms: number
+- workflow_state: string
+- workflow_error: string | null
+- current_manifest_id: UUID | null
+- exit_code: number | null
+- init_checksum: string | null
+- create_snapshot: number (SQLite boolean)
+- spot_interrupted: number (SQLite boolean)
+- created_at: TimestampMs
+- started_at: TimestampMs | null
+- finished_at: TimestampMs | null
+
+### AllocationRecord
+- id: UUID
+- run_id: UUID | null (null for AVAILABLE state)
+- instance_id: UUID
+- status: AllocationStatus
+- current_manifest_id: UUID | null
+- user: string
+- workdir: string
+- hold_until: TimestampMs | null
+- hold_reason: string | null
+- max_hold_duration_ms: number
+- created_at: TimestampMs
+- updated_at: TimestampMs
+
+### WorkflowRecord
+- id: UUID
+- type: string
+- parent_workflow_id: UUID | null
+- depth: number
+- status: string
+- current_node: string | null
+- input_json: string (JSON-encoded)
+- output_json: string | null
+- error_json: string | null
+- manifest_id: UUID | null
+- trace_id: string | null
+- idempotency_key: string | null
+- created_at: TimestampMs
+- started_at: TimestampMs | null
+- finished_at: TimestampMs | null
+
+### WorkflowNodeRecord
+- id: UUID
+- workflow_id: UUID
+- node_id: string (workflow-scoped identifier)
+- node_type: string
+- status: string
+- input_json: string
+- output_json: string | null
+- error_json: string | null
+- attempt: number
+- retry_reason: string | null
+- created_at: TimestampMs
+- started_at: TimestampMs | null
+- finished_at: TimestampMs | null
+
+### ManifestRecord
+- id: UUID
+- workflow_id: UUID
+- status: ManifestStatus
+- default_cleanup_priority: number
+- retention_ms: number | null
+- created_at: TimestampMs
+- released_at: TimestampMs | null
+- expires_at: TimestampMs | null
+
+### ManifestResourceRecord
+- manifest_id: UUID
+- resource_type: string
+- resource_id: UUID
+- cleanup_priority: number | null
+- added_at: TimestampMs
+
+### ObjectRecord
+- id: UUID (INTEGER AUTOINCREMENT)
+- type: string (snapshot, artifact, log, blob, run_file, etc.)
+- provider: string | null
+- provider_object_id: string | null
+- size_bytes: number
+- content_type: string | null
+- payload: Buffer | null (inline for ≤4KB)
+- s3_key: string | null (for >4KB objects)
+- s3_bucket: string | null
+- expires_at: TimestampMs | null
+- current_manifest_id: UUID | null
+- created_at: TimestampMs
+- updated_at: TimestampMs
+
+### ObjectTagRecord
+- object_id: UUID
+- tag: string (format: "key:value")
+- PRIMARY KEY (object_id, tag)
+
+### BlobRecord
+- id: UUID (INTEGER AUTOINCREMENT, changed from checksum PK)
+- checksum: string (stored as tag: "checksum:<hash>")
+- size_bytes: number
+- s3_key: string | null
+- s3_bucket: string | null
+- created_at: TimestampMs
+- last_accessed_at: TimestampMs
+
+### RunFileRecord
+- run_id: UUID
+- path: string
+- checksum: string
+- size_bytes: number
+
+### UsageRecordDb
+- id: UUID
+- instance_id: UUID
+- allocation_id: UUID | null
+- run_id: UUID | null
+- provider: string
+- spec: string
+- region: string | null
+- is_spot: number (SQLite boolean)
+- started_at: TimestampMs
+- finished_at: TimestampMs | null
+- duration_ms: number | null
+- estimated_cost_usd: number | null
+
+## CONVERTERS (Record ↔ Materialized)
+
+### recordToInstance(record: InstanceRecord): Omit<Instance, 'features' | 'tailscaleMachine' | 'externalStatus' | 'externalIp'>
+- Convert snake_case to camelCase
+- Convert is_spot (number) to isSpot (boolean)
+- Return base instance without relationships
+
+### instanceToRecord(instance: Instance): InstanceRecord
+- Convert camelCase to snake_case
+- Convert isSpot (boolean) to is_spot (number)
+- Omit relationship fields (features, tailscaleMachine)
+
+### recordToRun(record: RunRecord): Omit<Run, 'files' | 'logs' | 'artifacts' | 'allocation'>
+- Convert snake_case to camelCase
+- Convert booleans (create_snapshot, spot_interrupted)
+- Return base run without relationships
+
+### recordToAllocation(record: AllocationRecord): Omit<Allocation, 'instance' | 'run'>
+- Convert snake_case to camelCase
+- Return base allocation without relationships
+
+### recordToWorkflow(record: WorkflowRecord): Omit<Workflow, 'nodes' | 'manifest'>
+- Parse input_json, output_json, error_json
+- Convert status to WorkflowExecutionStatus enum
+- Return base workflow without relationships
+
+### recordToSnapshot(record: ObjectRecord): Snapshot
+- Assumes record.type === 'snapshot'
+- Parse tags from object_tags for metadata
+- Extract provider, spec, name from tags
+
+### recordToArtifact(record: ObjectRecord): Artifact
+- Assumes record.type === 'artifact'
+- Parse tags for run_id, path, keep flag
+
+### recordToFeatureInstallation(record: ObjectRecord): FeatureInstallation
+- Assumes record.type === 'feature_installation'
+- Parse tags for instance_id, feature_name, version, status
+
+## TYPE GUARDS
+
+### isInstanceRecord(record: any): record is InstanceRecord
+- Check for required fields: id, provider, spec, workflow_state
+
+### isRunRecord(record: any): record is RunRecord
+- Check for required fields: id, command, workflow_state
+
+## NOTES
+
+- All JSON fields (input_json, output_json, error_json) must be valid JSON strings
+- Timestamps are Unix milliseconds (number)
+- Boolean fields use SQLite convention: 0 = false, 1 = true
+- Converters handle field name transformation and type coercion
+- Relationship population happens at materialization layer, not converter layer

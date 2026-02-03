@@ -1,0 +1,15 @@
+# package.json - CLI Package
+
+## Identity
+- name: @skyrepl/cli
+- version: workspace version
+- bin: repl
+
+## Dependencies
+- commander: CLI framework
+- chalk: Colors
+- ora: Spinners
+- inquirer: Prompts
+
+## Scripts
+- build, dev

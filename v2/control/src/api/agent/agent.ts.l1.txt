@@ -1,0 +1,40 @@
+# agent.ts - Agent Communication Endpoints
+
+## Agent → Control (HTTP POST)
+- `POST /v1/agent/heartbeat` - Periodic heartbeat (every ~10s)
+  - Body: HeartbeatMessage with tailscale_ip, active_ssh_sessions, workflow_state
+  - Updates: instance.last_heartbeat, metrics, allocation state
+  - Returns: HeartbeatAckMessage with server_time, commands_pending
+
+- `POST /v1/agent/logs` - Batched log messages (every 5s or 100 lines)
+  - Body: LogMessage[] with run_id, stream (stdout/stderr/sync_complete), data
+  - Stores logs in objects table, forwards to WebSocket subscribers
+  - Special: stream="sync_complete" triggers CLAIMED→ACTIVE transition
+
+- `POST /v1/instances/:id/panic` - Emergency diagnostics (best-effort)
+  - Body: PanicRequest with reason, diagnostics, error_logs
+  - Always returns 200 OK, logs for ops team
+
+## Control → Agent (SSE)
+- `GET /v1/agent/commands` - Long-lived SSE connection
+  - Agent connects on startup, receives commands
+  - Events: StartRunMessage, CancelRunMessage, CaptureArtifactsMessage, TriggerTailscaleMessage, HeartbeatAckMessage
+  - Heartbeat every 30s to keep connection alive
+  - Supports reconnection with Last-Event-ID
+
+## Command Types (Control → Agent)
+- `StartRunMessage` - Execute run command with files, artifacts, run_init script
+- `CancelRunMessage` - SIGTERM → SIGKILL run process
+- `CaptureArtifactsMessage` - Upload artifacts to presigned URLs
+- `TriggerTailscaleMessage` - Ensure Tailscale running and authenticated
+- `HeartbeatAckMessage` - Keep-alive ping
+
+## Authentication
+- Agent token (JWT) in Authorization header
+- Token includes instance_id, expires in 7 days
+- Refresh via POST /v1/agent/refresh-token
+
+## Error Handling
+- Agent retries with exponential backoff (1s → 32s max)
+- Heartbeats and logs are idempotent
+- SSE reconnects with Last-Event-ID on disconnect

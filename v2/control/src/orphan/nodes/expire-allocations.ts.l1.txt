@@ -1,0 +1,32 @@
+# expire-allocations.ts - Expire Allocations Node
+
+## Input Type
+{ provider?: ProviderName }
+
+## Output Type
+{ expiredCount: number, allocationIds: string[] }
+
+## Execute Steps
+- Query db.getAllocations() with status='HELD' and hold_until < Date.now()
+- If provider is specified, filter allocations by instance.provider
+- Initialize expiredCount = 0, allocationIds = []
+- For each held allocation past TTL:
+  - Update allocation status from HELD to COMPLETE via db.updateAllocation()
+  - Set completed_at = Date.now()
+  - Increment expiredCount
+  - Add allocationId to allocationIds array
+  - Log transition: "Allocation {id} expired: HELD -> COMPLETE"
+- Return { expiredCount, allocationIds }
+
+## Compensation
+- On workflow failure/rollback:
+  - For each allocation in allocationIds:
+    - Revert allocation status from COMPLETE back to HELD
+    - Clear completed_at timestamp
+    - Log reversion: "Allocation {id} compensation: COMPLETE -> HELD"
+
+## Key Calls
+- db.getAllocations({ status: 'HELD', holdUntilBefore: Date.now(), provider })
+- db.updateAllocation(allocationId, { status: 'COMPLETE', completed_at: Date.now() })
+- Context: ctx.emitMetadata('expired_allocation_count', expiredCount)
+- Context: ctx.emitResource('allocation', allocationId) for each expired allocation

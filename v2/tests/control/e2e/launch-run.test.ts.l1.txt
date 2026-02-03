@@ -1,0 +1,105 @@
+# e2e/launch-run.test.ts - Launch-run E2E tests (OrbStack)
+
+## SETUP
+- OrbStack provider configured and available
+- Control plane running on localhost
+- CLI binary built and in PATH
+- Test SSH keys configured
+- Clean database before each test
+- Clean OrbStack containers before each test
+
+## Basic Run Tests
+- repl run executes command
+  - Command: repl run "echo hello"
+  - Workflow created and executed
+  - Instance spawned (or reused from pool)
+  - Command executed on instance
+  - Exit code captured
+- Logs streamed to client
+  - stdout/stderr streamed in real-time
+  - Logs displayed in terminal
+  - ANSI colors preserved
+  - Ctrl-C cancels (if supported)
+- Completes with exit code
+  - Success command → exit 0
+  - Failed command → exit non-zero
+  - Exit code shown in output
+  - Allocation state updated
+- Artifacts collected
+  - Output files uploaded to storage
+  - Artifacts linked to run
+  - Download URLs generated
+  - Artifact manifest included
+
+## Warm Pool Tests
+- First run spawns instance
+  - No AVAILABLE allocation exists
+  - New instance created
+  - Allocation created with init_checksum
+  - Instance provisioned on OrbStack
+- Second run reuses AVAILABLE allocation
+  - Same spec_checksum and init_checksum
+  - Finds AVAILABLE allocation
+  - No new instance spawned
+  - Faster start time
+- Init checksum matching works
+  - Different init_checksum → new instance
+  - Same init_checksum → reuse
+  - Checksum covers: base image, init script, env
+  - Mismatch logged for debugging
+
+## Hold State Tests
+- Run completes with HELD allocation
+  - Run completes successfully
+  - Allocation status → HELD
+  - hold_until timestamp set (e.g., +1 hour)
+  - Instance remains running
+- SSH accessible during hold
+  - repl ssh connects to held allocation
+  - Shell access works
+  - Files from run accessible
+  - Environment preserved
+- Hold expires
+  - hold_until time passes
+  - Background job transitions HELD→COMPLETE
+  - Instance not immediately terminated
+  - Becomes AVAILABLE for reuse or cleanup
+- Hold extension works
+  - repl extend-hold command
+  - hold_until updated
+  - Max hold duration respected
+  - Extension confirmed in output
+
+## Error Cases
+- Invalid command fails
+  - Command not found
+  - Non-zero exit code
+  - Error message displayed
+  - Allocation not held (goes to COMPLETE)
+- Timeout triggers
+  - Long-running command
+  - Timeout configured (e.g., 10min)
+  - Command killed on timeout
+  - Error message indicates timeout
+- Cancel stops execution
+  - Ctrl-C during run
+  - Cancel request sent to API
+  - Workflow cancelled
+  - Instance cleaned up (or returned to pool)
+
+## File Sync Tests
+- Files uploaded before run
+  - repl run --files uploads specified files
+  - Files synced to allocation workdir
+  - Sync completes before command runs
+  - Files accessible in command
+- Deduplication works
+  - Same file checksum reused
+  - No duplicate upload
+  - Fast sync for unchanged files
+  - Ref counting correct
+- Large files use S3
+  - File >4KB triggers S3 upload
+  - Presigned URL generated
+  - Agent downloads from S3
+  - Small files use inline storage

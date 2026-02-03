@@ -1,0 +1,11 @@
+# workflow-cleanup.ts - Cleanup Workflow
+
+## Purpose
+Clean up orphaned resources and expired allocations
+
+## Nodes
+1. find-orphans: Query EXTERNAL for untracked resources
+2. match-to-manifest: Find associated manifests
+3. terminate-orphans: Terminate unmatched resources
+4. expire-allocations: Transition HELD allocations past TTL to COMPLETE
+5. finalize: Seal manifest, log cleanup stats

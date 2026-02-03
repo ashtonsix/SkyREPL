@@ -1,0 +1,19 @@
+# ssh.ts - SSH Configuration
+
+## Config Generation
+- Write to ~/.repl/ssh_config
+- Per-allocation routing (not per-instance)
+
+## Host Entry Format
+- Host: allocation ID (e.g., alloc-abc123)
+- HostName: instance IP
+- User: allocation user
+- RemoteCommand: cd to workdir
+
+## Tailscale Integration
+- ProxyCommand via ssh_proxy_command.sh
+- JIT Tailscale connection
+
+## Triggers
+- Auto-regenerate on allocation state changes
+- Update on IP changes

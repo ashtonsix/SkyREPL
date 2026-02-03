@@ -1,0 +1,136 @@
+# provider.ts - Provider Interface
+
+Core provider interface and registry.
+80% homogeneous: all providers implement the same core methods.
+20% provider-specific: optional methods gated by capabilities.
+
+## ProviderName
+
+'aws' | 'lambda' | 'runpod' | 'orbstack'
+
+## Provider<TInstance, TSnapshot>
+
+Generic interface parameterized by provider-specific types.
+TInstance extends ProviderInstance, TSnapshot extends ProviderSnapshot.
+
+### Required Properties
+
+- name: ProviderName
+- capabilities: ProviderCapabilities
+
+### Core Methods (Required, the 80%)
+
+spawn(options: SpawnOptions) -> Promise<TInstance>
+- Create instance with configuration
+- Returns provider-specific instance type
+- Idempotent if capabilities.idempotentSpawn and clientRequestId provided
+- Caller polls for completion (spawn returns after initial API response)
+
+terminate(providerId: string) -> Promise<void>
+- Terminate instance
+- Idempotent (already terminated = no-op)
+
+list(filter?: ListFilter) -> Promise<TInstance[]>
+- Query instances matching filter
+- Filter by tags, status, createdAfter, createdBefore
+- Only returns SkyREPL-managed instances (has skyrepl:* tags)
+
+get(providerId: string) -> Promise<TInstance | null>
+- Fetch single instance by provider ID
+- Returns null if not found
+
+generateBootstrap(config: BootstrapConfig) -> BootstrapScript
+- Generate provider-specific bootstrap script
+- AWS: cloud-init YAML
+- OrbStack: shell script
+- Includes agent installation, feature setup, user init script
+
+### Optional Methods (Gated by Capabilities, the 20%)
+
+createSnapshot?(providerId: string, options: CreateSnapshotOptions) -> Promise<SnapshotRequest>
+- Requires capabilities.snapshots
+- Returns request ID for polling
+
+getSnapshotStatus?(requestId: string) -> Promise<SnapshotStatus>
+- Poll snapshot creation progress
+
+deleteSnapshot?(providerSnapshotId: string) -> Promise<void>
+- Delete provider snapshot
+
+getSnapshotByName?(name: string) -> Promise<TSnapshot | null>
+- Find snapshot by name
+
+requestSpotInstance?(options: SpotOptions) -> Promise<SpotRequest>
+- Requires capabilities.spot
+- Request spot/preemptible instance
+
+getSpotPrices?(spec: string, regions?: string[]) -> Promise<SpotPriceInfo[]>
+- Get spot price history
+
+## ProviderCapabilities
+
+Priority capabilities (variance in delivery):
+- snapshots: boolean - Can create snapshots/images
+- spot: boolean - Supports spot/preemptible instances
+- gpu: boolean - GPU instances available
+- multiRegion: boolean - Multiple regions supported
+- persistentVolumes: boolean - Can attach persistent storage
+
+Special capabilities (novel/rare):
+- warmVolumes: boolean - Pre-created volume pool (AWS)
+- hibernation: boolean - Instance hibernation
+- costExplorer: boolean - Cost tracking API
+- tailscaleNative: boolean - Tailscale built-in (OrbStack)
+- idempotentSpawn: boolean - Supports clientRequestId deduplication
+
+## SpawnOptions
+
+- spec: InstanceSpec (type, region, resources)
+- region?: string (override default)
+- spot?: boolean
+- snapshotId?: string (restore from snapshot)
+- clientRequestId?: string (idempotency token)
+- tags?: Record<string, string>
+- bootstrap: BootstrapConfig
+
+Required tags (added automatically):
+- skyrepl:manifest_id
+- skyrepl:run_id
+- skyrepl:spawn_key
+
+## BootstrapConfig
+
+- agentUrl: string (download URL)
+- controlPlaneUrl: string
+- registrationToken: string
+- initScript?: string (user-provided)
+- features: FeatureConfig[] (Tailscale, CUDA, etc.)
+- env?: Record<string, string>
+
+## BootstrapScript
+
+- content: string (script content)
+- format: 'cloud-init' | 'shell'
+- checksum: string (SHA256)
+
+## Provider Registry
+
+getProvider(name: ProviderName) -> Provider<any, any>
+- Returns provider instance by name
+- Lazy-loads providers on first use
+- Throws if provider not configured
+
+registerProvider(provider: Provider<any, any>) -> void
+- Register provider at startup
+- Called by each provider module
+
+getAllProviders() -> Provider<any, any>[]
+- Returns all registered providers
+
+## Call Semantics
+
+- All provider methods are async but conceptually blocking
+- Long-running operations (spawn, createSnapshot) return after initial API call
+- Caller is responsible for polling completion
+- Timeout handling is caller's responsibility (workflow nodes implement polling loops)
+- Providers do NOT handle retries (workflow engine handles retry logic)

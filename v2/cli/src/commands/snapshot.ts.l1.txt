@@ -1,0 +1,12 @@
+# snapshot.ts - Snapshot Commands
+
+## Subcommands
+- list: GET /v1/objects?type=snapshot
+
+## List Options
+- --provider: Filter by provider
+- --run: Filter by source run ID
+
+## Output
+- Table: ID, provider, spec, source run, size, created
+- Sorted by creation timestamp

@@ -1,0 +1,70 @@
+# workflows.types.ts - Layer 2 API Types
+
+## Launch Run
+
+### LaunchRunRequest
+- command: string
+- spec: InstanceSpec
+- provider: string
+- region?: string
+- files?: Array<{ path: string, content: string }>
+- env?: Record<string, string>
+- artifacts?: number[]
+- hold_duration_ms?: number
+- create_snapshot?: boolean
+
+### LaunchRunResponse
+- workflow_id: number
+- run_id: number
+- status_url: string
+- stream_url: string
+
+## Terminate
+
+### TerminateRequest
+- instance_id: number
+- force?: boolean
+- drain_timeout_ms?: number
+
+### TerminateResponse
+- workflow_id: number
+
+## Snapshot
+
+### CreateSnapshotRequest
+- instance_id: number
+- name: string
+- run_id?: number
+
+### CreateSnapshotResponse
+- workflow_id: number
+- snapshot_id: number
+
+## Extend Hold
+
+### ExtendHoldRequest
+- allocation_id: number
+- extension_ms: number
+
+### ExtendHoldResponse
+- new_hold_until: number
+
+## Cancel
+
+### CancelRequest
+- workflow_id: number
+- reason?: string
+
+### CancelResponse
+- status: string
+
+## Status
+
+### WorkflowStatusResponse
+- workflow_id: number
+- type: string
+- status: string
+- current_node: string
+- progress: number
+- output?: object
+- error?: string

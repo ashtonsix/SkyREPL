@@ -1,0 +1,7 @@
+# workflow-terminate.types.ts
+
+## TerminateInput
+instanceId: number
+
+## TerminateOutput
+instanceId: number, terminatedAt: Date

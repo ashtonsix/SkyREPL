@@ -1,0 +1,23 @@
+# reconciliation.ts - Reconciliation Task
+
+## Cycle
+- Every 5 minutes (configurable via RECONCILIATION_INTERVAL_MS)
+
+## Instance State Sync
+- Query provider API for instance status
+- Compare against DB records
+- Update workflow_state on drift
+
+## Heartbeat Timeout
+- Find instances with last_heartbeat > 30s ago
+- Mark as suspected dead
+- Trigger termination workflow if confirmed
+
+## Pending Spawn Handling
+- Check spawn:pending instances
+- Query provider for completion/failure
+- Update state accordingly
+
+## Error Handling
+- Transient API failures: log and retry next cycle
+- Persistent failures: alert after N consecutive failures

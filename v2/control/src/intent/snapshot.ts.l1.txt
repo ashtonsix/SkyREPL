@@ -1,0 +1,12 @@
+# workflow-snapshot.ts - Snapshot Workflow
+
+## Purpose
+Create snapshot of instance state
+
+## Nodes
+1. validate-instance: Check instance is running or stopped
+2. stop-if-needed: Stop instance if running
+3. create-snapshot: Call provider.createSnapshot()
+4. persist-snapshot: Store snapshot record in DB
+5. restart-if-needed: Restart instance if it was stopped
+6. finalize: Seal manifest

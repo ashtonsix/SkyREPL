@@ -1,0 +1,136 @@
+# unit/db.test.ts - Database layer unit tests
+
+## SETUP
+- Use in-memory SQLite database
+- Run all migrations before test suite
+- Clean all tables before each test
+- Create helper functions for seeding test data
+- Mock current timestamp for deterministic tests
+
+## Instance Tests
+- createInstance auto-generates ID
+  - Assert ID is non-null
+  - Assert created_at timestamp set
+  - Assert status defaults to 'pending'
+- getInstance by ID
+  - Returns instance when exists
+  - Returns null when not found
+- getInstanceByProviderId
+  - Finds instance by provider_id
+  - Returns null if not found
+  - Handles multiple providers correctly
+- updateInstance
+  - Updates specified fields only
+  - Does not modify created_at
+  - Updates updated_at timestamp
+- listInstances with filters
+  - Filter by status
+  - Filter by provider
+  - Filter by spec_checksum
+  - Pagination works (limit/offset)
+  - Sort by created_at desc
+- isInstanceAvailable inference
+  - Instance with no allocations returns true
+  - Instance with only COMPLETE allocations returns true
+  - Instance with ACTIVE allocation returns false
+  - Instance with HELD allocation returns false
+  - Instance with AVAILABLE allocation returns true
+
+## Run Tests
+- createRun with defaults
+  - Auto-generates ID
+  - workflow_state defaults to empty object
+  - status defaults to 'pending'
+  - command stored correctly
+- getRun with relationships
+  - Includes allocations when requested
+  - Includes workflow when requested
+  - Includes manifest when requested
+  - Returns null when not found
+- updateRun
+  - Updates status
+  - Updates workflow_state (JSON merge)
+  - Updates exit_code
+  - Updates completed_at on status=complete
+- listRuns filter by status
+  - Filter by single status
+  - Filter by multiple statuses
+  - Filter by manifest_id
+  - Order by created_at desc
+
+## Allocation Tests
+- createAllocation links instance
+  - Requires valid instance_id
+  - Requires valid run_id (if provided)
+  - status defaults to 'AVAILABLE'
+  - Sets created_at timestamp
+- claimAllocation atomic status update
+  - Updates AVAILABLE→CLAIMED
+  - Fails if status not AVAILABLE
+  - Updates run_id atomically
+  - Returns updated allocation
+  - Concurrent claims don't race (only one succeeds)
+- findAvailableAllocation matches spec+init_checksum
+  - Matches instance.spec_checksum
+  - Matches allocation.init_checksum
+  - Only returns AVAILABLE allocations
+  - Returns oldest available first
+  - Returns null if no match
+- hold expiry queries
+  - getExpiredHolds returns HELD allocations past hold_until
+  - Respects timezone handling
+  - Empty result if no expired holds
+
+## Workflow Tests
+- createWorkflow with JSON input
+  - Stores input as JSON
+  - Creates nodes from DAG
+  - Links to manifest
+  - Sets status to 'pending'
+- getWorkflowNodes
+  - Returns nodes in correct order
+  - Includes dependencies array
+  - Returns empty array if no nodes
+- concurrent node updates no race
+  - Multiple threads update different nodes
+  - No deadlocks occur
+  - All updates succeed
+  - Node status transitions are atomic
+
+## Manifest Tests
+- createManifest DRAFT status
+  - Status defaults to 'DRAFT'
+  - Auto-generates ID
+  - Sets created_at
+  - Empty metadata object by default
+- addResourceToManifest
+  - Links resource (run/instance/allocation) to manifest
+  - Sets priority correctly
+  - Multiple resources allowed
+  - Same resource can't be added twice
+- sealManifest
+  - Updates status DRAFT→SEALED
+  - Sets sealed_at timestamp
+  - Fails if already sealed
+  - Idempotent (no error on re-seal)
+- getManifestResources sorted by priority
+  - Returns resources in priority order
+  - Includes resource type and ID
+  - Empty array if no resources
+  - Filters by resource_type if specified
+
+## Object Tests
+- createObject with tags
+  - Stores blob data
+  - Stores checksum
+  - Stores tags as JSON
+  - Auto-generates ID
+- findBlobByChecksum dedup
+  - Returns existing object if checksum matches
+  - Returns null if not found
+  - Checksum comparison is exact
+- tag queries
+  - findObjectsByTag returns matching objects
+  - Tag matching is exact (no fuzzy)
+  - Multiple tags require all matches (AND)
+  - Returns empty array if no matches

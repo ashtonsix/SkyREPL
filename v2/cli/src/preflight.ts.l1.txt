@@ -1,0 +1,27 @@
+# preflight.ts - Pre-flight Checks
+
+## Integration
+- GET /v1/preflight before workflow submission
+- Called automatically by `repl run`, `repl instance terminate`, etc.
+
+## Warning Types
+- orphans: Untracked cloud resources (cost estimate)
+- budget: Approaching or exceeded budget limits
+- credentials: Provider credentials expiring soon
+- stale_allocations: HELD allocations older than 24h
+- provider_issues: Provider API errors or quota warnings
+
+## Warning Levels
+- info: Display only (orphans from other sessions)
+- warning: Prompt for confirmation (budget near limit)
+- critical: Block unless --force (credentials expired)
+
+## Display Format
+- Group warnings by type
+- Show cost impact where applicable
+- Include recommended actions
+
+## Bypass
+- --yes: Skip confirmation prompts, proceed on warnings
+- --no-preflight: Skip preflight entirely (for automation)
+- Neither bypasses critical errors

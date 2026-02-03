@@ -1,0 +1,14 @@
+# extend.ts - Extend Hold Command
+
+## Input
+- Allocation ID (full or prefix)
+- Duration (5m, 30m, 2h) - default 30m
+
+## Flow
+1. POST /v1/operations/extend-hold
+2. Display timeline
+
+## Output
+- Previous hold_until
+- New hold_until
+- Max hold (absolute limit)

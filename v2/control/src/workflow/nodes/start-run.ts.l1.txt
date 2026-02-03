@@ -1,0 +1,27 @@
+# start-run.ts - Start Run Node
+
+## Input Type
+{ runId: string, instanceId: string, command: string, env?: Record<string, string> }
+
+## Output Type
+{ started: true, syncedAt: number }
+
+## Execute Steps
+- Query instance to verify status='running'
+- Send StartRunMessage via SSE: { type: 'start_run', runId, command, env, workdir }
+- Agent receives message, cleans workdir, downloads files (if not already synced)
+- Poll for agent sync_complete event (check run record for synced_at field)
+- Timeout after 10 minutes (file sync should be fast)
+- If sync_complete received: Update run status to 'running', set started_at timestamp
+- Return synced timestamp
+
+## Compensation
+- Send CancelRunMessage via SSE: { type: 'cancel_run', runId }
+- Agent will SIGTERM process if running
+- Update run status to 'cancelled'
+
+## Key Calls
+- db.getInstance()
+- db.updateRun()
+- sse.sendMessage(instanceId, { type: 'start_run', runId, command, env })
+- sse.waitForEvent(instanceId, 'sync_complete', { runId })

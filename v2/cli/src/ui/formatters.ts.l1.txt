@@ -1,0 +1,28 @@
+# ui.ts - Terminal UI
+
+## Ink Components (React for CLI)
+- `ProgressBar` - Renders progress bar with current/total
+- `WorkflowStatus` - Displays workflow execution state, current node, progress
+- `NodeList` - Lists workflow nodes with status icons (⏳ pending, ⏵ running, ✓ done, ✗ failed)
+- `FileSyncProgress` - Shows file upload/download progress with transfer rate
+
+## Formatters
+- `formatDuration(ms): string` - "1.2s", "1m 5s", "1h 2m", "1d 1h"
+- `formatBytes(bytes): string` - "1.0 KB", "1.5 MB", "1.5 GB"
+- `formatTimestamp(ts, relative?): string` - "2 minutes ago" or "2024-01-31 14:32:02"
+- `formatId(id): string` - Convert ID to slug with resource prefix (run-9ix, inst-1h2i)
+
+## Output Modes
+- `pretty` - Default, colored terminal with progress bars
+- `json` - Machine-readable JSON output
+- `quiet` - Errors and final results only
+
+## Tables & Trees
+- `renderTable(data, columns?): string` - Auto-sized table with headers
+- `renderList(items, bullet?): string` - Bulleted list
+- `renderTree(node, indent?): string` - Hierarchical tree with box-drawing characters
+
+## Terminal Utilities
+- `isTTY(): boolean` - Check if stdout is terminal
+- `supportsColor(): boolean` - Detect color support
+- `withSpinner(message, fn): Promise<T>` - Show spinner during async operation

@@ -1,0 +1,76 @@
+# e2e/warm-pool.test.ts - Warm pool E2E tests
+
+## SETUP
+- OrbStack provider configured
+- Control plane with warm pool enabled
+- CLI available
+- Clean state before each test
+- Monitor allocation state transitions
+
+## Allocation Reuse Tests
+- Complete run creates AVAILABLE allocation
+  - Run completes successfully
+  - No --hold flag used
+  - Allocation status → AVAILABLE
+  - Instance remains running
+  - Workdir cleaned
+- Next same-spec run claims allocation
+  - Second run with same spec_checksum
+  - Same init_checksum
+  - findAvailableAllocation succeeds
+  - Allocation status AVAILABLE→CLAIMED→ACTIVE
+  - Same instance_id
+- No re-spawn occurs
+  - No new instance created
+  - No provider API call for spawn
+  - Allocation workdir reused
+  - Start time much faster
+
+## Init Checksum Matching Tests
+- Different checksum spawns new instance
+  - Run 1: init_checksum = A
+  - Run 2: init_checksum = B
+  - No AVAILABLE allocation matches
+  - New instance spawned
+  - Two instances running
+- Same checksum reuses allocation
+  - Run 1: init_checksum = A, completes
+  - Run 2: init_checksum = A
+  - Finds AVAILABLE allocation
+  - Reuses instance
+  - One instance total
+
+## Multiple Allocations Tests
+- Single instance, multiple allocations
+  - Instance supports multiple allocations (spec allows)
+  - Allocation 1: workdir=/work/alloc-1
+  - Allocation 2: workdir=/work/alloc-2
+  - Both ACTIVE simultaneously
+  - Isolated workdirs
+- Each has own workdir
+  - Files in alloc-1 not visible in alloc-2
+  - Separate environments
+  - Separate run contexts
+  - No interference
+- SSH to each works
+  - repl ssh <allocation-1> connects to workdir-1
+  - repl ssh <allocation-2> connects to workdir-2
+  - Correct isolation
+  - Both accessible simultaneously
+
+## Hold Interaction Tests
+- HELD allocation not available for reuse
+  - Run 1 completes with --hold
+  - Allocation status → HELD
+  - Run 2 (same spec) doesn't find it
+  - New instance spawned for Run 2
+- HELD→COMPLETE makes available
+  - Hold expires or explicitly released
+  - Allocation status HELD→COMPLETE
+  - Run 3 (same spec) can claim it
+  - Reuse now works
+- Spawns new instance if urgent
+  - All matching allocations are HELD
+  - New run needs immediate start
+  - New instance spawned
+  - Doesn't wait for hold expiry

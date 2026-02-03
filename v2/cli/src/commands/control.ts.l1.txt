@@ -1,0 +1,17 @@
+# control.ts - Control Plane Commands
+
+## Subcommands
+- start: Launch control plane services
+- stop: Shutdown control plane
+- status: Health check
+
+## Start
+- Start MinIO and Funnel
+- Initialize database
+- Display URL and log location
+
+## Status
+- GET /v1/status
+- Database connectivity
+- Provider connectivity per provider
+- Tailscale status

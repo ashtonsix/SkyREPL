@@ -1,0 +1,39 @@
+# patterns.ts - Workflow Patterns
+
+## insert-and-reconverge
+Insert node A' before B: A → B becomes A → A' → B (both must complete)
+
+## conditional-branch
+Choose between two paths based on condition or error
+
+## parallel-fan-out
+Execute multiple branches concurrently, join when all complete
+
+## retry-with-alternative
+On failure, compensate and try alternative approach
+
+**Triggered by:**
+- CAPACITY_UNAVAILABLE errors (e.g., spot capacity exhausted in region)
+- Engine calls determineRetryStrategy() → returns action='retry' + pattern='retry-with-alternative'
+- Alternative node config includes different parameters (region, instance type, etc.)
+
+**Execution:**
+1. Original node fails with retryable error
+2. Engine calls node compensation handler
+3. Create new node with alternative config
+4. Alternative node maintains same output contract
+5. Downstream nodes continue with alternative's output
+
+**Example Flow:**
+```
+spawn-instance-us-east-1 (CAPACITY_UNAVAILABLE)
+  → compensate (cleanup partial resources)
+  → spawn-instance-us-west-2 (alternative region)
+  → success, workflow continues
+```
+
+**Constraints:**
+- Max 3 retry attempts (configurable per error type)
+- Alternative must satisfy same output contract
+- Each retry increments attempt counter
+- After max retries exhausted → fail workflow

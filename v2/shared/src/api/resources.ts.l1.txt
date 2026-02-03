@@ -1,0 +1,38 @@
+# resources.types.ts - Layer 1 API Types
+
+## Request/Response Envelopes
+
+### ApiResponse<T>
+- data: T
+- meta?: object
+
+### ListResponse<T>
+- data: T[]
+- pagination: PaginationMeta
+
+### ApiError
+- code: string
+- message: string
+- category: 'client' | 'server' | 'provider'
+- details?: object
+
+## Pagination
+
+### PaginationParams
+- limit: number
+- cursor?: string
+
+### FilterParams
+- status?: string
+- provider?: string
+- created_after?: number
+- created_before?: number
+
+## Error Codes
+
+- INVALID_INPUT
+- UNAUTHORIZED
+- NOT_FOUND
+- CONFLICT
+- RATE_LIMITED
+- INTERNAL_ERROR

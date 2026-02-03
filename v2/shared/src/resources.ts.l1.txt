@@ -1,0 +1,17 @@
+# resources.ts - Shared Resource Interfaces
+
+## Core Domain Objects
+- Instance: id, provider, providerId, spec, region, ip, workflowState, isSpot, lastHeartbeat
+- Run: id, command, workdir, maxDurationMs, exitCode, workflowState, startedAt, finishedAt
+- Allocation: id, runId, instanceId, user, workdir, status, holdUntil
+- Workflow: id, type, status, currentNode, input, output, error, manifestId
+- Manifest: id, workflowId, status, retentionMs, expiresAt
+
+## Object-Backed Resources
+- Snapshot, Artifact, FeatureInstallation, TailscaleMachine
+
+## Supporting Types
+- RunFile, RunLogEntry, UsageRecord, WorkflowNode, ManifestResource
+
+## Status Enums
+- AllocationStatus, WorkflowExecutionStatus, ManifestStatus, NodeStatus

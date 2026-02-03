@@ -1,0 +1,31 @@
+# find-orphans.ts - Find Orphans Node
+
+## Input Type
+{ provider: ProviderName, sessionStartTime: number }
+
+## Output Type
+{ orphanedResources: OrphanedResource[], missingResources: MissingResource[] }
+
+## Execute Steps
+- Call provider.list() with namePrefix='repl-' to get all cloud resources
+- Query db.getAllInstances() filtered by provider to get tracked instances
+- Query db.getAllObjects() filtered by provider and type IN ('volume', 'snapshot', 'tailscale_machine')
+- Cross-reference cloud resources with DB records by provider_id
+- For each cloud resource not in DB:
+  - Parse resource name to extract controlId, manifestIdPrefix, instanceIdPrefix
+  - Calculate ageMs = Date.now() - resource.createdAt
+  - Determine likelyCurrentSession = resource.createdAt > sessionStartTime
+  - Add to orphanedResources array with metadata (providerId, resourceType, inferredInfo, ageMs, etc.)
+- For each DB resource not in cloud:
+  - Add to missingResources array (for reference, not actionable in this workflow)
+- Return { orphanedResources, missingResources }
+
+## Compensation
+- No compensation needed (read-only operation)
+
+## Key Calls
+- provider.list({ namePrefix: 'repl-', includeTerminated: false })
+- db.getAllInstances({ provider, excludeStates: ['terminate:complete', 'terminate:error'] })
+- db.getAllObjects({ provider, types: ['volume', 'snapshot', 'tailscale_machine'] })
+- parseResourceName(cloudResource.name)
+- Context: ctx.emitMetadata('orphan_count', orphanedResources.length)

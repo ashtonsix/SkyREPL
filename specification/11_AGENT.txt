@@ -1,0 +1,885 @@
+================================================================================
+11. AGENT
+================================================================================
+
+## Purpose
+
+The Agent Protocol defines communication between the control plane and Python
+agents running on remote instances. Message schemas have been updated for v2's
+allocation-based model (see Chapter 5), but the underlying architecture remains
+unchanged - agents still connect via SSE, stream logs, and report status.
+
+Design: Agent is intentionally simple: stdlib-only Python that receives commands,
+executes runs, streams logs, and reports status. Complexity lives in the
+control plane, not the agent.
+
+
+## 11.1 Communication Architecture
+
+Three distinct channels, all agent-initiated:
+
+```
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │                          CONTROL PLANE                                  │
+    └───────────────────────────────┬─────────────────────────────────────────┘
+                                    │
+          ┌─────────────────────────┼─────────────────────────┐
+          │                         │                         │
+          │ SSE Stream              │ HTTP POST               │ Presigned URLs
+          │ (commands)              │ (logs/heartbeat)        │ (artifacts)
+          │                         │                         │
+          ▼                         ▲                         ↕
+    ┌─────────────────────────────────────────────────────────────────────────┐
+    │                              AGENT                                      │
+    ├─────────────────────────────────────────────────────────────────────────┤
+    │  Threads:                                                               │
+    │    • Command handler  ─ SSE consumer, receives commands                 │
+    │    • Heartbeat        ─ 10s interval, liveness signal                   │
+    │    • Log flusher      ─ 100ms interval, batched log upload              │
+    │    • Spot monitor     ─ 5s interval, AWS only                           │
+    │    • Run execution    ─ spawned per run                                 │
+    └─────────────────────────────────────────────────────────────────────────┘
+
+    ╭─────────────────────────────────────────────────────────────────────────╮
+    │  LEGEND:  ▼ control→agent    ▲ agent→control    ↕ bidirectional        │
+    ╰─────────────────────────────────────────────────────────────────────────╯
+```
+
+### Why Agent-Initiated
+
+All connections originate from agent to control plane:
+- Instances may be behind NAT or in private VPCs
+- No need for control plane to track instance IPs for outbound connections
+- Firewall rules simpler (outbound only from instances)
+- Control plane can be behind load balancer without sticky sessions for SSE
+
+### Channel Purposes
+
+**SSE Stream (control -> agent)**: Command delivery with immediate response.
+Single long-lived connection. Agent reads byte-by-byte to avoid buffer deadlock.
+
+**HTTP POST (agent -> control)**: Status reporting. Batched logs (default 100ms),
+heartbeats (default 10s). Fire-and-forget semantics with retry on failure.
+All intervals configurable via environment variables.
+
+**Presigned URLs**: Artifact upload/download bypasses control plane. Agent
+PUT/GET directly to S3 (or control plane for small objects in v2).
+
+## 11.2 v2 Schema Changes
+
+v2 introduces allocation-based orchestration. Key schema changes:
+
+**allocation_id added to run messages:**
+All run-related messages (StartRunMessage, LogMessage, RunCompleteMessage) now
+include allocation_id. This allows the control plane to track which allocation
+is executing which run, enabling proper resource management and SSH session
+tracking. See Chapter 5 (Allocations) for allocation lifecycle details.
+
+**workflow_state replaces success boolean:**
+RunCompleteMessage now uses workflow_state (e.g., 'launch-run:complete',
+'launch-run:error') and exit_code instead of a simple success boolean. This
+provides richer state information for the control plane's workflow engine.
+See Chapter 6 (Workflows) for workflow state format and transitions.
+
+**workflow_state added to heartbeat:**
+HeartbeatMessage now includes workflow_state so the control plane knows the
+instance's current lifecycle phase without polling. This enables efficient
+state transitions and reduces latency in allocation management.
+
+**SSH session tracking clarified:**
+active_ssh_sessions reports total sessions across all allocations on the
+instance. The control plane uses allocation HELD state (Chapter 5) to track
+per-allocation SSH usage, allowing proper billing and termination decisions.
+
+## 11.3 Message Types
+
+### Control -> Agent (SSE Stream)
+
+| Type              | Purpose                                    |
+|-------------------|-------------------------------------------|
+| start_run         | Begin run with file sync and execution    |
+| cancel_run        | Terminate running run                     |
+| capture_artifacts | Upload artifacts (mid-run or emergency)   |
+| trigger_tailscale | JIT Tailscale installation                |
+| heartbeat_ack     | Acknowledge agent heartbeat               |
+
+### Agent -> Control (HTTP POST)
+
+| Type              | Purpose                                    |
+|-------------------|-------------------------------------------|
+| log               | Stdout/stderr chunk or sync_complete      |
+| artifact          | Artifact upload confirmation              |
+| init_complete     | Init script finished successfully         |
+| run_complete      | Run finished with exit code               |
+| spot_interrupt    | AWS spot interruption detected            |
+| heartbeat         | Liveness signal with status               |
+
+## 11.4 Message Schemas
+
+### Control -> Agent Messages
+
+```typescript
+// NOTE: IDs are integers internally, transmitted as numbers in JSON.
+
+// SSE: start_run (combines file download + run execution)
+interface StartRunMessage {
+  type: 'start_run';
+  run_id: string;             // Globally unique run identifier
+  allocation_id: number;      // Which allocation this run belongs to
+  command: string;
+  workdir: string;
+  files: Array<{
+    path: string;             // Relative path in workdir
+    checksum: string;         // SHA256 checksum for verification
+    url: string;              // Presigned URL (S3 or control plane)
+  }>;
+  artifacts?: string[];       // Glob patterns to collect
+  run_init?: boolean;         // Execute init script first
+  init_script?: string;       // Init script content
+  create_snapshot?: boolean;  // Snapshot-only mode
+}
+
+// SSE: cancel_run
+interface CancelRunMessage {
+  type: 'cancel_run';
+  run_id: string;
+}
+
+// SSE: capture_artifacts
+interface CaptureArtifactsMessage {
+  type: 'capture_artifacts';
+  run_id: string;
+}
+
+// SSE: trigger_tailscale
+interface TriggerTailscaleMessage {
+  type: 'trigger_tailscale';
+}
+
+// SSE: heartbeat_ack
+interface HeartbeatAckMessage {
+  type: 'heartbeat_ack';
+}
+```
+
+### Agent -> Control Messages
+
+```typescript
+// POST: log (batched, includes sync_complete)
+interface LogMessage {
+  type: 'log';
+  run_id: string;
+  allocation_id: number;          // Which allocation this run belongs to
+  stream: 'stdout' | 'stderr' | 'sync_complete';
+  data: string;
+  phase?: 'sync' | 'execution';   // Distinguishes sync failure from run failure
+  sync_success?: boolean;          // Only for sync_complete
+}
+
+// POST: artifact
+interface ArtifactMessage {
+  type: 'artifact';
+  run_id: string;
+  path: string;
+  s3_key: string;
+  size_bytes: number;
+}
+
+// POST: init_complete
+interface InitCompleteMessage {
+  type: 'init_complete';
+  run_id: string;
+}
+
+// POST: run_complete
+interface RunCompleteMessage {
+  type: 'run_complete';
+  run_id: string;
+  allocation_id: number;      // Which allocation this run belongs to
+  exit_code: number;          // Process exit code (0 = success)
+  workflow_state: string;     // Target state: 'launch-run:complete' or 'launch-run:error'
+                              // (see Chapter 6 for workflow state format)
+  interrupted?: boolean;      // True if spot interruption
+}
+
+// POST: spot_interrupt
+interface SpotInterruptMessage {
+  type: 'spot_interrupt';
+  run_id: string;
+  time_remaining_ms: number;
+}
+
+// POST: heartbeat
+interface HeartbeatMessage {
+  tailscale_ip: string | null;
+  active_ssh_sessions: number;   // NOTE: SSH is per-allocation, not per-instance.
+                                  // This field reports total sessions across all allocations.
+                                  // Control plane uses allocation HELD state (see Chapter 5)
+                                  // to track per-allocation SSH usage.
+  tailscale_status: 'not_installed' | 'installing' | 'ready' | 'failed';
+  workflow_state: string;         // Instance lifecycle state (e.g., 'launch-run:sync',
+                                  // 'launch-run:running', 'idle'). See Chapter 6 for format.
+}
+```
+
+## 11.5 Agent Lifecycle
+
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                            AGENT LIFECYCLE                                   ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  STARTUP                                                                     │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  1. Acquire lock (/tmp/repl-agent.lock)                                      │
+│     └─ Prevents duplicate agents on warm pool reuse                          │
+│     └─ Exit immediately if lock held                                         │
+│                                                                              │
+│  2. Detect Tailscale IP (if available)                                       │
+│     └─ Check tailscale0 interface                                            │
+│     └─ Check tailscale CLI                                                   │
+│                                                                              │
+│  3. Start background threads                                                 │
+│     ├─ Log flusher   (100ms interval, configurable)                          │
+│     ├─ Heartbeat     (10s interval, IMMEDIATE first, configurable)           │
+│     └─ Spot monitor  (5s interval, AWS only, configurable)                   │
+│                                                                              │
+│  4. Connect SSE command stream                                               │
+│     └─ Retry with exponential backoff (max 10 retries)                       │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+                                       │
+                                       ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  RUNNING                                                                     │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  ┌────────────────┐   ┌────────────────┐   ┌────────────────┐                │
+│  │  SSE Commands  │   │  Run Executor  │   │   Heartbeat    │                │
+│  │    (recv)      │──▶│   (per run)    │   │    (10s)       │                │
+│  └────────────────┘   └───────┬────────┘   └────────────────┘                │
+│                               │                                              │
+│                               ▼                                              │
+│                       ┌────────────────┐   ┌────────────────┐                │
+│                       │  Log Flusher   │   │  Spot Monitor  │                │
+│                       │   (100ms)      │   │  (5s, AWS)     │                │
+│                       └────────────────┘   └────────────────┘                │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+                                       │
+             ┌─────────────────────────┼─────────────────────────┐
+             │                         │                         │
+      Heartbeat timeout         Connection lost           SIGTERM/SIGINT
+       (30s no ack)            (10 retries fail)             received
+             │                         │                         │
+             └─────────────────────────┼─────────────────────────┘
+                                       │
+                            ┌──────────┴──────────┐
+                            │  Spot Interruption  │
+                            │   (emergency path)  │
+                            └──────────┬──────────┘
+                                       │
+                                       ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  SHUTDOWN                                                                    │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  1. Set shutting_down flag                                                   │
+│                    │                                                         │
+│                    ▼                                                         │
+│  2. Tailscale logout (cleanup device list)                                   │
+│                    │                                                         │
+│                    ▼                                                         │
+│  3. Terminate running run (if any)                                           │
+│                    │                                                         │
+│                    ▼                                                         │
+│  4. Flush remaining logs                                                     │
+│                    │                                                         │
+│                    ▼                                                         │
+│  5. Wait grace period (5s, configurable)                                     │
+│                    │                                                         │
+│                    ▼                                                         │
+│  6. Self-terminate: shutdown -h now (BACKUP SAFETY)                          │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Critical: Immediate Initial Heartbeat
+
+The heartbeat thread sends a heartbeat BEFORE its first sleep:
+
+```python
+def heartbeat_thread():
+    # Send immediate heartbeat on startup
+    # Closes timing gap where termination could race first heartbeat
+    if not send_heartbeat():
+        log("WARN", "Initial heartbeat failed")
+
+    while not shutting_down:
+        time.sleep(HEARTBEAT_INTERVAL_MS / 1000.0)  # Default: 10s
+        # ... rest of heartbeat logic
+```
+
+Without this, there's a 10-second window where the control plane might
+terminate the instance for "no heartbeat" before the agent reports ready.
+
+**Note**: Control plane should be forgiving on timing for the initial heartbeat.
+Allow some grace period, especially during Tailscale setup, to prevent premature
+termination of instances that are still bootstrapping.
+
+### Critical: Self-Termination is BACKUP Safety
+
+Agent's `shutdown -h now` is a LAST RESORT, not primary termination:
+
+1. **Normal path**: Control plane terminates instance via provider API
+2. **Backup path**: Agent self-terminates if control plane unreachable
+
+Agent self-termination prevents orphaned instances when:
+- Control plane crashes
+- Network partition
+- Control plane bug fails to terminate
+
+The agent does NOT rely on control plane for termination - it will shut
+itself down after heartbeat timeout regardless of control plane state.
+
+## 11.6 SSE Implementation Details
+
+### Byte-by-Byte Reading
+
+Python's HTTP response buffering causes deadlock with small SSE messages:
+
+```python
+def read_lines(response):
+    """
+    Reads newline-delimited strings from HTTPResponse without deadlocking.
+    Uses byte-by-byte reading to bypass Python's internal 4KB-8KB buffers.
+
+    Standard read(n) blocks until buffer fills. Control plane messages are
+    ~150 bytes, so chunked reads would hang waiting for more data that
+    never comes.
+
+    This guarantees immediate command delivery at cost of high syscall
+    overhead - negligible for low-frequency control signaling.
+    """
+    while not shutting_down:
+        line = b""
+        while True:
+            byte = response.read(1)
+            if not byte:
+                return  # Stream closed
+            if byte == b'\n':
+                break
+            line += byte
+
+        text = line.decode('utf-8', errors='replace').strip()
+        if text:
+            yield text
+```
+
+**Why not buffered reads?**
+
+Python's `http.client` and `urllib` use 8KB internal buffers. When you call
+`read(1024)`, it blocks until 1024 bytes are available OR the connection
+closes. SSE messages are tiny (~150 bytes) and arrive infrequently. The
+buffer never fills, so buffered reads block forever.
+
+**Why not readline()?**
+
+Same problem. `readline()` uses the internal buffer and blocks waiting for
+more data before returning the line.
+
+**Syscall overhead acceptable?**
+
+Yes. Command frequency is low (seconds between messages). The agent spends
+99.9% of time blocked on read(1), not doing syscalls. CPU overhead is
+negligible.
+
+### Connection Management
+
+```python
+def command_stream():
+    try:
+        conn = get_connection(CONTROL_PLANE)
+        conn.request("GET", build_agent_url("/v1/agent/commands"),
+                    headers={"Accept": "text/event-stream"})
+        resp = conn.getresponse()
+
+        if resp.status != 200:
+            log("ERROR", f"Command stream failed: {resp.status}")
+            return
+
+        for line in read_lines(resp):
+            msg = json.loads(line)
+            yield msg
+
+    except Exception as e:
+        log("ERROR", f"Command stream error: {e}")
+```
+
+Reconnection with exponential backoff (all configurable via environment):
+- Initial delay: 2s (REPL_SSE_RECONNECT_BASE_S)
+- Max delay: 64s (REPL_SSE_RECONNECT_MAX_S, calculated as base * 2^5)
+- Max retries: 10 (REPL_SSE_MAX_RETRIES)
+
+## 11.7 Agent Configuration
+
+### Timing Constants
+
+All timing constants are configurable via environment variables set in instance
+user data (cloud-init). This allows fine-tuning for different workload profiles
+without modifying agent code.
+
+**Example Defaults (non-normative):**
+
+| Constant                | Example | Env Variable                  | Purpose                           |
+|-------------------------|---------|-------------------------------|-----------------------------------|
+| HEARTBEAT_INTERVAL_MS   | 10000   | REPL_HEARTBEAT_INTERVAL_MS    | Agent -> control heartbeat        |
+| HEARTBEAT_TIMEOUT_MS    | 30000   | REPL_HEARTBEAT_TIMEOUT_MS     | Missing acks before shutdown      |
+| LOG_FLUSH_INTERVAL_MS   | 100     | REPL_LOG_FLUSH_INTERVAL_MS    | Batched log upload interval       |
+| SPOT_CHECK_INTERVAL_MS  | 5000    | REPL_SPOT_CHECK_INTERVAL_MS   | AWS metadata polling              |
+| SHUTDOWN_GRACE_PERIOD_S | 5       | REPL_SHUTDOWN_GRACE_PERIOD_S  | Delay before self-termination     |
+| SSE_RECONNECT_BASE_S    | 2       | REPL_SSE_RECONNECT_BASE_S     | Initial reconnect delay           |
+| SSE_RECONNECT_MAX_S     | 64      | REPL_SSE_RECONNECT_MAX_S      | Maximum reconnect delay           |
+| SSE_MAX_RETRIES         | 10      | REPL_SSE_MAX_RETRIES          | Reconnects before shutdown        |
+
+**Constraints (normative):**
+- HEARTBEAT_INTERVAL_MS < HEARTBEAT_TIMEOUT_MS (allow multiple missed beats)
+- HEARTBEAT_TIMEOUT_MS should match control plane stale detection threshold
+- SSE_RECONNECT_BASE_S < SSE_RECONNECT_MAX_S
+
+### When to Adjust Timing Constants
+
+**Longer heartbeat intervals (20-30s):**
+- Stable, long-running workloads
+- Reduces control plane heartbeat processing overhead
+- Trade-off: Slower detection of dead instances
+
+**Shorter heartbeat intervals (5s):**
+- High-churn ephemeral workloads
+- Faster instance recycling on failure
+- Trade-off: Higher control plane load
+
+**Longer log flush intervals (500ms-1s):**
+- Heavy logging workloads
+- Better batching reduces HTTP overhead
+- Trade-off: Delayed log visibility in UI
+
+**Shorter spot check intervals (2-3s):**
+- Critical workloads on spot instances
+- Faster artifact capture on interruption
+- Trade-off: Higher AWS metadata API load
+
+**Longer heartbeat timeout (60-90s):**
+- Networks with high latency or packet loss
+- Reduces false-positive terminations
+- Trade-off: Slower cleanup of truly dead instances
+
+### Example: Configure via User Data
+
+```yaml
+#cloud-config
+write_files:
+  - path: /etc/environment
+    content: |
+      REPL_HEARTBEAT_INTERVAL_MS=15000
+      REPL_HEARTBEAT_TIMEOUT_MS=45000
+      REPL_LOG_FLUSH_INTERVAL_MS=200
+    append: true
+```
+
+Agent reads environment variables on startup and uses them to override defaults.
+
+## 11.8 Lock Acquisition
+
+Prevents duplicate agents on warm pool instance reuse:
+
+```python
+def acquire_lock():
+    """Ensure only one agent runs on this instance"""
+    lock_file = "/tmp/repl-agent.lock"
+    try:
+        lock_fd = open(lock_file, 'w')
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return lock_fd
+    except IOError:
+        return None
+
+# In main():
+lock_fd = acquire_lock()
+if not lock_fd:
+    log("FATAL", "Another agent is already running on this instance")
+    sys.exit(1)
+```
+
+**Why this matters for warm pool:**
+
+When an instance is reused from warm pool, the bootstrap script may attempt
+to start a new agent. The lock ensures the existing agent continues and
+the new process exits immediately.
+
+The lock file persists in `/tmp` across agent restarts within the same
+boot. Instance termination clears it.
+
+## 11.9 Spot Interruption Handling
+
+AWS spot interruption gives 2-minute warning via instance metadata:
+
+```python
+def check_spot_interruption():
+    if PROVIDER != "aws":
+        return None
+
+    try:
+        # Get IMDSv2 token
+        token_req = urllib.request.Request(
+            "http://169.254.169.254/latest/api/token",
+            method="PUT",
+            headers={"X-aws-ec2-metadata-token-ttl-seconds": "21600"}
+        )
+        with urllib.request.urlopen(token_req, timeout=2) as resp:
+            token = resp.read().decode()
+
+        # Check for interruption notice
+        interrupt_req = urllib.request.Request(
+            "http://169.254.169.254/latest/meta-data/spot/instance-action",
+            headers={"X-aws-ec2-metadata-token": token}
+        )
+
+        try:
+            with urllib.request.urlopen(interrupt_req, timeout=2) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None  # No interruption pending
+            raise
+    except:
+        return None
+```
+
+**Interruption Response:**
+
+1. Set `spot_interrupted` flag
+2. Send `spot_interrupt` message to control plane
+3. Execute user checkpoint script (if configured)
+4. Upload partial artifacts (best effort)
+5. Send `run_complete` with `interrupted: true`
+6. Terminate run process
+
+The default 5-second polling interval balances responsiveness with metadata API
+rate limits. With 2-minute warning, 5s gives 24 checks before termination.
+This interval is configurable via REPL_SPOT_CHECK_INTERVAL_MS.
+
+**User Checkpoint Script:**
+
+If the project's repl.toml specifies a `checkpoint_script`, the agent executes
+it before uploading artifacts. This allows user code to save work-in-progress
+state (model checkpoints, partial results, etc.) before termination.
+
+Checkpoint script execution:
+
+1. Agent receives spot interruption notice (via cloud metadata endpoint)
+2. Agent checks if repl.toml specifies `checkpoint_script`
+3. If yes: execute checkpoint script with `checkpoint_timeout` limit
+4. Wait for script completion or timeout
+5. Upload any artifacts produced (including checkpoint outputs)
+6. Report `spot_interrupt` to control plane
+
+The checkpoint script path is relative to the project's repl.toml location.
+Both `checkpoint_script` and `checkpoint_timeout` are documented in Chapter 10
+(CLI Specification) as part of the repl.toml configuration schema.
+
+**Environment Variables:**
+
+The agent sets these environment variables when executing the checkpoint script:
+
+- `SKYREPL_CHECKPOINT_REASON=spot_termination` - Why checkpoint was triggered
+- `SKYREPL_RUN_ID=run-xyz789` - Current run identifier
+- `SKYREPL_WORKDIR=/home/ubuntu/work` - Remote working directory path
+
+These enable the checkpoint script to include run metadata in saved artifacts
+or customize behavior based on the termination reason.
+
+Example checkpoint script (saves PyTorch model state):
+
+```python
+#!/usr/bin/env python3
+# checkpoint.py - Save model state on spot interruption
+import torch
+import os
+
+model = load_current_model()  # User's model loading logic
+checkpoint_dir = "checkpoints"
+os.makedirs(checkpoint_dir, exist_ok=True)
+
+# Save checkpoint with timestamp
+checkpoint_path = f"{checkpoint_dir}/spot_interrupt_{int(time.time())}.pt"
+torch.save({
+    'epoch': current_epoch,
+    'model_state_dict': model.state_dict(),
+    'optimizer_state_dict': optimizer.state_dict(),
+    'loss': current_loss,
+}, checkpoint_path)
+
+print(f"Saved checkpoint to {checkpoint_path}")
+```
+
+The agent streams checkpoint script output (stdout/stderr) as regular logs,
+so users can verify checkpoint creation succeeded. If the script exceeds
+`checkpoint_timeout`, the agent terminates it and proceeds with artifact upload.
+
+## 11.10 Workdir Cleanup
+
+Prevents file leakage between warm pool reuses:
+
+```python
+def cleanup_workdir(workdir):
+    """Remove and recreate workdir to prevent file leakage"""
+    if os.path.exists(workdir):
+        log("INFO", f"Cleaning workdir for warm instance reuse: {workdir}")
+        # Change to home directory first - avoids error if cwd was workdir
+        os.chdir(os.path.expanduser("~"))
+        try:
+            shutil.rmtree(workdir)
+        except Exception as e:
+            log("WARN", f"Error removing workdir (non-critical): {e}")
+```
+
+Called at start of `start_run` handler before downloading files.
+
+**Why cleanup is critical:**
+
+Without cleanup, files from previous runs remain visible:
+- Security: Previous run's secrets could be read
+- Correctness: Stale files could affect new run behavior
+- Disk: Accumulated files could fill disk
+
+## 11.11 Presigned URL Abstraction (v2)
+
+v2 introduces transparent handling of small vs large objects:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         PRESIGNED URL ABSTRACTION                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   Control plane generates presigned URLs for all file operations.            │
+│   Agent code unchanged - same PUT/GET to URL regardless of backing.          │
+│                                                                              │
+│   LARGE OBJECTS (>4KB):                                                      │
+│   ─────────────────────                                                      │
+│   - Presigned URL points to S3                                               │
+│   - Agent PUT/GET directly to S3                                             │
+│   - Control plane never sees payload                                         │
+│                                                                              │
+│   SMALL OBJECTS (<=4KB):                                                     │
+│   ──────────────────────                                                     │
+│   - Presigned URL points to control plane endpoint                           │
+│   - Payload embedded in URL or query params                                  │
+│   - Avoids S3 round-trip for tiny files                                      │
+│                                                                              │
+│   Example URL patterns:                                                      │
+│   - S3:      https://bucket.s3.amazonaws.com/key?X-Amz-Signature=...         │
+│   - Inline:  https://control.plane/api/blob/abc123?payload=base64...         │
+│                                                                              │
+│   Agent just does:                                                           │
+│     urllib.request.Request(url, data=file_data, method="PUT")                │
+│                                                                              │
+│   Works identically for both backing stores.                                 │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Benefits:**
+
+- Reduces S3 operations for small config files, scripts
+- Lowers costs (S3 charges per request)
+- Reduces latency for small files
+- Agent code unchanged
+
+**4KB threshold:**
+
+Chosen because:
+- Control plane database can efficiently store 4KB blobs
+- HTTP overhead dominates below this size
+- Majority of config files under 4KB
+- S3 minimum billable size is 128KB (small file penalty)
+
+## 11.12 JIT Tailscale Installation
+
+On-demand Tailscale installation triggered by control plane:
+
+```python
+def install_tailscale_jit():
+    """
+    JIT (Just-In-Time) Tailscale installation.
+    Called when SSH access requested or instance enters warm pool.
+    Uses static binary for speed and reliability.
+    """
+    global tailscale_ip, tailscale_status, tailscale_error
+
+    # Already installed or installing
+    if tailscale_status in ("ready", "installing"):
+        return tailscale_status == "ready"
+
+    # Check if already available
+    existing_ip = detect_tailscale_ip()
+    if existing_ip:
+        tailscale_ip = existing_ip
+        tailscale_status = "ready"
+        return True
+
+    tailscale_status = "installing"
+    # ... download static binary, start daemon, authenticate
+```
+
+**Why JIT instead of pre-installed:**
+
+- Faster instance startup (no Tailscale install in bootstrap)
+- Only pay Tailscale overhead when SSH actually needed
+- Reduces image complexity
+- Auth key can be injected at install time (no baked-in secrets)
+
+**Static binary approach:**
+
+Downloads pre-compiled binary instead of using package manager:
+- Faster than apt-get/yum
+- Works across distributions
+- No package manager lock contention
+- Consistent version across providers
+
+## 11.13 Error Handling Philosophy
+
+Agent errors fall into two categories:
+
+**Transient (retry):**
+- Network timeout on log upload
+- SSE connection dropped
+- S3 presigned URL expired mid-upload
+
+**Fatal (shutdown):**
+- Missing required environment variables
+- Lock acquisition failed (duplicate agent)
+- Heartbeat timeout exceeded
+- Max reconnection retries exhausted
+
+For transient errors, agent retries with backoff. For fatal errors, agent
+initiates clean shutdown and self-terminates.
+
+Agent does NOT attempt complex recovery. If something is fundamentally
+wrong, better to terminate and let control plane spawn fresh instance
+than limp along in degraded state.
+
+## 11.14 Failsafe Self-Termination Diagnostics
+
+Before instance shutdown (any reason), the agent attempts a best-effort
+diagnostic transmission to the control plane via the /panic endpoint.
+
+**When Triggered:**
+
+Failsafe diagnostics are sent just before shutdown for:
+- Heartbeat timeout exceeded (30s no ack)
+- SSE connection loss (10 retries exhausted)
+- Fatal errors (lock acquisition failure, missing env vars)
+- SIGTERM/SIGINT signals received
+- Spot interruption detected
+- Self-termination via `shutdown -h now`
+
+**Diagnostic Payload:**
+
+```python
+def send_panic_diagnostics(reason: str):
+    """
+    Best-effort transmission of diagnostics before shutdown.
+    Does not block shutdown - returns immediately on failure.
+    """
+    try:
+        payload = {
+            "instance_id": INSTANCE_ID,
+            "reason": reason,
+            "last_state": {
+                "workflow_state": current_workflow_state,
+                "run_id": current_run_id,
+                "allocation_id": current_allocation_id,
+                "uptime_seconds": time.time() - agent_start_time,
+                "last_heartbeat_ack": last_heartbeat_ack_time,
+                "sse_reconnect_count": sse_reconnect_count,
+            },
+            "diagnostics": {
+                "cpu_percent": psutil.cpu_percent(),
+                "memory_percent": psutil.virtual_memory().percent,
+                "disk_percent": psutil.disk_usage('/').percent,
+                "active_threads": threading.active_count(),
+                "log_buffer_size": len(log_buffer),
+            },
+            "error_logs": get_recent_error_logs(max_lines=50),
+            "timestamp": int(time.time() * 1000),
+        }
+
+        # 2-second timeout - don't block shutdown
+        response = http_post(
+            f"{CONTROL_PLANE}/v1/instances/{INSTANCE_ID}/panic",
+            json=payload,
+            timeout=2.0
+        )
+
+        if response.status == 200:
+            log("INFO", f"Panic diagnostics sent: {reason}")
+        else:
+            log("WARN", f"Panic endpoint returned {response.status}")
+
+    except Exception as e:
+        # Failures are expected and acceptable
+        log("WARN", f"Failed to send panic diagnostics: {e}")
+```
+
+**Integration with Shutdown Sequence:**
+
+Modified shutdown sequence (see Section 11.5) includes panic transmission:
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│  SHUTDOWN (with panic diagnostics)                                       │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                           │
+│  1. Set shutting_down flag                                               │
+│                    │                                                      │
+│                    ▼                                                      │
+│  2. Send panic diagnostics (best-effort, 2s timeout)                     │
+│                    │                                                      │
+│                    ▼                                                      │
+│  3. Tailscale logout (cleanup device list)                               │
+│                    │                                                      │
+│                    ▼                                                      │
+│  4. Terminate running run (if any)                                       │
+│                    │                                                      │
+│                    ▼                                                      │
+│  5. Flush remaining logs                                                 │
+│                    │                                                      │
+│                    ▼                                                      │
+│  6. Wait grace period (5s, configurable)                                 │
+│                    │                                                      │
+│                    ▼                                                      │
+│  7. Self-terminate: shutdown -h now (BACKUP SAFETY)                      │
+│                                                                           │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Design Rationale:**
+
+- **Best-effort**: Transmission may fail (network partition, control plane
+  down). Agent proceeds with shutdown regardless of success.
+- **Short timeout**: 2-second limit prevents blocking shutdown sequence.
+- **Useful for debugging**: When instances disappear mysteriously, panic logs
+  provide post-mortem context (last known state, memory/disk pressure, etc.).
+- **Non-blocking**: Failure to send diagnostics never prevents shutdown.
+
+**Success Rate:**
+
+In most shutdown scenarios (normal termination, SSH timeout, spot interruption),
+network is available and control plane is reachable. Success rate for panic
+transmission is typically 70-90%. This is sufficient for debugging purposes -
+occasional transmission failures are acceptable since the feature is
+supplementary to normal logging.
+

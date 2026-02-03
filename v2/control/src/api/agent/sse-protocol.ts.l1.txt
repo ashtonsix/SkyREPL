@@ -1,0 +1,35 @@
+# sse-protocol.ts - SSE Command Protocol
+
+## Stream: Control Plane → Agent
+- Endpoint: GET /v1/agent/commands?instance_id=X&allocation_id=Y
+- Header: Accept: text/event-stream
+- Long-lived unidirectional stream
+
+## Event Types (5)
+- start_run: Execute run with file sync
+- cancel_run: Terminate running run
+- capture_artifacts: Upload artifacts (mid-run or emergency)
+- trigger_tailscale: JIT Tailscale installation
+- heartbeat_ack: Acknowledge agent heartbeat
+
+## Message Schemas
+- StartRunMessage: {type, run_id, allocation_id, command, workdir, files[], artifacts[], run_init?, init_script?, create_snapshot?}
+- CancelRunMessage: {type, run_id}
+- CaptureArtifactsMessage: {type, run_id}
+- TriggerTailscaleMessage: {type}
+- HeartbeatAckMessage: {type}
+
+## Agent Responses (HTTP POST, not SSE)
+- POST /v1/agent/logs: {run_id, allocation_id, stream, data, phase?, sync_success?}
+- POST /v1/agent/heartbeat: {instance_id, allocation_id?, run_id?, status, tailscale_ip, active_ssh_sessions, tailscale_status}
+- stream values: 'stdout' | 'stderr' | 'sync_complete'
+- sync_complete triggers CLAIMED→ACTIVE transition
+
+## Connection Management
+- Auto-reconnect: exponential backoff 2s → 64s, max 10 retries
+- Heartbeat timeout: 30s no ack → agent shutdown
+- Panic diagnostics: POST /v1/instances/:id/panic (best-effort, 2s timeout)
+
+## Implementation Notes
+- Byte-by-byte reading (Python 8KB buffer deadlocks on ~150 byte messages)
+- First heartbeat sent immediately on startup

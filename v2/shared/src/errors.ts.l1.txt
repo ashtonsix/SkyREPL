@@ -1,0 +1,23 @@
+# errors.ts - Shared Error Types
+
+## Error Categories
+- validation, auth, not_found, conflict
+- rate_limit, provider, timeout, internal
+
+## Error Codes (by category)
+- validation: INVALID_INPUT, MISSING_REQUIRED_FIELD, INVALID_FORMAT
+- auth: UNAUTHORIZED, FORBIDDEN
+- not_found: RESOURCE_NOT_FOUND, INSTANCE_NOT_FOUND, RUN_NOT_FOUND
+- conflict: IDEMPOTENCY_CONFLICT, RESOURCE_ALREADY_EXISTS, INVALID_STATE_TRANSITION
+- rate_limit: RATE_LIMITED, BUDGET_EXCEEDED
+- provider: PROVIDER_ERROR, CAPACITY_UNAVAILABLE, SPOT_INTERRUPTED
+- timeout: REQUEST_TIMEOUT, OPERATION_TIMEOUT
+- internal: INTERNAL_ERROR, DATABASE_ERROR
+
+## Structures
+- ApiError: { error: { code, message, category, details?, retryAfterMs? } }
+- WorkflowError: { code, message, nodeId?, category, details? }
+- NodeError: { code, message, category, details?, retryable }
+
+## Factory
+- createApiError(code, message, category, details?, retryAfterMs?)

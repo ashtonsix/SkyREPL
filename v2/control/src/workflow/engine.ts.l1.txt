@@ -1,0 +1,99 @@
+# engine.ts - Workflow Execution Engine
+
+## WorkflowEngine
+- submit(type, input, idempotencyKey?): Create workflow, start execution
+- get(workflowId): Get workflow with nodes
+- cancel(workflowId, reason): Request cancellation
+
+## Execution Loop
+- Find ready nodes (dependencies satisfied)
+- Execute node, persist state before/after
+- Handle failure: compensate or fail workflow
+- On completion: seal manifest
+
+## Execution Semantics
+- Engine executes nodes synchronously, blocking until each completes
+- Parallelism via Parallel-Fan-Out pattern (multiple ready nodes execute concurrently)
+- Node failure triggers retry logic before advancing
+
+## Crash Recovery
+- On startup: find workflows with status='running'
+- Resume from current_node
+
+## Manifest Integration
+- Create DRAFT manifest on workflow start
+- Seal manifest on completion
+- Cleanup manifest on failure
+
+## Retry Decision Logic
+
+### determineRetryStrategy(error, node, attempt)
+**Inputs:**
+- error: NodeError with code, category, details
+- node: WorkflowNode with retry policy
+- attempt: Current attempt number
+
+**Decision Tree:**
+- Check if attempt < node.maxRetries (default from ERROR_RETRY_MAPPING)
+- Check if error.code is retryable (consult mapping table)
+- Determine strategy based on error code:
+  - CAPACITY_UNAVAILABLE → 'alternative' (different region)
+  - PROVIDER_API_ERROR → 'same_params' (exponential backoff)
+  - RATE_LIMITED → 'same_params' (exponential backoff, respect retry_after_ms)
+  - SPOT_INTERRUPTED → 'fallback' (try spot again, then on-demand)
+  - OPERATION_TIMEOUT → 'same_params' (exponential backoff)
+  - VALIDATION_ERROR → null (fail immediately)
+  - INVALID_STATE_TRANSITION → null (fail immediately)
+  - DATABASE_ERROR → null (fail immediately)
+  - INSUFFICIENT_PERMISSIONS → null (fail immediately)
+
+**Returns:**
+```
+{
+  action: 'retry' | 'compensate' | 'fail',
+  delay?: number,          // Backoff delay in ms
+  alternative?: object,    // Alternative node config for retry-with-alternative
+  pattern?: string         // Pattern to apply: 'retry-with-alternative', 'conditional-branch'
+}
+```
+
+**Backoff Calculation:**
+- Base: 2^attempt * 2000ms
+- Cap: 60000ms (60 seconds)
+- Override: Use error.details.retry_after_ms if present (RATE_LIMITED)
+
+### Error Category → Strategy Mapping
+
+**Retryable Errors:**
+| Error Code           | Strategy            | Max Retries | Pattern Applied            |
+|----------------------|---------------------|-------------|----------------------------|
+| CAPACITY_UNAVAILABLE | alternative         | 3           | retry-with-alternative     |
+| PROVIDER_API_ERROR   | same_params         | 3           | (simple retry)             |
+| RATE_LIMITED         | same_params         | 5           | (simple retry)             |
+| SPOT_INTERRUPTED     | fallback            | 1           | conditional-branch         |
+| OPERATION_TIMEOUT    | same_params         | 2           | (simple retry)             |
+
+**Non-Retryable Errors:**
+| Error Code                | Action          |
+|---------------------------|-----------------|
+| VALIDATION_ERROR          | fail immediately|
+| INVALID_STATE_TRANSITION  | fail immediately|
+| DATABASE_ERROR            | fail immediately|
+| INSUFFICIENT_PERMISSIONS  | fail immediately|
+
+### Integration with Execution Loop
+
+**On Node Failure:**
+1. Call determineRetryStrategy(error, node, attempt)
+2. If action='retry' and pattern specified:
+   - Apply pattern (retry-with-alternative or conditional-branch)
+   - Schedule retry with delay
+3. If action='retry' and no pattern:
+   - Increment attempt counter
+   - Schedule simple retry after delay
+4. If action='compensate':
+   - Execute node compensation handler
+   - Mark node as failed
+5. If action='fail':
+   - Mark node and workflow as failed
+   - No retry attempted

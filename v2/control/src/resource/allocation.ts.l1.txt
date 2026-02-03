@@ -1,0 +1,35 @@
+# allocation.ts - Allocation State Machine (Ch5)
+
+## Purpose
+- Explicit state machine for run-to-instance binding
+- AVAILABLE allocations ARE the warm pool (no separate concept)
+
+## AllocationStatus Enum
+- AVAILABLE: Instance slot ready, run_id=NULL
+- CLAIMED: Run assigned, files syncing
+- ACTIVE: Run executing
+- HELD: Run finished, preserved for debugging
+- COMPLETE: Finalized, slot released
+- FAILED: Lifecycle error (not run error)
+
+## State Transitions
+- AVAILABLE → CLAIMED (workflow: claim-allocation)
+- CLAIMED → ACTIVE (control: on sync_complete log)
+- CLAIMED → FAILED (control: sync timeout 5min)
+- ACTIVE → HELD (workflow: transition-hold)
+- ACTIVE → FAILED (control: heartbeat >30s, spot interrupt)
+- HELD → COMPLETE (background: hold expiry)
+
+## Key Fields
+- run_id (NULL = AVAILABLE state)
+- instance_id, user, workdir, status
+- hold_until, hold_reason ('default' | 'explicit' | 'ssh_active')
+
+## Key Behaviors
+- HELD does NOT preclude new AVAILABLE allocations on same instance
+- HELD DOES preclude instance termination
+- Timestamps: only created_at, updated_at (no per-state timestamps)
+
+## Materialization
+- Simple DB record + optional related instance/run
+- Belongs to: Instance (required), Run (optional), Manifest (optional)

@@ -1,0 +1,86 @@
+# integration/api-agent.test.ts - Agent API integration tests
+
+## SETUP
+- Start control plane with agent endpoints
+- Create test instance and allocation
+- Mock agent client
+- WebSocket client for real-time tests
+- Clean database between tests
+
+## Heartbeat Tests
+- POST /api/agent/heartbeat updates instance
+  - Request body: {instance_id, allocation_id, metrics}
+  - Updates instance.last_heartbeat
+  - Updates instance.metrics
+  - Returns 200 OK
+  - Response includes ack: true
+- Returns ack with server_time
+  - Response includes server_time (ISO 8601)
+  - Response includes instance config
+  - Response includes next heartbeat interval
+  - Agent can sync clock from server_time
+- Missing heartbeats detected
+  - Heartbeat timeout configured (e.g., 60s)
+  - Instance without heartbeat for >timeout flagged
+  - Background job checks periodically
+  - Instance status updated to 'unhealthy'
+  - Alerts triggered
+
+## Logs Tests
+- POST /api/agent/logs stores log data
+  - Request body: {allocation_id, logs: [...]}
+  - Each log: {timestamp, stream, data}
+  - Logs stored in database
+  - Returns 200 OK
+  - Batching supported (multiple logs per request)
+- WebSocket subscribers receive logs
+  - Client subscribes to allocation logs
+  - New logs pushed via WebSocket
+  - Logs delivered in order
+  - Historical logs sent on subscribe
+  - Connection closed when allocation completes
+- sync_complete triggers CLAIMED→ACTIVE
+  - Request body includes sync_complete: true
+  - Allocation status updated CLAIMED→ACTIVE
+  - Workflow node unblocked
+  - Run status updated
+  - Event emitted to workflow stream
+
+## Commands SSE Tests
+- GET /api/agent/commands/:instance_id stream
+  - Returns SSE connection
+  - Content-Type: text/event-stream
+  - Keeps connection alive with heartbeat
+  - 404 if instance not found
+- start_run command delivered
+  - Control plane sends start_run
+  - Event delivered to connected agent
+  - Event includes run_id, command, env, files
+  - Agent acks receipt
+- cancel_run command delivered
+  - Control plane sends cancel_run
+  - Event delivered to agent
+  - Event includes run_id, reason
+  - Agent terminates run
+- heartbeat_ack delivered
+  - Periodic keepalive events
+  - Prevents connection timeout
+  - No action required from agent
+  - Comment-only events (: heartbeat)
+
+## Panic Tests
+- POST /api/agent/panic stores diagnostics
+  - Request body: {instance_id, allocation_id, error, stack, context}
+  - Panic stored in database
+  - Returns 200 OK
+  - No workflow impact (non-blocking)
+- Non-blocking operation
+  - Panic storage errors don't fail request
+  - Agent can proceed regardless
+  - Logged for operator review
+  - Does not trigger alerts (informational)
+- Best-effort storage
+  - Partial data accepted
+  - Large payloads truncated
+  - Invalid JSON tolerated (store as text)
+  - Always returns success

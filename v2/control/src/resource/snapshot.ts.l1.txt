@@ -1,0 +1,18 @@
+# snapshot.ts - Snapshot Materialization
+
+## Material Backing
+- Primary: objects table (type='snapshot')
+- External: Provider snapshot/image system
+
+## Key Tags (objects.tags_json)
+- provider, provider_id, spec, init_checksum
+- name, created_at, last_used_at, use_count
+
+## External State Caching
+- TTL: 5 minutes
+- Check if snapshot still exists in provider
+
+## Lifecycle
+- Created by create-snapshot workflow
+- Deleted by cleanup workflow
+- No status field - existence is the state

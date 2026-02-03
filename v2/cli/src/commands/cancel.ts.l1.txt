@@ -1,0 +1,15 @@
+# cancel.ts - Cancel Run Command
+
+## Input
+- Run ID (full or prefix)
+- --force: Skip compensation
+- --yes: Skip confirmation
+
+## Flow
+1. Confirm with user
+2. POST /v1/operations/cancel
+3. Display rollback progress
+
+## Output
+- Node-by-node rollback status
+- Final state (cancelled/compensated)

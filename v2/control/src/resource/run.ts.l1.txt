@@ -1,0 +1,35 @@
+# run.ts - Run Materialization (Ch3)
+
+## Material Backing
+- Primary: runs table
+- Secondary: objects (run_file, log, artifact types)
+- External: None (pure control plane state)
+
+## Key Fields
+- command: Shell command to execute
+- workdir: Working directory path
+- max_duration_ms: Timeout (default 1 hour)
+- exit_code: Process exit code (null while running)
+- create_snapshot: Whether to snapshot on completion
+- init_checksum: Checksum of init script for warm pool matching
+- spot_interrupted: True if terminated by spot reclaim
+- started_at, finished_at: Timestamps (null before/after)
+
+## Relationships
+- Has many: RunFiles (file manifest for sync)
+- Has many: RunLogs (streaming stdout/stderr)
+- Has many: Artifacts (output files)
+- Has one: Allocation (1:1 during execution)
+- Belongs to: Manifest
+
+## Materialization Steps
+1. Get base record from runs table
+2. Get file manifest: run_files WHERE run_id
+3. Get recent logs: limit 1000, ordered DESC (avoid huge payloads)
+4. Get artifacts: objects WHERE type='artifact' AND tags.run_id
+5. Get allocation: allocations WHERE run_id (if active)
+
+## Lifecycle States
+- launch-run:pending → preparing → running → complete/error/cancelled/timeout
+- Note: exit_code determines success (0 vs non-zero), workflow_state just tracks lifecycle
+- Both exit_code=0 and exit_code!=0 result in "complete" state

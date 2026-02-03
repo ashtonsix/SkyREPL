@@ -1,0 +1,11 @@
+# workflow-terminate.ts - Terminate Workflow
+
+## Purpose
+Terminate instance and clean up allocations
+
+## Nodes
+1. resolve-target: Get instance and active allocations
+2. terminate-allocations: Transition allocations to COMPLETE
+3. terminate-instance: Call provider.terminateInstance()
+4. update-db: Mark instance status='terminated'
+5. finalize: Seal manifest

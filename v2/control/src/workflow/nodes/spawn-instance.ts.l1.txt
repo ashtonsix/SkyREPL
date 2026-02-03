@@ -1,0 +1,142 @@
+# spawn-instance.ts - Spawn Instance Node
+
+Uses SpawnInstanceContract from providers/contracts.ts.
+Integrates with type boundaries via materialize/project.
+
+## Input Type (from SpawnInstanceContract.input)
+
+- spec: InstanceSpec
+- manifestId: number
+- runId: number
+- region?: string
+- spot?: boolean
+- snapshotId?: number
+- clientRequestId?: string (optional, generated if not provided)
+- bootstrap: BootstrapConfig
+- provider: ProviderName
+
+## Output Type (from SpawnInstanceContract.output)
+
+- instanceId: number (our DB ID)
+- providerId: string (provider's instance ID)
+- ip: string | null
+- status: WorkflowState
+
+## Execute Steps
+
+### 1. Check for Provider Custom Workflow
+
+- providerWorkflow = getProviderWorkflow(input.provider, 'spawn-instance')
+- If providerWorkflow exists:
+  - Delegate: result = await ctx.spawnSubworkflow(providerWorkflow.type, input)
+  - Validate output against SpawnInstanceContract.output
+  - Return result.output (control plane treats provider workflow as black box)
+- Else: Continue with standard spawn flow
+
+### 2. Generate Idempotency Key
+
+- spawnKey = hash(manifestId, runId, input.spec, input.snapshotId)
+- clientRequestId = input.clientRequestId ?? spawnKey
+
+### 3. Check Existing (Idempotent)
+
+- existing = await db.findInstanceBySpawnKey(spawnKey)
+- If existing with status in ['running', 'spawn:pending']:
+  - Return { instanceId: existing.id, providerId: existing.provider_id, ip: existing.ip, status: existing.workflow_state }
+
+### 4. Phase 1: Reserve in DB (Before Cloud Call)
+
+- instance = await db.createInstance({
+    provider: input.provider,
+    spec: input.spec,
+    region: input.region,
+    workflow_state: 'spawn:pending',
+    provider_id: null,
+    spawn_key: spawnKey,
+    is_spot: input.spot ?? false,
+    current_manifest_id: input.manifestId
+  })
+- await ctx.emitResource('instance', instance.id, { priority: 50 })
+
+Property: Instance tracked in manifest BEFORE cloud call. Crash here = orphan detection finds record.
+
+### 5. Phase 2: Execute Provider Spawn
+
+- provider = getProvider(input.provider)
+- bootstrap = provider.generateBootstrap(input.bootstrap)
+- providerInstance = await provider.spawn({
+    spec: input.spec,
+    region: input.region,
+    spot: input.spot,
+    snapshotId: input.snapshotId,
+    clientRequestId,
+    bootstrap,
+    tags: { 'skyrepl:manifest_id': input.manifestId, 'skyrepl:run_id': input.runId, 'skyrepl:spawn_key': spawnKey }
+  })
+
+Note: provider.spawn() returns provider-specific type (e.g., AWSInstance).
+
+### 6. Poll Until Running
+
+- Loop every 5s, timeout 5 min:
+  - providerInstance = await provider.get(providerInstance.id)
+  - If providerInstance.status === 'running': break
+  - If providerInstance.status === 'error': throw ProviderApiError
+- On timeout: throw OperationTimeoutError
+
+### 7. Project to Generic Type
+
+- genericInstance = projectToGenericInstance(providerInstance, instance)
+- Note: Projection discards provider-specific fields, keeps contract-required fields
+
+### 8. Update DB Record
+
+- await db.updateInstance(instance.id, {
+    provider_id: genericInstance.providerId,
+    ip: genericInstance.ip,
+    workflow_state: 'launch-run:provisioning'
+  })
+
+### 9. Return Contract Output
+
+- return {
+    instanceId: instance.id,
+    providerId: genericInstance.providerId,
+    ip: genericInstance.ip,
+    status: 'launch-run:provisioning'
+  }
+
+## Compensation
+
+Called if node fails after partial execution.
+
+### If provider_id exists (Phase 2 succeeded):
+
+- provider = getProvider(input.provider)
+- await provider.terminate(ctx.output.providerId)
+- Idempotent: OK if already terminated
+
+### Update DB:
+
+- await db.updateInstance(ctx.output.instanceId, { workflow_state: 'spawn:error' })
+
+### Manifest cleanup:
+
+- Instance remains in manifest for orphan reconciliation
+- Orphan system will find instances with 'spawn:error' status
+
+## Key Integration Points
+
+- providers/contracts.ts: SpawnInstanceContract defines input/output
+- providers/provider.ts: getProvider(), Provider interface
+- providers/types.ts: projectToGenericInstance() for type boundary
+- providers/{provider}.ts: Provider implementation
+- Provider workflows: Optional black-box delegation
+
+## Error Handling
+
+Errors bubble to workflow engine, which consults error taxonomy:
+- CapacityError -> retry-with-alternative (different region)
+- RateLimitError -> retry same params with backoff
+- AuthError -> fail immediately
+- OperationTimeoutError -> retry with increased timeout

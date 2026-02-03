@@ -1,0 +1,25 @@
+# transition-hold.ts - Transition Hold Node
+
+## Input Type
+{ allocationId: string, instanceId: string }
+
+## Output Type
+{ status: 'HELD', heldAt: number }
+
+## Execute Steps
+- Verify allocation is in ACTIVE state (should have transitioned after start-run)
+- Update allocation status: ACTIVE → HELD
+- Set held_at timestamp
+- HELD means: Run completed, instance ready for warm pool reuse
+- Instance workdir will be cleaned on next claim
+- Return new status and timestamp
+
+## Compensation
+- Revert to ACTIVE: db.updateAllocationStatus(allocationId, 'ACTIVE')
+- Clear held_at timestamp
+- Note: Usually no compensation needed (HELD is desired end state)
+
+## Key Calls
+- db.getAllocation()
+- db.updateAllocationStatus(allocationId, 'HELD')
+- db.updateAllocation(allocationId, { held_at: now })

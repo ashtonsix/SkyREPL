@@ -1,0 +1,15 @@
+# progress.ts - Progress Display
+
+## SSE Rendering
+- Connect to GET /v1/workflows/:id/stream
+- Parse event types: node_started, node_completed, node_failed, workflow_completed
+
+## Display Modes
+- TTY: ANSI colors, spinners, progress bars
+- Non-TTY: Plain text, no animations
+
+## Elements
+- Spinner for active nodes
+- Duration tracking per node
+- File sync progress bars
+- Receipt summary on completion

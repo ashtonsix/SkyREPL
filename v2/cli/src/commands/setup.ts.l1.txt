@@ -1,0 +1,22 @@
+# setup.ts - Setup Commands
+
+## Subcommands
+- init: Interactive setup wizard
+- provider: Configure provider credentials
+- verify: Verify setup
+
+## Init Wizard
+1. Deployment mode (local vs cloud)
+2. Provider selection
+3. Credential collection
+4. SSH key configuration
+5. Generate repl.toml
+
+## Provider Setup
+- Credential validation
+- Test API connectivity
+- Store encrypted credentials
+
+## Verify
+- Check all components
+- Report issues

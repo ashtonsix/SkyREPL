@@ -1,0 +1,19 @@
+# classifier.ts - Orphan Classification
+
+## Classification Rules
+- Current session: created after session start OR age < 1 hour → WARNING
+- Other sessions: older than 1 hour → INFO
+- Unknown: unparseable names → CAUTION
+
+## Inputs
+- orphans array
+- sessionStartTime
+- thresholdMs (default 1 hour)
+
+## Output
+- OrphanClassification: currentSession[], otherSessions[], unknown[]
+
+## Use Cases
+- Preflight warnings before operations
+- Prioritize investigation of recent orphans
+- Filter by severity in CLI output

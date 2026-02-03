@@ -1,0 +1,21 @@
+# hold-expiry.ts - Hold Expiry Task
+
+## Scan
+- Query: allocations WHERE status='HELD' AND hold_until < NOW
+
+## Transition
+- HELD → COMPLETE for expired holds
+- Release instance slot for new allocations
+
+## SSH Activity Extension
+- Check for active SSH sessions
+- Auto-extend hold_until if activity detected
+- Extension: 5 minutes per detection
+
+## Max Hold Enforcement
+- Absolute limit: 24 hours
+- Cannot extend beyond max
+
+## Batch Processing
+- Process in batches to prevent lock contention
+- Log metrics: expired count per cycle

@@ -1,0 +1,25 @@
+# compensation.ts - Compensation Handling
+
+## Core Principle
+- Compensate ONE node only - the failed node
+- NO cascade through completed nodes
+- Manifest policies handle broader cleanup
+
+## Compensation vs Teardown
+- COMPENSATION: error correction DURING workflow (single node)
+- TEARDOWN: scheduled cleanup AFTER workflow (manifest expiry)
+
+## Core Function
+- compensateFailedNode(workflowId, failedNodeId)
+- Check node.status === 'failed'
+- Skip if resource transferred to another workflow (ownership check)
+- Call executor.compensate() if defined
+
+## NodeExecutor Interface
+- execute(ctx): Promise<NodeOutput>
+- compensate?(ctx): Promise<void> (optional)
+
+## Example: Spawn Node Compensation
+- If provider_id exists, terminate in provider
+- Mark instance as terminate:complete in DB
+- Handle NOT_FOUND errors gracefully (already gone)

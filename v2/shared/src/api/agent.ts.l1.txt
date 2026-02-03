@@ -1,0 +1,66 @@
+# agent.types.ts - Agent Protocol Messages
+
+## Control → Agent (SSE)
+
+### StartRunMessage
+- type: 'start_run'
+- run_id: number
+- allocation_id: number
+- command: string
+- workdir: string
+- files: Array<{ path: string, content: string }>
+- artifacts: Array<{ artifact_id: number, mount_path: string }>
+
+### CancelRunMessage
+- type: 'cancel_run'
+- run_id: number
+
+### CaptureArtifactsMessage
+- type: 'capture_artifacts'
+- run_id: number
+
+### TriggerTailscaleMessage
+- type: 'trigger_tailscale'
+
+### HeartbeatAckMessage
+- type: 'heartbeat_ack'
+
+## Agent → Control (HTTP POST)
+
+### LogMessage
+- type: 'log'
+- run_id: number
+- allocation_id: number
+- stream: 'stdout' | 'stderr'
+- data: string
+- phase?: 'setup' | 'execution' | 'teardown'
+- timestamp: number
+
+### RunCompleteMessage
+- type: 'run_complete'
+- run_id: number
+- allocation_id: number
+- exit_code: number
+- workflow_state: object
+
+### HeartbeatMessage
+- type: 'heartbeat'
+- tailscale_ip: string
+- active_ssh_sessions: number
+- tailscale_status: 'not_installed' | 'installing' | 'ready' | 'failed'
+- workflow_state: object
+- command_ack: number[]
+
+### SpotInterruptMessage
+- type: 'spot_interrupt'
+- run_id: number
+- time_remaining_ms: number
+
+### PanicRequest
+- type: 'panic'
+- instance_id: number
+- reason: string
+- last_state_json: string
+- diagnostics_json: string
+- error_logs_json: string
+- timestamp: number

@@ -1,0 +1,20 @@
+# whitelist.ts - Whitelist Management
+
+## Operations
+- Add orphan with reason (required), notes (optional), expiry (optional)
+- Update existing entry (upsert pattern)
+- Remove from whitelist
+- Query active whitelist (non-expired)
+
+## Schema (orphan_whitelist table)
+- provider, provider_id, resource_type, resource_name
+- reason, acknowledged_by, acknowledged_at
+- expires_at (optional), notes
+
+## Filtering
+- Filter orphans against active whitelist
+- Return only unacknowledged for warnings
+
+## Audit Trail
+- Track who acknowledged and when
+- Optional expiry for re-evaluation

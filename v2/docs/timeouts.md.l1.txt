@@ -1,0 +1,89 @@
+# Timeout and Interval Configuration
+
+This document describes timeout categories, constraint relationships, and failure modes. Specific values are defined in configuration.
+
+## Timeout Categories
+
+| Category | Purpose | Constraint |
+|----------|---------|------------|
+| Agent heartbeat | Liveness signal from agent to control | interval < stale detection threshold |
+| Heartbeat ack timeout | Agent shuts down if control unresponsive | > 2x heartbeat interval (tolerate missed beats) |
+| Stale detection | Control detects unresponsive agents | >= heartbeat ack timeout |
+| Hold expiry | Release allocations after run completion | configurable per-run, bounded by absolute max |
+| Manifest cleanup | Remove expired manifests and resources | > reconciliation interval (allow orphan detection) |
+| Reconciliation | Sync provider state, detect orphans | fast enough to catch orphans before cost accrues |
+| Presigned URL TTL | S3 URL expiration | > expected transfer time for max file size |
+| Spawn timeout | Waiting for instance running state | > 99th percentile provider spawn time |
+| Snapshot timeout | Waiting for snapshot completion | > expected snapshot time for max disk size |
+| File sync timeout | Waiting for sync_complete | > expected transfer time for typical workload |
+
+## Constraint Relationships
+
+### Heartbeat Chain
+```
+heartbeat_interval < heartbeat_ack_timeout <= stale_detection_threshold
+```
+- Agent sends heartbeats faster than timeout threshold
+- Allows tolerance for missed heartbeats before declaring failure
+- Control and agent agree on when to consider connection dead
+
+### Cleanup Chain
+```
+reconciliation_interval < manifest_cleanup_interval
+```
+- Reconciliation runs multiple times before manifest cleanup
+- Gives multiple chances to detect orphans
+- Manifest cleanup is the fallback, not the primary mechanism
+
+### Hold Duration Chain
+```
+default_hold <= max_ssh_extension <= max_explicit_extension <= absolute_max_hold
+```
+- Default hold is shortest (normal case)
+- SSH activity can extend, but bounded
+- Explicit extension can go further, still bounded
+- Absolute max prevents runaway costs
+
+## Failure Modes
+
+### Network Partition (Agent-Control)
+Both sides detect: agent via ack timeout, control via stale detection. Both initiate cleanup. Idempotent termination.
+
+### Slow Provider Response
+Spawn/snapshot timeouts prevent indefinite waiting. Compensation terminates partial resources. Reconciliation catches anything missed.
+
+### Presigned URL Expiry During Transfer
+Large file transfers may exceed TTL. Client should request fresh URLs for long transfers. Future: multipart upload support.
+
+### Race: Hold Expiry vs Active SSH
+Hold expiry is the contract. SSH activity extends hold, but only if heartbeat reports it before expiry check. User can explicitly extend if needed.
+
+## Provider-Specific Considerations
+
+### Cloud Providers (AWS, Lambda, RunPod)
+- Longer reconciliation intervals (respect API rate limits)
+- Longer spawn timeouts (30s-2min typical provision time)
+- Consider provider-specific quota/throttling
+
+### Local Development (OrbStack)
+- Faster reconciliation (no API limits)
+- Shorter spawn timeouts (instant provisioning)
+- Faster cleanup cycles (development iteration)
+
+## Testing Considerations
+
+Key race conditions to validate:
+1. Heartbeat just before stale check
+2. SSH disconnect just before hold expiry
+3. Reconciliation during spawn
+4. Manifest cleanup during active workflow
+5. Concurrent claim attempts on same allocation
+
+## Observability
+
+Metrics to track timeout-related issues:
+- Heartbeat ack latency distribution
+- Claim conflict rate
+- Hold expiry count
+- Orphans detected per reconciliation cycle
+- Spawn timeout rate

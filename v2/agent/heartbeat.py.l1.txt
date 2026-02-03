@@ -1,0 +1,11 @@
+# heartbeat.py - Heartbeat Thread
+
+## Critical
+Send IMMEDIATE heartbeat before first sleep (closes timing gap)
+
+## Loop
+Every 10s: POST /v1/agent/heartbeat
+Payload: tailscale_ip, active_ssh_sessions, tailscale_status, workflow_state, command_ack
+
+## Timeout
+No ack for 30s → initiate shutdown

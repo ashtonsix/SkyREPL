@@ -1,0 +1,10 @@
+# tailscale.py - JIT Tailscale Installation
+
+## trigger_tailscale Handler
+1. Check if already installed
+2. Download static binary
+3. Start daemon
+4. Authenticate with auth key
+
+## Shutdown
+tailscale logout (removes from Tailnet)

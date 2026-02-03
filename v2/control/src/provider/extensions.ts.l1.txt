@@ -1,0 +1,168 @@
+# extensions.ts - Extension Framework
+
+Hooks, caching, and event bridges for provider-specific behavior.
+Hooks are lightweight (<1s) - they trigger workflows, don't do work themselves.
+
+## ProviderLifecycleHooks
+
+Interface for provider lifecycle events. All methods optional.
+
+### onStartup() -> Promise<void>
+- Called when control plane starts
+- Initialize provider, verify credentials
+- Warm caches (spot prices, capacity info)
+- Ensure resources exist (security groups, IAM roles)
+
+### onShutdown() -> Promise<void>
+- Called on graceful shutdown
+- Flush metrics, cleanup state
+- No new operations after this
+
+### onHeartbeat(expectations: HeartbeatExpectations) -> Promise<HeartbeatReceipts>
+- Unified heartbeat with expectations/receipts model
+- Core sends tasks to perform; provider returns completion receipts
+- Replaces separate onHeartbeat/onReconcile hooks
+- Called every heartbeat interval (30s default, provider can suggest different)
+
+HeartbeatExpectations:
+- tasks: HeartbeatTask[] (tasks to perform this cycle)
+- deadline: number (timestamp when this must complete)
+
+HeartbeatTask:
+- type: 'reconcile' | 'health_check' | 'cache_refresh' | 'pool_maintenance'
+- priority: 'high' | 'normal' | 'low'
+- lastRun?: number (timestamp of last successful run)
+- params?: Record<string, unknown> (task-specific parameters)
+
+HeartbeatReceipts:
+- receipts: TaskReceipt[] (results for requested tasks)
+- providerTasks?: ProviderTaskReport[] (provider-initiated tasks)
+- workflowsLaunched?: WorkflowLaunchReport[] (async event handling)
+- nextHeartbeat?: { preferredInterval: number } (suggest different cadence)
+
+TaskReceipt:
+- type: string (matches HeartbeatTask.type)
+- status: 'completed' | 'skipped' | 'deferred' | 'failed'
+- result?: unknown (task-specific result data)
+- reason?: string (explanation for skipped/deferred/failed)
+
+WorkflowLaunchReport:
+- workflowId: string
+- workflowType: string
+- trigger: 'spot_interruption' | 'budget_threshold' | 'drift_detected' | 'provider_event'
+- context?: Record<string, unknown> (event details)
+
+ProviderTaskReport:
+- taskType: string
+- status: string
+- details?: unknown
+
+Task Types:
+- 'reconcile': Compare DB vs provider state, detect orphans/drift/missing
+- 'health_check': Verify provider API responsiveness
+- 'cache_refresh': Update spot prices, capacity info, instance types
+- 'pool_maintenance': Check warm pool levels, warm volumes
+
+Note: Reconciliation findings (orphans, drift) are returned in TaskReceipt.result.
+Orphan termination requires human approval (via CLI), not auto-executed.
+
+### onSpotInterruption(notice: SpotInterruptionNotice) -> Promise<void>
+- Called when spot instance interrupted
+- Lightweight: trigger checkpoint/retry workflow
+- Do NOT do work here, just submit workflow
+
+SpotInterruptionNotice:
+- instanceId: number
+- providerId: string
+- interruptionTime: number
+- reason: 'capacity' | 'price' | 'termination-notice'
+
+### onBudgetThreshold(threshold: BudgetThreshold) -> Promise<void>
+- Called when spending threshold crossed
+- Trigger cleanup or alert workflow
+
+BudgetThreshold:
+- level: 'warning' | 'critical' | 'exceeded'
+- currentSpend: number
+- limit: number
+- period: 'daily' | 'weekly' | 'monthly'
+
+## Hook Registry
+
+registerProviderHooks(provider: ProviderName, hooks: ProviderLifecycleHooks) -> void
+- Register hooks for provider at startup
+- Called by provider module initialization
+
+invokeHook(provider: ProviderName, hook: keyof ProviderLifecycleHooks, ...args) -> Promise<void>
+- Invoke specific hook for provider
+- No-op if hook not registered
+- Catches and logs errors (hooks should not crash control plane)
+
+invokeAllHooks(hook: keyof ProviderLifecycleHooks, ...args) -> Promise<void>
+- Invoke hook for all registered providers
+- Parallel execution, wait for all to complete
+
+## In-Memory Cache
+
+Ephemeral cache for provider data with TTL.
+Not persisted - re-fetched on restart.
+
+### getWithCache<T>(key: string, ttlMs: number, fetcher: () -> Promise<T>) -> Promise<T>
+- Return cached value if not expired
+- Otherwise call fetcher, cache result, return
+- Cache key should include provider name
+
+### invalidateCache(pattern: string) -> void
+- Invalidate all keys matching pattern
+- Used when data known to be stale
+
+### clearProviderCache(provider: ProviderName) -> void
+- Clear all cached data for provider
+
+## TTL Configuration by Provider
+
+AWS:
+- 'aws:spot_prices:*': 300_000 (5 min)
+- 'aws:capacity:*': 60_000 (1 min)
+- 'aws:instance:*': 30_000 (30s)
+- 'aws:warm_volumes': No TTL, explicitly managed
+
+Lambda Labs:
+- 'lambda:instance_types': 3_600_000 (1 hour, rarely changes)
+- 'lambda:instance:*': 30_000 (30s)
+
+RunPod:
+- 'runpod:gpu_types': 3_600_000 (1 hour)
+- 'runpod:pod:*': 30_000 (30s)
+
+OrbStack:
+- 'orbstack:vm:*': 10_000 (10s, local is fast)
+
+## Event Types
+
+### SpotInterruptionNotice
+(defined above in onSpotInterruption)
+
+### BudgetThreshold
+(defined above in onBudgetThreshold)
+
+### ProviderHealthStatus
+- provider: ProviderName
+- healthy: boolean
+- lastCheck: number
+- latencyMs: number
+- errors?: string[]
+
+## Hooks vs Workflows
+
+Hooks:
+- Event-driven, synchronous
+- Lightweight (<1s execution)
+- Trigger workflows, don't do work
+- Example: onSpotInterruption submits handle-spot-interruption workflow
+
+Workflows:
+- Task-driven, asynchronous
+- Long-running (seconds to minutes)
+- Create/modify resources
+- Use pattern library (IAR, CB, PFO, RWA)

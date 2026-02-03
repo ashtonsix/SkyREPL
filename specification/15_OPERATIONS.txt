@@ -1,0 +1,271 @@
+================================================================================
+15. OPERATIONS
+================================================================================
+
+## Purpose
+
+This section covers operational concerns for running SkyREPL in production:
+observability, CI/CD, database migrations, auto-updates, licensing, and security.
+These aspects support long-term maintainability and enable sustainable commercial
+deployment.
+
+================================================================================
+
+## 15.1 Observability
+
+### Telemetry Stack
+
+OpenTelemetry for structured logging and traces, Loki for log aggregation, Grafana
+for visualization. Workflows are tagged with runtime topology signatures (provider,
+region, instance type) to enable grouping and comparison across similar executions.
+
+### Error Reporting
+
+Self-managed deployments have opt-in error reporting (Sentry or similar). Managed
+SkyREPL instances have mandatory telemetry for operational support. Users control
+what metadata is attached (stripped PII by default).
+
+### Workflow Observability
+
+Each workflow execution creates a trace showing step timing, decisions, retries,
+and resource allocations. Topology signatures enable queries like "show all
+Lambda Labs launch failures in us-west" or "compare P99 latency for warm vs cold
+starts on AWS."
+
+================================================================================
+
+## 15.2 CI/CD and Testing
+
+### OrbStack Generalization
+
+OrbStack provider serves as the testing backend. All control plane logic is
+testable locally without cloud credentials. CI runs full workflow test suite
+against OrbStack instances in isolated environments.
+
+The testing philosophy rests on contract-based generalization:
+
+- Intent contracts define provider-agnostic behavior: required inputs, guaranteed
+  outputs, allowed phases, cleanup priorities.
+- OrbStack implements these contracts identically to cloud providers, plus chaos
+  injection for failure scenarios.
+- The test suite validates that the control plane handles contract-compliant
+  behavior correctly: retry logic, compensation, state transitions.
+- When a provider implements the same contracts, it inherits the validated behavior.
+- The shared 80% (everything at the contract level) is tested once via OrbStack,
+  not repeated per provider.
+
+Key insight: We're not testing "OrbStack works therefore AWS works" - we're testing
+"the control plane handles intent contracts correctly, and any provider implementing
+those contracts gets the same behavior." The contract is the unit of trust. See
+Chapter 8 for how providers declare contract compliance.
+
+### Fault Injection
+
+Chaos testing via controlled provider failures (timeouts, capacity errors, network
+partitions). Validates crash recovery and orphan cleanup under arbitrary kill points.
+
+OrbStack implements fault injection hooks that simulate real-world provider failures
+while maintaining intent contract compliance. Intent contracts ensure failure handling
+tested against OrbStack applies to all conforming providers. For example, a simulated
+timeout during provision_instance still respects the contract's cleanup priorities
+and required outputs.
+
+### Contract Compliance Testing
+
+Each provider must pass a contract compliance test suite that verifies correct
+implementation of intent contracts. This is separate from integration testing:
+
+- Registry-based parametric testing pattern (described in Chapter 8) enables running
+  the same contract compliance suite against all providers.
+- Capability-gated tests skip gracefully when a provider lacks a specific capability
+  (e.g., idempotent spawn, snapshot creation).
+- Contract compliance is explicit verification of required fields, phase transitions,
+  idempotency guarantees, and error handling - not implicit coverage via integration
+  tests.
+- Once a provider passes contract compliance, the control plane behavior validated
+  via OrbStack testing applies to that provider.
+
+### Property-Based Testing
+
+Core invariant: "Kill workflow at any step -> no orphaned resources." fast-check
+or similar library generates random kill points and verifies cleanup succeeds.
+Additional properties validate allocation state transitions and manifest lifecycle.
+
+Intent contracts provide the specification for these tests. Each intent defines
+required outputs and cleanup priorities (see Chapter 7). Property tests verify
+intent contract compliance under all failure scenarios: random kill points, resource
+exhaustion, partial completion states. Contract adherence ensures that validation
+passing for one provider (OrbStack) applies to all providers implementing the same
+contracts.
+
+================================================================================
+
+## 15.3 Database Migrations
+
+### Migration Files
+
+Numbered SQL files in control/migrations/ directory: 001_initial.sql,
+002_idempotency_keys.sql, etc. Applied sequentially on control plane startup.
+Migration state tracked in schema_migrations table (number, applied_at, checksum).
+
+### Rollback Support
+
+Consider .up.sql / .down.sql pairs for reversible migrations. Critical for multi-user
+deployments where downtime requires fast recovery. Not all migrations are reversible
+(data transformations may be lossy).
+
+### Migration Testing
+
+CI validates migrations apply cleanly against empty database and realistic fixtures.
+Property test: apply all migrations then rollback all -> database state matches
+fresh init.
+
+================================================================================
+
+## 15.4 Auto-Updates
+
+### Update Mechanism
+
+Control plane checks for updates on startup (opt-out via config). Updates download
+new binary and restart service. Preflight check validates migration compatibility
+and database backup exists before applying.
+
+### Multi-User Authorization
+
+Single-user deployments auto-update by default. Multi-user deployments (>1 active
+user in last 30 days) require admin authorization. Preflight warning shows changelog
+and estimated downtime before proceeding.
+
+### Rollback Safety
+
+Previous version binary retained for emergency rollback. Database migrations log
+applied SQL for manual reversal if needed. Critical failures during update trigger
+automatic rollback to last known-good state.
+
+================================================================================
+
+## 15.5 License and Billing
+
+### License Model
+
+Source-available license (BSL 1.1 or similar). Free tier for deployments with ≤3
+users. Commercial tier: $18/month base (includes 3 users), $6/month per additional
+seat.
+
+### User-Month Billing
+
+Only bill user-months when user was actually active (executed runs, viewed dashboard,
+or invoked CLI that month). Dormant users don't count toward seat usage. Prevents
+billing inflation for seasonal usage patterns.
+
+### Nagging Tiers
+
+**Underprovision 1-5 seats:**
+- Preflight warning on `repl run` + 5-second delay
+- Warning includes upgrade link and current seat usage
+- Does not block functionality (nag-ware, not enforcement)
+
+**Missed 1 billing period:**
+- Nag with warning messages on CLI invocations
+- Email reminders to admin contacts
+- No functional restrictions yet
+
+**>8 users + missed 2 periods:**
+- Lockout with escalating warnings beforehand
+- Read-only access for all users
+- Admin must resolve billing to restore access
+
+### Overprovision Handling
+
+If licensed seats exceeded by >5 users, new signups create "inactive" accounts with
+read-only access. Admin must explicitly activate users or upgrade seat count.
+
+### Inactive User Prompts
+
+Prompt admins to deactivate users inactive >1 month. Control plane dashboard shows
+inactive user list with last activity timestamp. One-click deactivation preserves
+user history but frees seat allocation.
+
+### Source Modification Tolerance
+
+Tolerate source modification for self-managed deployments. License enforcement
+focuses on redistribution, not internal use. Crackdown targets commercial redistribution
+or SaaS offerings, not legitimate customization.
+
+### Seat Tracking
+
+Control plane tracks user activity per month. Users identified by API key fingerprint
+or OAuth identity. Anonymous usage (no auth) counts as single shared seat. Billing
+API provides monthly active user counts for self-service upgrade.
+
+================================================================================
+
+## 15.6 Deployment Models
+
+### Self-Managed
+
+User runs control plane on their own VPS. Full control over data and configuration.
+User responsible for updates and maintenance. Suitable for organizations with existing
+infrastructure and DevOps capacity.
+
+### Managed
+
+Multi-tenant control plane pilots user-connected clouds. We NEVER run user code
+directly (liability, AML/ATF concerns). We provision infrastructure on their behalf,
+but they run their code on their machines. Clear separation of control plane
+orchestration from execution environment. Managed deployments handle updates,
+monitoring, and availability automatically.
+
+================================================================================
+
+## 15.7 Security
+
+### Authentication
+
+Bearer tokens initially (single-user, VPS-deployed). OAuth integration encouraged
+after >3 seats (GitHub, Google, corporate SSO). Tokens stored hashed in database,
+never logged in plaintext.
+
+### Authorization
+
+Basic role system: Admin (all operations), User (run jobs, view own resources),
+Viewer (read-only). Workflow permissions checked upfront before execution starts,
+not lazily during execution. Prevents partial execution followed by auth failure.
+
+### API Security
+
+Rate limiting per user (100 req/min default). API keys scoped to specific operations
+(run-only keys for CI, admin keys for control plane management). Token rotation
+encouraged via expiry warnings (90-day default).
+
+### Secrets Management
+
+Run environment variables encrypted at rest. Agent decrypts on instance startup
+using ephemeral key from control plane. Secrets never logged or stored in workflow
+traces. Audit log tracks secret access (who, when, which run).
+
+================================================================================
+
+## 15.8 Extensibility & Future
+
+### Runbooks
+
+scripts/extra/ pattern for diagnostics and custom integrations. User-contributed
+scripts for common tasks live outside core codebase, easily modified without
+affecting system stability. Encourages community contributions without mainline
+code quality concerns.
+
+### AI Agent Piloting
+
+Workflow observability creates dataset for agent-assisted debugging. Future capability,
+not v1 scope. Structured logs with topology signatures enable ML-based anomaly
+detection. Example: "P99 latency spike on Lambda Labs us-west correlates with
+weekend spot market dynamics."
+
+### Profiling
+
+Covered by chaos testing + property-based tests. No separate profiling infrastructure
+needed initially. Performance characteristics emerge from observability data during
+normal operations. If bottlenecks appear, targeted profiling added per-component.
+
+================================================================================

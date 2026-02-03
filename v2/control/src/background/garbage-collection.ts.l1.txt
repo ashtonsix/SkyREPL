@@ -1,0 +1,22 @@
+# garbage-collection.ts - Garbage Collection Task
+
+## Blob GC
+- Find blobs with no run_file references
+- Delete unreferenced blobs after grace period (24h)
+
+## Object Expiry
+- Apply retention policies per object type
+- Delete expired objects
+
+## S3 Cleanup
+- Sync S3 bucket against objects table
+- Delete orphaned S3 objects
+
+## Reference Counting
+- Track blob references via checksum
+- Preserve blobs with any remaining references
+
+## Incremental Deletion
+- Batch size limits (500 objects/cycle)
+- Prevent API throttling
+- Spread load across cycles

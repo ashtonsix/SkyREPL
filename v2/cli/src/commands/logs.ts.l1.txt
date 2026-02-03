@@ -1,0 +1,15 @@
+# logs.ts - Log Streaming Command
+
+## Connection
+- WebSocket to /v1/runs/:id/logs
+
+## Modes
+- --stream: stdout, stderr, or both (default: both)
+- --tail N: Last N lines then follow
+- --head N: First N lines then exit
+- --timestamps: Show timestamps
+
+## Behavior
+- Buffer for smooth display
+- Handle sync_complete and status messages
+- Ctrl-C disconnects (run continues)

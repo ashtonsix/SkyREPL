@@ -1,0 +1,327 @@
+# state-transitions.ts - State machine ownership and transition rules
+
+## PURPOSE
+
+Defines ownership boundaries for state transitions across allocations, manifests, and workflows.
+State transitions have explicit owners (workflow nodes, control plane background tasks, or agent).
+
+## ALLOCATION STATE MACHINE
+
+### States
+
+- AVAILABLE - Instance advertises empty run slot (warm pool)
+- CLAIMED - Run assigned, workdir being prepared
+- ACTIVE - Run executing
+- HELD - Run finished but allocation preserved for debugging
+- COMPLETE - Allocation finalized
+- FAILED - Lifecycle failure (not run failure)
+
+### Transition Ownership
+
+```
+AVAILABLE → CLAIMED
+  Owner: Workflow (claim-allocation node)
+  Trigger: Warm pool allocation claimed during launch-run workflow
+  Validation: run_id NULL → run_id SET, status AVAILABLE → CLAIMED atomically
+
+CLAIMED → ACTIVE
+  Owner: Control plane (on sync_complete log)
+  Trigger: Agent reports sync_complete (files downloaded successfully)
+  Mechanism: Agent emits sync_complete to log stream, control plane watches logs
+  Validation: Allocation must be in CLAIMED state, run_id matches
+
+CLAIMED → FAILED
+  Owner: Control plane (on sync timeout/error)
+  Trigger: Agent reports sync failure OR timeout waiting for sync_complete
+  Timeout: 5 minutes default
+  Side effects: Instance marked suspect, typically triggers termination
+
+ACTIVE → HELD
+  Owner: Workflow (transition-hold node)
+  Trigger: Run completes (success or failure), hold period begins
+  Parameters: hold_until timestamp, hold_reason ('default' | 'explicit')
+  Note: Run exit_code != 0 is NOT a failure state - still transitions to HELD
+
+ACTIVE → FAILED
+  Owner: Control plane (heartbeat timeout) OR agent (spot interruption)
+  Control plane triggers:
+    - Heartbeat timeout (>30 seconds without heartbeat)
+    - Instance termination detected in provider
+  Agent triggers:
+    - Spot interruption warning received
+    - Fatal agent error (agent crash, OOM)
+  Side effects: Instance marked suspect, typically triggers termination
+
+HELD → COMPLETE
+  Owner: Control plane (hold expiry background task)
+  Trigger: hold_until timestamp expires
+  Background task: Runs every 60 seconds, scans for expired holds
+  Validation: Current time > hold_until, no active SSH sessions
+  Note: SSH activity auto-extends hold_until (see heartbeat processing)
+```
+
+### Invalid Transitions
+
+All other transitions are invalid and return error:
+
+- AVAILABLE → ACTIVE (must go through CLAIMED)
+- CLAIMED → COMPLETE (must go through ACTIVE → HELD)
+- HELD → AVAILABLE (allocations never return to warm pool)
+- COMPLETE → any state (terminal state)
+- FAILED → any state (terminal state)
+
+### Concurrent Modification Handling
+
+All transitions use optimistic locking:
+
+```typescript
+UPDATE allocations
+SET status = ?, updated_at = ?
+WHERE id = ? AND status = ? AND updated_at = ?
+```
+
+If update affects 0 rows, transaction rolls back and caller retries or fails.
+
+## MANIFEST STATE MACHINE
+
+### States
+
+- DRAFT - Manifest under construction, accepting resources
+- SEALED - Manifest finalized, no more modifications
+- EXPIRED (derived) - Computed from expiresAt timestamp, not stored
+
+### Transition Ownership
+
+```
+DRAFT → SEALED
+  Owner: Workflow (seal-manifest node OR workflow completion)
+  Trigger: Workflow calls ctx.sealManifest() or workflow completes
+  Side effects: Sets releasedAt timestamp, computes expiresAt
+  Validation: Manifest must be in DRAFT, no pending resource additions
+
+SEALED → EXPIRED (derived, not a real transition)
+  Owner: N/A (computed property)
+  Trigger: Current time > expiresAt
+  Note: Expired manifests are eligible for cleanup workflows
+  Query: WHERE status = 'SEALED' AND expires_at < ?
+```
+
+### Invalid Transitions
+
+- SEALED → DRAFT (cannot unseal)
+- DRAFT → EXPIRED (must seal first)
+- Manifests never transition back to earlier states
+
+### Resource Addition Rules
+
+- DRAFT: Resources can be added via ctx.emitResource()
+- SEALED: No resource additions allowed
+- EXPIRED: No modifications allowed (cleanup workflows claim resources)
+
+## WORKFLOW STATE MACHINE
+
+### States
+
+- pending - Workflow submitted, not yet started
+- running - Workflow execution in progress
+- completed - Workflow finished successfully
+- failed - Workflow failed (node error, validation, timeout)
+- cancelled - User-requested cancellation
+- rolling_back - Compensation in progress (after failure)
+
+### Transition Ownership
+
+```
+pending → running
+  Owner: Workflow engine (executeLoop)
+  Trigger: Engine picks up workflow from queue
+  Side effects: Sets startedAt timestamp, begins node execution
+
+running → completed
+  Owner: Workflow engine (completeWorkflow)
+  Trigger: All nodes completed successfully, no pending/failed nodes
+  Side effects: Sets finishedAt, seals manifest, emits output
+
+running → failed
+  Owner: Workflow engine (handleWorkflowFailure)
+  Trigger: Node failure with no retry/fallback path
+  Side effects: Sets error, compensates failed node, seals manifest
+
+running → cancelled
+  Owner: API handler (engine.cancel)
+  Trigger: User calls POST /workflows/:id/cancel
+  Side effects: Marks running nodes as skipped, seals manifest
+
+running → rolling_back
+  Owner: Workflow engine (on node failure)
+  Trigger: Failed node has compensation handler
+  Side effects: Executes compensation, then transitions to failed
+
+rolling_back → failed
+  Owner: Workflow engine (after compensation)
+  Trigger: Compensation completed (success or failure)
+  Side effects: Final state, workflow cannot be retried
+```
+
+### Invalid Transitions
+
+- completed → any state (terminal)
+- failed → running (use engine.retry to create new workflow)
+- cancelled → running (cannot resume cancelled workflows)
+- rolling_back → completed (compensation always leads to failed)
+
+### Pause/Resume (Future)
+
+Not implemented in initial version, but reserved:
+
+```
+running → paused (future)
+  Owner: API handler (engine.pause)
+  Side effects: Stops new node execution, preserves state
+
+paused → running (future)
+  Owner: API handler (engine.resume)
+  Side effects: Resumes node execution from paused state
+```
+
+## NODE STATE MACHINE
+
+### States
+
+- pending - Node waiting for dependencies
+- running - Node executing
+- completed - Node finished successfully
+- failed - Node execution error
+- skipped - Node bypassed (conditional branch not taken)
+
+### Transition Ownership
+
+```
+pending → running
+  Owner: Workflow engine (executeNode)
+  Trigger: All dependencies completed, node ready to execute
+  Side effects: Sets startedAt, increments attempt counter
+
+running → completed
+  Owner: Node executor (handler returns success)
+  Trigger: Handler returns without error
+  Side effects: Sets finishedAt, stores output, marks dependents ready
+
+running → failed
+  Owner: Node executor (handler throws error)
+  Trigger: Handler throws error, retry exhausted
+  Side effects: Sets error, triggers retry logic or workflow failure
+
+pending → skipped
+  Owner: Workflow engine (pattern application)
+  Trigger: Conditional branch not taken, or workflow cancelled
+  Side effects: Node never executes, dependents reevaluated
+
+failed → pending (retry)
+  Owner: Workflow engine (retry logic)
+  Trigger: Error is retryable, attempt < maxAttempts
+  Side effects: Increments attempt, sets retry_reason
+```
+
+### Crash Recovery Transitions
+
+When control plane restarts:
+
+```
+running → pending
+  Owner: Recovery process (recoverWorkflows)
+  Trigger: Control plane restart, node executor is idempotent
+  Condition: isIdempotent(nodeType) === true
+  Side effects: Increments attempt, sets retry_reason = 'crash_recovery'
+
+running → failed
+  Owner: Recovery process (recoverWorkflows)
+  Trigger: Control plane restart, node executor is NOT idempotent
+  Condition: isIdempotent(nodeType) === false
+  Side effects: Marks node failed, workflow handles failure path
+```
+
+## OWNERSHIP SUMMARY TABLE
+
+| Transition | Owner | Mechanism | Validation |
+|------------|-------|-----------|------------|
+| Allocation AVAILABLE→CLAIMED | Workflow | claim-allocation node | Atomic UPDATE with status check |
+| Allocation CLAIMED→ACTIVE | Control plane | sync_complete log event | Log timestamp < 5min |
+| Allocation CLAIMED→FAILED | Control plane | sync timeout/error | Timeout or error log |
+| Allocation ACTIVE→HELD | Workflow | transition-hold node | Run finished |
+| Allocation ACTIVE→FAILED | Control/Agent | Heartbeat timeout or spot interrupt | Timeout or provider signal |
+| Allocation HELD→COMPLETE | Control plane | Hold expiry background task | hold_until < now |
+| Manifest DRAFT→SEALED | Workflow | Workflow completion | No pending resources |
+| Workflow pending→running | Engine | Execute loop start | No validation needed |
+| Workflow running→completed | Engine | All nodes completed | No failed/pending nodes |
+| Workflow running→failed | Engine | Node failure | Retry exhausted |
+| Node pending→running | Engine | Dependencies ready | All deps completed |
+| Node running→completed | Handler | Success return | No exceptions |
+| Node running→failed | Handler | Error thrown | Retry logic evaluated |
+
+## IMPLEMENTATION NOTES
+
+### Background Tasks
+
+Control plane runs these background tasks:
+
+- Hold expiry scanner: Every 60s, finds allocations WHERE status='HELD' AND hold_until < NOW
+- Heartbeat timeout scanner: Every 30s, finds instances WHERE last_heartbeat < NOW - 30s
+- SSH activity extension: Every heartbeat, extends holds for active SSH sessions
+- Manifest cleanup: Every 5min, finds manifests WHERE status='SEALED' AND expires_at < NOW
+
+### Atomic Transitions
+
+All state transitions use database transactions with optimistic locking:
+
+```typescript
+async function transitionAllocationState(
+  allocationId: string,
+  fromStatus: AllocationStatus,
+  toStatus: AllocationStatus,
+  updates: Partial<Allocation> = {}
+): Promise<{ success: boolean; error?: string }> {
+  return db.transaction(async () => {
+    const allocation = await db.getAllocationForUpdate(allocationId);
+
+    if (!allocation) {
+      return { success: false, error: 'Allocation not found' };
+    }
+
+    if (allocation.status !== fromStatus) {
+      return {
+        success: false,
+        error: `Invalid transition: expected ${fromStatus}, got ${allocation.status}`
+      };
+    }
+
+    await db.updateAllocation(allocationId, {
+      status: toStatus,
+      updated_at: Date.now(),
+      ...updates
+    });
+
+    return { success: true };
+  });
+}
+```
+
+### Error Handling
+
+Transition validation failures return structured errors:
+
+```typescript
+{
+  code: 'INVALID_STATE_TRANSITION',
+  message: 'Cannot transition allocation from COMPLETE to ACTIVE',
+  category: 'conflict',
+  details: {
+    allocation_id: 'abc123',
+    current_state: 'COMPLETE',
+    requested_state: 'ACTIVE',
+    valid_transitions: []
+  }
+}
+```
+
+These map to HTTP 409 Conflict via errors.ts error mapping.

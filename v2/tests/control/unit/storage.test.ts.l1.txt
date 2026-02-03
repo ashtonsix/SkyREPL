@@ -1,0 +1,82 @@
+# unit/storage.test.ts - Storage layer unit tests
+
+## SETUP
+- Mock AWS S3 SDK calls
+- Use in-memory database for metadata
+- Configure test bucket name
+- Set small file threshold at 4KB
+- Clean up test data after each test
+
+## Presigned URL Tests
+- Small files (<=4KB) get control plane URLs
+  - File size 1KB returns control plane URL
+  - URL format: /api/blobs/{checksum}/inline
+  - No S3 interaction occurs
+  - Expiry parameter ignored for inline
+- Large files get S3 URLs
+  - File size 5KB returns S3 presigned URL
+  - URL contains signature and expiry
+  - Correct bucket and key used
+  - S3.getSignedUrl called with correct params
+- Correct expiry
+  - Default expiry is 1 hour
+  - Custom expiry respected
+  - Expiry in URL matches request
+
+## Inline Storage Tests
+- storeInline stores in DB
+  - Blob data stored in objects table
+  - Checksum computed and stored
+  - Size recorded correctly
+  - Returns object ID
+- getInline retrieves
+  - Returns blob data by checksum
+  - Returns null if not found
+  - Data matches original
+  - Handles binary data correctly
+
+## S3 Operations (Mocked)
+- uploadToS3 calls PutObject
+  - S3.putObject called with correct bucket
+  - Key format: blobs/{checksum}
+  - ContentType set to application/octet-stream
+  - Body is Buffer or Stream
+  - Returns S3 ETag
+- downloadFromS3 calls GetObject
+  - S3.getObject called with correct params
+  - Returns blob data
+  - Handles streaming response
+  - Throws error if not found
+- deleteFromS3 calls DeleteObject
+  - S3.deleteObject called
+  - Returns success even if not found
+  - Correct bucket and key used
+
+## Blob Dedup Tests
+- Existing blobs not in missing array
+  - prepareBlobUpload with existing checksum
+  - Returns empty missing array
+  - No upload URL generated
+  - Ref count incremented
+- New blobs get upload URLs
+  - New checksum returns upload URL
+  - URL type based on size (inline vs S3)
+  - Checksum included in response
+  - Blob marked as pending upload
+- Ref count incremented
+  - Existing blob ref count increases
+  - New blob ref count starts at 1
+  - Multiple refs from same run counted once
+
+## File Sync Tests
+- prepareFilesForRun generates correct URLs
+  - Input: array of {path, checksum, size}
+  - Output: array of upload URLs for missing
+  - Output: mapping of checksums to download URLs
+  - Small files use inline URLs
+  - Large files use S3 URLs
+- Handles mix of inline/S3
+  - Some files inline, some S3
+  - Correct URL type for each
+  - All missing files get upload URLs
+  - All existing files get download URLs

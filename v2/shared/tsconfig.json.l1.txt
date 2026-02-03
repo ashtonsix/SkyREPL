@@ -1,0 +1,11 @@
+# tsconfig.json - Shared TypeScript Config
+
+## Compiler Options
+- target: ES2022
+- module: ESNext
+- strict: true
+- outDir: dist
+- declaration: true (for type exports)
+
+## References
+- None (base package)

@@ -1,0 +1,35 @@
+# storage.ts - Object Storage
+
+## Config
+- `S3_BUCKET` - S3 bucket name from environment
+- `INLINE_THRESHOLD = 4096` - Store ≤4KB inline in DB
+- `PRESIGNED_URL_TTL = 900000` - 15 minutes
+
+## Presigned URLs
+- `generateUploadUrl(objectId, sizeBytes, contentType?): { url, method, inline }`
+  - ≤4KB: Return control plane URL for inline storage
+  - >4KB: Return S3 presigned PUT URL
+- `generateDownloadUrl(objectId): { url, inline }`
+  - Check s3_key field to determine inline vs S3
+  - Return appropriate URL
+
+## Inline Storage (≤4KB)
+- `storeInline(objectId, data): void` - UPDATE payload column
+- `getInline(objectId): Buffer | null` - SELECT payload
+
+## S3 Operations (>4KB)
+- `uploadToS3(objectId, data, contentType?): void` - PutObject, update DB
+- `downloadFromS3(objectId): Buffer` - GetObject
+- `deleteFromS3(objectId): void` - DeleteObject
+
+## Blob Deduplication
+- `checkBlobsExist(checksums): { missing: string[], urls: Record<string, string> }`
+  - Query existing blobs by checksum tag
+  - Return missing checksums with presigned upload URLs
+  - Enables client-side dedup before upload
+
+## File Sync Preparation
+- `prepareFilesForRun(runId, files): { path, checksum, url }[]`
+  - Lookup blobs by checksum
+  - Generate presigned download URLs for agent
+  - Create run_file objects linking run to blobs

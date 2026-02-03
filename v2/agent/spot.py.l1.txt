@@ -1,0 +1,10 @@
+# spot.py - Spot Monitor (only interruptible instances)
+
+## Loop
+Every 5s: Check EC2 metadata for interruption notice
+
+## IMDSv2
+GET token, then GET /latest/meta-data/spot/instance-action
+
+## On Interruption (2 min warning)
+Execute checkpoint script, upload artifacts, send spot_interrupt message

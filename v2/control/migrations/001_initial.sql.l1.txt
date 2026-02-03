@@ -1,0 +1,171 @@
+# migrations/001_initial.sql.txt
+
+## instances
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- provider TEXT NOT NULL
+- provider_id TEXT NOT NULL DEFAULT ''
+- spec TEXT NOT NULL
+- region TEXT NOT NULL DEFAULT 'local'
+- ip TEXT
+- workflow_state TEXT NOT NULL
+- workflow_error TEXT
+- current_manifest_id INTEGER
+- spawn_idempotency_key TEXT
+- is_spot INTEGER NOT NULL DEFAULT 0
+- spot_request_id TEXT
+- init_checksum TEXT NOT NULL
+- created_at INTEGER NOT NULL
+- last_heartbeat INTEGER
+Indexes: idx_instances_manifest, idx_instances_workflow_state, idx_instances_heartbeat, idx_instances_spawn_key, UNIQUE(provider, provider_id)
+
+## runs
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- command TEXT NOT NULL
+- workdir TEXT NOT NULL DEFAULT '/home/ubuntu/work'
+- max_duration_ms INTEGER
+- workflow_state TEXT NOT NULL
+- workflow_error TEXT
+- current_manifest_id INTEGER
+- exit_code INTEGER
+- init_checksum TEXT NOT NULL
+- create_snapshot INTEGER NOT NULL DEFAULT 0
+- spot_interrupted INTEGER NOT NULL DEFAULT 0
+- created_at INTEGER NOT NULL
+- started_at INTEGER
+- finished_at INTEGER
+Indexes: idx_runs_manifest, idx_runs_workflow_state, idx_runs_created, idx_runs_finished
+
+## allocations
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- run_id INTEGER
+- instance_id INTEGER NOT NULL
+- status TEXT NOT NULL
+- current_manifest_id INTEGER
+- user TEXT NOT NULL DEFAULT 'ubuntu'
+- workdir TEXT NOT NULL DEFAULT '/home/ubuntu/work'
+- hold_until INTEGER
+- hold_reason TEXT
+- max_hold_duration_ms INTEGER DEFAULT 86400000
+- created_at INTEGER NOT NULL
+- updated_at INTEGER NOT NULL
+Indexes: idx_allocations_run, idx_allocations_instance, idx_allocations_manifest, idx_allocations_status, idx_warm_pool, idx_allocations_hold_until
+
+## workflows
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- type TEXT NOT NULL
+- parent_workflow_id INTEGER
+- depth INTEGER NOT NULL DEFAULT 0
+- status TEXT NOT NULL
+- current_node TEXT
+- input_json TEXT NOT NULL
+- output_json TEXT
+- error_json TEXT
+- manifest_id INTEGER
+- trace_id TEXT NOT NULL
+- idempotency_key TEXT
+- created_at INTEGER NOT NULL
+- started_at INTEGER
+- finished_at INTEGER
+- updated_at INTEGER NOT NULL
+Indexes: idx_workflows_manifest, idx_workflows_status, idx_workflows_parent, idx_workflows_trace, idx_workflows_idempotency
+
+## workflow_nodes
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- workflow_id INTEGER NOT NULL
+- node_id TEXT NOT NULL
+- node_type TEXT NOT NULL
+- status TEXT NOT NULL
+- input_json TEXT
+- output_json TEXT
+- error_json TEXT
+- attempt INTEGER NOT NULL DEFAULT 1
+- retry_reason TEXT
+- created_at INTEGER NOT NULL
+- started_at INTEGER
+- finished_at INTEGER
+Indexes: idx_workflow_nodes_workflow, idx_workflow_nodes_status, UNIQUE(workflow_id, node_id)
+
+## manifests
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- workflow_id INTEGER
+- status TEXT NOT NULL
+- default_cleanup_priority INTEGER NOT NULL DEFAULT 50
+- retention_ms INTEGER
+- created_at INTEGER NOT NULL
+- released_at INTEGER
+- expires_at INTEGER
+Indexes: idx_manifests_status, idx_manifests_workflow, idx_manifests_expires
+
+## manifest_resources
+- manifest_id INTEGER NOT NULL
+- resource_type TEXT NOT NULL
+- resource_id INTEGER NOT NULL
+- cleanup_priority INTEGER
+- added_at INTEGER NOT NULL
+PRIMARY KEY: (manifest_id, resource_type, resource_id)
+Indexes: idx_manifest_resources_resource, idx_manifest_resources_priority
+
+## objects
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- type TEXT NOT NULL
+- provider TEXT NOT NULL
+- provider_object_id TEXT
+- size_bytes INTEGER NOT NULL
+- reservation INTEGER
+  # Optional. Invariant: reservation >= size_bytes when set.
+  # If object is expected to grow beyond 4KB, set reservation to expected final size.
+  # This causes immediate S3 allocation (skip inline storage).
+- content_type TEXT
+- payload BLOB
+- s3_key TEXT
+- s3_bucket TEXT
+- checksum TEXT
+  # Content hash (sha256). NULL if not yet computed or not applicable.
+  # For content-addressable blobs, used for deduplication via idx_objects_checksum.
+- checksum_bytes INTEGER
+  # Number of bytes covered by checksum. When checksum_bytes == size_bytes, checksum is current.
+  # When checksum_bytes < size_bytes (after append operations), checksum is stale.
+  # NULL when checksum is NULL.
+- expires_at INTEGER
+- current_manifest_id INTEGER
+- created_at INTEGER NOT NULL
+- accessed_at INTEGER
+Indexes: idx_objects_manifest, idx_objects_checksum, idx_objects_expires, idx_objects_type, UNIQUE(provider, provider_object_id)
+
+## object_tags
+- object_id INTEGER NOT NULL
+- tag TEXT NOT NULL
+PRIMARY KEY: (object_id, tag)
+FOREIGN KEY: object_id REFERENCES objects(id) ON DELETE CASCADE
+Indexes: idx_object_tags_tag
+
+# NOTE: There is no separate 'blobs' table. Blobs are stored as objects with
+# type='blob'. The checksum column on objects enables deduplication (query
+# by checksum before insert). For blob garbage collection, query objects
+# WHERE type='blob' that have no referencing run_file objects.
+
+## usage_records
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- instance_id INTEGER NOT NULL
+- allocation_id INTEGER
+- run_id INTEGER
+- provider TEXT NOT NULL
+- spec TEXT NOT NULL
+- region TEXT NOT NULL
+- is_spot INTEGER NOT NULL
+- started_at INTEGER NOT NULL
+- finished_at INTEGER
+- duration_ms INTEGER
+- estimated_cost_usd REAL
+Indexes: idx_usage_instance, idx_usage_allocation, idx_usage_run, idx_usage_started, idx_usage_provider_spec
+
+## instance_panic_logs
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- instance_id INTEGER NOT NULL
+- reason TEXT NOT NULL
+- last_state_json TEXT NOT NULL
+- diagnostics_json TEXT NOT NULL
+- error_logs_json TEXT NOT NULL
+- timestamp INTEGER NOT NULL
+- created_at INTEGER NOT NULL
+Indexes: idx_panic_instance, idx_panic_timestamp
