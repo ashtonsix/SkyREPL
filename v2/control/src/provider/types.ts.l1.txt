@@ -134,3 +134,263 @@ getAllProviders() -> Provider<any, any>[]
 - Caller is responsible for polling completion
 - Timeout handling is caller's responsibility (workflow nodes implement polling loops)
 - Providers do NOT handle retries (workflow engine handles retry logic)
+
+## FeatureProvider Interface (Ch8)
+
+Feature providers attach cross-cutting capabilities to existing instances.
+Different from compute providers (don't create instances).
+
+### FeatureProvider<TConfig, TState>
+
+```typescript
+export interface FeatureProvider<TConfig = unknown, TState = unknown> {
+  name: FeatureProviderName;
+  attach(instanceId: number, config: TConfig): Promise<TState>;
+  detach(instanceId: number): Promise<void>;
+  getState(instanceId: number): Promise<TState | null>;
+  healthCheck(instanceId: number): Promise<boolean>;
+  reconcile?(context: FeatureReconcileContext): Promise<FeatureReconcileResult>;
+}
+```
+
+### FeatureProvider.reconcile() (Optional)
+
+Called by orphan-cleanup background task to detect feature orphans.
+Compares DB feature state with provider API to find:
+
+1. **Orphans:** Resources in provider but not in DB (leaked during failed cleanup)
+2. **Drift:** Resources in DB but missing/offline in provider (manual deletion, expired auth)
+
+```typescript
+interface FeatureReconcileContext {
+  provider: FeatureProviderName;
+  minAgeMs: number;              // Only report resources older than this
+  userConfirmedTerminate: boolean; // If true, actually delete orphans (not just report)
+}
+
+interface FeatureReconcileResult {
+  orphans: OrphanedFeature[];    // Resources in provider but not DB
+  drift: DriftedFeature[];       // Resources in DB but offline/missing in provider
+  scannedAt: number;
+  durationMs: number;
+}
+
+interface OrphanedFeature {
+  providerId: string;            // Provider-specific ID (e.g., Tailscale machine ID)
+  resourceType: string;          // 'tailscale_machine', 'wandb_run', etc.
+  name: string;                  // Human-readable name
+  createdAt?: number;            // If available from provider
+  lastSeen?: number;             // Last activity timestamp
+  tags?: Record<string, string>; // Provider tags/metadata
+  estimatedCost: number;         // Usually 0 for features, but track for visibility
+}
+
+interface DriftedFeature {
+  instanceId: number;            // DB instance ID
+  providerId: string;            // Provider-specific ID
+  resourceType: string;
+  status: 'offline' | 'missing' | 'unauthorized';
+  lastSeenInProvider?: number;
+  lastSeenInDb: number;
+}
+```
+
+**Implementation Notes:**
+
+- Reconcile should bypass cache (use bypassCache=true) for accurate detection
+- Only scan resources with skyrepl:* tags (avoid detecting non-SkyREPL resources)
+- minAgeMs provides grace period (default 10 min) to avoid flagging in-progress workflows
+- userConfirmedTerminate=false → dry run (report only)
+- userConfirmedTerminate=true → actually delete orphans (requires manual confirmation)
+
+**Error Handling:**
+
+- Provider API errors: Return empty result, log error (don't crash orphan scan)
+- Partial failures: Return what was successfully scanned
+- Rate limits: Respect retry_after, return partial results
+
+### FeatureProviderName
+
+'tailscale' | 'wandb' | 'vscode-server'
+
+### Tailscale Feature Config
+
+```typescript
+interface TailscaleConfig {
+  tailnetName: string;
+  ephemeral: boolean;       // Auto-remove on disconnect
+  tags?: string[];          // ACL tags
+  advertiseRoutes?: string[]; // Subnet routing
+}
+```
+
+### Tailscale Feature State
+
+```typescript
+interface TailscaleState {
+  ip: string;               // Tailscale IP (100.x.x.x)
+  hostname: string;         // Tailscale hostname
+  connectedAt: number;
+  lastSeen: number;
+}
+```
+
+### Feature Registration
+
+Features are registered to instances via manifest_resources with resource_type='feature'.
+Cleanup during manifest expiry calls feature.detach() for all attached features.
+
+## Provider Error Retry Policies (Ch6, Ch8)
+
+Provider method calls can fail for various reasons. Retry behavior depends on error type:
+
+### Error Types and Retry Policies
+
+```typescript
+interface ProviderError extends Error {
+  code: ProviderErrorCode;
+  retryable: boolean;
+  retryAfterMs?: number;      // For RATE_LIMITED
+  provider: ProviderName;
+  operation: string;          // 'spawn', 'terminate', 'createSnapshot', etc.
+  details?: unknown;          // Provider-specific error details
+}
+
+enum ProviderErrorCode {
+  // Transient errors - retry with alternative
+  CAPACITY_UNAVAILABLE = 'CAPACITY_UNAVAILABLE',  // No capacity in region
+  SPOT_PRICE_TOO_HIGH = 'SPOT_PRICE_TOO_HIGH',    // Spot bid rejected
+
+  // Transient errors - retry with backoff
+  RATE_LIMITED = 'RATE_LIMITED',                   // API rate limit hit
+  PROVIDER_ERROR = 'PROVIDER_ERROR',               // Provider service error (5xx)
+  NETWORK_ERROR = 'NETWORK_ERROR',                 // Connection timeout, DNS failure
+
+  // Permanent errors - no retry
+  AUTH_ERROR = 'AUTH_ERROR',                       // Invalid credentials
+  INVALID_CONFIG = 'INVALID_CONFIG',               // Bad instance spec, region, etc.
+  QUOTA_EXCEEDED = 'QUOTA_EXCEEDED',               // Account quota limit
+  NOT_FOUND = 'NOT_FOUND',                         // Resource doesn't exist
+
+  // Idempotency errors
+  ALREADY_EXISTS = 'ALREADY_EXISTS',               // Resource already created (idempotent spawn)
+  ALREADY_TERMINATED = 'ALREADY_TERMINATED',       // Resource already terminated (idempotent terminate)
+}
+```
+
+### Retry Policy Matrix
+
+| Error Code             | Retry Strategy                        | Workflow Pattern          |
+|------------------------|---------------------------------------|---------------------------|
+| CAPACITY_UNAVAILABLE   | Retry with alternative region/type    | Retry-with-Alternative    |
+| SPOT_PRICE_TOO_HIGH    | Retry with on-demand or different AZ  | Retry-with-Alternative    |
+| RATE_LIMITED           | Retry with backoff, respect retry_after_ms | Exponential backoff   |
+| PROVIDER_ERROR         | Retry 3x with exponential backoff     | Exponential backoff       |
+| NETWORK_ERROR          | Retry 3x with exponential backoff     | Exponential backoff       |
+| AUTH_ERROR             | No retry, surface to user immediately | Fail workflow             |
+| INVALID_CONFIG         | No retry, surface to user immediately | Fail workflow             |
+| QUOTA_EXCEEDED         | No retry, surface to user immediately | Fail workflow             |
+| NOT_FOUND              | No retry (idempotent operations OK)   | Continue/skip             |
+| ALREADY_EXISTS         | Treat as success (idempotent spawn)   | Continue                  |
+| ALREADY_TERMINATED     | Treat as success (idempotent term)    | Continue                  |
+
+### Retry Implementation (Workflow Layer)
+
+Providers throw errors - they don't implement retry logic.
+Workflow engine handles retries based on error code:
+
+```typescript
+// In workflow node execution (Ch6)
+async function executeNode(node: WorkflowNode): Promise<NodeResult> {
+  let attempts = 0;
+  const maxAttempts = getMaxAttempts(node.errorPolicy);
+
+  while (attempts < maxAttempts) {
+    try {
+      const result = await node.execute();
+      return { status: 'success', result };
+    } catch (error) {
+      if (!isProviderError(error)) throw error;
+
+      attempts++;
+
+      // No retry for permanent errors
+      if (!error.retryable) {
+        throw new WorkflowError('node_failed_permanent', { error, attempts });
+      }
+
+      // Handle retry strategies
+      switch (error.code) {
+        case 'CAPACITY_UNAVAILABLE':
+          // Retry-with-Alternative pattern (Ch6)
+          const alternative = await findAlternativeResource(node.params);
+          if (!alternative) throw error;
+          node.params = { ...node.params, ...alternative };
+          break;
+
+        case 'RATE_LIMITED':
+          // Exponential backoff with retry_after hint
+          const backoffMs = error.retryAfterMs || calculateBackoff(attempts);
+          await sleep(backoffMs);
+          break;
+
+        case 'PROVIDER_ERROR':
+        case 'NETWORK_ERROR':
+          // Exponential backoff (3 attempts max)
+          if (attempts >= 3) throw error;
+          await sleep(calculateBackoff(attempts));
+          break;
+
+        default:
+          throw error;
+      }
+    }
+  }
+
+  throw new WorkflowError('node_failed_max_retries', { attempts });
+}
+```
+
+### Backoff Calculation
+
+```typescript
+function calculateBackoff(attempt: number): number {
+  // Exponential backoff: 1s, 2s, 4s, 8s, ...
+  // With jitter to avoid thundering herd
+  const baseMs = 1000 * Math.pow(2, attempt - 1);
+  const jitterMs = Math.random() * baseMs * 0.2; // ±20% jitter
+  return Math.min(baseMs + jitterMs, 30000); // Cap at 30s
+}
+```
+
+### Provider Implementation Guidance
+
+Providers should:
+1. Detect error type from provider API response
+2. Map to standardized ProviderErrorCode
+3. Set retryable flag appropriately
+4. Include retryAfterMs for RATE_LIMITED (from API headers)
+5. Preserve provider-specific details in details field
+
+Example:
+```typescript
+// In AWS provider
+async spawn(options: SpawnOptions): Promise<AWSInstance> {
+  try {
+    const response = await ec2.runInstances(...);
+    return mapToInstance(response);
+  } catch (err) {
+    if (err.code === 'InsufficientInstanceCapacity') {
+      throw new ProviderError({
+        code: 'CAPACITY_UNAVAILABLE',
+        retryable: true,
+        provider: 'aws',
+        operation: 'spawn',
+        message: `No ${options.instanceType} capacity in ${options.region}`,
+        details: { region: options.region, instanceType: options.instanceType }
+      });
+    }
+    // ... handle other AWS error codes
+  }
+}
+```

@@ -4,48 +4,40 @@
 
 ## Purpose
 
-The material layer provides the persistent foundation for all system state.
-It implements two primary material patterns: Records (dedicated SQL tables for
-high-frequency queries) and Objects (flexible blob storage with tags for
-everything else). External provider state is cached in memory only, not persisted.
+The material layer provides persistent foundation for all system state.
+Three material types:
+- **RECORDS**: Dedicated SQL tables for high-frequency queries
+- **OBJECTS**: Flexible blob storage with tags
+- **EXTERNAL**: Provider state cached in-memory only (not persisted)
 
-Design Principles:
-- Avoid table proliferation. The objects table + object_tags handles flexible storage.
-- Simpler is better. No multi-layer caching schemes.
-- This is a ground-up rewrite. No migration from existing deployments needed.
+**Design Principles:**
+- Avoid table proliferation. Objects table + object_tags handles flexible storage.
+- Simple caching. In-memory TTL only, no multi-layer schemes.
 
-Why Object Material Pattern?
+**When to Use Each Pattern:**
+- Records: High-frequency queries, complex joins, FK constraints
+- Objects: Flexible schemas, varied resource types, tag-based filtering
 
-Dedicated tables require: schema migrations per type, new indexes, new cleanup logic.
-Objects + tags require: zero schema changes for new resource types.
-
-Before: separate tables for snapshots, artifacts, logs, blobs (4+ tables, 4+ migration files)
-After: objects table + type tag (1 table, consistent query patterns)
-
-Use dedicated tables for: high-frequency queries, complex joins, FK constraints
-Use objects for: flexible schemas, varied resource types, tag-based filtering
+Objects eliminate schema migrations for new resource types. Before: separate
+tables for snapshots, artifacts, logs, blobs (4+ tables). After: objects table
++ type tag (1 table, consistent query patterns).
 
 ## 2.1 Records Schema (Dedicated Tables)
 
-Records are used for high-frequency query patterns requiring complex joins,
-indexes, and foreign key relationships. These tables represent the core
-resources of the system.
+Records handle high-frequency query patterns requiring complex joins, indexes,
+and foreign key relationships.
 
 **ID Scheme:**
+Primary keys use INTEGER AUTOINCREMENT (faster joins, smaller indexes, better
+SQLite performance). Sequential IDs cluster by access pattern. Future: can
+migrate to Snowflake IDs if multi-node needed.
 
-Primary keys use INTEGER AUTOINCREMENT for performance and efficiency:
-- Integer primary keys: faster joins, smaller indexes, better SQLite performance
-- Sequential IDs cluster by access pattern (recent resources accessed together)
-- Future distribution: can migrate to Snowflake IDs if multi-node needed
+**Slug Display Format:**
+User-facing IDs display as base-36 slugs: `id.toString(36)` (e.g., 12345 -> "9ix").
+Parse back: `parseInt(slug, 36)`. Benefits: shorter than UUIDs, sortable, human-friendly.
 
-**Slug (Display Format):**
-User-facing IDs are displayed as slugs - a base-36 alphanumeric representation
-that directly corresponds to the integer ID. For example, ID 12345 becomes slug "9ix".
-- Format: `id.toString(36)` for display
-- Parse: `parseInt(slug, 36)` for conversion back to ID
-- Benefits: shorter than UUIDs, sortable, human-friendly
-
-Exception: The objects table previously used TEXT PRIMARY KEY with checksums, but has been changed to INTEGER AUTOINCREMENT for multi-tenant support. Checksums are now stored as tags for deduplication and addressing.
+**Exception:** Objects table uses INTEGER AUTOINCREMENT (not TEXT checksum) for
+multi-tenant support. Checksums stored in a dedicated column for deduplication.
 
 ### instances Table
 
@@ -108,37 +100,25 @@ CREATE UNIQUE INDEX idx_instances_spawn_key ON instances(spawn_idempotency_key)
     WHERE spawn_idempotency_key IS NOT NULL;
 ```
 
-**Rationale:**
+**Key Design Decisions:**
 
-- `workflow_state` uses format `<workflow>:<phase>` throughout lifecycle.
-  Examples: 'spawn:pending', 'launch-run:provisioning', 'terminate:draining'.
-  No special terminal states like "available" - availability is INFERRED:
-  `isAvailable(instance) = workflow_state.endsWith(':complete') && current_manifest_id === null`
+- `workflow_state` format: `<workflow>:<phase>` (e.g., 'spawn:pending',
+  'launch-run:provisioning'). No "available" state stored - availability is
+  inferred: `workflow_state.endsWith(':complete') && current_manifest_id === null`
 
-- `workflow_error` stores error details when workflow_state ends in ':error'.
-  Keeps error context without overloading the state field.
+- `spawn_idempotency_key` enables two-phase spawn: format `${workflow_id}:${node_id}`.
+  Unique index ensures one spawn per workflow node, enables retry detection.
 
-- `spawn_idempotency_key` enables two-phase spawn protocol: format is
-  `${workflow_id}:${node_id}`. Used to detect retries and reconcile orphaned
-  spawn attempts. Unique index ensures one spawn per workflow node.
+- `provider_id` empty during spawn:pending, populated after provider.spawn()
+  succeeds. Unique index allows multiple spawn:pending but enforces uniqueness
+  once assigned.
 
-- `provider_id` defaults to empty string during spawn:pending phase, populated
-  after provider.spawn() succeeds. Unique index allows multiple spawn:pending
-  records but enforces uniqueness once provider_id is assigned.
+- `init_checksum` enables warm pool matching (spec + checksum = reusable).
 
-- `current_manifest_id` establishes ownership chain. Null means "available for
-  adoption by any workflow".
+- Warm pool via allocations: `allocations WHERE status = 'AVAILABLE'`.
+  See Chapter 5 for details.
 
-- `init_checksum` enables warm pool matching: instances with same spec +
-  init_checksum can be reused without re-initialization.
-
-- Warm pool is a query result, not a flag: `allocations WHERE status = 'AVAILABLE'`.
-  No need for instance-level warm tracking - allocations express availability.
-  Instance availability is inferred via `isAvailable()` helper.
-
-- Removed `active_ssh_sessions` count. SSH connections are per-allocation, not
-  per-instance. Tracked via allocations in HELD state with `hold_reason = 'ssh_active'`.
-  Instance agent reports active allocation IDs via heartbeat payload.
+- SSH sessions tracked per-allocation (via debug_hold_until), not per-instance.
 
 **Example queries:**
 
@@ -216,24 +196,17 @@ CREATE INDEX idx_runs_created ON runs(created_at DESC);
 CREATE INDEX idx_runs_duration ON runs(started_at, finished_at);
 ```
 
-**Rationale:**
+**Key Design Decisions:**
 
-- Removed `instance_id` FK. Run-to-instance binding is now via `allocations`
-  table, supporting multiple instances per run (future) and multiple runs
-  per instance (warm pool).
+- No `instance_id` FK. Run-to-instance binding via allocations table. Supports
+  multiple instances per run (future) and multiple runs per instance (warm pool).
 
-- Removed `files_ready`, `files_synced`, `bytes_synced`. File manifests now
-  stored as objects with type='run_file'.
+- File state moved to objects: type='run_file' for manifests, type='artifact'
+  for outputs. Removes `files_ready`, `files_synced`, `bytes_synced`, `artifacts_json`.
 
-- Removed `artifacts_json`. Artifacts now stored as objects with tags pointing
-  to run_id.
+- Grace period replaced by allocation debug_hold_until field (Chapter 5).
 
-- Removed `grace_period_ms`, `grace_period_on_failure_ms`. Grace period
-  mechanism replaced by allocation HELD state.
-
-- `workflow_state` uses format `<workflow>:<phase>` throughout lifecycle.
-  Examples: 'launch-run:pending', 'launch-run:running', 'launch-run:complete'.
-  Availability is inferred: `isAvailable(run) = workflow_state.endsWith(':complete') && current_manifest_id === null`
+- `workflow_state` format: `<workflow>:<phase>`. Availability inferred same as instances.
 
 **Example queries:**
 
@@ -277,21 +250,21 @@ CREATE TABLE allocations (
     instance_id INTEGER NOT NULL,           -- Instance hosting this allocation
 
     -- Status
-    status TEXT NOT NULL,                   -- AVAILABLE, CLAIMED, ACTIVE, HELD, COMPLETE, FAILED
+    status TEXT NOT NULL,                   -- AVAILABLE, CLAIMED, ACTIVE, COMPLETE, FAILED
     current_manifest_id INTEGER,            -- Owning manifest
 
     -- Execution Context
     user TEXT NOT NULL DEFAULT 'ubuntu',    -- Unix user (platform-dependent)
     workdir TEXT NOT NULL,                  -- Working directory path
 
-    -- Hold Mechanism (replaces grace_period)
-    hold_until INTEGER,                     -- Unix timestamp ms (null if not in HELD)
-    hold_reason TEXT,                       -- 'ssh_active', 'explicit', 'debug'
-    max_hold_duration_ms INTEGER DEFAULT 86400000, -- 24 hours hard limit
+    -- Debug Hold Mechanism (replaces grace_period)
+    debug_hold_until INTEGER,               -- Unix timestamp ms (null if no hold)
+                                            -- Blocks termination if > NOW, enables SSH when COMPLETE
 
     -- Timestamps
     created_at INTEGER NOT NULL,            -- Unix timestamp ms
     updated_at INTEGER NOT NULL,            -- Unix timestamp ms
+    completed_at INTEGER,                   -- Unix timestamp ms (set when status transitions to COMPLETE or FAILED)
 
     -- Foreign Keys
     FOREIGN KEY (run_id) REFERENCES runs(id),
@@ -304,45 +277,31 @@ CREATE INDEX idx_allocations_status ON allocations(status);
 CREATE INDEX idx_allocations_instance ON allocations(instance_id, status);
 CREATE INDEX idx_allocations_run ON allocations(run_id);
 CREATE INDEX idx_allocations_manifest ON allocations(current_manifest_id);
-CREATE INDEX idx_allocations_hold ON allocations(hold_until)
-    WHERE status = 'HELD' AND hold_until IS NOT NULL;
+CREATE INDEX idx_allocations_debug_hold ON allocations(debug_hold_until)
+    WHERE debug_hold_until IS NOT NULL;
 
 -- Warm pool query optimization
 CREATE INDEX idx_allocations_available ON allocations(instance_id, status, workdir)
     WHERE status = 'AVAILABLE';
 ```
 
-**Rationale:**
+**Key Design Decisions:**
 
-- Allocation IS the lifecycle primitive. An allocation in AVAILABLE state IS
-  a warm pool advertisement. No separate warm pool concept needed.
+- Allocation is the lifecycle primitive. AVAILABLE state IS the warm pool -
+  no separate concept. See Chapter 5 for the full state machine.
 
-- `user` and `workdir` enable per-allocation isolation on platforms that
-  support it. Platforms that don't can default to system user.
+- `user` and `workdir` enable per-allocation isolation. Each allocation gets
+  unique workdir (`/home/ubuntu/work_1`, `work_2`, etc.) and SSH entry.
 
-- `hold_until` replaces grace period. HELD state is explicit, with clear
-  extension mechanism and hard limit.
+- `debug_hold_until` replaces grace period. When set on COMPLETE allocations,
+  blocks termination and enables SSH access until timestamp expires. Simpler than
+  explicit state for debugging.
 
-- Two timestamps only. Detailed lifecycle timeline derived from workflow nodes
-  if needed for debugging.
+- Two timestamps only (created_at, updated_at). Detailed timeline from workflow
+  nodes if needed.
 
-- SSH connections are per-allocation, not per-instance. Each allocation gets:
-  * Unique allocation ID used as SSH host identifier (`ssh <alloc_id>`)
-  * Own workdir path (e.g., `/home/ubuntu/work_1`, `/home/ubuntu/work_2`)
-  * Own user context (default: platform native user like "ubuntu")
-  * SSH config entry that automatically connects to correct instance/workdir
-  Multiple allocations on one instance get separate SSH entries pointing to
-  same IP but different workdirs. Different workdirs mean old runs remain
-  accessible after completion, reducing HELD importance (but not eliminating it -
-  still can't terminate instance with active SSH).
-
-- Status transitions:
-  * AVAILABLE → CLAIMED (run assignment)
-  * CLAIMED → ACTIVE (execution starts)
-  * ACTIVE → HELD (execution finishes, debugging window)
-  * ACTIVE → FAILED (lifecycle failure, e.g., file sync error)
-  * HELD → COMPLETE (hold expires)
-  * CLAIMED/ACTIVE → FAILED (lifecycle error triggers instance termination)
+- Status transitions: AVAILABLE -> CLAIMED -> ACTIVE -> COMPLETE.
+  FAILED branch for lifecycle errors (file sync failure, etc.).
 
 **Example queries:**
 
@@ -362,37 +321,38 @@ SET status = 'CLAIMED', run_id = $run_id, updated_at = $now
 WHERE id = $alloc_id AND status = 'AVAILABLE'
 RETURNING *;
 
--- Find allocations needing hold expiry
+-- Find allocations eligible for cleanup (hold expired)
 SELECT * FROM allocations
-WHERE status = 'HELD'
-  AND hold_until < $now;
+WHERE status = 'COMPLETE'
+  AND (debug_hold_until IS NULL OR debug_hold_until < $now);
 
 -- SSH connection lookup (allocation by short ID)
 SELECT a.*, i.ip
 FROM allocations a
 JOIN instances i ON a.instance_id = i.id
 WHERE a.id LIKE $short_id || '%'
-  AND a.status IN ('ACTIVE', 'HELD');
+  AND (a.status = 'ACTIVE' OR (a.status = 'COMPLETE' AND a.debug_hold_until > $now));
 
 -- List all allocations with active SSH access (for SSH config generation)
 SELECT a.id, a.user, a.workdir, i.ip, i.provider
 FROM allocations a
 JOIN instances i ON a.instance_id = i.id
-WHERE a.status IN ('ACTIVE', 'HELD')
+WHERE (a.status = 'ACTIVE' OR (a.status = 'COMPLETE' AND a.debug_hold_until > $now))
   AND i.workflow_state NOT LIKE 'terminate:%'
 ORDER BY a.created_at;
 ```
 
 **SSH Config Regeneration:**
 
-SSH config is regenerated client-side when allocation states change. The control
-plane exposes allocation state via API, and the CLI watches for changes:
-- New allocation enters ACTIVE or HELD (add SSH entry)
-- Allocation leaves HELD (remove SSH entry)
+SSH config regenerates client-side when allocation states change. Control plane
+exposes allocation state via API, CLI watches for changes:
+- New allocation enters ACTIVE (add SSH entry)
+- Allocation enters COMPLETE with debug_hold_until set (add SSH entry)
+- Allocation debug_hold_until expires (remove SSH entry)
 - Instance IP changes via Tailscale or provider update (update SSH entry)
 
 Each SSH config entry uses allocation ID as host identifier and includes workdir
-in RemoteCommand for automatic directory changing on connection.
+in RemoteCommand for automatic directory change on connection.
 
 ### workflows Table
 
@@ -409,7 +369,7 @@ CREATE TABLE workflows (
     depth INTEGER NOT NULL DEFAULT 0,       -- Subworkflow nesting depth (max 3)
 
     -- Status
-    status TEXT NOT NULL,                   -- pending, running, completed, failed, rolled_back
+    status TEXT NOT NULL,                   -- pending, running, completed, failed, cancelled, rolling_back
     current_node TEXT,                      -- Current executing node ID
 
     -- Input/Output
@@ -425,6 +385,10 @@ CREATE TABLE workflows (
 
     -- Idempotency
     idempotency_key TEXT,                   -- Client-provided idempotency key
+
+    -- Timeout
+    timeout_ms INTEGER,                     -- Workflow timeout in milliseconds (null = no timeout)
+    timeout_at INTEGER,                     -- Computed: started_at + timeout_ms (null if no timeout or not started)
 
     -- Timestamps
     created_at INTEGER NOT NULL,            -- Unix timestamp ms
@@ -446,17 +410,15 @@ CREATE UNIQUE INDEX idx_workflows_idempotency ON workflows(idempotency_key)
     WHERE idempotency_key IS NOT NULL;
 ```
 
-**Rationale:**
+**Key Design Decisions:**
 
-- `type` identifies the workflow blueprint (launch-run, terminate, etc).
+- `type` identifies workflow blueprint (launch-run, terminate, create-snapshot, etc).
 
-- `parent_workflow_id` + `depth` support subworkflows with depth limit (max 3).
+- `parent_workflow_id` + `depth` support subworkflows (max depth 3).
 
-- `input_json` / `output_json` store workflow parameters and results. Flexible
-  schema without proliferating columns.
+- `input_json` / `output_json` store parameters and results as flexible JSON.
 
-- `idempotency_key` enables client-side retry safety. Same key + same input
-  returns existing workflow.
+- `idempotency_key` enables client retry safety (same key returns existing workflow).
 
 **Example queries:**
 
@@ -517,16 +479,19 @@ CREATE INDEX idx_workflow_nodes_status ON workflow_nodes(workflow_id, status);
 CREATE INDEX idx_workflow_nodes_type ON workflow_nodes(node_type, status);
 ```
 
-**Rationale:**
+**Key Design Decisions:**
 
-- `node_id` is workflow-scoped (unique within workflow, not globally).
+- `node_id` workflow-scoped (unique within workflow, not globally).
 
-- `node_type` identifies the handler. Same handler may appear multiple times
-  in complex workflows (e.g., parallel fan-out creates multiple spawn nodes).
+- `node_type` identifies handler. Same handler may appear multiple times
+  (e.g., parallel fan-out creates multiple spawn nodes).
 
-- `attempt` + `retry_reason` support retry patterns (RETRY-WITH-ALTERNATIVE).
+- `attempt` + `retry_reason` support retry patterns.
 
-- Cascade delete: when workflow deleted, nodes auto-delete.
+- Cascade delete: workflow deletion auto-deletes nodes.
+
+- **Why separate table:** Nodes execute concurrently (Promise.all). JSON blob
+  would cause read-modify-write races. Separate table = SQLite row-level locking.
 
 **Example queries:**
 
@@ -553,8 +518,8 @@ ORDER BY created_at;
 
 ## 2.2 Objects Schema (Flexible Material)
 
-The objects table provides flexible material for resources that don't need
-dedicated tables. Combined with object_tags for efficient querying.
+Objects table provides flexible material for resources without dedicated tables.
+Combined with object_tags for efficient querying.
 
 ### objects Table
 
@@ -562,30 +527,17 @@ dedicated tables. Combined with object_tags for efficient querying.
 CREATE TABLE objects (
     -- Identity
     id INTEGER PRIMARY KEY AUTOINCREMENT,   -- Integer ID for multi-tenant support
-    type TEXT NOT NULL,                     -- snapshot, artifact, log, blob, run_file, etc
+    type TEXT NOT NULL,                     -- snapshot, artifact, log, run_file (NOT blob)
+
+    -- Blob reference (all payload storage delegated to blobs table)
+    blob_id INTEGER NOT NULL,               -- References blobs.id
 
     -- Provider Context
     provider TEXT,                          -- Provider that created this (null for generic)
     provider_object_id TEXT,                -- Provider's ID for this object (e.g., snap-xxx)
 
-    -- Metadata
-    size_bytes INTEGER NOT NULL DEFAULT 0,  -- Payload size in bytes
-    reservation INTEGER,                    -- Expected final size (invariant: >= size_bytes when set)
-                                            -- If set and > 4KB, object goes directly to S3
-    content_type TEXT,                      -- MIME type (application/json, text/plain, etc)
-
-    -- Content Hash
-    checksum TEXT,                          -- SHA-256 hash (null if not computed/applicable)
-    checksum_bytes INTEGER,                 -- Bytes covered by checksum (null when checksum null)
-                                            -- When checksum_bytes == size_bytes, checksum is current
-                                            -- When checksum_bytes < size_bytes, checksum is stale
-
-    -- Payload
-    payload BLOB,                           -- Binary data (may be JSON, text, or binary)
-
-    -- S3 Offload
-    s3_key TEXT,                            -- S3 key if payload offloaded (payload is null)
-    s3_bucket TEXT,                         -- S3 bucket name
+    -- Metadata (type-specific, stored as JSON)
+    metadata_json TEXT,                     -- Type-specific metadata (path, content-type, etc.)
 
     -- Lifecycle
     expires_at INTEGER,                     -- Unix timestamp ms (null = never expires)
@@ -593,23 +545,28 @@ CREATE TABLE objects (
 
     -- Timestamps
     created_at INTEGER NOT NULL,            -- Unix timestamp ms
-    updated_at INTEGER NOT NULL,            -- Unix timestamp ms (for append-style logs)
+    accessed_at INTEGER,                    -- Last access timestamp
 
     -- Foreign Keys
+    FOREIGN KEY (blob_id) REFERENCES blobs(id) ON DELETE RESTRICT,
     FOREIGN KEY (current_manifest_id) REFERENCES manifests(id)
 );
 
 -- Indexes
 CREATE INDEX idx_objects_type ON objects(type, created_at DESC);
+CREATE INDEX idx_objects_blob ON objects(blob_id);
 CREATE INDEX idx_objects_provider ON objects(provider, type);
 CREATE INDEX idx_objects_manifest ON objects(current_manifest_id);
-CREATE INDEX idx_objects_checksum ON objects(type, checksum)
-    WHERE checksum IS NOT NULL;           -- For blob deduplication
 CREATE INDEX idx_objects_expires ON objects(expires_at)
     WHERE expires_at IS NOT NULL;
-CREATE INDEX idx_objects_s3 ON objects(s3_bucket, s3_key)
-    WHERE s3_key IS NOT NULL;
 ```
+
+**Key Design Decisions:**
+
+- `blob_id` references blobs table - ALL payload storage is in blobs, objects are metadata
+- ON DELETE RESTRICT prevents blob deletion while objects reference it (background GC handles cleanup)
+- No payload/s3_key/s3_bucket on objects - these are blob concerns
+- `metadata_json` stores type-specific fields (path for run_file, mime-type for artifact, etc.)
 
 ### object_tags Table
 
@@ -626,23 +583,172 @@ CREATE TABLE object_tags (
 CREATE INDEX idx_object_tags_tag ON object_tags(tag);
 ```
 
-**Rationale:**
+**Key Design Decisions:**
 
-- Replaces `tags_json` column with normalized tag table for efficient lookups.
-- Tags use `key:value` format (e.g., `run_id:abc123`, `init_checksum:sha256...`).
-- Cascade delete: when object deleted, tags auto-delete.
-- Index on `tag` enables fast lookups like `WHERE tag = 'run_id:abc123'`.
-- Note: Blob checksums use the `checksum` column (not tags) for efficient deduplication.
+- Tags use `key:value` format (e.g., `run_id:abc123`). Index on `tag` enables
+  fast lookups. Cascade delete with object.
 
-**Rationale for INTEGER ID:**
+- Objects reference blobs via `blob_id` foreign key. All payload storage is in blobs table.
 
-The objects table uses INTEGER AUTOINCREMENT instead of TEXT checksum as primary key:
-- **Multi-tenant support**: With TEXT checksum IDs, checksum collisions across tenants
-  would prevent proper ACL enforcement (can't distinguish which tenant owns the object)
-- **Cost attribution**: Need to track which tenant/bucket owns each object for billing
-- **Bucket concept**: Objects belong to buckets with access control lists
-- **Deduplication preserved**: Checksum column enables same deduplication behavior
-  via query-before-insert pattern (query by type + checksum, insert if not found)
+- ON DELETE RESTRICT on blob_id ensures blobs aren't deleted while referenced.
+  Background GC cleans unreferenced blobs (required because DB cascade can't reach S3).
+
+### Blob Storage and Deduplication
+
+All objects store payload data in the `blobs` table. The blobs table provides
+content-addressable storage with optional deduplication, simple cleanup (no reference
+counting), and consistent SBO (small-buffer-optimization for files ≤64KB).
+
+```sql
+CREATE TABLE blobs (
+    -- Identity
+    id INTEGER PRIMARY KEY AUTOINCREMENT,   -- Integer ID (NOT checksum)
+
+    -- Bucket scoping (multi-tenant isolation)
+    bucket TEXT NOT NULL,                   -- Tenant bucket identifier
+
+    -- Content hash
+    checksum TEXT NOT NULL,                 -- SHA-256 hash (NOT unique - same checksum can exist multiple times)
+    checksum_bytes INTEGER,                 -- Bytes covered by checksum (null when checksum null)
+                                            -- When checksum_bytes == size_bytes, checksum is current
+                                            -- When checksum_bytes < size_bytes, checksum is stale (after append)
+
+    -- Storage location (SBO: Small Buffer Optimization)
+    s3_key TEXT,                            -- S3 key if >64KB (null if inline)
+    s3_bucket TEXT,                         -- S3 bucket if >64KB (null if inline)
+    payload BLOB,                           -- Inline data if ≤64KB (null if S3)
+
+    -- Metadata
+    size_bytes INTEGER NOT NULL,            -- Total size in bytes
+
+    -- Timestamps
+    created_at INTEGER NOT NULL,            -- Unix timestamp ms
+    last_referenced_at INTEGER NOT NULL     -- Unix timestamp ms (updated on ref)
+);
+
+-- Indexes
+CREATE INDEX idx_blobs_dedup ON blobs(bucket, checksum); -- Optimization for dedup lookups, NOT constraint
+CREATE INDEX idx_blobs_last_ref ON blobs(last_referenced_at);
+CREATE INDEX idx_blobs_s3 ON blobs(s3_bucket, s3_key)
+    WHERE s3_key IS NOT NULL;
+```
+
+**Key Fields:**
+- `id`: Integer primary key (allows multiple blobs with same checksum - logs may transiently match then diverge on append)
+- `bucket`: Tenant identifier for multi-tenant isolation
+- `checksum`: SHA-256 hash (indexed for dedup lookups, but NOT unique)
+- `checksum_bytes`: Bytes covered by checksum - when `< size_bytes`, checksum is stale (needs recomputation after append)
+- `payload` OR `s3_key`/`s3_bucket`: SBO inline (≤64KB) vs S3 reference (>64KB)
+- `last_referenced_at`: Tracks active usage for GC
+
+**Upload Flow (with optional deduplication):**
+
+For immutable content (e.g., run inputs):
+1. CLI computes SHA-256 checksums for files to upload
+2. Call `checkBlobsExist(bucket, checksums[])` → returns existing/missing
+3. Upload only missing files (SBO handled by blobs table)
+4. Create blob records for newly uploaded
+5. Create object records referencing blobs by checksum
+
+For mutable content (e.g., logs):
+1. Always create new blob (no dedup check)
+2. Create object record referencing blob
+
+```typescript
+// Example: check which blobs already exist
+async function checkBlobsExist(
+  bucket: string,
+  checksums: string[]
+): Promise<{ existing: string[], missing: string[] }> {
+  const existing = await db.all(
+    `SELECT DISTINCT checksum FROM blobs
+     WHERE bucket = ?
+       AND checksum IN (${checksums.map(() => '?').join(',')})`,
+    [bucket, ...checksums]
+  );
+  const existingSet = new Set(existing.map(r => r.checksum));
+  return {
+    existing: checksums.filter(c => existingSet.has(c)),
+    missing: checksums.filter(c => !existingSet.has(c))
+  };
+}
+```
+
+**Manifest Cleanup (Simplified):**
+
+When manifest expires:
+
+1. Get all objects owned by manifest:
+   ```sql
+   SELECT resource_id FROM manifest_resources
+   WHERE manifest_id = $manifest_id
+     AND resource_type = 'object';
+   ```
+2. Delete objects (no reference counting needed):
+   ```sql
+   DELETE FROM objects WHERE id IN ($object_ids);
+   ```
+3. Delete manifest_resources entries (cascades)
+4. Blobs remain until background GC cleans unreferenced ones
+
+**Background Blob GC:**
+
+Separate background job finds and removes orphaned blobs. This is necessary
+because **DB cascade cannot reach S3** - when run_file objects are deleted from
+the database, we need a background process to clean up the corresponding S3
+objects that blobs reference.
+
+Process:
+
+1. Find blobs with no referencing objects + 24h grace period:
+   ```sql
+   SELECT b.id, b.bucket, b.checksum, b.s3_key, b.s3_bucket
+   FROM blobs b
+   WHERE b.last_referenced_at < $cutoff_24h_ago
+     AND NOT EXISTS (
+       SELECT 1 FROM objects o
+       WHERE o.blob_id = b.id
+     );
+   ```
+2. **Delete S3 objects** for orphaned blobs (if s3_key present)
+   - This step is why background GC exists - DB cascade can't delete from S3
+   - Must call `s3.deleteObject()` for each blob with s3_key
+3. Delete blob records from blobs table
+
+**Grace Period Rationale:**
+
+24-hour grace period handles:
+- In-flight uploads (client computing checksums, uploading files)
+- Concurrent runs (multiple manifests creating run_files for same blob)
+- Clock skew and reconciliation delays
+
+**Why Background GC is Needed:**
+
+Database CASCADE DELETE only affects database tables. When a run_file object is
+deleted, its foreign key references are cleaned up automatically, but the S3
+objects that blobs reference are external to the database. A background job must
+explicitly call S3 API to delete orphaned objects. Inline blobs (≤64KB) are
+cleaned up via simple DELETE since payload is in the database.
+
+**Blob Storage (All Files):**
+
+All files go through the blobs table. The blobs table handles small-buffer-
+optimization (SBO) internally:
+- Files ≤64KB: Stored inline in `blobs.payload`
+- Files >64KB: Stored in S3, referenced by `blobs.s3_key`/`s3_bucket`
+
+Objects reference blobs by checksum. Deduplication is decided per-upload:
+
+```sql
+-- WITH DEDUP (immutable content): check exists, reuse or create
+-- WITHOUT DEDUP (mutable content like logs): always create new blob
+-- Both paths end with: INSERT INTO objects ... RETURNING id
+```
+
+See implementation for full SQL patterns (inline vs S3, dedup vs no-dedup variants).
+
+**Multi-Tenant Isolation:** Blobs scoped by bucket for clean tenant deletion,
+cost attribution, and security isolation. Trade-off: storage duplication across tenants.
 
 **Object Types:**
 
@@ -660,23 +766,16 @@ The objects table uses INTEGER AUTOINCREMENT instead of TEXT checksum as primary
    - Payload: Log data (text, newline-delimited)
    - Updated via append operations
 
-4. **blob** - Content-addressable file storage
-   - ID: Integer AUTOINCREMENT (changed from checksum for multi-tenant support)
-   - Checksum: SHA-256 in `checksum` column (for addressing and deduplication)
-   - Payload: File contents (or S3 reference if large)
-   - Deduplicated: query by `type='blob' AND checksum=?` to find existing blob before insert
-
-5. **run_file** - File manifest entry for a run
+4. **run_file** - Input file for a run
    - Tags: `run_id:<id>`, `path:<filepath>`
-   - Checksum: SHA-256 in `checksum` column (references blob by checksum)
-   - Payload: null (data stored in referenced blob)
-   - Tracks which files belong to which run
+   - Checksum: SHA-256 (references blob)
+   - Benefits most from CAS dedup (user uploads 10GB, changes 2 files, re-uploads - only 2 files transfer)
 
-6. **tailscale_machine** - Tailscale machine state
+5. **tailscale_machine** - Tailscale machine state
    - Tags: `instance_id:<id>`
    - Payload: JSON with machine ID, auth key, status
 
-7. **feature_installation** - Feature install state
+6. **feature_installation** - Feature install state
    - Tags: `instance_id:<id>`, `feature:tailscale` or `feature:nvidia-driver`
    - Payload: JSON with status, version, installed_at
 
@@ -698,14 +797,15 @@ WHERE o.type = 'artifact'
   AND ot_run.tag = 'run_id:' || $run_id
   AND ot_path.tag LIKE 'path:%';
 
--- Find blob by checksum (content-addressable lookup via column)
-SELECT * FROM objects
-WHERE type = 'blob'
+-- Find blob by checksum (content-addressable lookup)
+SELECT * FROM blobs
+WHERE bucket = $bucket
   AND checksum = $checksum;
 
--- Find run files for a run
-SELECT o.id, o.checksum, ot_path.tag as path
+-- Find run files for a run (join blobs to get checksum)
+SELECT o.id, b.checksum, ot_path.tag as path
 FROM objects o
+JOIN blobs b ON o.blob_id = b.id
 JOIN object_tags ot_run ON o.id = ot_run.object_id
 JOIN object_tags ot_path ON o.id = ot_path.object_id
 WHERE o.type = 'run_file'
@@ -722,53 +822,15 @@ SELECT * FROM objects
 WHERE expires_at < $now;
 ```
 
-### Blob Deduplication
-
-Blobs use checksum-based deduplication via the `checksum` column. Check for existing blob before insert.
-
-```sql
--- Check for existing blob with same checksum
-SELECT id FROM objects
-WHERE type = 'blob'
-  AND checksum = $checksum;
-
--- If not found, store a new blob
-INSERT INTO objects (type, size_bytes, checksum, checksum_bytes, payload, created_at, updated_at)
-VALUES ('blob', $size, $checksum, $size, $data, $now, $now)
-RETURNING id;
-
--- Reference blob from run_file
-INSERT INTO objects (type, checksum, created_at, updated_at)
-VALUES ('run_file', $checksum, $now, $now)
-RETURNING id;
-
-INSERT INTO object_tags (object_id, tag) VALUES
-    ($run_file_id, 'run_id:' || $run_id),
-    ($run_file_id, 'path:' || $path);
-```
-
-**Garbage collection:** Blobs with no referencing run_file objects can be deleted.
-
-```sql
--- Find orphaned blobs (no run_file references them)
-SELECT b.id FROM objects b
-WHERE b.type = 'blob'
-  AND NOT EXISTS (
-    SELECT 1 FROM objects rf
-    WHERE rf.type = 'run_file'
-      AND rf.checksum = b.checksum
-  );
-```
-
 ### Log Streaming Support
 
-Logs are stored as objects with special handling for streaming:
+Logs stored as objects with special streaming handling:
 
 1. **Append model**: New log data appends to payload, updates `updated_at`
 2. **Size limit**: When object exceeds threshold (e.g., 1MB), create new object
    with sequence tag: `sequence:2`
 3. **Client streaming**: Clients poll with `WHERE updated_at > $last_seen`
-4. **Checksum staleness**: After append, `checksum_bytes < size_bytes` (checksum is stale)
+4. **Checksum staleness**: After append, `checksum_bytes < size_bytes` (checksum stale)
 
 ```sql
 -- Append log data (application-level operation)
@@ -793,36 +855,42 @@ ORDER BY o.updated_at;
 
 ### S3 Offload Strategy
 
-Large objects (>4KB threshold) offloaded to S3 to keep DB manageable.
+Large objects (>64KB threshold) offload to S3 to keep DB manageable.
 
 **Material decision:**
 
-- Objects ≤4KB: Stored inline in `payload` column (small buffer optimization)
-- Objects >4KB: Stored in S3, `payload` is NULL, `s3_key`/`s3_bucket` populated
-- Objects with `reservation` set and > 4KB: Go directly to S3 (skip inline)
+- Objects ≤64KB: Stored inline in `payload` column (small buffer optimization)
+- Objects >64KB: Stored in S3, `payload` NULL, `s3_key`/`s3_bucket` populated
+- Objects with `reservation` > 64KB: Go directly to S3 (skip inline)
+
+**Threshold rationale (64KB default, configurable):**
+- SQLite handles BLOBs up to ~100KB efficiently (especially with `incremental_vacuum`)
+- S3 adds latency (~50-200ms TTFB) plus per-request cost (~$0.0004/1K)
+- Below 64KB, SQLite wins on speed and cost
+- Adjust based on workload: lower for write-heavy, higher for read-heavy
 
 **Reservation field:**
 
-The `reservation` column allows pre-declaring expected object size. Invariant: `reservation >= size_bytes`.
+`reservation` column allows pre-declaring expected object size. Invariant: `reservation >= size_bytes`.
 Use cases:
 - Logs expected to grow: set `reservation` to expected max size (e.g., 1MB)
 - Streaming uploads: reserve space in S3 before content arrives
-- Avoids migration from inline → S3 when object grows past 4KB threshold
+- Avoids migration from inline → S3 when object grows past 64KB
 
 **Presigned URL abstraction:**
 
-Agent/CLI always use presigned URLs for all object operations. The control plane
-generates URLs that abstract over the storage location:
+Agent/CLI always use presigned URLs for all object operations. Control plane
+generates URLs abstracting over storage location:
 
-- **Large objects (>4KB)**: Presigned URL points directly to S3
+- **Large objects (>64KB)**: Presigned URL points directly to S3
   - Agent/CLI uploads/downloads directly to/from S3 (no control plane bottleneck)
 
-- **Small objects (≤4KB)**: Presigned URL points to control plane endpoint
+- **Small objects (≤64KB)**: Presigned URL points to control plane endpoint
   - Agent/CLI issues same PUT/GET operations to presigned URL
   - Control plane endpoint reads/writes inline payload in objects table
   - Agent code doesn't change - same HTTP operations work for both cases
 
-**Offload process (>4KB objects):**
+**Offload process (>64KB objects):**
 
 1. Upload payload to S3: `s3://$bucket/objects/$object_id`
 2. Update object record:
@@ -834,7 +902,7 @@ generates URLs that abstract over the storage location:
    WHERE id = $object_id;
    ```
 
-**Inline material process (≤4KB objects):**
+**Inline material process (≤64KB objects):**
 
 1. Store payload directly in objects table:
    ```sql
@@ -850,7 +918,7 @@ generates URLs that abstract over the storage location:
 **Cleanup process:**
 
 When object deleted, also delete S3 object if `s3_key` present. Inline objects
-are cleaned up via CASCADE DELETE on object_tags and manifest_resources.
+cleaned up via CASCADE DELETE on object_tags and manifest_resources.
 
 ## 2.3 Supporting Tables
 
@@ -915,11 +983,11 @@ CREATE INDEX idx_manifest_resources_lookup ON manifest_resources(resource_type, 
 CREATE INDEX idx_manifest_resources_priority ON manifest_resources(manifest_id, cleanup_priority);
 ```
 
-**Rationale:**
+**Key Design Decisions:**
 
 - Generic join table supports any resource type without schema changes.
-- Cleanup priority determines deletion order when manifest expires.
-- Cascade delete: when manifest deleted, all resource links deleted.
+- Cleanup priority determines deletion order when manifest expires (higher = sooner).
+- Cascade delete with manifest. See Chapter 4 for manifest lifecycle.
 
 **Example queries:**
 
@@ -979,11 +1047,12 @@ CREATE INDEX idx_usage_records_time ON usage_records(started_at, finished_at);
 CREATE INDEX idx_usage_records_cost ON usage_records(estimated_cost_usd DESC);
 ```
 
-**Rationale:**
+**Key Design Decisions:**
 
-- Captures usage at multiple granularities: instance, allocation, run.
+- Captures usage at multiple granularities (instance, allocation, run).
 - `duration_ms` and `estimated_cost_usd` computed on `finished_at` update.
-- Enables cost reporting by time period, provider, spec, run, etc.
+- Enables cost reporting by time period, provider, spec, run.
+- See Chapter 15 for billing and cost attribution details.
 
 **Example queries:**
 
@@ -1007,16 +1076,18 @@ SELECT * FROM usage_records WHERE finished_at IS NULL;
 
 ## 2.4 Caching Strategy
 
-External provider state (spot prices, capacity info, etc) should NOT be persisted
-in database tables. This data is ephemeral and caching it in tables adds complexity
-without benefit.
+External provider state (spot prices, capacity info) uses in-memory caching
+only - not persisted to database.
 
-**Recommended approach:**
+**Why in-memory only:**
+- Provider state changes frequently
+- Stale data worse than fresh API calls
+- No cache invalidation complexity
+- Simpler = fewer bugs
 
-Use light in-memory caching at the application layer:
+**Implementation:** Simple TTL cache wrapper at application layer:
 
 ```typescript
-// Simple TTL cache wrapper
 async function getWithCache<T>(
   key: string,
   ttlMs: number,
@@ -1031,19 +1102,11 @@ async function getWithCache<T>(
   return value;
 }
 
-// Usage
+// Example: 5 minute TTL for spot prices
 const spotPrices = await getWithCache(
   'aws:spot_prices:us-east-1',
-  5 * 60 * 1000,  // 5 minute TTL
+  5 * 60 * 1000,
   () => aws.describeSpotPriceHistory(...)
 );
 ```
-
-**Why not persist:**
-
-- Provider state changes frequently (spot prices, capacity)
-- Stale cached data is worse than fresh API calls
-- In-memory cache handles the common case (reduce API calls within short window)
-- No need to manage cache invalidation, TTL cleanup, etc in database
-- Simpler system = fewer bugs
 

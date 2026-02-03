@@ -5,7 +5,7 @@
 - Collect files matching patterns from workdir
 
 ## Upload
-- Upload to presigned URLs (S3 or control plane for <4KB)
+- Upload to presigned URLs (S3 or control plane for ≤64KB)
 - SHA256 checksum calculation
 - Send ArtifactMessage confirmation after upload
 

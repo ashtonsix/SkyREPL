@@ -4,26 +4,49 @@
 
 ### StartRunMessage
 - type: 'start_run'
+- command_id: number  # For acknowledgment protocol (required)
 - run_id: number
 - allocation_id: number
 - command: string
 - workdir: string
-- files: Array<{ path: string, content: string }>
-- artifacts: Array<{ artifact_id: number, mount_path: string }>
+- files: Array<{ path: string, checksum: string, url: string }>
+  - path: Relative path in workdir (e.g., "train.py", "data/config.yaml")
+  - checksum: SHA256 checksum for verification (e.g., "sha256:abc123...")
+  - url: Presigned S3 URL or control plane URL for download
+    - S3 for files >64KB: presigned GET URL
+    - Control plane for files ≤64KB: GET /v1/blobs/:checksum
+- artifacts: string[]  # Glob patterns to collect (e.g., ["**/*.pt", "checkpoints/**"])
+- run_init?: boolean   # Run init script before command
+- init_script?: string # Init script content (if run_init=true)
+- create_snapshot?: boolean  # Create snapshot after run completes
 
 ### CancelRunMessage
 - type: 'cancel_run'
+- command_id: number  # For acknowledgment protocol (required)
 - run_id: number
+
+### PrepareSnapshotMessage
+- type: 'prepare_snapshot'
+- command_id: number  # For acknowledgment protocol (required)
+- instance_id: number
 
 ### CaptureArtifactsMessage
 - type: 'capture_artifacts'
+- command_id?: number  # Optional (fire-and-forget acceptable)
 - run_id: number
 
 ### TriggerTailscaleMessage
 - type: 'trigger_tailscale'
+- command_id?: number  # Optional (fire-and-forget acceptable)
 
 ### HeartbeatAckMessage
 - type: 'heartbeat_ack'
+
+### PrepareSnapshotAckMessage
+- type: 'prepare_snapshot_ack'
+- instance_id: number
+- success: boolean  # True if preparation successful, false on error
+- error?: string  # Error details if success=false
 
 ## Agent → Control (HTTP POST)
 
@@ -35,6 +58,7 @@
 - data: string
 - phase?: 'setup' | 'execution' | 'teardown'
 - timestamp: number
+- batch_sequence_id: number  # Monotonic counter per agent session, ensures ordering even if HTTP requests arrive out-of-order
 
 ### RunCompleteMessage
 - type: 'run_complete'
@@ -49,12 +73,19 @@
 - active_ssh_sessions: number
 - tailscale_status: 'not_installed' | 'installing' | 'ready' | 'failed'
 - workflow_state: object
-- command_ack: number[]
+- pending_command_acks: number[]  # Array of command IDs to acknowledge (autoincrement integers)
+- dropped_logs_count?: number  # Total count of logs dropped due to buffer overflow
 
-### SpotInterruptMessage
-- type: 'spot_interrupt'
+### SpotInterruptStartMessage (Phase 1)
+- type: 'spot_interrupt_start'
 - run_id: number
-- time_remaining_ms: number
+- time_remaining_ms: number  # Time remaining until forced termination (from IMDS)
+
+### SpotInterruptCompleteMessage (Phase 2)
+- type: 'spot_interrupt_complete'
+- run_id: number
+- checkpoint_exit_code?: number  # Exit code of checkpoint script (0=success, non-zero=failure, undefined=not run)
+- artifacts_uploaded: number  # Count of artifacts successfully uploaded during interrupt window
 
 ### PanicRequest
 - type: 'panic'
@@ -64,3 +95,33 @@
 - diagnostics_json: string
 - error_logs_json: string
 - timestamp: number
+
+## Command Acknowledgment Protocol
+
+Commands sent via SSE include a command_id field. Agent must acknowledge receipt.
+
+### Commands Requiring Acknowledgment
+- StartRunMessage: command_id required
+- CancelRunMessage: command_id required
+- PrepareSnapshotMessage: command_id required
+- CaptureArtifactsMessage: command_id optional (fire-and-forget acceptable)
+- TriggerTailscaleMessage: command_id optional (fire-and-forget acceptable)
+
+### Acknowledgment Flow
+1. Control sends command via SSE with command_id (autoincrement integer, NOT UUID)
+2. Agent receives command, adds command_id to pending_command_acks set
+3. Agent processes command, adds command_id to processed_command_ids (last 100)
+4. Agent includes pending_command_acks in next heartbeat
+5. Control receives heartbeat, marks commands in pending_command_acks as acknowledged
+6. Agent clears pending_command_acks after successful heartbeat
+
+### Timeout and Retry (Control Plane)
+- Timeout: 30s from command send
+- If no ack within 30s: Control resends command via SSE
+- Max retries: 3 attempts
+- After max retries: Mark command as failed, log error, continue
+
+### Deduplication (Agent)
+- Agent tracks last 100 command_ids in processed_command_ids (circular buffer)
+- On duplicate command_id: Skip execution, add to pending_command_acks immediately
+- Ensures idempotency on retries

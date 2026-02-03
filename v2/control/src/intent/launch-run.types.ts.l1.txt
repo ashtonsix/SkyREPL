@@ -1,7 +1,54 @@
-# workflow-launch-run.types.ts
+# launch-run.types.ts - Type definitions for launch-run intent
 
 ## LaunchRunInput
-runId: number, command, workdir, spec, provider, region, initChecksum, maxDurationMs, holdDurationMs, createSnapshot, files[], artifactPatterns[], env?
+
+```typescript
+interface LaunchRunInput {
+  // Required
+  runId: number;                              // DB ID for the run record
+  command: string;                            // Command to execute
+  spec: InstanceSpec;                         // Instance specification
+
+  // Optional - instance selection
+  preferWarmPool?: boolean;                   // Default: true
+  allowSpotFallback?: boolean;                // Default: true (try spot, fall back to on-demand)
+  provider?: ProviderName;                    // Specific provider, or let system choose
+  region?: string;                            // Specific region, or let system choose
+
+  // Optional - execution
+  workdir?: string;                           // Override workdir (default: auto-assigned)
+  env?: Record<string, string>;               // Environment variables
+  maxDurationMs?: number;                     // Timeout (default: 24 hours)
+  initChecksum?: string;                      // Checksum for warm pool matching
+
+  // Optional - files and artifacts
+  files?: Array<{ path: string; checksum: string }>;  // Files to sync
+  artifactPatterns?: string[];                // Glob patterns for artifact collection
+
+  // Optional - lifecycle
+  holdDurationMs?: number;                    // Hold period after run (default: 5 min)
+  createSnapshot?: boolean;                   // Create snapshot after run (default: false)
+  idempotencyKey?: string;                    // For duplicate submission prevention
+}
+```
 
 ## LaunchRunOutput
-runId: number, instanceId: number, allocationId: number, exitCode, snapshotId?: number, spotInterrupted
+
+```typescript
+interface LaunchRunOutput {
+  workflowId: number;
+  runId: number;
+  instanceId: number;
+  allocationId: number;
+  fromWarmPool: boolean;                      // True if claimed from warm pool
+  exitCode: number | null;                    // Null if run was cancelled/timed out
+  spotInterrupted: boolean;                   // True if spot interruption occurred
+  snapshotId?: number;                        // Set if createSnapshot was true
+  artifacts?: Array<{ id: number; path: string; sizeBytes: number }>;
+}
+```
+
+## Notes
+- IDs are numbers (INTEGER AUTOINCREMENT from database)
+- This file must stay in sync with launch-run.ts exports
+- See launch-run.ts for workflow graph and node descriptions

@@ -7,6 +7,11 @@
 { sealed: true, snapshotId?: string }
 
 ## Execute Steps
+- B4: Wait for active subworkflows before sealing:
+  - Query: SELECT id FROM workflows WHERE parent_workflow_id = ? AND status IN ('pending', 'running')
+  - If any found: await Promise.all(subworkflows.map(sw => ctx.waitForWorkflow(sw.id)))
+  - This blocks until all child workflows complete (success or failure)
+  - Prevents parent from sealing manifest while child still emitting resources
 - Seal manifest: db.sealManifest(manifestId) transitions DRAFT → SEALED
 - SEALED manifests are immutable, all resources locked
 - If createSnapshot=true and instanceId provided:

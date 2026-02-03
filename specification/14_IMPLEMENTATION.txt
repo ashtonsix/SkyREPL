@@ -4,73 +4,62 @@
 
 ## Purpose
 
-This section provides guidance for implementing the redesigned system. The phases
-suggest a logical grouping of work, but implementation order is flexible and will
-adapt to practical needs discovered during development.
+Implementation guidance for the redesigned system. Phases suggest logical work
+groupings; actual sequence adapts to practical constraints.
 
 **Key Principle**: Run new code alongside legacy until stable.
 
-**Note**: For operational deployment concerns (monitoring, security, migrations), see Chapter 15 Operations.
+**Note**: For operational concerns (monitoring, security, migrations), see Chapter 15.
 
-**Implementation Flexibility**:
-- Phases are guidance, not strict requirements
-- Work can proceed in parallel where sensible
-- The actual sequence will emerge from practical constraints
-- Focus on what needs to exist, not when it must happen
+**Strategy**: Ground-up rewrite (no live deployments). Maintain functional parity
+between versions, but mechanisms are free to change.
 
-Strategy: Ground-up rewrite, not migration (no live deployments exist). We
-maintain functional parity between versions, but all details/mechanisms are
-free to change.
-
-Implementation will happen in a v2/ folder with pseudo-implementation files
-using fidelity level suffixes (e.g., main.ts.l1.txt, agent.py.l2.txt). These
-files contain plain English, outlines, and pseudo-code sketches, citing real
-code to copy over. Fidelity levels:
+Implementation happens in v2/ with pseudo-implementation files using fidelity
+level suffixes (e.g., main.ts.l1.txt, agent.py.l2.txt). Files contain outlines
+and pseudo-code sketches citing real code to copy. Fidelity levels:
 
 - `.l1.txt` - Bullet-point outlines (structure exploration)
 - `.l2.txt` - Detailed pseudocode (algorithm design)
 - `.l3.txt` - Partial implementation (core logic, stubbed deps)
 - (no suffix) - Working code (remove suffix when complete)
 
-The v2/ directory is organized by component:
-- `v2/control/` - Control plane (VPS deployment)
-- `v2/cli/` - CLI client (user machine)
+The v2/ directory organizes by component:
+- `v2/control/` - Control plane (VPS)
+- `v2/cli/` - CLI client
 - `v2/shared/` - Types shared between control + CLI
 - `v2/agent/` - Python agent (on instances)
-- `v2/tests/` - Test files organized by component
+- `v2/tests/` - Component-organized tests
 
-This is reference material, not a detailed project plan.
+This is reference material, not a detailed plan.
 
 ## 14.1 Phase Overview
 
-### Phase Groupings (Suggested)
+### Phase Groupings
 
-The phases below represent logical groupings of work. They can be approached in
-roughly this order, but parallel development is expected where dependencies allow.
+Phases represent logical work groupings. Parallel development expected where
+dependencies allow.
 
 | Phase | Name                | Scope                                           |
 |-------|---------------------|-------------------------------------------------|
 | 0     | Foundation          | Database schema, type definitions               |
 | 1     | Material            | Core tables operational, content-addressing     |
 | 2     | Workflows           | Pattern library, workflow execution             |
-| 3     | Allocations         | HELD state, SSH routing, warm pool              |
+| 3     | Allocations         | debug_hold_until, SSH routing, warm pool        |
 | 4     | Provider Refinement | Type enhancement, provider workflows, hooks     |
 | 5     | Final Integration   | End-to-end flows, cleanup, documentation        |
 
 **Typical Build Order**:
-- Foundation and Material typically come first (data model must exist)
-- Workflows builds on material concepts but can start in parallel
-- Allocations and Provider Refinement can proceed in parallel
+- Foundation and Material come first (data model must exist)
+- Workflows builds on material but can start in parallel
+- Allocations and Provider Refinement proceed in parallel
 - Final Integration happens when components stabilize
 
 ### Core Principles
 
 - Start small, expand carefully
-- Careful with interfaces we'll regret later
 - Property-based testing: "Kill at any step → no orphans"
-- Ground-up rewrite means freedom to change everything
+- Careful with interfaces we'll regret later
 - Avoid overengineering phase details
-- Run new code alongside legacy until stable
 
 ================================================================================
 
@@ -84,8 +73,8 @@ roughly this order, but parallel development is expected where dependencies allo
 - Workflow engine core skeleton (isolated, not yet integrated)
 - Pattern library interfaces (4 patterns, no implementations yet)
 
-**Note**: All new code runs alongside existing code. No breaking changes.
-Tables are created empty. Types compile but aren't used yet.
+**Note**: New code runs alongside existing code. No breaking changes. Tables
+created empty. Types compile but unused.
 
 ================================================================================
 
@@ -102,8 +91,8 @@ Tables are created empty. Types compile but aren't used yet.
 - Run files and blobs tables for content-addressable material
 - Manifests table tracking resource ownership
 
-**Note**: Compatibility layer (jobs view) may exist temporarily if useful.
-Focus on getting the data model working, not on perfect migration paths.
+**Note**: Compatibility layer (jobs view) may exist temporarily. Focus on getting
+data model working, not perfect migration paths.
 
 ================================================================================
 
@@ -121,29 +110,28 @@ be built independently and integrated later.
 - Crash recovery and persistence
 - Basic observability (topology signatures, audit logs)
 
-**Note**: This is where the orchestration logic moves from imperative control.ts
-code to declarative workflow definitions. Property tests validate "no orphans"
-invariant under arbitrary kill points.
+**Note**: Orchestration logic moves from imperative control.ts to declarative
+workflow definitions. Property tests validate "no orphans" under arbitrary kill points.
 
 ================================================================================
 
 ## 14.5 Phase 3: Allocations
 
-**Scope**: HELD state, SSH per-allocation, warm pool via allocations query.
+**Scope**: debug_hold_until, SSH per-allocation, warm pool via allocations query.
 
 **Typical Dependencies**: Uses material layer and workflow engine concepts. Can be
 developed in parallel with Phase 4 once foundational pieces are in place.
 
 **Deliverables**:
-- HELD state transitions (ACTIVE → HELD → COMPLETE)
-- Hold duration management with tiered extensions
+- debug_hold_until timestamp management on COMPLETE allocations
+- Hold duration extensions with tiered limits
 - SSH config keyed by allocation ID (short form)
 - SSH activity detection for auto-extension
 - Warm pool = allocations WHERE status='AVAILABLE'
 - Remove grace_period from run input (or keep with deprecation warning)
 
-**Note**: This changes user-facing CLI behavior. SSH routing and extend command
-are new workflows. Warm pool is now a query result, not a separate concept.
+**Note**: Changes user-facing CLI behavior. SSH routing and extend command are
+new workflows. Warm pool becomes a query result, not a separate concept.
 
 ================================================================================
 
@@ -161,9 +149,8 @@ parallel with Phase 3 once workflow foundation exists.
 - Extension framework (lifecycle hooks: onStartup, onShutdown, onHeartbeat with expectations/receipts)
 - Error taxonomy (CapacityError, AuthError, RateLimitError, etc.)
 
-**Note**: Providers can opt into workflow features independently. Tier 2 providers
-(Lambda Labs) can stick with simple interface. Type enhancement is compile-time,
-not runtime overhead.
+**Note**: Providers opt into workflow features independently. Tier 2 providers
+(Lambda Labs) stick with simple interface. Type enhancement is compile-time only.
 
 ================================================================================
 
@@ -182,9 +169,9 @@ together. This is a consolidation phase, not a development phase.
 - Performance benchmarks validate no regression
 - Full test suite passing
 
-**Note**: This is when we clean up. Remove compatibility shims, drop old tables
-(step 0 is DROP ALL TABLES since this is ground-up rewrite), finalize documentation.
-Not reversible without full backup/restore.
+**Note**: Cleanup time. Remove compatibility shims, drop old tables (step 0 is
+DROP ALL TABLES for ground-up rewrite), finalize documentation. Not reversible
+without full backup/restore.
 
 ================================================================================
 
@@ -195,7 +182,7 @@ Not reversible without full backup/restore.
 - **Phase 0**: Unit tests (types, engine core), integration tests (table creation)
 - **Phase 1**: Data model tests on demo data, property tests (integrity)
 - **Phase 2**: Pattern unit tests, property tests (orphan invariant), E2E CLI tests
-- **Phase 3**: HELD state unit tests, SSH E2E tests, warm pool matching tests
+- **Phase 3**: debug_hold_until unit tests, SSH E2E tests, warm pool matching tests
 - **Phase 4**: Provider workflow E2E tests per provider, type tests
 - **Phase 5**: Full regression suite, performance benchmarks
 
@@ -203,9 +190,8 @@ Not reversible without full backup/restore.
 
 "Kill workflow at any step → no orphaned resources"
 
-This validates crash recovery and cleanup logic. Use fast-check or similar
-property-based testing library. Arbitrary kill points, verify allocations/instances
-cleaned up correctly.
+Validates crash recovery and cleanup logic. Use fast-check or similar property-based
+testing library. Arbitrary kill points, verify allocations/instances clean up correctly.
 
 ================================================================================
 
@@ -240,7 +226,7 @@ Monitor throughout:
 
 ## 14.10 Future Work
 
-Items deferred from v1 specification, noted here for future development:
+Items deferred from v1 specification:
 
 ### Error Message Guidelines
 
@@ -253,6 +239,7 @@ Items deferred from v1 specification, noted here for future development:
 - `repl init` wizard for first-time setup
 - Step-by-step configuration validation
 - Provider credential verification
+- Interactive credential testing
 
 ### Diagnostic Tooling
 
@@ -265,11 +252,5 @@ Items deferred from v1 specification, noted here for future development:
 - SQLite performance limits documentation
 - Migration path to PostgreSQL
 - Concurrent request handling guidance
-
-### Onboarding Improvements
-
-- Enhanced `repl init` wizard features
-- Interactive provider credential testing
-- Improved setup validation
 
 ================================================================================

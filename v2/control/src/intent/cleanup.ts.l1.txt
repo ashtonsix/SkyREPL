@@ -1,11 +1,141 @@
-# workflow-cleanup.ts - Cleanup Workflow
+# cleanup.ts - Cleanup Intent
+
+## Exports
+
+```typescript
+export interface CleanupInput {
+  userConfirmedTerminate?: boolean;  // Default: false (dry run, NEVER auto-terminate)
+  providers?: string[];              // Default: all providers
+  minAgeMs?: number;                 // Grace period - only terminate orphans older than this (default: 600000 = 10 min)
+  idempotencyKey?: string;
+}
+
+export interface CleanupOutput {
+  workflowId: string;
+  orphansFound: number;
+  orphansTerminated: number;
+  orphansSkipped: number;
+  allocationsExpired: number;
+  matchedOrphans: number;     // Orphans matched to active manifests (skipped)
+}
+
+// Entry point
+export async function cleanup(input: CleanupInput): Promise<Workflow>;
+
+// Workflow definition
+export const cleanupWorkflow: WorkflowDefinition;
+```
 
 ## Purpose
-Clean up orphaned resources and expired allocations
+
+Clean up orphaned resources and expired allocations.
+
+## Workflow Graph
+
+```
+┌─────────────────┐
+│  find-orphans   │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│match-to-manifest│
+└────────┬────────┘
+         │
+         ▼
+┌──────────────────┐
+│terminate-orphans │
+└────────┬─────────┘
+         │
+         ▼
+┌──────────────────┐
+│expire-allocations│
+└────────┬─────────┘
+         │
+         ▼
+┌─────────────────┐
+│    finalize     │
+└─────────────────┘
+```
 
 ## Nodes
-1. find-orphans: Query EXTERNAL for untracked resources
-2. match-to-manifest: Find associated manifests
-3. terminate-orphans: Terminate unmatched resources
-4. expire-allocations: Transition HELD allocations past TTL to COMPLETE
-5. finalize: Seal manifest, log cleanup stats
+
+### 1. find-orphans
+
+See `orphan/nodes/find-orphans.ts.l1.txt`
+
+### 2. match-to-manifest
+
+See `orphan/nodes/match-to-manifest.ts.l1.txt`
+
+**Matched Orphan Handling:**
+
+Orphans that match an active (non-sealed) manifest are **skipped from termination**:
+
+```
+async function execute(ctx, input): Promise<MatchToManifestOutput>
+  1. For each orphan with parseable manifest ID:
+     - manifest = await db.getManifest(orphan.parsedManifestId)
+
+     - If manifest exists AND manifest.status === 'DRAFT':
+       // Active workflow owns this resource
+       result.matched.push({
+         orphan,
+         manifestId: manifest.id,
+         workflowId: manifest.workflow_id,
+         reason: 'Resource belongs to active workflow'
+       })
+
+     - Else if manifest exists AND manifest.status === 'SEALED':
+       // Manifest complete but resource not cleaned up
+       result.unmatched.push(orphan)
+
+     - Else (manifest not found):
+       // Truly orphaned
+       result.unmatched.push(orphan)
+
+  2. Return { matched, unmatched }
+```
+
+**Why matched orphans are skipped:**
+- Resource may be in use by running workflow
+- Terminating could cause workflow failure
+- Workflow's manifest cleanup will handle it when complete
+
+**Logging:**
+- Matched orphans are logged at INFO level
+- Includes workflow ID for investigation
+- User can manually intervene if workflow appears stuck
+
+### 3. terminate-orphans
+
+See `orphan/nodes/terminate-orphans.ts.l1.txt`
+
+**Input:** Only receives `unmatched` orphans from match-to-manifest.
+Matched orphans are excluded before this node runs.
+
+### 4. expire-allocations
+
+See `orphan/nodes/expire-allocations.ts.l1.txt`
+
+### 5. finalize
+
+Uses shared finalize node, logs cleanup stats.
+
+## Safety Constraints (Ch12.7: NEVER auto-terminate)
+
+1. **Dry run by default:** userConfirmedTerminate=false prevents accidental deletion
+2. **Explicit user confirmation required:** Background task ALWAYS uses userConfirmedTerminate=false
+3. **Matched orphans protected:** Resources belonging to active workflows skipped
+4. **Whitelist support:** Acknowledged orphans can be marked safe
+5. **Mandatory grace period:** minAgeMs defaults to 600000 (10 minutes)
+6. **Audit log:** All terminations logged with reason and timestamp
+
+## Error Handling
+
+| Node | Error | Response |
+|------|-------|----------|
+| find-orphans | Provider API error | Retry with backoff |
+| match-to-manifest | DB error | Fail immediately |
+| terminate-orphans | Provider terminate failure | Log error, continue with remaining |
+| expire-allocations | State transition failure | Log error, continue |

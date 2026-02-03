@@ -1,21 +1,44 @@
 # db.ts - Database Layer
 
+## Exports
+
+```typescript
+// Connection management
+export function initDatabase(path: string): Database;
+export function getDatabase(): Database;
+export function closeDatabase(): void;
+
+// Migrations
+export function runMigrations(): void;
+export function getMigrationVersion(): number;
+
+// Query helpers
+export function queryOne<T>(sql: string, params?: unknown[]): T | null;
+export function queryMany<T>(sql: string, params?: unknown[]): T[];
+export function execute(sql: string, params?: unknown[]): void;
+export function transaction<T>(fn: () => T): T;
+```
+
 ## Connection
+
 - `initDatabase(path: string): Database` - Open SQLite with WAL mode, foreign keys enabled
 - `getDatabase(): Database` - Get singleton instance
 - `closeDatabase(): void` - Close connection
 
 ## Migrations
+
 - `runMigrations(): void` - Apply schema migrations from version files
 - `getMigrationVersion(): number` - Current schema version
 
 ## Query Helpers
+
 - `queryOne<T>(sql, params): T | null` - Single row with JSON parsing
 - `queryMany<T>(sql, params): T[]` - Multiple rows
 - `execute(sql, params): void` - Non-query statements
 - `transaction<T>(fn): T` - Atomic transaction
 
 ## Instance Operations
+
 - `getInstance(id): Instance | null`
 - `getInstanceByProviderId(provider, providerId): Instance | null`
 - `createInstance(data): Instance`
@@ -23,55 +46,53 @@
 - `listInstances(filter?): Instance[]`
 
 ## Run Operations
+
 - `getRun(id): Run | null`
 - `createRun(data): Run`
 - `updateRun(id, updates): Run`
 - `listRuns(filter?): Run[]`
 
 ## Allocation Operations
+
 - `getAllocation(id): Allocation | null`
 - `createAllocation(data): Allocation`
 - `updateAllocationStatus(id, status): Allocation`
 - `claimAllocation(id, runId): Allocation | null` - Atomic claim with race protection
-  # CONCURRENCY: Optimistic locking strategy for allocation claims
-  # Multiple workflows may attempt to claim the same allocation simultaneously.
-  # This function ensures exactly one succeeds using a compare-and-swap approach.
-  #
-  # Implementation:
-  # 1. SELECT allocation WHERE id = ? AND status = 'AVAILABLE' AND run_id IS NULL
-  #    - Read current state including updated_at timestamp
-  #    - If not found or status/run_id mismatch, return null immediately (claim failed)
-  #
-  # 2. UPDATE allocations
-  #    SET run_id = ?, status = 'CLAIMED', updated_at = <current_timestamp>
-  #    WHERE id = ? AND updated_at = <original_updated_at>
-  #    - The WHERE clause includes the original updated_at value from step 1
-  #    - This ensures the UPDATE only succeeds if no other transaction modified the row
-  #
-  # 3. Check UPDATE result (rows affected)
-  #    - If 0 rows affected: Another transaction won the race, return null (claim failed)
-  #    - If 1 row affected: Claim succeeded, return updated allocation
-  #
-  # Race conditions handled:
-  # - Two workflows claim same allocation: First UPDATE wins, second gets 0 rows affected
-  # - Allocation deleted between SELECT and UPDATE: 0 rows affected, claim fails gracefully
-  # - Allocation status changed (e.g., FAILED): 0 rows affected, claim fails
-  #
-  # Performance notes:
-  # - SQLite's default isolation (SERIALIZABLE) ensures atomicity
-  # - Index on (status, run_id) enables fast AVAILABLE allocation queries
-  # - updated_at index (idx_allocations_updated) enables efficient race detection
-  #
-  # Example usage:
-  #   const allocation = claimAllocation(allocId, runId)
-  #   if (!allocation) {
-  #     // Claim failed - allocation unavailable or race lost
-  #     // Workflow should find another allocation or create new one
-  #   }
-  #
 - `findAvailableAllocation(spec): Allocation | null`
 
+### claimAllocation Concurrency
+
+CONCURRENCY: Optimistic locking strategy for allocation claims.
+Multiple workflows may attempt to claim the same allocation simultaneously.
+This function ensures exactly one succeeds using a compare-and-swap approach.
+
+**Implementation:**
+1. SELECT allocation WHERE id = ? AND status = 'AVAILABLE' AND run_id IS NULL
+   - Read current state including updated_at timestamp
+   - If not found or status/run_id mismatch, return null immediately (claim failed)
+
+2. UPDATE allocations
+   SET run_id = ?, status = 'CLAIMED', updated_at = <current_timestamp>
+   WHERE id = ? AND updated_at = <original_updated_at>
+   - The WHERE clause includes the original updated_at value from step 1
+   - This ensures the UPDATE only succeeds if no other transaction modified the row
+
+3. Check UPDATE result (rows affected)
+   - If 0 rows affected: Another transaction won the race, return null (claim failed)
+   - If 1 row affected: Claim succeeded, return updated allocation
+
+**Race conditions handled:**
+- Two workflows claim same allocation: First UPDATE wins, second gets 0 rows affected
+- Allocation deleted between SELECT and UPDATE: 0 rows affected, claim fails gracefully
+- Allocation status changed (e.g., FAILED): 0 rows affected, claim fails
+
+**Performance notes:**
+- SQLite's default isolation (SERIALIZABLE) ensures atomicity
+- Index on (status, run_id) enables fast AVAILABLE allocation queries
+- updated_at index (idx_allocations_updated) enables efficient race detection
+
 ## Workflow Operations
+
 - `getWorkflow(id): Workflow | null`
 - `createWorkflow(data): Workflow`
 - `updateWorkflow(id, updates): Workflow`
@@ -80,19 +101,137 @@
 - `updateWorkflowNode(id, updates): WorkflowNode`
 
 ## Manifest Operations
+
 - `getManifest(id): Manifest | null`
 - `createManifest(type): Manifest` - Create in DRAFT state
-- `sealManifest(id): void` - DRAFT → SEALED
-- `addResourceToManifest(manifestId, resourceType, resourceId): void`
+- `sealManifest(id): void` - DRAFT → SEALED (throws if already SEALED)
+- `addResourceToManifest(manifestId, resourceType, resourceId, options?): void`
+  - **Invariant:** Throws MANIFEST_SEALED_ERROR if manifest.status !== 'DRAFT'
+  - **Exception:** A13 recovery path can update provider_id for orphan matching (special flag: allowRecovery=true)
+  - Options: { ownerType?, ownerId?, cleanupPriority?, allowRecovery? }
+  - ownerType: 'workflow' | 'user' | 'system' - Source that created resource
+  - ownerId: number - ID of the owner (workflowId, userId, etc.)
 - `getManifestResources(manifestId): ManifestResource[]`
+- `deleteManifest(id): void` - Delete manifest and all manifest_resources (cascade)
+- `listExpiredManifests(cutoffTime): Manifest[]` - Get manifests where expires_at < cutoffTime
+
+## B21: Cleanup Processed Tracking
+
+Schema addition to manifest_resources:
+```sql
+ALTER TABLE manifest_resources ADD COLUMN cleanup_processed_at INTEGER;
+CREATE INDEX idx_manifest_resources_cleanup ON manifest_resources(manifest_id, cleanup_processed_at);
+```
+
+This timestamp prevents double-processing of blob reference decrements during cleanup.
+
+## Blob Operations
+
+- `getBlob(id): Blob | null`
+- `createBlob(data): Blob`
+  - CAS dedup is OPTIONAL (opt-in per bucket)
+  - For dedupable buckets: Check idx_blobs_dedup first, return existing if found
+  - For non-dedupable buckets (e.g., logs): Always create new blob
+  - No UNIQUE constraint on checksum - multiple blobs can have same checksum
+- `findBlobByChecksum(bucket, checksum): Blob | null` - Deduplication helper
+- `updateBlobLastReferenced(id): void` - Touch last_referenced_at for GC
 
 ## Object Operations
+
 - `getObject(id): Object | null`
-- `createObject(data): Object`
+- `createObject(data): Object` - Creates object with blob_id reference
+  - All objects require blob_id (NOT NULL)
+  - Object types: 'artifact', 'snapshot', 'log', 'run_file' (NOT 'blob')
 - `addObjectTag(objectId, key, value): void`
 - `findObjectByTag(key, value): Object | null`
-- `findBlobByChecksum(checksum): Object | null` - Deduplication helper
 
 ## Warm Pool
+
 - `findWarmAllocation(spec, initChecksum?): Allocation | null` - Match spec and optional init script
 - `getWarmPoolStats(): { available: number, bySpec: Record<string, number> }`
+
+## Orphan Operations
+
+- `getTrackedInstanceIds(): Set<number>` - All instance IDs in database
+- `getActiveManifestIds(): Set<number>` - Manifests that are DRAFT or unexpired SEALED
+- `recordOrphanScan(result: OrphanScanResult): void` - Log scan for audit
+- `addToWhitelist(providerId: string, reason: string): void` - Exclude from future orphan detection
+- `isWhitelisted(providerId: string): boolean` - Check whitelist status
+
+## Delete Operations
+
+- `deleteInstance(id): void` - Delete instance record (only if no active allocations)
+- `deleteRun(id): void` - Delete run record (only if completed/failed)
+- `deleteAllocation(id): void` - Delete allocation (only if COMPLETE or FAILED)
+- `deleteObject(id): void` - Delete object record (blob cleanup handled by background GC)
+- `deleteBlob(id): void` - Delete blob record (used by GC only, not directly)
+- `deleteWorkflow(id): void` - Delete workflow and all workflow_nodes (cascade)
+
+## Error Handling
+
+All database operations can throw these errors:
+
+| Error | Cause | Handling |
+|-------|-------|----------|
+| DATABASE_CONNECTION_ERROR | SQLite file locked, disk full, permissions | Fail immediately, log details |
+| DATABASE_QUERY_ERROR | Invalid SQL, type mismatch | Fail immediately (bug) |
+| CONSTRAINT_VIOLATION | Foreign key, unique constraint | Fail immediately with constraint name |
+| MIGRATION_ERROR | Schema version mismatch, invalid migration | Fail on startup, require manual fix |
+| TRANSACTION_ERROR | Deadlock, timeout (rare in SQLite) | Retry once, then fail |
+
+### Connection Error Handling
+
+```
+function getDatabase(): Database
+  if (!connection) throw DATABASE_CONNECTION_ERROR('Database not initialized')
+  if (!connection.open) throw DATABASE_CONNECTION_ERROR('Database connection closed')
+  return connection
+```
+
+### Constraint Violation Handling
+
+```
+function createAllocation(data): Allocation
+  try:
+    return execute(INSERT...)
+  catch (e):
+    if (e.code === 'SQLITE_CONSTRAINT_FOREIGNKEY'):
+      throw CONSTRAINT_VIOLATION('Instance or Run not found')
+    if (e.code === 'SQLITE_CONSTRAINT_UNIQUE'):
+      throw CONSTRAINT_VIOLATION('Allocation already exists for this run')
+    throw e
+```
+
+### Migration Error Handling
+
+```
+function runMigrations(): void
+  const current = getMigrationVersion()
+  const target = getLatestMigrationVersion()
+
+  if (current > target):
+    throw MIGRATION_ERROR(`Database version ${current} is newer than code version ${target}`)
+
+  for each migration from current+1 to target:
+    try:
+      transaction(() => {
+        executeMigrationSQL(migration)
+        setMigrationVersion(migration.version)
+      })
+    catch (e):
+      throw MIGRATION_ERROR(`Migration ${migration.version} failed: ${e.message}`)
+```
+
+### Transaction Retry
+
+```
+function transaction<T>(fn: () => T, retries = 1): T
+  for attempt in 0..retries:
+    try:
+      return db.transaction(fn)
+    catch (e):
+      if (e.code === 'SQLITE_BUSY' && attempt < retries):
+        sleep(100 * (attempt + 1))
+        continue
+      throw TRANSACTION_ERROR(e.message)
+```

@@ -1,15 +1,55 @@
 # agent.ts - Agent Communication Endpoints
 
 ## Agent → Control (HTTP POST)
+
 - `POST /v1/agent/heartbeat` - Periodic heartbeat (every ~10s)
-  - Body: HeartbeatMessage with tailscale_ip, active_ssh_sessions, workflow_state
+  - Body: HeartbeatMessage with tailscale_ip, active_ssh_sessions, workflow_state, pending_command_acks, dropped_logs_count
   - Updates: instance.last_heartbeat, metrics, allocation state
+  - Processes: Check pending_command_acks, mark commands as acknowledged, remove from retry queue
+  - Monitoring: Track dropped_logs_count for alerting on log buffer overflow
   - Returns: HeartbeatAckMessage with server_time, commands_pending
 
-- `POST /v1/agent/logs` - Batched log messages (every 5s or 100 lines)
-  - Body: LogMessage[] with run_id, stream (stdout/stderr/sync_complete), data
+- `POST /v1/agent/logs` - Batched log messages (100ms local buffer, 5s network batch OR 64KB threshold)
+  - Body: LogMessage[] with run_id, stream (stdout/stderr/sync_complete), data, phase, timestamp, batch_sequence_id
+  - Reorders batches by batch_sequence_id before processing (handles out-of-order HTTP arrival)
+  - batch_sequence_id: Monotonic counter per agent session, ensures correct ordering
   - Stores logs in objects table, forwards to WebSocket subscribers
   - Special: stream="sync_complete" triggers CLAIMED→ACTIVE transition
+  - Special: stream="sync_complete" with sync_success=false triggers CLAIMED→FAILED
+  - Critical path: sync_complete bypasses batching via flush_and_send() for low latency
+
+- `POST /v1/agent/run-complete` - Run completion notification
+  - Body: RunCompleteMessage with run_id, allocation_id, exit_code, workflow_state
+  - Updates: run.exit_code, run.finished_at, run.workflow_state
+  - Triggers: wait-completion node unblocks, artifact collection starts
+  - Returns: { acknowledged: true }
+
+- `POST /v1/agent/spot-interrupt-start` - Spot interruption detected (Phase 1)
+  - Body: SpotInterruptStartMessage with run_id, time_remaining_ms
+  - Signals: Spot interrupt detected, checkpoint starting
+  - Updates: run.spot_interrupted=true, allocation.spot_interrupt_started_at=NOW
+  - Returns: { acknowledged: true, actions: ['checkpoint', 'artifacts'] }
+
+- `POST /v1/agent/spot-interrupt-complete` - Spot checkpoint and upload complete (Phase 2)
+  - Body: SpotInterruptCompleteMessage with run_id, checkpoint_exit_code, artifacts_uploaded
+  - Signals: Checkpoint done, artifacts uploaded, ready for termination
+  - checkpoint_exit_code: Exit code of checkpoint script (if ran)
+  - artifacts_uploaded: Count of artifacts successfully uploaded
+  - Triggers: allocation transitions ACTIVE→FAILED
+  - Returns: { acknowledged: true }
+  - Note: Control waits max 30s from spot-interrupt-start before forcing FAILED transition
+
+- `POST /v1/agent/artifacts` - Artifact upload notification
+  - Body: ArtifactMessage[] with run_id, path, s3_key, size_bytes, checksum
+  - Creates artifact object records in DB
+  - Links artifacts to run
+  - Returns: { acknowledged: true, artifactIds: number[] }
+
+- `POST /v1/agent/snapshot-ready` - Snapshot preparation complete
+  - Body: PrepareSnapshotAckMessage with instance_id, success, error
+  - Signals that agent has synced filesystems and cleared temp files
+  - Unblocks prepare-instance node in snapshot workflow
+  - Returns: { acknowledged: true }
 
 - `POST /v1/instances/:id/panic` - Emergency diagnostics (best-effort)
   - Body: PanicRequest with reason, diagnostics, error_logs
@@ -18,9 +58,22 @@
 ## Control → Agent (SSE)
 - `GET /v1/agent/commands` - Long-lived SSE connection
   - Agent connects on startup, receives commands
-  - Events: StartRunMessage, CancelRunMessage, CaptureArtifactsMessage, TriggerTailscaleMessage, HeartbeatAckMessage
+  - Events: StartRunMessage, CancelRunMessage, PrepareSnapshotMessage, CaptureArtifactsMessage, TriggerTailscaleMessage, HeartbeatAckMessage
   - Heartbeat every 30s to keep connection alive
   - Supports reconnection with Last-Event-ID
+
+### Command ID Generation and Tracking
+- Each command gets unique command_id (autoincrement integer per instance or global)
+- Track sent commands awaiting acknowledgment:
+  - Map<command_id, { message, sent_at, retry_count }>
+- On heartbeat: Check pending_command_acks from agent, mark as acknowledged
+- Retry logic (background task every 5s):
+  - If not acked after 30s: Resend command via SSE
+  - Max retries: 3 attempts
+  - After max retries: Mark command as failed, log error, remove from tracking
+- Implementation:
+  - Use global autoincrement counter: let nextCommandId = 1
+  - Or per-instance counter stored in memory: instanceCommandCounters.get(instance_id) || 1
 
 ## Command Types (Control → Agent)
 - `StartRunMessage` - Execute run command with files, artifacts, run_init script

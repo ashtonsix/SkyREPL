@@ -1,20 +1,64 @@
-### The "Workdir Isolation" Problem
+Agent heartbeat should include ID of control plane it believes it's talking to (the control plane which created the instance): helps ensure it's not been misconfigured (pointing at wrong control plane / heartbeat service eg, because of a gateway configuration change or control plane failover). Control plane should respond "heartbeat acked; and yep, that's me".
 
-In **Chapter 5**, you mention that multiple allocations on one instance get separate workdirs (`work_1`, `work_2`) to allow post-run debugging.
+Tailscale JIT: can do in background between jobs (not during job: don't want to disrupt; not on startup: don't want to impact cold time-to-ready), to reduce cold time-to-connect for users connecting to debug. Note: install-on-start would be sensible when an instance is launched with the intention of doing interactive work (eg, Jupyter Notebooks).
 
-* **The Risk:** Filesystem/Environment pollution. If Allocation A runs `pip install --user`, it may affect Allocation B. If Allocation A fills `/tmp` or hits disk IOPS limits, it impacts the "warm" Allocation B.
-* **Recommendation:** If you aren't using containers (Docker/OrbStack), consider a "pre-claim" node in workflow that checks disk space or uses `chroot`/systemd units to provide harder isolation for sequential/parallel runs on the same "warm" hardware.
+Use WAL (Write-Ahead Logging) mode and implement a short, random jitter/retry in database wrapper (material layer) specifically for SQLITE_BUSY errors.
 
-### S3 Offload Threshold (4KB)
+The reservation column (Ch 2.2 of specification). It's intended to pre-declare expected object size to avoid the "migration shuffle" from inline to S3. I flagged it because the implementation logic in your L1 outlines (`storage.ts.l1.txt`) was leaning heavily on `generateUploadUrl` deciding based on *current* size, rather than explicitly honoring the reservation. Ensuring the L2 code explicitly checks `if (reservation > threshold) -> S3` even if current size is 0 will be the fix there.
 
-You've set a **4KB threshold** for offloading payloads to S3.
+Heartbeat Timeout: increasing to 15 minutes significantly lowers the "false positive" termination rate, with the accepted compromise of an increased "cost leak" window if an instance genuinely hangs. Given SkyREPL's core insight is lifecycle chaos, 15 minutes is a safe "researcher-friendly" default. Agent should commit to self-termination at minute 15, and actually terminate at minute ~16-20, using the same checkpoint path as spot interruption to handle (harden for resilience if control plane unavailable: second presigned S3 URL the agent can try if first fails, when control plane comes back online manifest created before workflow started will show where to find artifact [just update to include second failover location], reconcillation should be able to infer instance terminated and that a checkpoint was uploaded immediately before. this means users who configure checkpoints properly and launch multi-hour/day jobs that interrupt due to agent panic don't lose work done up until point of panic). Timing constraints need to be updated: normatively, control plane shouldn't terminate instance that fails heartbeat until unreachable for "agent commits to self termination after X duration without heartbeat ack" + "expected time for agent to checkpoint" + margin; advisory: 15 minutes self-termination, 25 minutes control plane forces termination.
 
-* **The Risk:** S3 latency and cost. S3's overhead (TTFB and per-request pricing) for a 5KB file is significantly higher than SQLite's overhead for a 5KB BLOB.
-* **Recommendation:** SQLite is extremely efficient with BLOBs up to ~100KB (especially with `incremental_vacuum`). You might find that a **64KB threshold** reduces S3 API noise and speeds up log retrieval without bloating the DB file significantly.
+---
 
-### The "Held" Debugging Conflict
+## 10 Consideration Points for the L2 Transition 
 
-If an allocation is in `HELD` status for debugging, and a new `ACTIVE` allocation is assigned to the same instance (Warm Pool reuse):
+DO NOT START AS-IS: CURATE/REFINE/RESEARCH/VALIDATE/ETC TO PLAN TENTATIVE FIRST STEPS INTO L2 TRANSITION
 
-* **The Risk:** A user debugging an old run via SSH might accidentally consume resources (VRAM, CPU) needed by the new active run.
-* **Recommendation:** Ensure the CLI `status` command clearly warns if a user is SSH-ed into a "shared" instance where a production run is currently active.
+Moving from L1 (Outlines) to L2 (Detailed Pseudocode) is where you stop describing *what* happens and start defining the **logical edge cases** of *how* it happens. Here are the 10 critical points to steer your L2 drafting:
+
+### 1. Atomic State Transitions (The `WHERE` clause)
+
+Every status update in L2 pseudocode must include its "pre-condition" in the SQL logic.
+
+* **Bad:** `UPDATE allocations SET status = 'CLAIMED'`
+* **L2 Standard:** `UPDATE allocations SET status = 'CLAIMED' WHERE id = ? AND status = 'AVAILABLE'`
+* This is the only way to prevent two parallel workflow nodes from "double-claiming" the same warm instance.
+
+### 2. The "In-Flight" Buffer for Deduplication
+
+In `storage.ts.l2`, consider the race condition where two users upload the same large file simultaneously. Since you don't have a `UNIQUE` constraint on the checksum (to allow for log appends), L2 needs to define how `checkBlobsExist` handles blobs that are currently being uploaded but aren't "finalized" yet.
+
+### 3. SSE "Byte-by-Byte" Handling
+
+The Python agent's `sse.py` needs a robust generator pattern. In L2, you must explicitly handle the `\n\n` SSE message separator and what happens if a `read(1)` call returns an empty byte (indicating the control plane closed the socket).
+
+### 4. Workflow Timeout vs. Node Timeout
+
+Ensure the `engine.ts` execution loop checks the **Workflow-level** timeout at the start of every iteration, while the individual **Node-level** timeouts are managed by the `Promise.race` or timer within the node's execution block.
+
+### 5. Idempotency Key Cleanup Policy
+
+L2 should define the "Garbage Collection" for the `idempotency_keys` table. If you keep keys forever, the table bloats; if you delete too fast, retries become dangerous. A sliding 24-hour window is usually the L2 standard here.
+
+### 6. The "Partial Artifact" Spot Strategy
+
+When a spot interruption occurs, the agent has a narrow window (e.g., 2 minutes). The L2 logic for `spot.py` should prioritize the **Checkpoint Script** first, and then attempt an **ordered upload** of artifacts (smallest or most recent first) to maximize data recovery before the VM vanishes.
+
+### 7. Explicit "Materialization Depth"
+
+In `materialization.ts`, define a `depth` or `include` parameter.
+
+* Does `materializeInstance()` always fetch all its `Allocations`?
+* L2 pseudocode should define "shallow" vs "deep" materialization to prevent accidental "N+1" query patterns where fetching one instance triggers 50 sub-queries.
+
+### 8. Backpressure in Log Streaming
+
+In the WebSocket handlers for logs, consider what happens if the CLI client is on a slow connection. Does the Control Plane buffer infinite logs in memory? L2 should define a **dropping policy** or a **high-water mark** for the in-memory WebSocket buffers.
+
+### 9. Two-Phase Spawn Recovery (A13)
+
+This is your "Ghost Instance" handler. If Phase 1 (DB record) exists but Phase 2 (Cloud ID) is missing, L2 must define how the `reconciler` queries the Cloud Provider by **Tag** (the `spawn_idempotency_key`) to see if the instance was actually created before giving up.
+
+### 10. SSH Config "Host Collisions"
+
+Your CLI generates `~/.repl/ssh_config`. L2 should define how it handles naming if two different instances have the same "Short ID" prefix. (e.g., adding a counter or using more characters of the slug).

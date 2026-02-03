@@ -1,5 +1,13 @@
 # control.ts - Control Plane
 
+# Note: Timing constants import from ../../shared/src/config/timing.ts.l2.txt
+# - HEARTBEAT_CHECK_INTERVAL_MS (30s)
+# - HOLD_EXPIRY_CHECK_INTERVAL_MS (60s)
+# - RECONCILIATION_INTERVAL_MS (60s)
+# - MANIFEST_CLEANUP_INTERVAL_MS (5m)
+# - ORPHAN_SCAN_INTERVAL_MS (1h)
+# - BLOB_GC_INTERVAL_MS (24h)
+
 ## Startup
 - `main(): void` - Entry point
   - Load config from environment
@@ -33,11 +41,12 @@
 - WebSocket handlers: `/v1/runs/:id/logs`, `/v1/workflows/:id/progress`
 
 ## Background Tasks (periodic)
-- `heartbeatTimeoutCheck()` - Every 30s, detect stale heartbeats
-- `holdExpiryCheck()` - Every 1m, release expired holds
-- `manifestCleanupCheck()` - Every 5m, cleanup expired manifests
-- `reconciliationTask()` - Every 60s, sync provider state (see below)
-- `storageGarbageCollection()` - Every 24h, delete unreferenced blobs
+- `heartbeatTimeoutCheck()` - Every HEARTBEAT_CHECK_INTERVAL_MS (30s), detect stale heartbeats
+- `holdExpiryCheck()` - Every HOLD_EXPIRY_CHECK_INTERVAL_MS (60s), release expired holds
+- `manifestCleanupCheck()` - Every MANIFEST_CLEANUP_INTERVAL_MS (5m), cleanup expired manifests
+- `reconciliationTask()` - Every RECONCILIATION_INTERVAL_MS (60s), sync provider state (see below)
+- `orphanScanTask()` - Every ORPHAN_SCAN_INTERVAL_MS (1h), full orphan scan
+- `storageGarbageCollection()` - Every BLOB_GC_INTERVAL_MS (24h), delete unreferenced blobs
 
 ### reconciliationTask() Implementation
 - For each enabled provider:

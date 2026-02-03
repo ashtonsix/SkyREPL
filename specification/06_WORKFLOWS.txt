@@ -6,21 +6,21 @@
 
 The Workflow Engine orchestrates multi-step operations that cannot be reduced to
 single atomic transactions. It provides DAG execution, pattern-based composition,
-node-level retry, and single-node compensation for complex operations like launching
-runs, creating snapshots, and cleaning up resources.
+node-level retry, and single-node compensation for launching runs, creating
+snapshots, and cleaning up resources.
 
-Key Principle: Everything IS a workflow, but single-step workflows get helper
-functions that hide complexity. Ask: "Does this need orchestration overhead?" If
-no, use the single-step helper.
+Key Principle: Everything is a workflow, but single-step workflows get helper
+functions hiding complexity. Ask: "Does this need orchestration overhead?" If no,
+use the single-step helper.
 
-Cross-Reference: See Chapter 7 (Intents) for WHAT workflows achieve. Intents define
-the expected outputs and verification requirements for workflows. This chapter
-focuses on HOW workflows are executed.
+Cross-Reference: See Chapter 7 (Intents) for what workflows achieve. Intents define
+expected outputs and verification requirements. This chapter focuses on how
+workflows are executed.
 
 ## 6.1 Single-Step Workflows
 
-Everything is a workflow. Single-step operations use shared infrastructure but
-skip orchestration overhead.
+Everything is a workflow. Single-step operations use shared infrastructure but skip
+orchestration overhead.
 
 Helper pattern:
 ```typescript
@@ -57,7 +57,7 @@ interface WorkflowEngine {
   cancel(workflowId: string, reason: string): Promise<void>;
   pause(workflowId: string): Promise<void>;
   resume(workflowId: string): Promise<void>;
-  retry(workflowId: string): Promise<void>;
+  retry(workflowId: string): Promise<void>;  // Creates NEW workflow (see 6.2.1)
 }
 
 interface WorkflowSubmission {
@@ -69,6 +69,42 @@ interface WorkflowSubmission {
   timeout?: number;
 }
 ```
+
+### 6.2.1 Retry Semantics
+
+**Important**: `retry()` does NOT transition a failed workflow back to running state
+(invalid per state machine). Instead, it creates a NEW workflow with the same inputs.
+
+```typescript
+async function retry(workflowId: string): Promise<string> {
+  const originalWorkflow = await db.getWorkflow(workflowId);
+
+  if (originalWorkflow.status !== 'failed') {
+    throw new Error('Can only retry failed workflows');
+  }
+
+  // Create NEW workflow with same inputs (different idempotency key)
+  const newWorkflowId = await submit({
+    type: originalWorkflow.type,
+    input: JSON.parse(originalWorkflow.input_json),
+    // NEW idempotency key - allows retry of same logical operation
+    idempotencyKey: `${originalWorkflow.idempotency_key}:retry:${Date.now()}`,
+    parentWorkflowId: originalWorkflow.parent_workflow_id,
+    priority: originalWorkflow.priority,
+    timeout: originalWorkflow.timeout_ms,
+  });
+
+  // Link for audit trail
+  await db.execute(`
+    UPDATE workflows SET retry_of_workflow_id = ? WHERE id = ?
+  `, [workflowId, newWorkflowId]);
+
+  return newWorkflowId;
+}
+```
+
+**Rationale**: Preserves failed workflow for audit trail, avoids state machine
+violations, enables clean retry without contaminating original workflow state.
 
 ### Execution Loop
 
@@ -82,6 +118,12 @@ private async executeLoop(workflowId: string): Promise<void> {
     const workflow = await db.getWorkflow(workflowId);
     if (workflow.status === 'cancelled') {
       await handleCancellation(workflowId);
+      break;
+    }
+
+    // Check timeout (see 6.6.3)
+    if (workflow.timeout_at && Date.now() > workflow.timeout_at) {
+      await handleWorkflowTimeout(workflowId);
       break;
     }
 
@@ -115,9 +157,9 @@ private async executeLoop(workflowId: string): Promise<void> {
 
 ### Why workflow_nodes is a Separate Table
 
-The Promise.all pattern above is critical: multiple nodes execute concurrently.
-If node state were stored in a JSON blob on the workflow record, concurrent
-updates would create read-modify-write races:
+Multiple nodes execute concurrently (Promise.all). If node state were in a JSON
+blob on the workflow record, concurrent updates would create read-modify-write
+races:
 
 ```
 Node A reads workflow.nodes_json -> [{id: 'a', status: 'pending'}, {id: 'b', status: 'pending'}]
@@ -126,11 +168,11 @@ Node A completes, writes -> [{id: 'a', status: 'completed'}, {id: 'b', status: '
 Node B completes, writes -> [{id: 'a', status: 'pending'}, {id: 'b', status: 'completed'}]  // A's update lost!
 ```
 
-With a separate workflow_nodes table, SQLite handles row-level concurrency:
+With separate workflow_nodes table, SQLite handles row-level concurrency:
 ```sql
 UPDATE workflow_nodes SET status = 'completed' WHERE id = ?
 ```
-Each node updates its own row. No races. SQLite handles it for free.
+Each node updates its own row. No races. SQLite handles it.
 
 ### Node Execution Model
 
@@ -310,7 +352,7 @@ async function compensateSpawnNode(ctx: CompensationContext): Promise<void> {
 ```
 
 **Key Properties:**
-- DB record + manifest entry created BEFORE cloud API call
+- DB record + manifest entry created before cloud API call
 - Idempotency key prevents duplicate spawns on retry
 - Reconciliation finds instances if DB update fails
 - Compensation handles both phases (DB only or DB + cloud)
@@ -356,9 +398,8 @@ async function recoverWorkflows(): Promise<void> {
 
 ## 6.3 Pattern Library
 
-Starting with 4 patterns. More added as need arises.
-
-Restricted palette signposts good workflow design (minimize moving parts).
+Four patterns, restricted by design. A small palette signposts good workflow
+design and minimizes moving parts. More patterns added only when justified.
 
 ### 6.3.1 Insert-and-Reconverge (IAR)
 
@@ -381,14 +422,14 @@ ctx.applyPattern('insert-and-reconverge', {
 
 ### 6.3.2 Conditional-Branch (CB)
 
-**Purpose**: Choose between 2 mutually exclusive paths, or try-fallback on error.
+**Purpose**: Choose between two mutually exclusive paths, or try-fallback on error.
 
 **Transform**:
 ```
 A -> B -> C  becomes  A -> B_opt1 -> C  (B_opt2 skipped)
 ```
 
-**Constraints**: Exactly 2 branches; deterministic condition.
+**Constraints**: Exactly two branches; deterministic condition.
 
 **Configuration**:
 ```typescript
@@ -484,8 +525,12 @@ ctx.applyPattern('retry-with-alternative', {
 
 ### Manifest Independence
 
-Subworkflows are independent by default - they release their own manifests on
-completion. Parents can claim resources if needed by querying SEALED manifests.
+Subworkflows are independent by default—they release their own manifests on
+completion. Parents claim resources by querying SEALED manifests.
+
+**Manifest sealing waits for subworkflows**: The finalize node blocks until all
+child subworkflows complete. A parent workflow cannot seal its manifest while
+children are still emitting resources. This ensures complete resource tracking.
 
 ```typescript
 // Subworkflow always releases independently
@@ -529,38 +574,26 @@ MAX_SUBWORKFLOW_DEPTH = 3
 Root (depth 0) -> Child (1) -> Grandchild (2) -> Great-grandchild (3) [MAX]
 ```
 
+Depth 3 supports common patterns (parent -> provider -> internal) while preventing
+unbounded nesting. The `ctx.depth` value passes through provider delegation boundaries.
+When a provider delegates to a custom workflow, that workflow automatically increments
+depth. MAX_SUBWORKFLOW_DEPTH=3 applies globally across all delegation.
+
 ## 6.5 Compensation vs Teardown
 
-### Compensation Scope
-
-Compensation applies to ONE node only - the failed node. When a node fails:
-1. Execute that node's compensation handler (if defined)
-2. Emit manifest annotated with failure
-3. Manifest policies handle broader cleanup (terminate instances, etc.)
-
-Workflows do NOT cascade compensation through multiple completed nodes.
-This keeps workflows simple and predictable. Complex teardown logic
-belongs at the manifest/policy level, not embedded in workflow execution.
-
-### Compensation
-
-**COMPENSATION**: Error correction DURING workflow
-- Triggered by node failure, user abort, timeout
-- Only compensates the ONE failed node (no cascade)
-- If retries fail and no failover path, emit manifest annotated as failed run output
-- The manifest documents what was created, even on failure
+**COMPENSATION**: Error correction during workflow execution
+- Triggered by: node failure, user abort, timeout
+- Scope: Single failed node only (no cascade through completed nodes)
+- On failure: manifest annotated with failure, documents resources created
 - Respects ownership (skips transferred resources)
 
-### Teardown
+**TEARDOWN**: Scheduled cleanup after workflow completes
+- Triggered by: manifest expiry
+- Separate cleanup workflow destroys resources by cleanup priority
 
-**TEARDOWN**: Scheduled cleanup AFTER workflow
-- Triggered by manifest expiry
-- Separate cleanup workflow claims manifest
-- Destroys resources by cleanup priority
-
-Multi-step cleanup of failed workflows is handled at the manifest/policy level,
-not by workflow compensation. The manifest tracks all resources created during
-workflow execution, enabling proper cleanup regardless of where the workflow failed.
+Complex teardown logic belongs at the manifest/policy level, not embedded in
+workflow execution. Manifests track all resources, enabling proper cleanup
+regardless of where the workflow failed.
 
 ```typescript
 async function compensateFailedNode(workflowId: string, failedNodeId: string): Promise<void> {
@@ -571,7 +604,7 @@ async function compensateFailedNode(workflowId: string, failedNodeId: string): P
   // Skip if resource transferred to another workflow
   if (!shouldCompensate(workflowId, node)) return;
 
-  // Compensate ONLY this single failed node
+  // Compensate only this single failed node
   const executor = nodeExecutors.get(node.node_type);
   if (executor?.compensate) {
     await executor.compensate({
@@ -580,7 +613,7 @@ async function compensateFailedNode(workflowId: string, failedNodeId: string): P
     });
   }
 
-  // NOTE: We do NOT cascade to other completed nodes.
+  // NOTE: No cascade to other completed nodes.
   // Manifest policies handle broader resource cleanup.
 }
 ```
@@ -589,8 +622,8 @@ async function compensateFailedNode(workflowId: string, failedNodeId: string): P
 
 ### 6.6.1 Error → Retry Mapping
 
-The workflow engine uses a standardized error handling strategy that determines
-whether errors trigger retry, fallback, or immediate failure.
+Standardized error handling determines whether errors trigger retry, fallback, or
+immediate failure.
 
 **Error Handling Table:**
 
@@ -614,7 +647,7 @@ whether errors trigger retry, fallback, or immediate failure.
    - Example: us-east-1 fails → retry us-west-2
 
 2. **Exponential backoff:**
-   - Delays: 2s, 4s, 8s, 16s, 32s (capped at 60s)
+   - Delays: exponential from RETRY_BASE_DELAY, capped at RETRY_MAX_DELAY (see Ch15 §15.9)
    - Respects `retry_after_ms` from error response if present
    - Formula: `min(2^attempt * base_ms, max_backoff_ms)`
 
@@ -650,7 +683,7 @@ function determineRetryStrategy(error: NodeError, attempt: number): RetryDecisio
   }
 
   const delayMs = mapping.strategy === 'exponential_backoff'
-    ? Math.min(Math.pow(2, attempt) * 2000, 60000)  // 2s base, 60s max
+    ? Math.min(Math.pow(2, attempt) * 2000, 60000)  // See Ch15 §15.9 for timing config
     : error.details?.retry_after_ms ?? 0;
 
   return {
@@ -680,8 +713,7 @@ const ERROR_RETRY_MAPPING: Record<string, {
 
 ### 6.6.2 Workflow → API Error Mapping
 
-When workflow nodes fail, the errors propagate to the API layer with appropriate
-HTTP status codes.
+Workflow node failures propagate to API layer with appropriate HTTP status codes.
 
 **Node Failure → HTTP Response Mapping:**
 
@@ -762,33 +794,131 @@ function mapErrorToHttpStatus(error: WorkflowError): number {
 }
 ```
 
-## 6.7 Observability
+### 6.6.3 Workflow Timeout
 
-**Core principle**: OTel/Loki handles observability, not the core database.
+Prevents workflows from running indefinitely due to stuck nodes or slow provider APIs.
 
-The workflow itself IS the audit trail. Nodes describe outcomes and emit
-OpenTelemetry spans/events. This data flows to Loki for analysis. We do NOT
-store dedicated audit tables in the database.
+**Schema fields**: `timeout_ms` (per-workflow override), `timeout_at` (absolute timestamp)
 
-Pattern applications are emitted as OTel span events. The workflow_nodes table
-provides the execution audit trail.
+**Default**: WORKFLOW_TIMEOUT (configurable, see Ch15 §15.9)
+
+**Enforcement**: Execution loop checks `workflow.timeout_at` before each iteration:
+
+```typescript
+if (workflow.timeout_at && Date.now() > workflow.timeout_at) {
+  // Mark workflow failed with WORKFLOW_TIMEOUT, compensate running nodes
+  await handleWorkflowTimeout(workflowId);
+  break;
+}
+```
+
+**Per-workflow override**: Pass `timeout` in `WorkflowSubmission` (e.g., shorter for
+terminate, longer for training). Compensation ensures partial work cleaned up on timeout.
+
+### 6.6.5 Node Timeout Hierarchy
+
+**Node execution timeout:** NODE_TIMEOUT (see Ch15 §15.9) applies to node execution logic.
+
+**Wait operations:** Explicit timeout parameters (e.g., 10 minutes for sync).
+Wait operations are exempt from the node execution timeout.
+
+Example: sync-files node has 10-minute wait timeout but no execution timeout.
+
+### 6.6.6 Pending Workflow Timeout
+
+Pending workflows exceeding PENDING_WORKFLOW_TIMEOUT (see Ch15 §15.9) transition to failed during crash recovery (see 6.2).
+
+## 6.7 Cancellation Protocol
+
+Cancellation uses fire-and-forget CancelRunMessage via SSE. Heartbeat timeout handles unresponsive agents.
+
+**Agent alive:** receives cancel → stops run → emits run_complete
+**Agent dead:** heartbeat timeout → ACTIVE→FAILED
+
+```typescript
+async function cancelWorkflow(workflowId: string, reason: string): Promise<void> {
+  const workflow = await db.getWorkflow(workflowId);
+
+  // Send cancel message to agent (fire-and-forget via SSE)
+  const allocation = await findActiveAllocation(workflow);
+  if (allocation) {
+    await enqueueInstanceMessage(allocation.instance_id, {
+      type: 'cancel_run',
+      run_id: workflow.run_id
+    });
+  }
+
+  // Mark workflow as cancelling
+  await db.updateWorkflow(workflowId, {
+    status: 'cancelling',
+    cancel_reason: reason
+  });
+
+  // If agent alive: receives cancel → stops run → emits run_complete → workflow completes
+  // If agent dead: heartbeat timeout (e.g., 30s) → ACTIVE→FAILED → workflow fails
+}
+```
+
+## 6.8 Compensation Behavior
+
+### 6.8.1 Compensation Timeout
+
+Each compensation handler has a 5-minute timeout.
+
+On timeout: log error, allow orphan scan to catch remaining resources.
+
+### 6.8.2 Compensation Retry
+
+Retryable errors (RATE_LIMITED, NETWORK_ERROR): up to MAX_RETRIES with exponential backoff from RETRY_BASE_DELAY.
+
+Non-retryable errors: fail immediately.
+
+```typescript
+async function compensateWithRetry(
+  compensateFn: () => Promise<void>,
+  maxRetries = 3
+): Promise<void> {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      await Promise.race([
+        compensateFn(),
+        timeout(COMPENSATION_TIMEOUT_MS) // 5 minutes
+      ]);
+      return; // Success
+    } catch (error) {
+      const isRetryable = ['RATE_LIMITED', 'NETWORK_ERROR'].includes(error.code);
+      const isLastAttempt = attempt === maxRetries - 1;
+
+      if (!isRetryable || isLastAttempt) {
+        // Log error, orphan scan will catch
+        logger.error('Compensation failed', { error, attempt });
+        return;
+      }
+
+      // Exponential backoff: 1s, 2s, 4s
+      await sleep(Math.pow(2, attempt) * 1000);
+    }
+  }
+}
+```
+
+## 6.9 Observability
+
+OTel/Loki handles observability, not the core database. The workflow itself is
+the audit trail: nodes emit OpenTelemetry spans/events, pattern applications emit
+as span events, and the workflow_nodes table provides execution history.
+
+The core database focuses on operational state. OTel provides auditability without
+polluting the schema. Span schema details (attribute names, event structures) will
+be finalized based on observability tooling requirements.
 
 **Note**: For production observability deployment, see Chapter 15.1 Observability.
 
-### 6.7.1 OpenTelemetry Integration
+### 6.9.1 Topology Signatures (Observability Extension)
 
-Workflow nodes emit OpenTelemetry spans to external observability systems
-(Grafana/Loki). Pattern applications are emitted as span events.
-
-The core database focuses on operational state. OTel provides auditability
-without polluting the schema. Span schema details (attribute names, event
-structures) will be finalized based on observability tooling requirements.
-
-### 6.7.2 Topology Signatures (Observability Extension)
-
-Topology signatures are useful for Grafana dashboards but are NOT part of
-the core workflow engine. They're computed on-demand or by an observability
-sidecar, not stored in the workflows table.
+Topology signatures are useful for Grafana dashboards but aren't part of the core
+workflow engine. They're computed on-demand or by an observability sidecar, not
+stored in the workflows table.
 
 ```typescript
 // Observability helper - NOT core workflow state

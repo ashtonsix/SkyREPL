@@ -95,23 +95,22 @@
 - PUT /api/allocations/:id update
   - Can update status
   - Can update run_id (when claiming)
-  - Can update hold_until (extend hold)
+  - Can update debug_hold_until (debugging only)
   - Cannot update instance_id
   - Cannot update workdir
 - DELETE /api/allocations/:id
   - Deletes allocation
   - 409 if status=ACTIVE
   - Allowed if AVAILABLE or COMPLETE
-- PUT /api/allocations/:id hold extension
-  - Updates hold_until timestamp
-  - Validates max hold duration
+- PUT /api/allocations/:id debug hold extension
+  - Updates debug_hold_until timestamp (COMPLETE allocations only)
+  - Validates max hold duration (24h from completed_at)
   - 400 if exceeds max
   - Returns updated allocation
 - Status transitions validated
   - AVAILABLE→CLAIMED allowed
   - CLAIMED→ACTIVE allowed
-  - ACTIVE→HELD allowed
-  - HELD→COMPLETE allowed
+  - ACTIVE→COMPLETE allowed
   - Invalid transitions → 400 error
 
 ## Workflows Read-Only

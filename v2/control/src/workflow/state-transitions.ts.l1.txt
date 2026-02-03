@@ -12,9 +12,8 @@ State transitions have explicit owners (workflow nodes, control plane background
 - AVAILABLE - Instance advertises empty run slot (warm pool)
 - CLAIMED - Run assigned, workdir being prepared
 - ACTIVE - Run executing
-- HELD - Run finished but allocation preserved for debugging
-- COMPLETE - Allocation finalized
-- FAILED - Lifecycle failure (not run failure)
+- COMPLETE - Allocation finalized (terminal state)
+- FAILED - Lifecycle failure (not run failure, terminal state)
 
 ### Transition Ownership
 
@@ -33,14 +32,22 @@ CLAIMED → ACTIVE
 CLAIMED → FAILED
   Owner: Control plane (on sync timeout/error)
   Trigger: Agent reports sync failure OR timeout waiting for sync_complete
-  Timeout: 5 minutes default
+  Timeout: 10 minutes default (configurable via SYNC_TIMEOUT_MS)
   Side effects: Instance marked suspect, typically triggers termination
 
-ACTIVE → HELD
-  Owner: Workflow (transition-hold node)
-  Trigger: Run completes (success or failure), hold period begins
-  Parameters: hold_until timestamp, hold_reason ('default' | 'explicit')
-  Note: Run exit_code != 0 is NOT a failure state - still transitions to HELD
+ACTIVE → COMPLETE
+  Owner: Workflow (finalize node)
+  Trigger: Run completes (success or failure)
+  Parameters: debug_hold_until timestamp (optional, for debugging)
+  Note: Run exit_code != 0 is NOT a failure state - still transitions to COMPLETE
+  Side effects:
+    - Sets completed_at timestamp
+    - Sets debug_hold_until if configured (preserves allocation for debugging)
+    - Creates new AVAILABLE allocation on same instance if warm pool eligible
+  Race condition: If allocation already FAILED when transition attempted, treat as success
+    - Scenario: Run completes while heartbeat timeout triggers FAILED transition
+    - Resolution: Log warning, return success (run completed despite allocation failure)
+    - Rationale: Run execution completed successfully; allocation state is infrastructure concern
 
 ACTIVE → FAILED
   Owner: Control plane (heartbeat timeout) OR agent (spot interruption)
@@ -51,23 +58,42 @@ ACTIVE → FAILED
     - Spot interruption warning received
     - Fatal agent error (agent crash, OOM)
   Side effects: Instance marked suspect, typically triggers termination
-
-HELD → COMPLETE
-  Owner: Control plane (hold expiry background task)
-  Trigger: hold_until timestamp expires
-  Background task: Runs every 60 seconds, scans for expired holds
-  Validation: Current time > hold_until, no active SSH sessions
-  Note: SSH activity auto-extends hold_until (see heartbeat processing)
+  Race condition: May race with workflow's ACTIVE→COMPLETE transition
+    - Winner: Whichever UPDATE executes first (optimistic locking)
+    - Loser: If workflow attempts COMPLETE but finds FAILED, treat as success
 ```
+
+### Warm Pool Replenishment (CRITICAL)
+
+When allocation transitions ACTIVE → COMPLETE, warm pool must be replenished:
+
+```
+ACTIVE → COMPLETE (with warm pool replenishment)
+  1. Transition existing allocation: status='ACTIVE' → status='COMPLETE'
+  2. Set completed_at timestamp
+  3. Set debug_hold_until if configured (optional, for debugging access)
+  4. Check if instance should remain in warm pool:
+     - workflow_state ends with ':complete' (not ':error')
+     - No pending termination request
+     - Instance not marked for cleanup
+  5. If warm pool eligible:
+     - Create NEW allocation record: { instance_id, status='AVAILABLE', run_id=NULL, workdir=nextWorkdir() }
+     - Log: "Created warm pool allocation for instance ${instanceId}"
+  6. If NOT warm pool eligible:
+     - Do not create new allocation
+     - Instance will be cleaned up by manifest expiry
+```
+
+NOTE: Allocations are not "recycled" - each run gets a fresh allocation record.
+The warm pool consists of AVAILABLE allocations with run_id=NULL.
 
 ### Invalid Transitions
 
 All other transitions are invalid and return error:
 
 - AVAILABLE → ACTIVE (must go through CLAIMED)
-- CLAIMED → COMPLETE (must go through ACTIVE → HELD)
-- HELD → AVAILABLE (allocations never return to warm pool)
-- COMPLETE → any state (terminal state)
+- CLAIMED → COMPLETE (must go through ACTIVE)
+- COMPLETE → any state (terminal state for that allocation)
 - FAILED → any state (terminal state)
 
 ### Concurrent Modification Handling
@@ -166,9 +192,16 @@ rolling_back → failed
 ### Invalid Transitions
 
 - completed → any state (terminal)
-- failed → running (use engine.retry to create new workflow)
+- failed → running (B1: INVALID - use engine.retry() to create NEW workflow, not state transition)
 - cancelled → running (cannot resume cancelled workflows)
 - rolling_back → completed (compensation always leads to failed)
+
+**B1: Retry After Compensation Clarification**
+- retry() does NOT transition failed→running (this is invalid)
+- retry() creates a NEW workflow with same inputs (new workflow ID)
+- Original workflow remains in 'failed' state for audit trail
+- New workflow starts fresh with status='pending'
+- This maintains state machine integrity while allowing retries
 
 ### Pause/Resume (Future)
 
@@ -246,11 +279,10 @@ running → failed
 | Transition | Owner | Mechanism | Validation |
 |------------|-------|-----------|------------|
 | Allocation AVAILABLE→CLAIMED | Workflow | claim-allocation node | Atomic UPDATE with status check |
-| Allocation CLAIMED→ACTIVE | Control plane | sync_complete log event | Log timestamp < 5min |
+| Allocation CLAIMED→ACTIVE | Control plane | sync_complete log event | Log timestamp < 10min |
 | Allocation CLAIMED→FAILED | Control plane | sync timeout/error | Timeout or error log |
-| Allocation ACTIVE→HELD | Workflow | transition-hold node | Run finished |
+| Allocation ACTIVE→COMPLETE | Workflow | finalize node | Run finished, warm pool replenishment |
 | Allocation ACTIVE→FAILED | Control/Agent | Heartbeat timeout or spot interrupt | Timeout or provider signal |
-| Allocation HELD→COMPLETE | Control plane | Hold expiry background task | hold_until < now |
 | Manifest DRAFT→SEALED | Workflow | Workflow completion | No pending resources |
 | Workflow pending→running | Engine | Execute loop start | No validation needed |
 | Workflow running→completed | Engine | All nodes completed | No failed/pending nodes |
@@ -265,10 +297,19 @@ running → failed
 
 Control plane runs these background tasks:
 
-- Hold expiry scanner: Every 60s, finds allocations WHERE status='HELD' AND hold_until < NOW
+- Debug hold expiry: Every 60s, clears debug_hold_until WHERE status='COMPLETE' AND debug_hold_until < NOW
 - Heartbeat timeout scanner: Every 30s, finds instances WHERE last_heartbeat < NOW - 30s
-- SSH activity extension: Every heartbeat, extends holds for active SSH sessions
-- Manifest cleanup: Every 5min, finds manifests WHERE status='SEALED' AND expires_at < NOW
+- Manifest cleanup: Every 60s, finds manifests WHERE status='SEALED' AND expires_at < NOW
+- Orphan scan: Every 3600s (1hr), scans provider resources for orphans (dry-run mode)
+
+### Background Task Intervals (Standardized)
+
+| Task | Interval | Rationale |
+|------|----------|-----------|
+| Hold expiry | 60s | Balances responsiveness with DB load |
+| Heartbeat timeout | 30s | Must catch timeouts within 2x heartbeat interval |
+| Manifest cleanup | 60s | Synced with orphan scan for consistency |
+| Orphan scan | 3600s (1hr) | Balances thoroughness with provider API rate limits |
 
 ### Atomic Transitions
 

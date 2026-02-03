@@ -5,6 +5,7 @@
 ### Run Management
 - `run [profile]` - Submit launch-run workflow, stream progress
   - Flags: --command, --timeout, --spot, --hold, --snapshot, --dry-run
+- `run status <run-id>` - Show detailed run status
 - `logs <run-id>` - Stream logs via WebSocket
 - `list` - List recent runs with pagination
 - `cancel <run-id>` - Cancel workflow with rollback
@@ -17,6 +18,7 @@
 - `instance terminate <instance-id>` - Terminate instance workflow
 - `snapshot list` - List snapshots
 - `orphan list` - List untracked provider resources
+- `orphan terminate` - Terminate orphans (requires confirmation)
 - `usage [period]` - Usage and cost summary
 
 ### Control Plane
@@ -24,9 +26,23 @@
   - start: Spawn detached process, wait for health check
   - stop: SIGTERM with graceful timeout, fallback SIGKILL
   - status: Check PID file, query /health endpoint, show logs
-- `auth login|logout|status` - Authentication
+
+### Authentication (Ch10.3)
+- `auth login` - Authenticate with control plane
+  - OAuth flow for hosted mode
+  - Token validation for self-hosted
+- `auth logout` - Clear stored credentials
+- `auth status` - Show current auth state and token expiry
+
+### Setup & Configuration
 - `setup-provider <provider>` - Provider configuration wizard
 - `verify-setup` - Verify provider configuration
+
+### Help & Meta
+- `help [command]` - Show help for command
+- `update` - Check for CLI updates, prompt to install
+- `feedback` - Open feedback form or submit issue
+- `completion <shell>` - Generate shell completions (bash, zsh, fish)
 
 ## Global Flags
 - `--json` - JSON output mode

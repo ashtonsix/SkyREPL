@@ -1,25 +1,30 @@
-# transition-hold.ts - Transition Hold Node
+# transition-hold.ts - DEPRECATED
 
-## Input Type
-{ allocationId: string, instanceId: string }
+## Status: DEPRECATED
 
-## Output Type
-{ status: 'HELD', heldAt: number }
+This node has been removed. Its functionality has been integrated into the finalize node.
 
-## Execute Steps
-- Verify allocation is in ACTIVE state (should have transitioned after start-run)
-- Update allocation status: ACTIVE → HELD
-- Set held_at timestamp
-- HELD means: Run completed, instance ready for warm pool reuse
-- Instance workdir will be cleaned on next claim
-- Return new status and timestamp
+## Previous Behavior
 
-## Compensation
-- Revert to ACTIVE: db.updateAllocationStatus(allocationId, 'ACTIVE')
-- Clear held_at timestamp
-- Note: Usually no compensation needed (HELD is desired end state)
+Previously, this node transitioned allocations from ACTIVE → HELD.
 
-## Key Calls
-- db.getAllocation()
-- db.updateAllocationStatus(allocationId, 'HELD')
-- db.updateAllocation(allocationId, { held_at: now })
+## Current Behavior
+
+The finalize node now handles:
+- ACTIVE → COMPLETE transition
+- Setting debug_hold_until (optional, for debugging)
+- Warm pool replenishment (creating new AVAILABLE allocation)
+- Manifest sealing
+- Optional snapshot creation
+
+## Migration Notes
+
+If you see references to transition-hold in workflow definitions:
+- Replace with finalize node
+- Configure debug_hold_until in finalize node input if debugging needed
+- Warm pool replenishment happens automatically in finalize
+
+## See Also
+
+- /home/ashtonsix/SkyREPL/v2/control/src/workflow/nodes/finalize.ts.l1.txt
+- /home/ashtonsix/SkyREPL/v2/control/src/workflow/state-transitions.ts.l1.txt (ACTIVE→COMPLETE)

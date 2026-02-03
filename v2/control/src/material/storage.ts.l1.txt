@@ -1,35 +1,73 @@
 # storage.ts - Object Storage
 
+# Note: Timing constants import from ../../../shared/src/config/timing.ts.l2.txt
+# - PRESIGNED_URL_TTL_MS (4h)
+
 ## Config
 - `S3_BUCKET` - S3 bucket name from environment
-- `INLINE_THRESHOLD = 4096` - Store ≤4KB inline in DB
-- `PRESIGNED_URL_TTL = 900000` - 15 minutes
+- `INLINE_THRESHOLD = 65536` - Store ≤64KB inline in DB (see Ch2 for rationale)
+- `PRESIGNED_URL_TTL` - PRESIGNED_URL_TTL_MS from timing.ts (4 hours, single-part uploads)
+- `MULTIPART_URL_TTL` - PRESIGNED_URL_TTL_MS from timing.ts (4 hours, multipart uploads per part)
+- `LARGE_FILE_THRESHOLD = 104857600` - 100MB (trigger multipart)
+- Single-part upload max: 5GB (S3 limit)
+- Multipart required for files >5GB
 
 ## Presigned URLs
-- `generateUploadUrl(objectId, sizeBytes, contentType?): { url, method, inline }`
-  - ≤4KB: Return control plane URL for inline storage
-  - >4KB: Return S3 presigned PUT URL
-- `generateDownloadUrl(objectId): { url, inline }`
-  - Check s3_key field to determine inline vs S3
-  - Return appropriate URL
+- `generateUploadUrl(blobId, sizeBytes, contentType?): { url, method, inline, multipart? }`
+  - ≤64KB: Return control plane URL for inline storage (SBO)
+  - 64KB-100MB: Return S3 presigned PUT URL (single-part, PRESIGNED_URL_TTL_MS)
+  - >100MB: Return multipart upload details (see Multipart Uploads, PRESIGNED_URL_TTL_MS per part)
+- `generateDownloadUrl(blobId): { url, inline }`
+  - Check blob.s3_key field to determine inline vs S3
+  - Return appropriate URL with PRESIGNED_URL_TTL_MS
+- No refresh endpoint needed (PRESIGNED_URL_TTL_MS is sufficient for all transfers)
 
-## Inline Storage (≤4KB)
-- `storeInline(objectId, data): void` - UPDATE payload column
-- `getInline(objectId): Buffer | null` - SELECT payload
+## Inline Storage (≤64KB, SBO)
+- `storeInline(blobId, data): void` - UPDATE blobs.payload column
+- `getInline(blobId): Buffer | null` - SELECT blobs.payload
 
-## S3 Operations (>4KB)
-- `uploadToS3(objectId, data, contentType?): void` - PutObject, update DB
-- `downloadFromS3(objectId): Buffer` - GetObject
-- `deleteFromS3(objectId): void` - DeleteObject
+## S3 Operations (>64KB)
+- `uploadToS3(blobId, data, contentType?): void` - PutObject, update DB
+- `downloadFromS3(blobId): Buffer` - GetObject
+- `deleteFromS3(blobId): void` - DeleteObject (used by GC only)
 
-## Blob Deduplication
-- `checkBlobsExist(checksums): { missing: string[], urls: Record<string, string> }`
-  - Query existing blobs by checksum tag
-  - Return missing checksums with presigned upload URLs
+## Multipart Uploads (>100MB)
+- `generateMultipartUploadUrls(blobId, partCount, partSizeBytes): { uploadId, parts: { partNumber, url }[] }`
+  - Initialize S3 multipart upload
+  - Generate presigned URL for each part with PRESIGNED_URL_TTL_MS (from timing.ts)
+  - Returns uploadId for completion
+  - Part size: min 5MB (except last), max 5GB
+  - Max parts: 10,000
+- `completeMultipartUpload(blobId, uploadId, parts: { partNumber, etag }[]): void`
+  - Finalize multipart upload
+  - Update DB with s3_key
+- `abortMultipartUpload(blobId, uploadId): void`
+  - Cancel partial upload, clean up S3 parts
+
+## Blob Deduplication (Opt-In)
+- `checkBlobsExist(bucket, checksums): { missing: string[], existing: Record<string, number> }`
+  - For dedupable buckets (e.g., 'run-files', 'artifacts'): Query blobs by (bucket, checksum)
+  - For non-dedupable buckets (e.g., 'logs'): Always return all as missing
+  - Returns: missing checksums (need upload) + existing blob IDs (can reuse)
   - Enables client-side dedup before upload
+- `createBlobWithDedup(bucket, checksum, data): number`
+  - CAS dedup is opt-in (not schema constraint)
+  - If dedupable bucket: SELECT blob WHERE bucket=? AND checksum=? first
+  - If found: Update last_referenced_at, return existing blob ID
+  - If not found: INSERT new blob
+  - For logs (non-dedupable): Always INSERT new blob (no checksum check)
+
+### Deduplication Race Handling
+CONCURRENCY: Two runs upload same file simultaneously, both see "missing".
+- No UNIQUE constraint on blobs.checksum (intentionally allows duplicates)
+- Check-then-insert pattern with idx_blobs_dedup index for performance
+- First upload creates blob successfully
+- Second upload may create duplicate blob (acceptable for eventual consistency)
+- Periodic GC merges duplicates and updates object references
+- Result: Temporary duplicates cleaned by GC, deduplication maintained eventually
 
 ## File Sync Preparation
-- `prepareFilesForRun(runId, files): { path, checksum, url }[]`
-  - Lookup blobs by checksum
+- `prepareFilesForRun(runId, files): { path, blobId, url }[]`
+  - Lookup blobs by checksum (using idx_blobs_dedup)
   - Generate presigned download URLs for agent
-  - Create run_file objects linking run to blobs
+  - Create run_file objects (object type) linking run to blobs via blob_id

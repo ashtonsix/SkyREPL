@@ -1,14 +1,18 @@
 # run.ts - Launch Run Command
 
+# Note: Timing constants import from ../../../shared/src/config/timing.ts.l2.txt
+# - CLI_DEFAULT_TIMEOUT_MS (1h)
+# - DEFAULT_HOLD_MS (5m)
+
 ## Input
 - Profile from repl.toml (provider, spec, region)
 - Command to execute (positional or --command)
 - Workdir (default: current directory)
 
 ## Flags
-- --timeout DURATION: Max run duration (default: 1h)
+- --timeout DURATION: Max run duration (default: CLI_DEFAULT_TIMEOUT_MS / 1h)
 - --spot: Use spot instances (default: from profile)
-- --hold DURATION: Hold allocation after completion (default: 5m)
+- --hold DURATION: Hold allocation after completion (default: DEFAULT_HOLD_MS / 5m)
 - --snapshot: Create snapshot on completion
 - --dry-run: Validate without submitting
 - --no-stream: Don't stream progress (exit after submission)

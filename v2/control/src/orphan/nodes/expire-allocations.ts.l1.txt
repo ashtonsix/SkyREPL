@@ -1,32 +1,29 @@
-# expire-allocations.ts - Expire Allocations Node
+# expire-allocations.ts - DEPRECATED
 
-## Input Type
-{ provider?: ProviderName }
+## Status: DEPRECATED
 
-## Output Type
-{ expiredCount: number, allocationIds: string[] }
+This node has been removed. Debug hold expiry is now handled by the hold-expiry background task.
 
-## Execute Steps
-- Query db.getAllocations() with status='HELD' and hold_until < Date.now()
-- If provider is specified, filter allocations by instance.provider
-- Initialize expiredCount = 0, allocationIds = []
-- For each held allocation past TTL:
-  - Update allocation status from HELD to COMPLETE via db.updateAllocation()
-  - Set completed_at = Date.now()
-  - Increment expiredCount
-  - Add allocationId to allocationIds array
-  - Log transition: "Allocation {id} expired: HELD -> COMPLETE"
-- Return { expiredCount, allocationIds }
+## Previous Behavior
 
-## Compensation
-- On workflow failure/rollback:
-  - For each allocation in allocationIds:
-    - Revert allocation status from COMPLETE back to HELD
-    - Clear completed_at timestamp
-    - Log reversion: "Allocation {id} compensation: COMPLETE -> HELD"
+Previously, this node expired HELD allocations and transitioned them to COMPLETE.
 
-## Key Calls
-- db.getAllocations({ status: 'HELD', holdUntilBefore: Date.now(), provider })
-- db.updateAllocation(allocationId, { status: 'COMPLETE', completed_at: Date.now() })
-- Context: ctx.emitMetadata('expired_allocation_count', expiredCount)
-- Context: ctx.emitResource('allocation', allocationId) for each expired allocation
+## Current Behavior
+
+The hold-expiry background task now:
+- Queries COMPLETE allocations WHERE debug_hold_until IS NOT NULL AND debug_hold_until < NOW
+- Clears debug_hold_until field (sets to NULL)
+- Does NOT transition state - allocations remain COMPLETE
+- No warm pool replenishment here (happens at ACTIVE→COMPLETE)
+
+## Migration Notes
+
+If you see references to expire-allocations in workflow definitions:
+- Remove the node - functionality is now automatic
+- Background task runs every 60 seconds
+- No workflow action needed
+
+## See Also
+
+- /home/ashtonsix/SkyREPL/v2/control/src/background/hold-expiry.ts.l1.txt
+- /home/ashtonsix/SkyREPL/v2/control/src/workflow/state-transitions.ts.l1.txt (ACTIVE→COMPLETE)

@@ -1,0 +1,192 @@
+# orphan-cleanup.ts - Orphan Cleanup Background Task
+
+# Note: Timing constants import from ../../../../shared/src/config/timing.ts.l2.txt
+# - ORPHAN_SCAN_INTERVAL_MS (1h)
+# - ORPHAN_MIN_AGE_MS (10m)
+
+## Purpose
+Periodically scan for orphaned cloud resources and report/cleanup.
+This task is the TRIGGER for orphan cleanup - it invokes the cleanup intent.
+
+## Schedule
+- Run every ORPHAN_SCAN_INTERVAL_MS (1h)
+- Configurable via environment variable
+
+## Execution Flow
+
+```typescript
+async function runOrphanCleanupCycle(): Promise<void> {
+  const startTime = Date.now();
+
+  // 1. Run compute orphan detection (dry run by default)
+  const computeResult = await cleanup({
+    userConfirmedTerminate: false,  // Always dry run in background
+    providers: getAllEnabledProviders(),
+    minAgeMs: TIMING.ORPHAN_MIN_AGE_MS,  // Grace period from timing.ts
+    idempotencyKey: `orphan-scan-${Date.now()}`
+  });
+
+  // 2. Run feature orphan detection (separate scan)
+  const featureResult = await scanFeatureOrphans({
+    minAgeMs: TIMING.ORPHAN_MIN_AGE_MS,
+    userConfirmedTerminate: false,
+  });
+
+  // 3. Log results for monitoring
+  logger.info('orphan_scan_complete', {
+    computeOrphansFound: computeResult.orphansFound,
+    computeMatchedOrphans: computeResult.matchedOrphans,
+    featureOrphansFound: featureResult.totalOrphans,
+    allocationsExpired: computeResult.allocationsExpired,
+    durationMs: Date.now() - startTime
+  });
+
+  // 4. Alert if orphan count exceeds threshold
+  const totalOrphans = computeResult.orphansFound + featureResult.totalOrphans;
+  if (totalOrphans > ORPHAN_ALERT_THRESHOLD) {
+    await alertOrphanCountHigh({ computeResult, featureResult });
+  }
+
+  // 5. Update metrics for dashboard
+  metrics.gauge('orphans.compute.found', computeResult.orphansFound);
+  metrics.gauge('orphans.compute.matched', computeResult.matchedOrphans);
+  metrics.gauge('orphans.features.found', featureResult.totalOrphans);
+  metrics.counter('orphans.scans').inc();
+}
+
+async function scanFeatureOrphans(options: {
+  minAgeMs: number;
+  userConfirmedTerminate: boolean;
+}): Promise<FeatureScanResult> {
+  const featureProviders = await getAllFeatureProviders();
+  const results: Map<FeatureProviderName, FeatureReconcileResult> = new Map();
+
+  // Run reconciliation for each feature provider
+  for (const featureProvider of featureProviders) {
+    try {
+      // Only reconcile if provider implements the method
+      if (!featureProvider.reconcile) continue;
+
+      const result = await featureProvider.reconcile({
+        provider: featureProvider.name,
+        minAgeMs: options.minAgeMs,
+        userConfirmedTerminate: options.userConfirmedTerminate,
+      });
+
+      results.set(featureProvider.name, result);
+
+      // Log orphans for visibility
+      if (result.orphans.length > 0) {
+        logger.warn('feature_orphans_detected', {
+          provider: featureProvider.name,
+          orphanCount: result.orphans.length,
+          orphans: result.orphans.map(o => ({
+            providerId: o.providerId,
+            resourceType: o.resourceType,
+            name: o.name,
+          })),
+        });
+      }
+    } catch (error) {
+      // Don't fail entire scan if one feature provider errors
+      logger.error('feature_orphan_scan_failed', {
+        provider: featureProvider.name,
+        error: error.message,
+      });
+    }
+  }
+
+  return {
+    totalOrphans: Array.from(results.values()).reduce((sum, r) => sum + r.orphans.length, 0),
+    totalDrift: Array.from(results.values()).reduce((sum, r) => sum + r.drift.length, 0),
+    byProvider: results,
+  };
+}
+
+interface FeatureScanResult {
+  totalOrphans: number;
+  totalDrift: number;
+  byProvider: Map<FeatureProviderName, FeatureReconcileResult>;
+}
+```
+
+## Key Behaviors
+
+### Dry Run Only
+- Background task NEVER auto-terminates resources
+- userConfirmedTerminate is always false
+- Results are logged for monitoring and alerting
+- User must explicitly run `repl orphan terminate` to actually delete
+
+### Grace Period
+- minAgeMs=ORPHAN_MIN_AGE_MS (10 minutes) prevents terminating recently created resources
+- Resources created by in-progress workflows are protected
+- Current-session detection provides additional safety
+
+### Alerting Thresholds
+
+```typescript
+const ORPHAN_ALERT_THRESHOLD = 10;  // Alert if >10 orphans found
+const ORPHAN_COST_THRESHOLD = 100;  // Alert if estimated daily cost > $100
+```
+
+Alerts are sent via configured notification channel (Slack, email, etc.)
+
+## Metrics Emitted
+
+- `orphans.found` (gauge): Number of orphans detected
+- `orphans.matched` (gauge): Orphans that matched an active manifest
+- `orphans.scans` (counter): Total scan cycles completed
+- `orphans.scan_duration_ms` (histogram): Time taken per scan
+- `orphans.by_provider` (gauge, labeled): Orphan count per provider
+- `orphans.estimated_daily_cost_usd` (gauge): Estimated cost of orphans
+
+## Error Handling
+
+```typescript
+try {
+  await runOrphanCleanupCycle();
+} catch (error) {
+  logger.error('orphan_scan_failed', { error: error.message });
+  metrics.counter('orphans.scan_errors').inc();
+
+  // Don't crash the background task - retry next cycle
+  // Alert if errors persist (3+ consecutive failures)
+  consecutiveErrors++;
+  if (consecutiveErrors >= 3) {
+    await alertOrphanScanFailure(error);
+  }
+}
+```
+
+## Startup Behavior
+
+On control plane startup:
+1. Wait 30 seconds before first scan (let other systems initialize)
+2. Run initial scan
+3. Then run every ORPHAN_SCAN_INTERVAL_MS
+
+```typescript
+import { TIMING } from '../../../../shared/src/config/timing';
+
+// In main.ts startup
+setTimeout(() => {
+  setInterval(runOrphanCleanupCycle, TIMING.ORPHAN_SCAN_INTERVAL_MS);
+  runOrphanCleanupCycle();  // Run immediately after delay
+}, 30_000);
+```
+
+## Integration with Manual Cleanup
+
+The CLI `repl orphan` commands use the same cleanup intent:
+
+- `repl orphan list`: cleanup({ userConfirmedTerminate: false }) → show results
+- `repl orphan terminate`: cleanup({ userConfirmedTerminate: true }) → actually delete
+- `repl orphan whitelist <id>`: Add to whitelist (excluded from future scans)
+
+## Notes
+
+- This task is critical for cost control
+- Failure to run will accumulate cloud costs from leaked resources
+- Alert on task failure is high priority
+- Scanner results are cached (1 hour TTL) to reduce provider API calls

@@ -33,8 +33,8 @@
   - Instance with no allocations returns true
   - Instance with only COMPLETE allocations returns true
   - Instance with ACTIVE allocation returns false
-  - Instance with HELD allocation returns false
   - Instance with AVAILABLE allocation returns true
+  - COMPLETE allocations with debug_hold_until > NOW block termination (not availability)
 
 ## Run Tests
 - createRun with defaults
@@ -76,10 +76,11 @@
   - Only returns AVAILABLE allocations
   - Returns oldest available first
   - Returns null if no match
-- hold expiry queries
-  - getExpiredHolds returns HELD allocations past hold_until
+- debug hold expiry queries
+  - getExpiredDebugHolds returns COMPLETE allocations past debug_hold_until
   - Respects timezone handling
-  - Empty result if no expired holds
+  - Empty result if no expired debug holds
+  - Max duration check: debug_hold_until > completed_at + 24h forced to expire
 
 ## Workflow Tests
 - createWorkflow with JSON input

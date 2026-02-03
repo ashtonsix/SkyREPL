@@ -1,0 +1,140 @@
+================================================================================
+WORKLOG: L1 Pseudo-Implementation Refinement (Rounds 0-9)
+================================================================================
+Status: COMPLETE
+Period: 2026-02-03 to 2026-02-04
+
+================================================================================
+SUMMARY
+================================================================================
+
+Ten rounds of iterative refinement on L1 pseudo-implementation after structural
+overhaul (see 001_WORKLOG_L1_RESTRUCTURING.txt).
+
+Progression:
+- R0-R4: Low-hanging bugs, point-focused updates, some spec changes
+- R5-R7: Validation method experiments; behavior tracing emerged as most effective
+- R8-R9: Addressed spec drift from "seat-of-the-pants" fixes, design review,
+         corrected L1 drift, aligned with spec
+
+Final state: L1 is stable. L2 transition has begun (see 003_WORKLOG_TIMINGS.txt).
+
+================================================================================
+VALIDATION APPROACH EVOLUTION
+================================================================================
+
+Tried multiple validation methods. Effectiveness ranked:
+
+1. BEHAVIOR TRACING (most effective)
+   - 65+ traces across 7 domains
+   - Critical bugs found: warm pool race, cancel flow, orphan lifecycle
+   - Cross-module interactions revealed issues static analysis missed
+
+2. E2E FLOW ANALYSIS
+   - Launch-run, terminate, warm pool, orphan cleanup traces
+   - Caught missing SSE messages, undefined DB methods
+
+3. SPEC-PARITY AUDITS
+   - Useful but less novel - mostly caught obvious inconsistencies
+
+4. DEEP FILE VALIDATION
+   - Interface extraction, state machines, dependency direction
+   - Good for individual files, missed integration issues
+
+Lesson: Behavior tracing should be weighted more heavily than static analysis.
+
+================================================================================
+CRITICAL FIXES (Spec Changes Required)
+================================================================================
+
+C5: HELD STATE ELIMINATION
+    State machine: 6 states → 5 states
+    AVAILABLE → CLAIMED → ACTIVE → COMPLETE (+ FAILED)
+    HELD replaced with debug_hold_until: timestamp | null
+    Benefit: Simpler, earlier warm pool replenishment
+
+C6: BLOB ARCHITECTURE
+    Separate blobs table from objects table
+    Schema: blobs (id, checksum, payload, size_bytes, ...)
+            objects (id, type, blob_id FK, ...)
+    checksum NOT unique (logs use append)
+    CAS dedup opt-in per object type, not schema constraint
+
+A1: COMMAND ACKNOWLEDGMENT PROTOCOL
+    command_id: autoincrement on StartRun/Cancel/PrepareSnapshot messages
+    pending_command_acks: number[] in heartbeat
+    30s timeout, 3 retries from control plane
+    Reason: SSE is lossy, command loss causes silent failures
+
+================================================================================
+BEHAVIOR TRACES SUMMARY
+================================================================================
+
+Phase A - Critical (13 traces): All fixed
+  A1: Compensation during partial provider creation
+  A2: Subworkflow depth across provider delegation
+  A3: Warm pool replenishment race with termination
+  A4: Parallel branch failure - successful branches compensated
+  A5: Resolve→claim race in warm pool
+  A6: CLAIMED→ACTIVE timeout with control crash
+  A7: ACTIVE→COMPLETE vs ACTIVE→FAILED race
+  A8: Workflow cancel with agent disconnect
+  A9: Log ordering without sequence numbers
+  A10: Spot interrupt artifact upload race
+  A11: Command acknowledgment protocol
+  A12: Presigned URL expiry during large transfers
+  A13: Two-phase spawn crash leaves cloud orphan
+
+Phase B - High (24 traces): All fixed
+
+Verification: 3 opus agents validated all remediation work (PASSED)
+
+================================================================================
+KEY DESIGN DECISIONS
+================================================================================
+
+| Decision                 | Choice                           | Rationale               |
+|--------------------------|----------------------------------|-------------------------|
+| Workflow timeout         | 60min default, per-workflow      | Easy to override        |
+| Retry semantics          | Create new workflow              | Audit trail valuable    |
+| Warm pool eligibility    | workflow_state suffix check      | Sufficient for MVP      |
+| Cancel verification      | Fire-and-forget, heartbeat       | Simpler, robust         |
+| Orphan scan interval     | 1hr                              | User confirmation req'd |
+| Spot interrupt           | Two-phase (start + complete)     | Reconciliation useful   |
+| Presigned URL TTL        | 4hr                              | Large transfers need it |
+
+================================================================================
+FILES MODIFIED (AGGREGATE)
+================================================================================
+
+62 L1 files updated across:
+  - Workflow: engine, patterns, compensation, state-transitions, 9 nodes
+  - Intent: launch-run, terminate, cleanup, snapshot, cleanup-manifest
+  - Background: hold-expiry, reconciliation, orphan-cleanup
+  - Material: db, storage
+  - Provider: types, registry, feature/tailscale
+  - API: agent, workflows, resources
+  - Shared: types, api/agent, api/resources
+  - CLI: main, config, client
+  - Agent: executor.py, logs.py, spot.py, heartbeat.py, checkpoint.py
+
+14 spec chapters updated (see specification/WORKLOG_REVISIONS.txt)
+
+================================================================================
+VALIDATION RESULTS
+================================================================================
+
+[x] Grep for "HELD" - only in deprecated/historical files
+[x] AllocationStatus enums - consistent 5 states across all files
+[x] Timeout constants - match spec
+[x] Background intervals - match Ch5.6 table
+[x] checksum_bytes present in blobs table
+[x] Objects use blob_id FK
+
+================================================================================
+CROSS-REFERENCES
+================================================================================
+
+Spec changes: specification/WORKLOG_REVISIONS.txt (R6-R9)
+Prior work: 001_WORKLOG_L1_RESTRUCTURING.txt
+Next phase: 003_WORKLOG_TIMINGS.txt (first L2 work)

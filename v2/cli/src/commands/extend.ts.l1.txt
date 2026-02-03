@@ -1,14 +1,19 @@
-# extend.ts - Extend Hold Command
+# extend.ts - Extend Debug Hold Command
 
 ## Input
 - Allocation ID (full or prefix)
 - Duration (5m, 30m, 2h) - default 30m
 
 ## Flow
-1. POST /v1/operations/extend-hold
+1. POST /v1/operations/extend-debug-hold
 2. Display timeline
 
 ## Output
-- Previous hold_until
-- New hold_until
-- Max hold (absolute limit)
+- Previous debug_hold_until
+- New debug_hold_until
+- Max hold (24h from completed_at, absolute limit)
+
+## Notes
+- Only works on COMPLETE allocations
+- Cannot extend beyond 24h from completed_at
+- Used for debugging access to completed runs

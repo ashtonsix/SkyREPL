@@ -16,7 +16,7 @@
 - Error suffix: `:error` with workflow_error populated
 
 ## AllocationStatus Enum
-- AVAILABLE, CLAIMED, ACTIVE, HELD, COMPLETE, FAILED
+- AVAILABLE, CLAIMED, ACTIVE, COMPLETE, FAILED
 
 ## Helpers
 - isAvailable(resource): boolean - checks workflow_state and manifest ownership

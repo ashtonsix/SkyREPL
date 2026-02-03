@@ -11,10 +11,12 @@ Fidelity: L1 (outline)
 IMPORTS
 ================================================================================
 
-import type { Provider, ProviderCapabilities } from './provider';
-import type { FeatureProvider } from './types';
-import type { WorkflowBlueprint } from '../workflows/types';
+import type { Provider, ProviderCapabilities, FeatureProvider } from './types';
 import type { ProviderWorkflowContract } from './contracts';
+
+// NOTE: WorkflowBlueprint removed to avoid provider → workflow dependency cycle.
+// Workflow registration is handled by the intent layer, not the provider layer.
+// See control/src/intent/*.ts for workflow definitions.
 
 ================================================================================
 PROVIDER REGISTRY
@@ -91,8 +93,9 @@ PROVIDER REGISTRATION (for dynamic providers if needed)
 interface ProviderRegistration {
   provider: Provider;
   hooks?: ProviderLifecycleHooks;
-  workflows?: WorkflowBlueprint[];
   contracts?: ProviderWorkflowContract[];
+  // NOTE: Workflow registration moved to intent layer to avoid dependency cycle.
+  // Providers define capabilities; intents define workflows that use those capabilities.
 }
 
 // Dynamic registry for plugins (future extensibility)
@@ -370,6 +373,53 @@ Feature Provider Testing:
 */
 
 ================================================================================
+PROVIDER ISOLATION
+================================================================================
+
+Each provider maintains isolated configuration and credentials:
+
+1. **Credential Isolation:**
+   - Each provider loads credentials independently
+   - No cross-provider credential sharing
+   - AWS credentials: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+   - Lambda credentials: LAMBDA_API_KEY
+   - RunPod credentials: RUNPOD_API_KEY
+   - OrbStack: No credentials needed (local)
+
+2. **Lazy Configuration Loading:**
+   - Provider config loaded only when provider first accessed
+   - Reduces startup time (don't load all providers if only using one)
+   - Enables conditional provider availability (skip if credentials missing)
+   - Example: AWS module throws on import if AWS_ACCESS_KEY_ID missing
+
+3. **No Cross-Provider Leakage:**
+   - Provider caches are isolated (separate cache namespaces)
+   - Provider hooks are independently registered
+   - Provider errors don't affect other providers
+   - Parallel provider operations use separate execution contexts
+
+4. **Security Benefits:**
+   - Credentials never passed between providers
+   - Provider code can't access other providers' credentials
+   - Audit logs track per-provider credential usage
+   - Test isolation: Each test suite can use different provider subsets
+
+**Configuration Validation:**
+
+On first provider access:
+1. Check required environment variables present
+2. Validate credential format (not expired, correct format)
+3. Test API connectivity (lightweight health check)
+4. Cache validated provider instance
+5. Future accesses use cached instance (no re-validation)
+
+If validation fails:
+- Throw error with clear remediation message
+- Provider remains unavailable for session
+- Other providers unaffected
+- User sees: "AWS provider unavailable: AWS_ACCESS_KEY_ID not set"
+
+================================================================================
 KEY INSIGHTS
 ================================================================================
 
@@ -379,6 +429,8 @@ Registry Pattern Benefits:
   3. Same registry for runtime and test discovery
   4. Parametric testing validates all providers uniformly
   5. Easy to add new providers (just extend registry)
+  6. Provider isolation prevents credential leakage
+  7. Configuration loaded lazily per provider
 
 Contract Testing Philosophy:
   - Tests validate control plane handles contracts correctly

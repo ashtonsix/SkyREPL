@@ -1,18 +1,26 @@
 # terminate-orphans.ts - Terminate Orphans Node
 
 ## Input Type
-{ orphans: OrphanedResource[], autoTerminate: boolean }
+{ orphans: OrphanedResource[], userConfirmedTerminate: boolean, minAgeMs?: number }
+
+NOTE: userConfirmedTerminate (not "autoTerminate") - termination ALWAYS requires
+explicit user confirmation. Spec 12.7 states "NEVER auto-terminate cloud resources".
+This flag indicates the USER has explicitly requested termination, not automation.
 
 ## Output Type
 { terminated: string[], skipped: string[], errors: Array<{ providerId: string, error: string }> }
 
 ## Execute Steps
 - Initialize result arrays: terminated = [], skipped = [], errors = []
-- If autoTerminate is false:
-  - Log warning: "Auto-termination disabled, skipping all orphans"
-  - Add all orphan providerIds to skipped array
+- If userConfirmedTerminate is false:
+  - Log info: "User has not confirmed termination, returning dry-run results"
+  - Add all orphan providerIds to skipped array with reason='dry_run'
   - Return { terminated: [], skipped, errors: [] }
-- For each orphan in orphans:
+- Apply minAgeMs filter (default: 600000 = 10 minutes):
+  - For each orphan where ageMs < minAgeMs:
+    - Add to skipped with reason='too_young'
+    - Continue to next (grace period not elapsed)
+- For each remaining orphan:
   - Check if orphan is whitelisted via db.isOrphanWhitelisted(orphan.provider, orphan.providerId)
   - If whitelisted:
     - Add to skipped array
@@ -24,15 +32,23 @@
 - Return { terminated, skipped, errors }
 
 ## Compensation
-- WARNING: Termination is destructive and cannot be easily compensated
+- WARNING: Termination is destructive and cannot be compensated
 - Log all terminations to audit trail via db.logOrphanTermination()
 - On workflow failure/rollback: Do NOT attempt to recreate terminated resources
 - Orphan termination is final and irreversible
 
+## Safety Constraints (Spec 12.7)
+1. NEVER auto-terminate - userConfirmedTerminate must be explicit user action
+2. Mandatory grace period - minAgeMs defaults to 10 minutes
+3. Whitelist respected - acknowledged orphans never terminated
+4. Audit trail - all terminations logged for review
+5. Dry run default - CLI shows what WOULD be terminated before actual deletion
+
 ## Key Calls
 - db.isOrphanWhitelisted(provider, providerId)
 - provider.terminate(providerId, { force: true })
-- db.logOrphanTermination(providerId, provider, resourceType, reason='cleanup_workflow')
+- db.logOrphanTermination(providerId, provider, resourceType, reason='user_requested_cleanup')
 - Context: ctx.emitMetadata('terminated_count', terminated.length)
 - Context: ctx.emitMetadata('skipped_count', skipped.length)
 - Context: ctx.emitMetadata('error_count', errors.length)
+- Context: ctx.emitMetadata('dry_run', !userConfirmedTerminate)

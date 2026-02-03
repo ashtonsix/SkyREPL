@@ -5,47 +5,27 @@
 ## Purpose
 
 The API provides HTTP endpoints for CLI and agent communication with the control
-plane. It follows a two-layer architecture: Layer 2 (workflow-based) for normal
-operations, Layer 1 (direct resource access) for debugging and advanced use cases.
+plane. Design principle: keep handlers thin—orchestration belongs in workflows,
+not HTTP handlers.
 
-Design: Keep handlers thin. Orchestration belongs in workflows, not HTTP handlers.
+**Two-layer architecture:**
+- **Layer 2 (Workflow)**: Primary CLI interface. Submit workflows that abstract
+  orchestration complexity behind simple submission.
+- **Layer 1 (Resource)**: CRUD on resources. For debugging, monitoring dashboards,
+  and power users who need direct manipulation of instances, runs, allocations.
 
-## Framework and Architecture Notes
+**Endpoint roles:**
+- **External endpoints**: Standard HTTP REST API for CLI clients and external tools.
+  Full authentication, validation, and error handling.
+- **Internal endpoints**: Control plane operations that bypass HTTP overhead via
+  FFI-style direct function calls (same process). Share TypeScript types and
+  validation logic with external endpoints.
 
-**API Framework: ElysiaJS**
-
-We use ElysiaJS for the API layer, which provides:
-- Type/schema generation directly from TypeScript types
-- Automatic runtime validation from type definitions
-- Type-safe request/response handling
-
-**Endpoint Roles**
-
-Endpoints fall into two categories:
-
-1. **External endpoints**: Standard HTTP REST API accessible to CLI clients and
-   external tools. Full HTTP request/response cycle with authentication,
-   validation, and error handling.
-
-2. **Internal endpoints**: Control plane internal operations. These can bypass
-   HTTP overhead and use FFI-style direct function calls since they run in the
-   same process. Internal endpoints don't need full REST semantics but share the
-   same TypeScript types and validation logic as external endpoints.
-
-This distinction keeps the codebase flexible: internal operations get the
-performance of direct calls while maintaining the same contract as external APIs.
-
-The API follows a two-layer architecture:
-- **Layer 1 (Resource)**: CRUD operations on resources. Used for debugging and
-  power users. Direct manipulation of instances, runs, allocations, workflows.
-- **Layer 2 (Workflow)**: Submit workflows. Primary CLI interface. Abstracts
-  orchestration complexity behind simple submission endpoints.
-
-CLI primarily uses Layer 2. Layer 1 exists for debugging, monitoring dashboards,
-and advanced users who need direct resource manipulation.
+**Framework**: ElysiaJS provides type/schema generation from TypeScript types,
+automatic runtime validation, and type-safe request/response handling.
 
 Future: Users may define custom workflows for complex runs (multi-instance,
-staged execution, etc.). The workflow system is designed to support this.
+staged execution).
 
 ### File Organization
 
@@ -69,7 +49,7 @@ control/src/api/
 
 ## 9.1 Layer 1 (Resource) API
 
-Direct CRUD operations on resources. All endpoints support pagination, filtering,
+Direct CRUD on resources. All endpoints support pagination, filtering,
 and field selection.
 
 ### 9.1.1 Endpoint Summary Table
@@ -141,7 +121,7 @@ interface ListQueryParams {
 
 #### GET /v1/runs
 
-List runs with optional filtering.
+List runs with optional filters.
 
 **Request:**
 ```
@@ -225,7 +205,8 @@ interface GetRunResponse {
     "allocation": {
       "id": "alloc-xyz...",
       "instance_id": "inst-abc...",
-      "status": "HELD",
+      "status": "COMPLETE",
+      "debug_hold_until": 1706752860000,
       "user": "ubuntu",
       "workdir": "/home/ubuntu/work_1"
     },
@@ -246,7 +227,7 @@ interface GetRunResponse {
 
 #### POST /v1/runs
 
-Create a run record (low-level, prefer POST /v1/workflows/launch-run).
+Create run record (low-level, prefer POST /v1/workflows/launch-run).
 
 **Request:**
 ```typescript
@@ -287,7 +268,7 @@ interface CreateRunRequest {
 
 #### PUT /v1/runs/:id
 
-Update a run. Limited to certain fields based on status.
+Update run. Limited to certain fields based on status.
 
 **Request:**
 ```typescript
@@ -313,7 +294,7 @@ interface UpdateRunRequest {
 
 #### DELETE /v1/runs/:id
 
-Delete a run and associated data.
+Delete run and associated data.
 
 **Response (204 No Content):**
 No body.
@@ -333,7 +314,7 @@ No body.
 
 #### GET /v1/instances
 
-List instances with optional filtering.
+List instances with optional filters.
 
 **Request:**
 ```
@@ -405,7 +386,7 @@ interface GetInstanceResponse {
 
 #### POST /v1/instances
 
-Create an instance record (low-level, used by providers internally).
+Create instance record (low-level, used internally by providers).
 
 **Request:**
 ```typescript
@@ -437,7 +418,7 @@ interface UpdateInstanceRequest {
 
 #### DELETE /v1/instances/:id
 
-Delete an instance record.
+Delete instance record.
 
 **Response (204 No Content):**
 No body.
@@ -460,7 +441,7 @@ No body.
 
 #### GET /v1/allocations
 
-List allocations with optional filtering.
+List allocations with optional filters.
 
 **Request:**
 ```
@@ -510,11 +491,10 @@ interface GetAllocationResponse {
     "id": "alloc-xyz-1234",
     "run_id": "run-abc...",
     "instance_id": "inst-def...",
-    "status": "HELD",
+    "status": "COMPLETE",
     "user": "ubuntu",
     "workdir": "/home/ubuntu/work_1",
-    "hold_until": 1706752800000,
-    "hold_reason": "ssh_active",
+    "debug_hold_until": 1706752800000,
     "created_at": 1706745600000,
     "updated_at": 1706752800000,
     "ssh_config": {
@@ -529,7 +509,7 @@ interface GetAllocationResponse {
 
 #### POST /v1/allocations
 
-Create an allocation (low-level, used by workflow engine).
+Create allocation (low-level, used by workflow engine).
 
 **Request:**
 ```typescript
@@ -567,7 +547,7 @@ interface UpdateAllocationRequest {
 
 #### DELETE /v1/allocations/:id
 
-Delete an allocation record.
+Delete allocation record.
 
 **Response (204 No Content):**
 No body.
@@ -750,8 +730,8 @@ interface GetObjectResponse {
     tags: Record<string, unknown>;
     size_bytes: number;
     content_type?: string;
-    s3_url?: string;  // Presigned URL (S3 for >4KB, control plane endpoint for ≤4KB)
-    payload?: string; // Base64 if inline storage (≤4KB) and requested
+    s3_url?: string;  // Presigned URL (S3 for >64KB, control plane endpoint for ≤64KB)
+    payload?: string; // Base64 if inline storage (≤64KB) and requested
     created_at: number;
     updated_at: number;
   };
@@ -760,7 +740,7 @@ interface GetObjectResponse {
 
 #### DELETE /v1/objects/:id
 
-Delete an object.
+Delete object.
 
 **Response (204 No Content):**
 No body.
@@ -769,8 +749,8 @@ No body.
 
 #### POST /v1/blobs/check
 
-Check which blobs already exist and return presigned upload URLs for missing ones.
-This enables efficient file sync by avoiding re-upload of existing files.
+Check which blobs exist and return presigned upload URLs for missing ones.
+Enables efficient file sync by avoiding re-upload of existing files.
 
 **Request:**
 ```typescript
@@ -809,14 +789,15 @@ interface BlobCheckResponse {
 ```
 
 **Notes:**
-- Existing blobs are NOT returned in `missing` or `urls`
-- URLs have configurable TTL (e.g., 15 minutes); must exceed expected transfer time
-- Small files (<=4KB) may get control plane URLs instead of S3
-- Control plane increments ref_count for existing blobs when they are referenced by new runs
+- Existing blobs NOT returned in `missing` or `urls`
+- Presigned URLs use 4-hour TTL (sufficient for large transfers, no refresh needed)
+- Multipart uploads: 4-hour TTL per part (each part gets independent presigned URL)
+- Small files (≤64KB) may get control plane URLs instead of S3
+- Control plane increments ref_count for existing blobs when referenced by new runs
 
 **V2 File Sync Flow:**
 
-The v2 design reduces round trips by combining operations:
+V2 reduces round trips by combining operations:
 
 ```
 1. CLI: Hash local files → checksums[]
@@ -830,11 +811,11 @@ The v2 design reduces round trips by combining operations:
 9. Agent: Executes command, reports run_complete
 ```
 
-Key improvements over v1:
+Improvements over v1:
 - Combined download_files + start_run into single start_run message
-- Removed separate files_downloaded message (replaced with sync_complete via log channel)
-- sync_complete triggers CLAIMED→ACTIVE transition in control plane
-- Agent can distinguish sync failure from run failure via "phase" field in logs
+- Removed files_downloaded message (replaced with sync_complete via log channel)
+- sync_complete triggers CLAIMED→ACTIVE transition
+- Agent distinguishes sync failure from run failure via "phase" field
 - Fewer round trips, clearer state transitions
 
 ## 9.2 Layer 2 (Workflow) API
@@ -856,7 +837,7 @@ Workflow submission endpoints. These are the primary interface for CLI operation
 
 ### 9.2.2 POST /v1/workflows/launch-run
 
-Launch a new run. The primary entry point for executing commands.
+Launch a new run. Primary entry point for executing commands.
 
 **Request:**
 ```typescript
@@ -965,7 +946,7 @@ interface LaunchRunResponse {
 
 ### 9.2.3 POST /v1/workflows/terminate-instance
 
-Terminate an instance and clean up resources.
+Terminate instance and clean up resources.
 
 **Request:**
 ```typescript
@@ -1006,7 +987,7 @@ interface TerminateInstanceRequest {
 
 ### 9.2.4 POST /v1/workflows/create-snapshot
 
-Create a snapshot from an instance.
+Create snapshot from instance.
 
 **Request:**
 ```typescript
@@ -1049,7 +1030,7 @@ interface CreateSnapshotRequest {
 
 ### 9.2.5 POST /v1/workflows/extend-hold
 
-Extend the hold period on an allocation.
+Extend hold period on allocation.
 
 **Request:**
 ```typescript
@@ -1086,7 +1067,7 @@ interface ExtendHoldRequest {
 
 ### 9.2.6 POST /v1/workflows/cancel
 
-Cancel a running workflow.
+Cancel running workflow.
 
 **Request:**
 ```typescript
@@ -1120,10 +1101,9 @@ interface CancelWorkflowRequest {
 }
 ```
 
-Note: `compensation_status` refers to single-node compensation only (the node
-that was running when cancel was called). Previously completed nodes are NOT
-compensated - their resources remain in the manifest for cleanup at the
-manifest/policy level.
+**Compensation scope**: `compensation_status` refers to the currently running node
+only. Previously completed nodes are NOT compensated—their resources remain in the
+manifest for cleanup at the manifest/policy level.
 
 ### 9.2.7 GET /v1/workflows/:id/status
 
@@ -1134,7 +1114,7 @@ Poll for workflow status updates.
 interface WorkflowStatusResponse {
   workflow_id: string;
   type: string;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'compensating';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'rolling_back';
   current_node: string | null;
   progress: {
     completed_nodes: number;
@@ -1240,8 +1220,9 @@ type WorkflowStreamEvent =
 
 ### 9.2.9 GET /v1/preflight
 
-Perform preflight checks before operations that launch workflows or allocate resources.
-Returns warnings for orphaned resources, budget limits, credential expiry, and stale allocations.
+Perform preflight checks before launching workflows or allocating resources.
+Returns warnings for orphaned resources, budget limits, credential expiry, stale allocations,
+low disk space on warm pool instances, and shared instance notifications.
 
 **Request:**
 ```
@@ -1276,7 +1257,7 @@ interface PreflightResponse {
 
 interface PreflightWarning {
   /** Warning type */
-  type: 'orphaned_resources' | 'budget_limit' | 'credential_expiry' | 'stale_allocations';
+  type: 'orphaned_resources' | 'budget_limit' | 'credential_expiry' | 'stale_allocations' | 'low_disk_space' | 'shared_instance';
 
   /** Human-readable message */
   message: string;
@@ -1356,10 +1337,10 @@ interface PreflightError {
 ```
 
 **Notes:**
-- Preflight checks are non-blocking by default (return warnings, not errors)
-- CLI uses this endpoint before `POST /v1/workflows/launch-run` to display warnings
-- Warnings can be bypassed with `--yes` or `--no-preflight` CLI flags
-- Errors indicate blocking issues that prevent operation (e.g., budget exceeded)
+- Preflight checks are non-blocking by default (warnings, not errors)
+- CLI uses this before `POST /v1/workflows/launch-run` to display warnings
+- Warnings bypassed with `--yes` or `--no-preflight` flags
+- Errors indicate blocking issues preventing operation (e.g., budget exceeded)
 
 ## 9.3 Communication Architecture
 
@@ -1601,7 +1582,7 @@ specification.
 
 ### 9.5.2 POST /v1/agent/heartbeat
 
-Agent sends periodic heartbeat to confirm liveness. Sent every 10 seconds.
+Agent sends periodic heartbeat to confirm liveness. Sent periodically (interval: HEARTBEAT_INTERVAL, see Ch11, Ch15).
 
 **Request:**
 ```typescript
@@ -1741,7 +1722,8 @@ interface AgentLogsRequest {
 
 **Notes:**
 - Logs are batched at configurable intervals (e.g., 100ms) to reduce HTTP overhead
-- sync_complete triggers CLAIMED→ACTIVE allocation transition
+- sync_complete event bypasses log batching using flush_and_send() for immediate
+  delivery, ensuring CLAIMED→ACTIVE transition happens without delay
 - phase field distinguishes sync failures from execution failures
 - WebSocket clients subscribed to run logs receive these in real-time
 
@@ -1918,7 +1900,7 @@ X-Checksum: sha256:abc123...
 - 409: Checksum mismatch (file modified)
 
 **Note:** In v2, start_run message includes presigned URLs for each file.
-Agent downloads directly from S3 (or control plane for small files ≤4KB).
+Agent downloads directly from S3 (or control plane for small files ≤64KB).
 This endpoint maintained for backward compatibility during transition.
 
 ### 9.5.8 POST /v1/instances/:id/panic
@@ -2027,10 +2009,10 @@ CREATE INDEX idx_panic_timestamp ON instance_panic_logs(timestamp);
 
 **Retention Policy:**
 
-Panic logs retained for 30 days, then automatically cleaned up.
+Panic logs retained for PANIC_LOG_RETENTION (see Ch15 §15.9), then automatically cleaned up.
 
 **Notes:**
-- Agent timeout: 2 seconds (does not block shutdown)
+- Agent timeout: PANIC_DIAGNOSTICS_TIMEOUT (does not block shutdown)
 - Transmission success rate: 70-90% (acceptable for debugging feature)
 - Failures expected and non-critical (network partition, control plane down)
 - Endpoint returns 200 immediately to minimize agent shutdown delay

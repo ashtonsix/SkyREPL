@@ -1,0 +1,117 @@
+================================================================================
+WORKLOG: L1 Structural Overhaul
+================================================================================
+Status: COMPLETE
+Period: 2026-02-03
+
+================================================================================
+CONTEXT
+================================================================================
+
+Initial state: ~15,000 line specification (candidate draft) and first-cut L1
+pseudo-implementation. The L1 had major structural problems:
+
+1. Flat directory structure - all files under src/ with no layer separation
+2. Provider layer departed from spec spirit (Ch6-8):
+   - Missing intent-based foundation
+   - Missing 80/20 homogeneous/specific separation
+   - Minimal extension framework
+3. No clear component boundaries (control vs CLI vs shared vs agent)
+
+Decision: Delete and rebuild with proper architecture.
+
+================================================================================
+CHANGES SUMMARY
+================================================================================
+
+PART 1: PROVIDER LAYER REBUILD
+------------------------------
+
+Deleted (5 files):
+  provider.types.ts, provider-aws.ts, provider-lambda.ts,
+  provider-runpod.ts, provider-orbstack.ts
+
+Created (9 files):
+  Core layer (80% homogeneous):
+    - contracts.ts: Intent contracts (spawn, terminate, snapshot, cleanup)
+    - provider.ts: Provider<T> interface, core methods, capabilities
+    - errors.ts: 9 error classes, retry mapping
+
+  Type boundary layer:
+    - types.ts: Generic + provider-specific types, materialize/project functions
+
+  Extension layer (20% specific):
+    - extensions.ts: 6 lifecycle hooks, TTL cache, events
+
+  Implementations:
+    - aws.ts, lambda.ts, runpod.ts, orbstack.ts
+
+Key decisions:
+  - Intent contracts as compile-time types (not runtime objects)
+  - Explicit materialize() on entry, project() on exit at type boundaries
+  - OrbStack testing validates contracts generalize to all providers
+  - Provider workflows as black boxes (control validates output only)
+
+PART 2: COMPONENT-BASED RESTRUCTURE
+-----------------------------------
+
+Final structure (128 files, up from 80):
+
+  v2/
+  ├── control/                    # Control plane (VPS deployment)
+  │   ├── migrations/
+  │   └── src/
+  │       ├── material/           # Layer 1: Data sources (Ch2)
+  │       ├── resource/           # Layer 2: Domain objects (Ch3-5)
+  │       ├── provider/           # Layer 3: Cloud abstraction (Ch8)
+  │       │   ├── compute/        # AWS, Lambda, RunPod, OrbStack
+  │       │   └── feature/        # Tailscale
+  │       ├── workflow/           # Layer 4: Execution engine (Ch6)
+  │       │   └── nodes/
+  │       ├── intent/             # Layer 5: Workflow compositions (Ch7)
+  │       ├── orphan/             # Layer 5: Orphan management (Ch12)
+  │       │   └── nodes/
+  │       ├── api/                # Layer 6: HTTP interface (Ch9)
+  │       │   ├── resources/
+  │       │   ├── operations/
+  │       │   ├── agent/
+  │       │   └── middleware/
+  │       └── background/         # Periodic tasks
+  │
+  ├── cli/                        # CLI client (user machine)
+  │   └── src/
+  │       ├── ui/
+  │       └── commands/
+  │
+  ├── shared/                     # Types shared between control + CLI
+  │   └── src/
+  │       └── api/
+  │
+  ├── agent/                      # Python agent (on instances)
+  │
+  └── tests/
+      ├── control/{unit,integration,e2e}/
+      ├── cli/unit/
+      └── property/
+
+Dependency rules:
+  material/ <- resource/ <- provider/ <- workflow/ <- intent/
+                                        \_ orphan/ _/
+  cli/ imports from shared/ only (never control/)
+  control/ imports from shared/ only (never cli/)
+
+================================================================================
+SPEC ALIGNMENT
+================================================================================
+
+Ch13 updated with component-based directory structure and dependency rules.
+Ch8 provider paths updated to control/src/provider/compute/.
+File organization sections added to Ch9 (API), Ch10 (CLI), Ch12 (Orphan).
+
+================================================================================
+CROSS-REFERENCES
+================================================================================
+
+See also:
+- specification/WORKLOG_REVISIONS.txt: R9 (v2 structure alignment)
+- 002_WORKLOG_R0X_L1_REFINEMENT.txt: Subsequent refinement rounds

@@ -4,15 +4,14 @@
 
 ## Purpose
 
-The type system provides complete TypeScript type definitions for all entities
-in SkyREPL, ensuring type safety across the control plane, CLI, and agent.
-It organizes types by layer, avoiding circular dependencies and mixed concerns.
+Complete TypeScript type definitions for all SkyREPL entities, organized by layer
+to avoid circular dependencies. Three distinct type categories:
 
-Goal: Proper use of generics, no any types, clear separation between DB rows,
-API shapes, and domain objects.
+- **Record types** (db.types.ts): Raw database rows, snake_case, primitive types
+- **Materialized types** (types.ts): Rich domain objects, camelCase, with relationships
+- **API types** (api/*.types.ts): HTTP request/response shapes
 
-This section specifies file organization patterns, core type primitives,
-resource types at all layers, and workflow-specific types.
+Goals: Proper use of generics, no `any` types, clear separation between layers.
 
 ## 13.1 File Organization
 
@@ -127,14 +126,14 @@ WHAT GOES IN foo.types.ts:
 - Internal state types for foo.ts
 - Type guards and validation schemas for foo.ts
 
-WHAT DOES NOT GO IN foo.types.ts:
+WHAT DOESN'T GO IN foo.types.ts:
 - Types shared across multiple files (use types.ts)
 - Database record types (use control/src/material/db.types.ts)
 - API contract types (use shared/src/api/)
 
 ### 13.1.3 Control/Shared Type Split
 
-Types are split between control/ and shared/ based on who needs them:
+Types split between control/ and shared/ based on consumer:
 
 **shared/src/api/*.ts** - HTTP contract types (request/response shapes)
 - Used by CLI to construct requests and parse responses
@@ -146,68 +145,13 @@ Types are split between control/ and shared/ based on who needs them:
 - Not exposed to CLI
 - Example: LaunchRunInput (workflow engine input), LaunchRunOutput
 
-This separation ensures CLI never imports from control/ - it only uses
-the shared API contract types to communicate over HTTP.
+This separation ensures CLI never imports from control/ - it communicates
+via shared API contract types over HTTP.
 
-EXAMPLE: cli.types.ts
-
-```typescript
-// cli.types.ts - Types specific to CLI operations
-
-import type { Run, Instance, Allocation } from './types';
-import type { WorkflowStatus } from './workflows/engine.types';
-
-/** CLI command parsing result */
-export interface ParsedCommand {
-  command: CliCommand;
-  args: string[];
-  flags: Record<string, string | boolean>;
-}
-
-export type CliCommand =
-  | 'run'
-  | 'list'
-  | 'ssh'
-  | 'extend'
-  | 'stop'
-  | 'terminate'
-  | 'status'
-  | 'logs'
-  | 'control';
-
-/** CLI output formatters */
-export interface OutputFormatter {
-  formatRun(run: Run, verbose: boolean): string;
-  formatInstance(instance: Instance, verbose: boolean): string;
-  formatAllocation(allocation: Allocation, verbose: boolean): string;
-  formatWorkflowProgress(status: WorkflowStatus): string;
-}
-
-/** CLI progress display state */
-export interface ProgressDisplayState {
-  workflowId: string;
-  currentNode: string | null;
-  nodesCompleted: number;
-  nodesTotal: number;
-  startedAt: number;
-  lastUpdate: number;
-}
-
-/** CLI SSH config entry */
-export interface CliSSHEntry {
-  host: string;           // Short allocation ID
-  hostname: string;       // IP address
-  user: string;
-  port: number;
-  identityFile: string;
-  workdir: string;
-}
-```
-
-### 13.1.3 Cross-Cutting Types (types.ts)
+### 13.1.4 Cross-Cutting Types (types.ts)
 
 The types.ts file contains ONLY types that are:
-1. Used by 3+ files across the codebase
+1. Used by 3+ files across codebase
 2. Fundamental primitives (IDs, timestamps, enums)
 3. Core domain objects (materialized resources)
 
@@ -218,16 +162,9 @@ The types.ts file contains ONLY types that are:
 // PRIMITIVES
 // =============================================================================
 
-/** INTEGER PRIMARY KEY, display as slug */
+/** INTEGER PRIMARY KEY, displayed as base-36 slug (e.g., ID 12345 → "9ix") */
 export type ID = number;
 export type UUID = ID;    // Deprecated alias for migration
-
-// Slug Definition:
-// A slug is a base-36 alphanumeric representation that directly corresponds
-// to the integer ID. Example: ID 12345 → slug "9ix"
-// Internal: integer (e.g., 12345)
-// Display: slug (e.g., "9ix")
-// Format: id.toString(36) for display, parseInt(slug, 36) to parse
 
 /** Unix timestamp in milliseconds */
 export type TimestampMs = number;
@@ -280,7 +217,6 @@ export type AllocationStatus =
   | 'AVAILABLE'
   | 'CLAIMED'
   | 'ACTIVE'
-  | 'HELD'
   | 'COMPLETE'
   | 'FAILED';
 
@@ -382,9 +318,7 @@ export interface Allocation {
   user: string;
   workdir: string;
   status: AllocationStatus;
-  holdUntil: TimestampMs | null;
-  holdReason: AllocationHoldReason | null;
-  maxHoldDurationMs: DurationMs | null;  // Hard limit for hold duration
+  debugHoldUntil: TimestampMs | null;  // Blocks termination if > NOW, enables SSH when COMPLETE
   createdAt: TimestampMs;
   updatedAt: TimestampMs;
   currentManifestId: UUID | null;
@@ -393,14 +327,6 @@ export interface Allocation {
   instance?: Instance;
   run?: Run;
 }
-
-/** Valid hold reasons for allocations */
-export type AllocationHoldReason =
-  | 'explicit'       // User explicitly extended hold
-  | 'ssh_active'     // SSH session is active
-  | 'debugging'      // Held for debugging purposes
-  | 'run_completing' // Run finishing, collection in progress
-  | string;          // Extensible for custom reasons
 
 /** Materialized Workflow resource */
 export interface Workflow {
@@ -627,15 +553,11 @@ export type PatternType =
   | 'retry-with-alternative';
 ```
 
-### 13.1.4 Type Placement Decision Tree
+### 13.1.5 Type Placement Decision Tree
 
-When adding a new type, follow this decision tree:
+Follow this decision tree when adding a new type:
 
 ```
-Is this type used by 3+ files across src/?
-  YES --> types.ts
-  NO  |
-      v
 Is this type a database row representation?
   YES --> db.types.ts
   NO  |
@@ -644,33 +566,35 @@ Is this type an API request/response shape?
   YES --> api/{resource}.types.ts or api/workflows.types.ts
   NO  |
       v
-Is this type specific to a single module (foo.ts)?
-  YES --> foo.types.ts (create if doesn't exist)
-  NO  |
-      v
 Is this type provider-specific?
   YES --> providers/provider.types.ts
   NO  |
       v
 Is this type workflow engine internals?
   YES --> workflows/engine.types.ts
+  NO  |
+      v
+Is this type specific to a single module (foo.ts)?
+  YES --> foo.types.ts (create if doesn't exist)
+  NO  |
+      v
+Is this type used by 3+ files across src/?
+  YES --> types.ts
   NO  --> types.ts (cross-cutting by elimination)
 ```
 
 ## 13.2 Core Types
 
-### 13.2.1 ID Types
+Core type definitions appear in Section 13.1.4 (types.ts). This section provides
+additional utilities and semantic context.
 
-All IDs are INTEGER PRIMARY KEYs stored as numbers internally. Type aliases improve readability and catch misuse.
+### 13.2.1 ID Utilities
+
+Semantic ID type aliases distinguish between internal IDs and provider-specific
+identifiers:
 
 ```typescript
-// types.ts
-
-/** Branded ID types for compile-time safety */
-export type ID = number;  // INTEGER PRIMARY KEY
-export type UUID = ID;    // Deprecated alias for migration
-
-// Specific ID types (all are IDs, but semantically distinct)
+// Specific ID types (all INTEGER PRIMARY KEY, but semantically distinct)
 export type InstanceId = UUID;
 export type RunId = UUID;
 export type AllocationId = UUID;
@@ -679,107 +603,39 @@ export type ManifestId = UUID;
 export type ObjectId = UUID;
 export type NodeRecordId = UUID;
 
-// Provider IDs (NOT IDs - provider-specific format)
+// Provider IDs (NOT INTEGER PKs - provider-specific format)
 export type ProviderId = string;  // i-xxxxx, pod-xxxxx, etc.
 export type ProviderSnapshotId = string;  // ami-xxxxx, snap-xxxxx, etc.
-
-// ID Display Utilities
-// Database stores INTEGER
-// API can return either integer or slug string
-// CLI displays slugs for human readability
-
-/** Convert ID to slug for display */
-export function idToSlug(id: number): string {
-  return id.toString(36);
-}
-
-/** Parse slug back to ID */
-export function slugToId(slug: string): number {
-  return parseInt(slug, 36);
-}
-
-/** Format ID for display as slug */
-export function formatId(id: number): string {
-  return idToSlug(id);
-}
 ```
 
-### 13.2.2 Timestamp Types
-
-All timestamps are Unix milliseconds. Duration is also in milliseconds.
+### 13.2.2 Timestamp and Duration Utilities
 
 ```typescript
-// types.ts
-
-/** Unix timestamp in milliseconds */
-export type TimestampMs = number;
-
-/** Duration in milliseconds */
-export type DurationMs = number;
-
 /** Timestamp utilities */
 export const Timestamp = {
-  now(): TimestampMs {
-    return Date.now();
-  },
-
-  fromDate(date: Date): TimestampMs {
-    return date.getTime();
-  },
-
-  toDate(ts: TimestampMs): Date {
-    return new Date(ts);
-  },
-
-  addMs(ts: TimestampMs, ms: DurationMs): TimestampMs {
-    return ts + ms;
-  },
-
-  isExpired(expiresAt: TimestampMs | null): boolean {
-    if (expiresAt === null) return false;
-    return Date.now() > expiresAt;
-  },
+  now: () => Date.now(),
+  fromDate: (date: Date) => date.getTime(),
+  toDate: (ts: TimestampMs) => new Date(ts),
+  addMs: (ts: TimestampMs, ms: DurationMs) => ts + ms,
+  isExpired: (expiresAt: TimestampMs | null) => expiresAt !== null && Date.now() > expiresAt,
 } as const;
 
-/** Duration constants */
+/** Duration constants and utilities */
 export const Duration = {
-  SECOND: 1000,
-  MINUTE: 60 * 1000,
-  HOUR: 60 * 60 * 1000,
-  DAY: 24 * 60 * 60 * 1000,
-
-  seconds(n: number): DurationMs { return n * Duration.SECOND; },
-  minutes(n: number): DurationMs { return n * Duration.MINUTE; },
-  hours(n: number): DurationMs { return n * Duration.HOUR; },
-  days(n: number): DurationMs { return n * Duration.DAY; },
-
-  format(ms: DurationMs): string {
-    if (ms < Duration.MINUTE) return `${Math.round(ms / 1000)}s`;
-    if (ms < Duration.HOUR) return `${Math.round(ms / Duration.MINUTE)}m`;
-    if (ms < Duration.DAY) return `${(ms / Duration.HOUR).toFixed(1)}h`;
-    return `${(ms / Duration.DAY).toFixed(1)}d`;
-  },
-
-  parse(str: string): DurationMs {
-    const match = str.match(/^(\d+(?:\.\d+)?)(s|m|h|d)$/);
-    if (!match) throw new Error(`Invalid duration: ${str}`);
-    const [, value, unit] = match;
-    const n = parseFloat(value);
-    switch (unit) {
-      case 's': return Duration.seconds(n);
-      case 'm': return Duration.minutes(n);
-      case 'h': return Duration.hours(n);
-      case 'd': return Duration.days(n);
-      default: throw new Error(`Unknown unit: ${unit}`);
-    }
-  },
+  SECOND: 1000, MINUTE: 60_000, HOUR: 3_600_000, DAY: 86_400_000,
+  seconds: (n: number) => n * 1000,
+  minutes: (n: number) => n * 60_000,
+  hours: (n: number) => n * 3_600_000,
+  days: (n: number) => n * 86_400_000,
+  format: (ms: DurationMs) => /* ... human-readable string ... */,
+  parse: (str: string) => /* ... parse "5m", "2h", etc. ... */,
 } as const;
 ```
 
 ### 13.2.3 Status Enums (Workflow-Aware)
 
-Status uses "<workflow>:<state>" format for active resources, or terminal
-states for completed/detached resources.
+Status uses "<workflow>:<state>" format for active resources, or terminal states
+for completed/detached resources.
 
 ```typescript
 // types.ts
@@ -859,7 +715,7 @@ export const RunWorkflowState = {
 } as const;
 
 /**
- * Check if a resource is available for use.
+ * Check if resource is available for use.
  * Availability is INFERRED from workflow_state and ownership, not stored.
  */
 export function isAvailable(resource: { workflowState: WorkflowState; currentManifestId: string | null }): boolean {
@@ -1024,8 +880,8 @@ export function createApiError(
 
 ### 13.3.1 Database Row Types (Records)
 
-Record types represent raw database rows. They use snake_case to match SQL
-column names and use primitive types (number for booleans, string for JSON).
+Record types represent raw database rows. Use snake_case to match SQL column
+names and primitive types (number for booleans, string for JSON).
 
 ```typescript
 // db.types.ts
@@ -1083,9 +939,7 @@ export interface AllocationRecord {
   current_manifest_id: UUID | null;
   user: string;
   workdir: string;
-  hold_until: TimestampMs | null;
-  hold_reason: string | null;
-  max_hold_duration_ms: number;
+  debug_hold_until: TimestampMs | null;  // Blocks termination if > NOW, enables SSH when COMPLETE
   created_at: TimestampMs;
   updated_at: TimestampMs;
 }
@@ -1104,6 +958,8 @@ export interface WorkflowRecord {
   manifest_id: UUID | null;
   trace_id: string | null;
   idempotency_key: string | null;
+  timeout_ms: number | null;         // Workflow timeout in milliseconds
+  timeout_at: TimestampMs | null;    // Computed: started_at + timeout_ms
   created_at: TimestampMs;
   started_at: TimestampMs | null;
   finished_at: TimestampMs | null;
@@ -1167,19 +1023,18 @@ export interface ObjectRecord {
   updated_at: TimestampMs;
 }
 
-/** Blob database record (stored in objects table with type='blob') */
+/** Blob database record (stored in separate blobs table) */
 export interface BlobRecord {
   id: number;
-  type: 'blob';
-  checksum: string;
-  checksum_bytes: number | null;  // Bytes covered by checksum (null if checksum null)
+  bucket: string;                 // Tenant bucket identifier
+  checksum: string;               // SHA-256 hash (NOT unique - allows duplicates for append)
+  checksum_bytes: number | null;  // Bytes covered by checksum (== size_bytes when current, < when stale)
   size_bytes: number;
-  reservation: number | null;     // Expected final size (for S3 pre-allocation)
-  payload: Buffer | null;         // Inline data (≤4KB) or null if in S3
+  payload: Buffer | null;         // Inline data (≤64KB) or null if in S3
   s3_key: string | null;
   s3_bucket: string | null;
   created_at: TimestampMs;
-  updated_at: TimestampMs;
+  last_referenced_at: TimestampMs;
 }
 
 /** Run file database record (stored in objects table with type='run_file') */
@@ -1221,11 +1076,11 @@ export interface UsageRecordDb {
 
 ### 13.3.2 Materialized Types (Domain Objects)
 
-Materialized types are the rich domain objects constructed from records plus
-related data. They use camelCase and TypeScript boolean/object types.
+Materialized types are rich domain objects constructed from records plus related
+data. Use camelCase and TypeScript boolean/object types.
 
-Materialized types are defined in types.ts (Section 13.1.3) as they are
-cross-cutting. The relationship between Record and Materialized types:
+Materialized types are defined in types.ts (Section 13.1.3) as cross-cutting.
+Relationship between Record and Materialized types:
 
 ```typescript
 // db.types.ts - Conversion utilities
@@ -1321,9 +1176,7 @@ export function recordToAllocation(
     user: record.user,
     workdir: record.workdir,
     status: record.status,
-    holdUntil: record.hold_until,
-    holdReason: record.hold_reason,
-    maxHoldDurationMs: record.max_hold_duration_ms,
+    debugHoldUntil: record.debug_hold_until,
     createdAt: record.created_at,
     updatedAt: record.updated_at,
     currentManifestId: record.current_manifest_id,
@@ -1402,7 +1255,7 @@ export function recordToFeatureInstallation(
 
 ### 13.3.3 API Request/Response Types
 
-API types are specific shapes for HTTP request bodies and response bodies.
+API types are specific shapes for HTTP request and response bodies.
 
 ```typescript
 // api/resources.types.ts
@@ -1705,7 +1558,7 @@ DATA FLOW:
 
 ### 13.4.1 Definition Types (Blueprints)
 
-Blueprint types define the static structure of workflows.
+Blueprint types define static workflow structure.
 
 ```typescript
 // workflows/engine.types.ts
@@ -1867,7 +1720,7 @@ export interface NodeExecutionState {
 
 ### 13.4.3 NodeContext Interface
 
-The NodeContext is the primary interface for node execution.
+NodeContext is the primary interface for node execution.
 
 ```typescript
 // workflows/engine.types.ts (continued)
@@ -2131,9 +1984,9 @@ export interface WorkflowEngine {
 
 ### 13.4.5 Intent-Specific Input/Output Types
 
-Type definitions for intent workflow inputs and outputs. These are internal
-to the control plane (in control/src/intent/) - CLI uses the API contract
-types in shared/src/api/workflows.ts instead.
+Type definitions for intent workflow inputs and outputs. Internal to control
+plane (in control/src/intent/) - CLI uses API contract types in
+shared/src/api/workflows.ts instead.
 
 ```typescript
 // control/src/intent/launch-run.types.ts
@@ -2309,22 +2162,7 @@ OWNERSHIP RELATIONSHIPS
       │
       └──spawns──> Subworkflow (depth + 1)
 
-
-DATA FLOW
-=========
-
-  HTTP Request
-       │
-       v
-  API Types ──────────> Validation ──────────> Materialized Types
-  (CreateRunRequest)                           (Run)
-                                                    │
-                                                    v toRecord()
-                                               Record Types
-                                               (RunRecord)
-                                                    │
-                                                    v
-                                               SQLite DB
+(See Section 13.3.4 for detailed data flow between type layers)
 ```
 
 ## 13.6 Guidance: Where to Put New Types
@@ -2418,10 +2256,21 @@ interface SpawnOptions {
    type AWSInstance = Instance & AWSInstanceExtension;
    ```
 
+### Adding Pattern/Feature/Heartbeat Types
+
+All live in `providers/provider.types.ts`:
+
+- **New pattern**: Add to `PatternType` union, define config interface, add to `PatternConfig` discriminated union
+- **New feature provider**: Define config/state types, implement `FeatureProvider<TConfig, TState>`, add to `FeatureProviderName` union
+- **New heartbeat task**: Add to `HeartbeatTask.type` union, use `TaskReceipt` for completions
+
+**Note:** Remote agent communication types (Ch11) live in `api/agent.types.ts`.
+Don't confuse provider heartbeats with agent heartbeats.
+
 ## 13.7 Feature Provider Types
 
 Feature providers enable cross-provider capabilities like Tailscale VPN integration.
-These types are defined to support the feature provider system introduced in R3.
+Types support the feature provider system introduced in R3.
 
 ```typescript
 // providers/provider.types.ts - Feature Provider Types
@@ -2494,9 +2343,8 @@ export interface TailscaleState {
 
 ## 13.8 Provider Heartbeat Types
 
-Types for the unified heartbeat expectations model between the control plane
-and providers (introduced in R3). These types enable explicit communication
-about periodic maintenance tasks.
+Types for heartbeat expectations model between control plane and providers.
+Enable explicit communication about periodic maintenance tasks.
 
 ```typescript
 // providers/provider.types.ts - Provider Heartbeat Types
@@ -2560,63 +2408,7 @@ export interface HealthCheckResult {
 }
 ```
 
-### Adding New Pattern Configuration
-
-1. Add to `PatternType` union:
-   ```typescript
-   export type PatternType =
-     | 'insert-and-reconverge'
-     | 'new-pattern'  // Add here
-     | ...;
-   ```
-
-2. Define config interface:
-   ```typescript
-   export interface NewPatternConfig {
-     // ... config fields
-   }
-   ```
-
-3. Add to `PatternConfig` discriminated union:
-   ```typescript
-   export type PatternConfig<P extends PatternType> =
-     ...
-     P extends 'new-pattern' ? NewPatternConfig :
-     never;
-   ```
-
-### Adding Feature Provider Types
-
-Feature providers follow a specific pattern to enable cross-provider capabilities.
-
-1. Define config and state types in `providers/provider.types.ts`:
-   ```typescript
-   export interface NewFeatureConfig {
-     // Configuration options
-   }
-
-   export interface NewFeatureState {
-     // Runtime state
-   }
-   ```
-
-2. Implement `FeatureProvider<NewFeatureConfig, NewFeatureState>` interface
-
-3. Add feature name to `FeatureProviderName` union in `types.ts`
-
-### Adding Provider Heartbeat Types
-
-Types for control plane ↔ provider heartbeat communication go in
-`providers/provider.types.ts` alongside the Provider interface.
-
-1. Define task types in `HeartbeatTask.type` union
-2. Use `TaskReceipt` for task completion reports
-3. Use `WorkflowLaunchReport` for async event handling (spot interruptions, etc.)
-
-**Note:** Remote agent communication types (Ch11) are separate and live in
-`api/agent.types.ts`. Don't confuse provider heartbeats with agent heartbeats.
-
-### Type Naming Conventions
+## 13.9 Type Naming Conventions and Anti-Patterns
 
 | Type Category     | Naming Pattern              | Example                    |
 |-------------------|-----------------------------|----------------------------|
@@ -2633,7 +2425,7 @@ Types for control plane ↔ provider heartbeat communication go in
 ### Anti-Patterns to Avoid
 
 1. **Mixed concern types** - Don't put API shapes in db.types.ts
-2. **any usage** - Always use generics or unknown with type guards
+2. **any usage** - Use generics or unknown with type guards
 3. **Inline complex types** - Extract to named interfaces
 4. **Circular imports** - Use type-only imports: `import type { X } from`
 5. **Overly generic types** - Prefer specific types with discriminated unions

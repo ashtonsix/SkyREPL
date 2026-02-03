@@ -1,5 +1,8 @@
 # manifest-cleanup.ts - Manifest Cleanup Task
 
+# Note: Timing constants import from ../../../../shared/src/config/timing.ts.l2.txt
+# - MANIFEST_CLEANUP_INTERVAL_MS (5m)
+
 ## Scan
 - Query: manifests WHERE status='SEALED' AND expires_at < NOW
 
@@ -16,5 +19,5 @@
 - Skip if already in progress
 
 ## Cycle
-- Every minute (configurable)
+- Every MANIFEST_CLEANUP_INTERVAL_MS (5m)
 - Alert after 5+ consecutive failures

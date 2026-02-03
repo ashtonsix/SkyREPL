@@ -1,5 +1,17 @@
 # resources.ts - Layer 1 API (CRUD Endpoints)
 
+## Pagination Constants
+- DEFAULT_PAGE_LIMIT = 50
+- MAX_PAGE_LIMIT = 1000
+- CURSOR_TTL_MS = 3600000 (1 hour)
+
+## Pagination Behavior
+- Cursor format: Opaque base64-encoded JSON { id: number, created_at: number }
+- Cursor validation: Expired (>1h old) or invalid cursors return 400 with error code INVALID_CURSOR
+- Limit capping: Requests exceeding MAX_PAGE_LIMIT are capped (not rejected)
+- Sort order: created_at DESC by default
+- Empty result format: { data: [], pagination: { hasMore: false, cursor: null } }
+
 ## Runs
 - `GET /v1/runs` - List runs with pagination, filtering
 - `POST /v1/runs` - Create run (typically via workflow)

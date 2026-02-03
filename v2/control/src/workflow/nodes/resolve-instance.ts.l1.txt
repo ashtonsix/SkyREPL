@@ -1,0 +1,92 @@
+# resolve-instance.ts - Resolve Instance Node
+
+## Exports
+
+```typescript
+export interface ResolveInstanceInput {
+  spec: InstanceSpec;
+  preferWarmPool: boolean;
+  initChecksum?: string;
+}
+
+export interface ResolveInstanceOutput {
+  branch: 'warm-pool' | 'spawn';
+  warmAllocation?: Allocation;  // Set if branch='warm-pool'
+}
+
+export const resolveInstanceExecutor: NodeExecutor<ResolveInstanceInput, ResolveInstanceOutput>;
+```
+
+## Purpose
+
+Entry point for launch-run workflow. Decides between warm pool reuse and fresh spawn
+using the conditional-branch pattern.
+
+## Execute Steps
+
+```
+async function execute(ctx, input): Promise<ResolveInstanceOutput>
+  1. If !input.preferWarmPool:
+     - Return { branch: 'spawn' }
+
+  2. Query warm pool:
+     - allocation = await db.findWarmAllocation(input.spec, input.initChecksum)
+
+  3. If allocation found:
+     - Return { branch: 'warm-pool', warmAllocation: allocation }
+
+  4. If no allocation:
+     - Return { branch: 'spawn' }
+```
+
+## Conditional Branch Application
+
+The engine interprets the output to apply conditional-branch pattern:
+
+```
+if (output.branch === 'warm-pool') {
+  // Route to claim-allocation node
+  // Pass warmAllocation.id as input
+  // If claim-allocation returns null (race lost), fallback to spawn path
+} else {
+  // Route to spawn-instance node
+}
+```
+
+## Race Condition Handling
+
+Two workflows may find the same AVAILABLE allocation simultaneously:
+1. Both call resolve-instance and receive same allocation ID
+2. Both route to claim-allocation node
+3. First workflow succeeds claim (atomic UPDATE)
+4. Second workflow loses race (affected rows = 0)
+5. Loser's claim-allocation returns null
+6. Engine interprets null return as fallback signal
+7. Workflow reroutes to spawn-instance node
+8. Fresh instance spawned for second workflow
+
+## Compensation
+
+- None needed (read-only operation)
+- No side effects to reverse
+
+## Error Handling
+
+| Error | Source | Response |
+|-------|--------|----------|
+| Database query failure | Internal | Fail immediately (DATABASE_ERROR) |
+| Invalid spec | User | Fail immediately (VALIDATION_ERROR) |
+
+## Warm Pool Health
+
+Orphan AVAILABLE allocations (instance terminated but allocation remains) are handled by reconciliation:
+- Reconciliation scans AVAILABLE allocations every 5 minutes
+- Verifies instance exists in provider
+- Marks allocation FAILED if instance not found
+- Prevents infinite loop: claim → fail (instance gone) → release → claim again
+- Without this check, dead instances pollute warm pool indefinitely
+
+## Key Calls
+
+- db.findWarmAllocation(spec, initChecksum?)
+- Note: findWarmAllocation should filter out FAILED allocations (WHERE status='AVAILABLE')

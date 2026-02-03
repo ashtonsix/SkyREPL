@@ -5,6 +5,13 @@
 - Path relative to repl.toml location
 - Timeout enforcement via checkpoint_timeout
 
+## Timeout Constraints for Spot Interruption
+- AWS spot warning window: 2 minutes (120 seconds)
+- MAX_SPOT_CHECKPOINT_MS = 90000 (90 seconds)
+- Leaves 30 seconds for artifact upload and messaging
+- User-configured checkpoint_timeout capped at MAX_SPOT_CHECKPOINT_MS during spot interruption
+- Regular checkpoints (non-spot) can use full user-configured timeout
+
 ## Environment Variables
 - SKYREPL_CHECKPOINT_REASON=spot_termination
 - SKYREPL_RUN_ID, SKYREPL_WORKDIR

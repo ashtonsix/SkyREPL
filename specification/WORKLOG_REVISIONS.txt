@@ -1,464 +1,77 @@
 ================================================================================
-WORKLOG: Spec Revisions
+WORKLOG: Specification Revisions
 ================================================================================
-
-ROUND 1 SUMMARY (REVIEW_0.txt) - COMPLETED
-------------------------------------------
-
-Executed 10 revision items across 3 phases:
-
-Phase 1 (R1-A1 to R1-A4): Single-file updates ✓
-- R1-A1: Resource naming → repl-<control_id>-<manifest_id>-<instance_id>
-- R1-A2: cleanup-features (PFO pattern), snapshot as launch-run variation
-- R1-A3: Workdirs persist until instance termination
-- R1-A4: Implementation phases simplified to guidance-only
-
-Phase 2 (R1-B1 to R1-B4): Batched same-file updates ✓
-- R1-B1: INTEGER AUTOINCREMENT + base-36 slugs, object storage rationale
-- R1-B2: DRAFT/SEALED states, owner_type/owner_id, timing, DOS, scanner
-- R1-B3: Pattern evolution simplified, single-step rollback, workflow helpers
-- R1-B4: Contract testing via types+tests, AWS as "first" not "Tier 1"
-
-Phase 3 (R1-C1 to R1-C2): Cross-file updates ✓
-- R1-C1: status → workflow_state, <workflow>:<phase> format, isAvailable() helper
-- R1-C2: 15_OPERATIONS.txt enhanced (billing tiers, deployment models, security)
-
-Post-revision: DRAFT/SEALED propagated, INTEGER IDs fixed, workflow_state
-propagated, compensation terminology standardized.
+Status: COMPLETE (10 rounds)
+Period: 2026-02-03 to 2026-02-04
 
 ================================================================================
-ROUND 2 SUMMARY (REVIEW_1.txt + ANALYSIS.txt) - COMPLETED
+INITIAL STATE (Pre-Worklog)
 ================================================================================
 
-Executed 5 revision items across 3 phases:
-
-Phase 1 (R2-A1): Quick Fix ✓
-- R2-A1: Removed files_synced/bytes_synced ghost fields from API spec (4 locations)
-
-Phase 2 (R2-B1 to R2-B2): Mechanical Renames ✓
-- R2-B1: Storage → Material (file rename + ~80 replacements)
-- R2-B2: Core Workflows → Intents (file rename + conceptual reframe)
-
-Phase 3 (R2-C1 to R2-C2): Substantive Work ✓
-- R2-C1: Full 01_INTRODUCTION.txt rewrite
-- R2-C2: Verified single-step workflow helpers documented
+This worklog was created after the majority of spec content was drafted.
+Initial ~15,000 lines represented candidate draft ready for refinement.
 
 ================================================================================
-ROUND 3 (Final Polish) - IN PROGRESS
+REVISION SUMMARY
 ================================================================================
 
-Context: Post-R2 verification identified remaining issues from ANALYSIS.txt
-plus user feedback on intro and section naming.
+130 revision items across 10 rounds:
 
-R3 SCOPE
---------
+R0-R4: Foundation and polish (54 items)
+  - Resource naming: repl-<control_id>-<manifest_id>-<instance_id>
+  - INTEGER IDs + base-36 slugs (not checksum PKs)
+  - DRAFT/SEALED manifest states
+  - Storage → Material, Core Workflows → Intents terminology
+  - 12 files renamed (dropped _LAYER/_SYSTEM/_SPECIFICATION suffixes)
+  - OrbStack elevated to critical testing provider
+  - Sky Computing ecosystem context (SkyPilot as touchstone)
+  - Workflow pattern library cut to 4 patterns
+  - Future Work section added to Ch14
 
-Section Renames (R3-A: mechanical, parallel):
-  R3-A1: 02_MATERIAL_LAYER → 02_MATERIAL
-  R3-A2: 03_RESOURCE_LAYER → 03_RESOURCES
-  R3-A3: 04_MANIFEST_LAYER → 04_MANIFEST
-  R3-A4: 05_ALLOCATION_SYSTEM → 05_ALLOCATIONS
-  R3-A5: 06_WORKFLOW_ENGINE → 06_WORKFLOWS
-  R3-A6: 08_PROVIDER_SYSTEM → 08_PROVIDERS
-  R3-A7: 09_API_SPECIFICATION → 09_API
-  R3-A8: 10_CLI_SPECIFICATION → 10_CLI
-  R3-A9: 11_AGENT_PROTOCOL → 11_AGENT
-  R3-A10: 12_ORPHAN_DETECTION → 12_ORPHANS
-  R3-A11: 13_TYPE_SYSTEM → 13_TYPES
-  R3-A12: 14_IMPLEMENTATION_PHASES → 14_IMPLEMENTATION
+R5: Agent failsafe (1 item)
+  - /panic endpoint for pre-shutdown diagnostics
 
-Intro Fixes (R3-B):
-  R3-B1: GPU → compute (not just GPUs)
-  R3-B2: Add Sky Computing ecosystem context (SkyPilot as touchstone)
-  R3-B3: Fix diagram: 2→3→4 flow, 6 needs 4, remove redundant 7→10, ch12 refs
-  R3-B4: Align diagram with reading order text
+R6: Timing normative/non-normative (12 items)
+  - Timing values marked as examples, not requirements
+  - Constraint relationships made normative
 
-Terminology/Consistency (R3-C):
-  R3-C1: Slug terminology - use consistently, define as base-36 at first use
-  R3-C2: Pattern library - cut to 4 patterns (remove 3 extra from ch13 types)
-  R3-C3: Cross-references Ch6↔Ch7
-  R3-C4: ACTIVE→FAILED triggers - add concrete examples
-  R3-C5: workflow_error structure - verify/fix consistency
+R7: Schema alignment (14 items)
+  - Objects table: reservation, checksum columns
+  - Blob deduplication queries fixed
 
-Future Work Sketch (R3-D):
-  R3-D1: Add "Future Work" section to ch14 covering:
-    - Error message guidelines (CLI presentation, recovery suggestions)
-    - Onboarding flow (`repl init` wizard, setup validation)
-    - `repl doctor` command (config validation)
-    - SQLite scaling thresholds (when to migrate)
-    - Any other deferred items
+R8: v2 structure alignment (15 items)
+  - Component-based directory structure (control/cli/shared/agent)
+  - Provider paths updated, file organization sections added
 
-================================================================================
-EXECUTION LOG
-================================================================================
+R9: L1 backport + healing (34 items)
+  - HELD state elimination (6 → 5 states, debug_hold_until timestamp)
+  - Blob architecture (separate table, FK reference)
+  - Command acknowledgment protocol
+  - Behavior trace fixes backported
+  - Writing quality pass (~400 lines saved)
 
-R3-A: Section Renames - COMPLETED
----------------------------------
-All 12 files renamed via git mv:
-  02_MATERIAL_LAYER → 02_MATERIAL
-  03_RESOURCE_LAYER → 03_RESOURCES
-  04_MANIFEST_LAYER → 04_MANIFEST
-  05_ALLOCATION_SYSTEM → 05_ALLOCATIONS
-  06_WORKFLOW_ENGINE → 06_WORKFLOWS
-  08_PROVIDER_SYSTEM → 08_PROVIDERS
-  09_API_SPECIFICATION → 09_API
-  10_CLI_SPECIFICATION → 10_CLI
-  11_AGENT_PROTOCOL → 11_AGENT
-  12_ORPHAN_DETECTION → 12_ORPHANS
-  13_TYPE_SYSTEM → 13_TYPES
-  14_IMPLEMENTATION_PHASES → 14_IMPLEMENTATION
-Section headers updated, cross-references updated in all spec files.
-
-R3-B: Intro Fixes - COMPLETED
------------------------------
-  R3-B1: GPU → compute (2 occurrences)
-  R3-B2: Added Sky Computing ecosystem context (SkyPilot as touchstone)
-  R3-B3: Fixed diagram (2→3→4 flow, 6 needs 4, removed redundant 7→10, ch12 refs)
-  R3-B4: Aligned reading order text with diagram
-
-R3-C: Terminology/Consistency - COMPLETED
------------------------------------------
-  R3-C1: Slug terminology standardized (base-36 only at definition, "slug" elsewhere)
-  R3-C2: Cut to 4 patterns (removed try-fallback, sequential-append, dynamic-join)
-  R3-C3: Added cross-references between Ch6↔Ch7
-  R3-C4: ACTIVE→FAILED triggers documented (heartbeat timeout, SSH loss, spot, fatal error)
-  R3-C5: workflow_error structure verified consistent (already flat JSON string)
-
-R3-D: Future Work - COMPLETED
------------------------------
-  R3-D1: Added section 14.10 FUTURE WORK covering:
-    - Error message guidelines
-    - Onboarding flow (repl init)
-    - Diagnostic tooling (repl doctor)
-    - Scaling thresholds (SQLite limits)
-    - Interactive development (repl connect)
-
-Verification - COMPLETED
-------------------------
-  - Final scan found 1 stale section reference (9.8 → 9.2.9 in 10_CLI.txt), fixed
-  - All file references clean (no old _LAYER/_SYSTEM/_SPECIFICATION suffixes)
-  - TOC matches actual filenames
-  - Terminology consistent (material, intent, compute, slug)
+Writing Quality Pass (Undocumented Round, see git:4158870):
+  - Deep pass across all 15 chapters
+  - Reduced over-detailed implementation sections
+  - Tightened prose throughout
 
 ================================================================================
-ROUND 3 COMPLETION SUMMARY
+KEY DECISIONS
 ================================================================================
 
-All R3 revision items completed:
-- R3-A (Section renames): 12/12 ✓
-- R3-B (Intro fixes): 4/4 ✓
-- R3-C (Terminology): 5/5 ✓
-- R3-D (Future work): 1/1 ✓
-- Verification: Clean ✓
-
-Total across all rounds:
-- Round 1: 10 items ✓
-- Round 2: 5 items ✓
-- Round 3: 22 items ✓
+| Topic                | Decision                              |
+|----------------------|---------------------------------------|
+| ID format            | INTEGER auto-increment + base-36 slug |
+| Manifest states      | DRAFT/SEALED (not OPEN/CLOSED)        |
+| Allocation states    | 5 states (HELD eliminated)            |
+| Timing spec          | Constraints normative, values examples|
+| Provider testing     | OrbStack validates contract compliance|
+| Workflow patterns    | 4 patterns (not 7)                    |
 
 ================================================================================
-ROUND 4 (Final Polish) - IN PROGRESS
+CROSS-REFERENCES
 ================================================================================
 
-User feedback from spec skim:
-
-Terminology/Framing:
-  R4-A1: Drop "single-user" → "development" (optimizing for dev workflows, not scope)
-  R4-A2: Multi-user is important (business model), don't imply single-user limitation
-
-Intro Restructure:
-  R4-B1: Diagram deleted by user - confirm removed
-  R4-B2: Merge 1.2+1.3 (repeat content), add subsections for Foundation/Execution/Interface/Operations
-  R4-B3: Move TOC above merged architecture section
-
-Material Layer:
-  R4-C1: Objects table: change from TEXT PK (checksum) to INTEGER auto-increment + checksum as tag
-         Reason: multi-tenant buckets, ACL, cost attribution, checksum collision
-  R4-C2: Instance table: "null for local" → use "local" string, no null
-
-Documentation:
-  R4-D1: Merge ANALYSIS/REVIEW_0/REVIEW_1/WORKLOG → single STATUS.txt
-         Keep WORKLOG as-is (continue updating separately)
-
-Legacy Code Research (src/):
-  R4-E1: Find Tailscale JIT install via ProxyCommand - document in ch5
-  R4-E2: Find preflight system - verify documented in ch10
-  R4-E3: Find CLI autocomplete generation (zsh/bash) - update ch10
-
-Chapter Fixes:
-  R4-F1: ch5: Add Tailscale JIT install details (from E1 research)
-  R4-F2: ch10: Slug-only IDs, no prefix acceptance, use autocomplete
-  R4-F3: ch10: "local or cloud (funnel)" → "local (funnel) or cloud"
-  R4-F4: ch10: Verify preflight documented (from E2 research)
-  R4-F5: ch11: Control should be more forgiving on heartbeat (initial)
-  R4-F6: ch14: Remove "repl connect"/interactive from Future Work (already in ch5)
-  R4-F7: ch14: Remove preflight from Future Work (already implemented)
-
-================================================================================
-R4 EXECUTION LOG
-================================================================================
-
-R4-A: Intro and Terminology - COMPLETED
----------------------------------------
-  R4-A1: Dropped "single-user" → "development" framing in intro
-
-R4-B: Intro Restructure - COMPLETED
------------------------------------
-  R4-B1: Diagram confirmed removed (deleted by user)
-  R4-B2: Merged 1.2+1.3, added subsections for Foundation/Execution/Interface/Operations
-  R4-B3: Moved TOC to section 1.3 (before architecture overview)
-
-R4-C: Material Layer - COMPLETED
---------------------------------
-  R4-C1: Objects table changed from TEXT PK (checksum) to INTEGER auto-increment
-         Checksum now stored as tag for addressing/dedup
-         Added rationale: multi-tenant buckets, ACL, cost attribution
-  R4-C2: Instance region: "null for local" → "local" string, NOT NULL
-
-R4-D: Documentation Merge - COMPLETED
--------------------------------------
-  R4-D1: Created STATUS.txt consolidating ANALYSIS/REVIEW_0/REVIEW_1
-         Kept WORKLOG_REVISIONS.txt separate (continue updating)
-
-R4-E: Legacy Code Research - COMPLETED
---------------------------------------
-  R4-E1: Found Tailscale JIT via ProxyCommand in src/
-  R4-E2: Found preflight system (already documented in ch10 section 9.2.9)
-  R4-E3: Found CLI autocomplete (already documented in ch10 section 10.15)
-
-R4-F: Chapter Fixes - COMPLETED
--------------------------------
-  R4-F1: Added Tailscale JIT install to ch5 (section 5.4)
-  R4-F2: ch10: Slug-only IDs, tab completion instead of prefix
-  R4-F3: ch10: "local (funnel) or cloud" with explanation
-  R4-F5: ch11: Control should be forgiving on initial heartbeat timing
-  R4-F6: ch14: Removed repl connect from Future Work (in ch5)
-  R4-F7: ch14: Removed preflight from Future Work (already implemented)
-
-Verification - COMPLETED
-------------------------
-  Final scan: CLEAN
-  - Terminology consistent (compute, development, slug)
-  - All cross-references valid
-  - Preflight documented (ch9 9.2.9)
-  - CLI autocomplete documented (ch10 10.15)
-  - No stale content in spec files
-  - "single-user" in ch15 is valid deployment model distinction
-
-================================================================================
-ROUND 4 COMPLETION SUMMARY
-================================================================================
-
-All R4 revision items completed:
-- R4-A (Terminology): 2/2 ✓
-- R4-B (Intro restructure): 3/3 ✓
-- R4-C (Material layer): 2/2 ✓
-- R4-D (Doc merge): 1/1 ✓
-- R4-E (Legacy research): 3/3 ✓
-- R4-F (Chapter fixes): 6/6 ✓
-- Verification: Clean ✓
-
-================================================================================
-GRAND TOTAL ACROSS ALL ROUNDS
-================================================================================
-
-- Round 1: 10 items ✓
-- Round 2: 5 items ✓
-- Round 3: 22 items ✓
-- Round 4: 17 items ✓
-- TOTAL: 54 revision items completed
-
-SPEC STATUS: Ready for finalization
-
-================================================================================
-ROUND 5 (Detailed Review Fixes) - COMPLETED
-================================================================================
-
-User performed detailed read-through and identified:
-
-R5-A: API Simplification
-  R5-A1: Ch5 Tailscale - collapsed 3-step API to single POST /tailscale-ensure
-
-R5-B: Intent Enhancements
-  R5-B1: Ch7 - Added required status phases for CLI consistent output
-  R5-B2: Ch7 - Added Testing Role section with OrbStack generalization
-
-R5-C: Provider Fixes
-  R5-C1: Ch8 intro - Removed AWS-centrism, AWS is just one example
-  R5-C2: Ch8 - Elevated OrbStack to critical testing role (not "Additional Provider")
-  R5-C3: Ch8 - Clarified shared 80% testing benefit via intent contracts
-
-R5-D: API Architecture
-  R5-D1: Ch9 - Added endpoint roles (external vs internal)
-  R5-D2: Ch9 - Added ElysiaJS framework note (type gen, FFI-ish internals)
-
-R5-E: Provider Vision
-  R5-E1: Ch1 - Expanded providers list to v2 vision (AWS/GCP/Azure/Lambda/RunPod/CoreWeave/Vast.ai/SLURM/OrbStack)
-
-R5-F: Configuration
-  R5-F1: Ch10 - Verified repl.toml documentation complete
-  R5-F2: Ch10 - Added checkpoint_script and checkpoint_timeout options
-  R5-F3: Ch11 - Added checkpoint script execution in spot interruption handling
-
-R5-G: Testing Consistency
-  R5-G1: Ch15 - Enhanced OrbStack generalization with intent contract refs
-  R5-G2: Ch15 - Enhanced fault injection with intent contract compliance
-  R5-G3: Ch15 - Enhanced property testing with intent contract specification
-  R5-G4: Cross-references added between Ch7↔Ch8↔Ch15 for testing
-
-TOTAL: 15 additional fixes in Round 5
-
-GRAND TOTAL: 69 revision items across 5 rounds
-
-================================================================================
-FINAL VERIFICATION - COMPLETED
-================================================================================
-
-Verification agents checked WORKLOG against actual spec state.
-
-Results:
-  ✓ R1/R2 foundational work: All verified (INTEGER IDs, DRAFT/SEALED, workflow_state, compensation, material, intent terminology)
-  ✓ R3 file structure: All 15 files correctly renamed, headers match, TOC correct, no stale references
-  ✓ R4/R5 recent work: All 10 items verified present
-  ✓ Pattern library: Exactly 4 patterns in both Ch6 and Ch13, consistent naming
-
-Issues found and fixed:
-  - object_tags.object_id was TEXT, changed to INTEGER (to match objects table)
-
-SPEC STATUS: Verified complete and consistent
-
-================================================================================
-POST-VERIFICATION ADDITIONS
-================================================================================
-
-R6-A1: Agent failsafe /panic endpoint
-  - Ch11: Added section 11.14 "Failsafe Self-Termination Diagnostics"
-  - Ch9: Added POST /v1/instances/:id/panic (internal endpoint)
-  - Agent transmits diagnostics just before shutdown (best-effort, 2s timeout)
-  - Payload: state, system info, error logs, timestamps
-  - 30-day retention for post-mortem debugging
-
-FINAL TOTAL: 71 revision items
-
-================================================================================
-ROUND 7 (Timeout Non-Normative) - COMPLETED
-================================================================================
-
-Context: Timeout values (10s, 30s, 5m, etc.) were over-specified as normative
-requirements when they should be tuning guidance discovered through operational
-experience. Specific values should be configurable, with only the constraint
-relationships being normative.
-
-R7 SCOPE
---------
-
-R7-A: Chapter 05_ALLOCATIONS.txt
-  R7-A1: SSH Activity Extension timing box - values → named constants with examples
-  R7-A2: Instance-Side Detection - hardcoded ms → config.* references
-  R7-A3: HoldDurationConfig - DEFAULT → EXAMPLE, added constraint comment
-  R7-A4: Tiered Extension System - specific values → named constants
-  R7-A5: Tailscale JIT timing - marked as "example defaults"
-
-R7-B: Chapter 09_API.txt
-  R7-B1: Heartbeat interval/timeout - "configurable (e.g., X)"
-  R7-B2: Log batching interval - "configurable interval (e.g., 100ms)"
-  R7-B3: Presigned URL TTL - "configurable TTL (e.g., 15 minutes)"
-  R7-B4: Idempotency expiry policy - "example defaults, configurable"
-
-R7-C: Chapter 11_AGENT.txt
-  R7-C1: Timing constants table - "Default" → "Example" column header
-  R7-C2: Added "Example Defaults (non-normative)" section heading
-  R7-C3: Added constraints section documenting normative relationships
-
-PRINCIPLE APPLIED
------------------
-
-Spec now distinguishes:
-- NORMATIVE: Constraint relationships (e.g., "heartbeat_interval < heartbeat_timeout")
-- NON-NORMATIVE: Specific values (e.g., "10 seconds") marked as examples
-
-This allows implementations to tune values based on operational experience while
-maintaining the invariants that ensure correct system behavior.
-
-TOTAL: 12 items in Round 7
-
-================================================================================
-ROUND 8 (Checksum/Blob Schema Alignment) - COMPLETED
-================================================================================
-
-Context: L1 pseudo-implementation had incorrect notes about checksum storage
-and blob table design. Cross-reference scan found inconsistencies in Ch3, Ch7,
-and Ch13. Spec and L1 needed alignment.
-
-R8-A: Objects Table Schema (Ch2)
-  R8-A1: Added `reservation` column for S3 pre-allocation
-  R8-A2: Added `checksum` column (SHA-256, nullable)
-  R8-A3: Added `checksum_bytes` column for staleness tracking
-  R8-A4: Added `idx_objects_checksum` index for deduplication
-  R8-A5: Updated S3 offload strategy with reservation docs
-
-R8-B: Blob Deduplication (Ch2)
-  R8-B1: Updated blob type description (checksum as column, not tag)
-  R8-B2: Updated run_file type description (checksum as column)
-  R8-B3: Updated deduplication queries (column instead of tag join)
-  R8-B4: Updated example queries
-  R8-B5: Fixed garbage collection query (was ambiguous "SELECT blobs")
-
-R8-C: Log Streaming (Ch2)
-  R8-C1: Added checksum staleness note for appendable objects
-
-R8-D: Cross-Reference Fixes
-  R8-D1: Ch3 blob materialization - fixed query pattern
-  R8-D2: Ch7 cleanupBlob - removed ref to non-existent blobs table
-  R8-D3: Ch13 BlobRecord - added id, checksum_bytes, reservation; removed ref_count
-  R8-D4: Ch13 RunFileRecord - updated to use checksum column
-
-TOTAL: 14 items in Round 8
-
-GRAND TOTAL: 97 revision items across 8 rounds
-
-================================================================================
-ROUND 9 (v2 Structure Alignment) - COMPLETED
-================================================================================
-
-Context: The v2/ pseudo-implementation adopted a component-based structure
-(control/cli/shared/agent) with layered directories within control/. The spec
-still referenced the old flat src/ structure. This round aligns spec file
-path references with the actual v2/ structure.
-
-R9-A: Ch13 Directory Structure (CRITICAL)
-  R9-A1: Rewrote 13.1.1 with full component-based tree (control/cli/shared/agent)
-  R9-A2: Added layer directories within control/ (material/resource/provider/workflow/intent/orphan/api/background)
-  R9-A3: Added dependency rules section
-  R9-A4: Added 13.1.3 "Control/Shared Type Split" explaining API vs internal types
-
-R9-B: Ch13 Intent Types (CRITICAL)
-  R9-B1: Renamed section 13.4.5 "Workflow-Specific" → "Intent-Specific"
-  R9-B2: Updated all file paths from workflows/workflow-*.types.ts → control/src/intent/*.types.ts
-  R9-B3: Added note that CLI uses shared/src/api/ types, not these internal types
-
-R9-C: Ch8 Provider Paths (CRITICAL)
-  R9-C1: Updated registry path v2/src/providers/ → control/src/provider/
-  R9-C2: Added compute/ subdirectory for provider implementations
-  R9-C3: Updated test import paths to tests/control/unit/
-
-R9-D: API Organization (MEDIUM)
-  R9-D1: Added "File Organization" section to Ch9
-  R9-D2: Documented api/ subdirectories: resources/, operations/, agent/, middleware/
-
-R9-E: Orphan Organization (MEDIUM)
-  R9-E1: Added "File Organization" section to Ch12
-  R9-E2: Documented orphan/ directory: scanner, classifier, whitelist, nodes/
-
-R9-F: CLI Organization (LOW)
-  R9-F1: Added "File Organization" section to Ch10
-  R9-F2: Documented cli/src/ structure with commands/ directory
-
-R9-G: Implementation Docs (LOW)
-  R9-G1: Ch14: Updated pseudo-impl description with .l1/.l2/.l3 fidelity suffixes
-  R9-G2: Ch14: Added component directory list (control/cli/shared/agent/tests)
-  R9-G3: Ch15: Updated migrations path to control/migrations/ with 001_ numbering
-
-TOTAL: 15 items in Round 9
-
-GRAND TOTAL: 112 revision items across 9 rounds
+L1 structural work: worklogs/001_WORKLOG_L1_RESTRUCTURING.txt
+L1 refinement: worklogs/002_WORKLOG_R0X_L1_REFINEMENT.txt
+Timing consolidation: worklogs/003_WORKLOG_TIMINGS.txt

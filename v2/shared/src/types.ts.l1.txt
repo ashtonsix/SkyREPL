@@ -1,5 +1,8 @@
 # types.ts - Cross-cutting type definitions
 
+# Note: Timing constants import from ./config/timing.ts.l2.txt
+# - ABSOLUTE_MAX_HOLD_MS (24h)
+
 ## PRIMITIVES
 
 - ID = number (INTEGER AUTOINCREMENT from database)
@@ -109,7 +112,7 @@ OrbStack ubuntu-22.04-4cpu-8gb:
 
 ## STATUS ENUMS
 
-- AllocationStatus = 'AVAILABLE' | 'CLAIMED' | 'ACTIVE' | 'HELD' | 'COMPLETE' | 'FAILED'
+- AllocationStatus = 'AVAILABLE' | 'CLAIMED' | 'ACTIVE' | 'COMPLETE' | 'FAILED'
 - WorkflowExecutionStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'rolling_back'
 - ManifestStatus = 'DRAFT' | 'SEALED' (EXPIRED is derived, not stored)
 - NodeStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
@@ -158,16 +161,19 @@ OrbStack ubuntu-22.04-4cpu-8gb:
 - user: string (Unix username, platform-dependent)
 - workdir: string
 - status: AllocationStatus
-- holdUntil: TimestampMs | null
-- holdReason: AllocationHoldReason | null
-- maxHoldDurationMs: DurationMs | null (24 hours hard limit)
+- debugHoldUntil: TimestampMs | null (preserves COMPLETE allocation for debugging)
 - createdAt: TimestampMs
 - updatedAt: TimestampMs
+- completedAt: TimestampMs | null
 - currentManifestId: UUID | null
 - instance?: Instance (populated based on depth)
 - run?: Run (populated based on depth)
 
-- AllocationHoldReason = 'explicit' | 'ssh_active' | 'debugging' | 'run_completing' | string
+NOTE: debugHoldUntil applies only to COMPLETE allocations:
+- When set: blocks instance termination, allows SSH access
+- When NULL or expired: allocation eligible for cleanup
+- Max duration: ABSOLUTE_MAX_HOLD_MS (24h) from completedAt (hard limit from timing.ts)
+- SSH activity does NOT auto-extend (debugging tool, not indefinite hold)
 
 ### Workflow
 - id: UUID
@@ -286,10 +292,14 @@ OrbStack ubuntu-22.04-4cpu-8gb:
 - resourceId: UUID
 - cleanupPriority: number | null (override manifest default)
 - addedAt: TimestampMs
-# NOTE: The spec TypeScript types (13_TYPES.txt lines 469-471) show ownerType/ownerId
-# fields, but these are from an older design. The database schema is correct (simpler):
-# ManifestResource uses manifest_id only to establish ownership. The ownerType/ownerId
-# pattern was replaced with direct manifest_id foreign key for clarity.
+- ownerType: 'manifest' | 'workflow' | 'policy'  # Who added this resource
+- ownerId: number | null                          # ID of owner (workflow_id, policy_id, etc)
+
+NOTE: ownerType/ownerId track WHO added the resource to the manifest, which is
+important for understanding resource provenance during compensation and cleanup.
+- ownerType='manifest': Added directly during manifest creation
+- ownerType='workflow': Added by a workflow node (ownerId = workflow_id)
+- ownerType='policy': Added by retention policy (ownerId = policy_id)
 
 ### WorkflowError (JSON-serialized in DB)
 - code, message, nodeId?, category: ErrorCategory, details?

@@ -1,19 +1,120 @@
 # classifier.ts - Orphan Classification
 
+## Exports
+
+```typescript
+export type OrphanSeverity = 'WARNING' | 'INFO' | 'CAUTION';
+
+export interface Orphan {
+  id: string;
+  name: string;
+  provider: string;
+  providerId: string;
+  resourceType: 'instance' | 'volume' | 'snapshot' | 'network';
+  createdAt: Date;
+  parsedManifestId?: string;
+  parsedInstanceId?: string;
+}
+
+export interface ClassifiedOrphan extends Orphan {
+  severity: OrphanSeverity;
+  reason: string;
+  ageMs: number;
+}
+
+export interface OrphanClassification {
+  currentSession: ClassifiedOrphan[];
+  otherSessions: ClassifiedOrphan[];
+  unknown: ClassifiedOrphan[];
+  stats: {
+    total: number;
+    byProvider: Record<string, number>;
+    bySeverity: Record<OrphanSeverity, number>;
+  };
+}
+
+// Main classification function
+export function classifyOrphans(
+  orphans: Orphan[],
+  sessionStartTime: Date,
+  thresholdMs?: number  // Default: 3600000 (1 hour)
+): OrphanClassification;
+
+// Helper to parse resource names
+export function parseOrphanName(name: string): {
+  manifestId?: string;
+  instanceId?: string;
+  controlId?: string;
+} | null;
+```
+
 ## Classification Rules
-- Current session: created after session start OR age < 1 hour → WARNING
-- Other sessions: older than 1 hour → INFO
-- Unknown: unparseable names → CAUTION
 
-## Inputs
-- orphans array
-- sessionStartTime
-- thresholdMs (default 1 hour)
+### Current Session (WARNING)
+- Created after sessionStartTime, OR
+- Age < thresholdMs (default 1 hour)
+- Reason: "Created during current session" or "Recent orphan (< 1 hour old)"
+- Action: May indicate active workflow failure, investigate immediately
 
-## Output
-- OrphanClassification: currentSession[], otherSessions[], unknown[]
+### Other Sessions (INFO)
+- Age >= thresholdMs
+- Has parseable name with manifest/instance IDs
+- Reason: "Orphan from previous session"
+- Action: Safe to terminate, likely from crashed workflow
+
+### Unknown (CAUTION)
+- Unparseable name (doesn't match repl-* pattern)
+- Reason: "Unknown resource (name doesn't match expected pattern)"
+- Action: Manual review recommended, may not be SkyREPL resource
+
+## classifyOrphans Implementation
+
+```
+function classifyOrphans(orphans, sessionStartTime, thresholdMs = 3600000):
+  const result = { currentSession: [], otherSessions: [], unknown: [], stats: {...} }
+
+  for each orphan in orphans:
+    const ageMs = Date.now() - orphan.createdAt.getTime()
+    const parsed = parseOrphanName(orphan.name)
+
+    if (!parsed):
+      // Unparseable name
+      result.unknown.push({
+        ...orphan,
+        severity: 'CAUTION',
+        reason: 'Unknown resource (name doesn\'t match expected pattern)',
+        ageMs
+      })
+    else if (orphan.createdAt > sessionStartTime || ageMs < thresholdMs):
+      // Current session or recent
+      result.currentSession.push({
+        ...orphan,
+        severity: 'WARNING',
+        reason: orphan.createdAt > sessionStartTime
+          ? 'Created during current session'
+          : `Recent orphan (${Math.floor(ageMs / 60000)} minutes old)`,
+        ageMs,
+        parsedManifestId: parsed.manifestId,
+        parsedInstanceId: parsed.instanceId
+      })
+    else:
+      // Old orphan from previous session
+      result.otherSessions.push({
+        ...orphan,
+        severity: 'INFO',
+        reason: 'Orphan from previous session',
+        ageMs,
+        parsedManifestId: parsed.manifestId,
+        parsedInstanceId: parsed.instanceId
+      })
+
+  // Compute stats
+  result.stats = computeStats(result)
+  return result
+```
 
 ## Use Cases
 - Preflight warnings before operations
 - Prioritize investigation of recent orphans
 - Filter by severity in CLI output
+- Inform automatic cleanup decisions (INFO = safe to terminate)

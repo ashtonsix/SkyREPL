@@ -1,33 +1,204 @@
 # engine.ts - Workflow Execution Engine
 
-## WorkflowEngine
-- submit(type, input, idempotencyKey?): Create workflow, start execution
-- get(workflowId): Get workflow with nodes
-- cancel(workflowId, reason): Request cancellation
+# Note: Timing constants import from ../../../shared/src/config/timing.ts.l2.txt
+# - DEFAULT_NODE_TIMEOUT_MS (5m)
+# - DEFAULT_WORKFLOW_TIMEOUT_MS (60m)
+# - CANCEL_VERIFICATION_MS (90s)
+
+## Exports
+
+```typescript
+// Types
+export type WorkflowStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'rolling_back';
+export type NodeStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+
+export interface WorkflowEngine {
+  submit(type: WorkflowType, input: WorkflowInput, idempotencyKey?: string): Promise<Workflow>;
+  get(workflowId: number): Promise<WorkflowWithNodes | null>;
+  cancel(workflowId: number, reason: string): Promise<void>;
+  pause(workflowId: number): Promise<void>;
+  resume(workflowId: number): Promise<void>;
+  retry(workflowId: number, fromNodeId?: string): Promise<void>;
+  waitForCompletion(workflowId: number, timeoutMs?: number): Promise<WorkflowResult>;
+  spawnSubworkflow(ctx: NodeExecutionContext, type: WorkflowType, input: WorkflowInput): Promise<SubworkflowHandle>;
+}
+
+export interface WorkflowWithNodes {
+  workflow: Workflow;
+  nodes: WorkflowNode[];
+}
+
+export interface WorkflowResult {
+  status: 'completed' | 'failed' | 'cancelled';
+  output?: unknown;
+  error?: NodeError;
+}
+
+export interface SubworkflowHandle {
+  workflowId: number;
+  wait(): Promise<WorkflowResult>;
+  cancel(reason: string): Promise<void>;
+}
+
+export interface RetryStrategy {
+  action: 'retry' | 'compensate' | 'fail';
+  delay?: number;
+  alternative?: AlternativeNodeConfig;
+  pattern?: 'retry-with-alternative' | 'conditional-branch';
+}
+
+// Constants (Ch6)
+export const MAX_PARALLEL_BRANCHES = 10;
+export const MAX_SUBWORKFLOW_DEPTH = 3;
+// Timing constants imported from timing.ts:
+// - DEFAULT_NODE_TIMEOUT_MS (5 minutes, H5)
+// - DEFAULT_WORKFLOW_TIMEOUT_MS (60 minutes, A3)
+// - CANCEL_VERIFICATION_MS (90 seconds, 3x heartbeat interval)
+
+// Factory
+export function createWorkflowEngine(db: Database, sse: SSEManager): WorkflowEngine;
+```
+
+## WorkflowEngine Methods
+
+### submit(type, input, idempotencyKey?, timeoutMs?): Promise<Workflow>
+- Check idempotency key, return existing workflow if found
+- Create DRAFT manifest
+- Create workflow record with status='pending'
+- A3: Set workflow.timeout_at = now + (timeoutMs ?? DEFAULT_WORKFLOW_TIMEOUT_MS)
+- Create workflow nodes from type definition
+- Start execution loop (async, non-blocking)
+- Return workflow immediately
+
+### get(workflowId): Promise<WorkflowWithNodes | null>
+- Load workflow from DB
+- Load all nodes for workflow
+- Return combined result or null if not found
+
+### cancel(workflowId, reason): Promise<void>
+- Verify workflow status is 'pending' or 'running'
+- Set workflow status='cancelled', cancelled_reason=reason
+- Mark running nodes as 'skipped'
+- If allocation is ACTIVE:
+  1. Find allocation for this workflow via manifest
+  2. Find instance for that allocation
+  3. H4: Send CancelRunMessage via SSE (fire-and-forget): sse.sendMessage(instanceId, { type: 'cancel_run', run_id })
+  4. Transition allocation: ACTIVE → COMPLETE (not FAILED, cancellation is intentional)
+  5. Set debug_hold_until if configured (preserves for debugging)
+  6. H4: No explicit verification - heartbeat timeout handles unresponsive agents
+     - If agent alive: receives cancel → stops run → emits run_complete (allocation already COMPLETE)
+     - If agent dead: heartbeat timeout → ACTIVE→FAILED (may race with COMPLETE transition)
+- Seal manifest
+- Note: Fire-and-forget delivery - heartbeat timeout ensures cleanup if agent unresponsive
+
+### pause(workflowId): Promise<void>
+- Verify workflow status is 'running'
+- Set workflow status='pending' (paused workflows re-enter pending)
+- Current node continues to completion, next node doesn't start
+- Useful for manual intervention scenarios
+
+### resume(workflowId): Promise<void>
+- Verify workflow status is 'pending' (paused)
+- Set workflow status='running'
+- Resume executeLoop from current position
+
+### retry(workflowId, fromNodeId?): Promise<Workflow>
+- A4: retry() does NOT reset failed nodes - creates NEW workflow with same inputs
+- This is NOT a state transition (failed→running is invalid per state-transitions.ts)
+- Implementation:
+  1. Verify original workflow status is 'failed'
+  2. Load original workflow input and idempotency key
+  3. A4: Generate new idempotency key: ${original_key}:retry:${timestamp}
+  4. Create new workflow with same type and input (new workflow ID, new idempotency key)
+  5. Return new workflow
+- Original workflow preserved for audit trail
+- New workflow starts fresh with status='pending'
+
+### waitForCompletion(workflowId, timeoutMs?): Promise<WorkflowResult>
+- Poll workflow status until terminal (completed, failed, cancelled)
+- Default timeout: 30 minutes
+- Returns: { status, output?, error? }
+
+### spawnSubworkflow(ctx, type, input): Promise<SubworkflowHandle>
+- Check ctx.depth < MAX_SUBWORKFLOW_DEPTH (default 3)
+- Create child workflow with parentWorkflowId = ctx.workflowId
+- Child inherits parent's manifestId (resources aggregate)
+- A2: Increment depth for child context (ctx.depth + 1)
+- Provider workflows receive ctx with incremented depth
+- Return handle for wait() or cancel()
+
+## Subworkflow Support (Ch6.4)
+
+### Parent-Child Relationship
+- Child workflows track parentWorkflowId in DB
+- Resources emitted by child go to parent's manifest
+- Parent can wait for child completion or proceed in parallel
+- Child failure doesn't automatically fail parent (depends on node logic)
+
+### Depth Limiting
+- MAX_SUBWORKFLOW_DEPTH = 3 prevents infinite spawning
+- ctx.depth incremented for each child
+- Exceeding depth throws VALIDATION_ERROR
 
 ## Execution Loop
-- Find ready nodes (dependencies satisfied)
-- Execute node, persist state before/after
-- Handle failure: compensate or fail workflow
-- On completion: seal manifest
+
+### executeLoop(workflowId): Promise<void>
+- A3: Check workflow.timeout_at before each node - if exceeded, fail workflow
+- Find ready nodes (dependencies satisfied, status='pending')
+- Execute nodes concurrently (Parallel-Fan-Out support)
+- Persist state before/after each node
+- On failure: call determineRetryStrategy, handle result
+- On completion: seal manifest, set workflow status='completed'
+
+### Workflow Timeout (A3)
+
+- Each workflow has timeout_at timestamp (set during submit)
+- executeLoop checks timeout before each node execution
+- If now > timeout_at:
+  1. Mark running nodes as failed
+  2. Seal manifest
+  3. Set workflow status='failed' with error code 'WORKFLOW_TIMEOUT'
+- Default: DEFAULT_WORKFLOW_TIMEOUT_MS (60 minutes)
+- Can be overridden per-workflow via submit(type, input, idempotencyKey, timeoutMs)
 
 ## Execution Semantics
-- Engine executes nodes synchronously, blocking until each completes
+- Engine executes nodes synchronously within each parallel branch
 - Parallelism via Parallel-Fan-Out pattern (multiple ready nodes execute concurrently)
 - Node failure triggers retry logic before advancing
 
+## Timeout Hierarchy (H5)
+
+- H5: Three-tier timeout system:
+  1. Workflow-level timeout (DEFAULT_WORKFLOW_TIMEOUT_MS = 60 min) - highest priority, checked before each node
+  2. Wait operation timeout (explicit per-operation, e.g., 10 min for sync) - wait operations exempt from node timeout
+  3. Node-level timeout (DEFAULT_NODE_TIMEOUT_MS = 5 min) - applies to node execution only
+- Wait operations (waitForEvent, waitForCondition) bypass node timeout
+- Example: start-run node has 5min node timeout, but internal sync wait has 10min explicit timeout
+- Node timeout applies to node.execute() overall, not to exempt wait operations within
+
 ## Crash Recovery
-- On startup: find workflows with status='running'
-- Resume from current_node
+
+### recoverWorkflows(): Promise<void>
+- H6: On startup: find workflows with status='running' OR 'pending'
+- Query: WHERE status IN ('running', 'pending')
+- H6: For pending workflows >30min without progress (updated_at < now - 30min):
+  - Mark workflow as 'failed' with error code 'PENDING_TIMEOUT'
+  - Seal manifest
+  - Log warning for investigation
+- For running workflows: resume executeLoop from current_node
+- Handle idempotent vs non-idempotent nodes (check node.idempotent flag)
 
 ## Manifest Integration
 - Create DRAFT manifest on workflow start
-- Seal manifest on completion
-- Cleanup manifest on failure
+- Seal manifest on completion (success or failure)
+- Resources emitted via ctx.emitResource() are added to manifest
+- B4: Manifest sealing waits for all child subworkflows to complete
+  - finalize node queries for active children and blocks until completion
+  - Ensures all resources from subworkflows are captured before SEALED state
 
 ## Retry Decision Logic
 
-### determineRetryStrategy(error, node, attempt)
+### determineRetryStrategy(error, node, attempt): RetryStrategy
 **Inputs:**
 - error: NodeError with code, category, details
 - node: WorkflowNode with retry policy
@@ -46,16 +217,6 @@
   - INVALID_STATE_TRANSITION → null (fail immediately)
   - DATABASE_ERROR → null (fail immediately)
   - INSUFFICIENT_PERMISSIONS → null (fail immediately)
-
-**Returns:**
-```
-{
-  action: 'retry' | 'compensate' | 'fail',
-  delay?: number,          // Backoff delay in ms
-  alternative?: object,    // Alternative node config for retry-with-alternative
-  pattern?: string         // Pattern to apply: 'retry-with-alternative', 'conditional-branch'
-}
-```
 
 **Backoff Calculation:**
 - Base: 2^attempt * 2000ms

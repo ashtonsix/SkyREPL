@@ -1,13 +1,134 @@
 # executor.py - Run Executor
 
+# Note: Timing constants reference ../../shared/src/config/timing.ts.l2.txt
+# - LOG_LOCAL_BUFFER_MS (100ms)
+# - ARTIFACT_COLLECTION_TIMEOUT_MS (30min)
+
+## Exports
+
+```python
+class RunExecutor:
+    def start_run(self, msg: StartRunMessage) -> None
+    def cancel_run(self, msg: CancelRunMessage) -> None
+    def prepare_snapshot(self, msg: PrepareSnapshotMessage) -> None
+```
+
 ## start_run Handler
-1. Clean workdir (critical for warm pool)
-2. Download files (parallel, verify checksums)
-3. Send sync_complete
-4. Execute command (subprocess.Popen)
-5. Stream stdout/stderr to log buffer
-6. Send run_complete with exit_code
-7. Collect and upload artifacts
+
+### Execute Steps
+1. Clean workdir (critical for warm pool):
+   - rm -rf /work/run_{n}/*
+   - mkdir -p /work/run_{n}
+
+2. Download files (parallel, verify checksums):
+   - For each file in msg.files:
+     - Download from presigned URL
+     - For large files (transfer duration > 10 minutes):
+       - Request URL refresh: POST /v1/storage/refresh-url { objectId }
+       - Continue download with new presigned URL
+     - Verify SHA256 checksum
+     - Write to workdir
+   - If any checksum fails: send sync_complete with sync_success=False
+   - Note: Files >100MB use multipart URLs with 1 hour TTL
+
+3. Execute init script (if provided):
+   - If msg.init_script:
+     - Write to /tmp/init.sh
+     - chmod +x /tmp/init.sh
+     - Run with timeout (default 5 min)
+     - If fails: send sync_complete with sync_success=False, error=init_failed
+
+4. Send sync_complete:
+   - Call logs.flush_and_send() to bypass batching (critical for timeout)
+   - POST /v1/agent/logs with stream='sync_complete'
+   - Include: sync_success, phase='sync', timestamp
+   - If sync_success=False: include error details
+
+5. Execute command (subprocess.Popen):
+   - If msg.create_snapshot and not msg.command:
+     - Snapshot-only mode: skip command execution
+     - Send run_complete with exit_code=0
+   - Else:
+     - Run command in workdir
+     - Capture stdout/stderr
+
+6. Stream stdout/stderr to log buffer:
+   - Buffer logs, flush every LOG_LOCAL_BUFFER_MS (100ms)
+   - POST /v1/agent/logs with phase='running'
+   - Include: stream='stdout'|'stderr', data, timestamp
+
+7. Wait for completion:
+   - Wait for process exit
+   - Capture exit_code
+
+8. Send run_complete:
+   - POST /v1/agent/run-complete
+   - Include: run_id, exit_code, workflow_state
+
+9. Collect and upload artifacts:
+   - Match artifact patterns from msg.artifacts
+   - Upload to presigned URLs
+   - For large files (>100MB): Use multipart upload URLs
+   - For transfers >10 minutes: Request URL refresh
+   - POST /v1/agent/artifacts
+   - Timeout: ARTIFACT_COLLECTION_TIMEOUT_MS (30 minutes)
+   - Large checkpoints (100GB+) need extended time to upload
 
 ## cancel_run Handler
-SIGTERM, wait, SIGKILL if needed
+
+### Execute Steps
+1. Find process by run_id
+2. If process running:
+   - Send SIGTERM
+   - Wait up to 10s for graceful exit
+   - If still running: send SIGKILL
+3. Send run_complete with exit_code=-15 (SIGTERM)
+
+## prepare_snapshot Handler
+
+### Execute Steps
+1. Sync filesystems: sync
+2. Clear temp files: rm -rf /tmp/* /var/tmp/*
+3. **Clear workdir: rm -rf /work/run_* (ensures no workdir state in snapshot)**
+4. Flush buffers: sync; echo 3 > /proc/sys/vm/drop_caches (if permitted)
+5. Send acknowledgment:
+   - POST /v1/agent/snapshot-ready
+   - Body: PrepareSnapshotAckMessage with instance_id, success=True
+   - On error: success=False, include error details
+
+Note: Workdir cleanup is critical - snapshots must NOT contain run-specific state.
+Workdir state preserved via artifacts, not snapshots.
+
+## Log Message Fields (Ch11)
+
+### LogMessage Fields
+- run_id: string
+- stream: 'stdout' | 'stderr' | 'sync_complete'
+- data: string (log content)
+- phase: 'sync' | 'running' | 'complete'
+- timestamp: number
+- sync_success?: boolean (only for sync_complete)
+- error?: string (only on failures)
+
+## State Tracking
+
+### Current Run State
+- current_run_id: string | None
+- current_process: subprocess.Popen | None
+- interrupted: boolean (set on spot interrupt)
+- pending_command_acks: set[int] (command IDs to acknowledge in next heartbeat)
+- processed_command_ids: deque[int] (last 100 command IDs for deduplication, maxlen=100)
+
+### Command Acknowledgment Protocol
+- When receiving StartRunMessage/CancelRunMessage/PrepareSnapshotMessage:
+  1. Check if command_id in processed_command_ids (deduplication)
+  2. If duplicate: Add to pending_command_acks, skip execution, return
+  3. If new: Add to pending_command_acks, then add to processed_command_ids, execute
+- pending_command_acks sent via heartbeat as pending_command_acks: number[]
+- Clear pending_command_acks after successful heartbeat
+- processed_command_ids is a circular buffer (collections.deque with maxlen=100)
+
+### Implementation Notes
+- command_id is autoincrement integer (NOT UUID)
+- Deduplication ensures idempotency on control plane retries
+- Keep last 100 command IDs to handle aggressive retry scenarios

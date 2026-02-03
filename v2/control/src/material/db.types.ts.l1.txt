@@ -50,9 +50,8 @@
 - current_manifest_id: UUID | null
 - user: string
 - workdir: string
-- hold_until: TimestampMs | null
-- hold_reason: string | null
-- max_hold_duration_ms: number
+- debug_hold_until: TimestampMs | null (applies only to COMPLETE allocations)
+- completed_at: TimestampMs | null (set when status transitions to COMPLETE or FAILED)
 - created_at: TimestampMs
 - updated_at: TimestampMs
 
@@ -72,6 +71,7 @@
 - created_at: TimestampMs
 - started_at: TimestampMs | null
 - finished_at: TimestampMs | null
+- updated_at: TimestampMs
 
 ### WorkflowNodeRecord
 - id: UUID
@@ -107,18 +107,15 @@
 
 ### ObjectRecord
 - id: UUID (INTEGER AUTOINCREMENT)
-- type: string (snapshot, artifact, log, blob, run_file, etc.)
+- type: string (snapshot, artifact, log, run_file - NOT blob)
+- blob_id: UUID (references blobs.id, NOT NULL)
 - provider: string | null
 - provider_object_id: string | null
-- size_bytes: number
-- content_type: string | null
-- payload: Buffer | null (inline for ≤4KB)
-- s3_key: string | null (for >4KB objects)
-- s3_bucket: string | null
+- metadata_json: string | null (type-specific metadata)
 - expires_at: TimestampMs | null
 - current_manifest_id: UUID | null
 - created_at: TimestampMs
-- updated_at: TimestampMs
+- accessed_at: TimestampMs | null
 
 ### ObjectTagRecord
 - object_id: UUID
@@ -126,19 +123,18 @@
 - PRIMARY KEY (object_id, tag)
 
 ### BlobRecord
-- id: UUID (INTEGER AUTOINCREMENT, changed from checksum PK)
-- checksum: string (stored as tag: "checksum:<hash>")
+- id: UUID (INTEGER AUTOINCREMENT)
+- bucket: string (tenant bucket identifier)
+- checksum: string (SHA-256 hash)
+- checksum_bytes: number | null (bytes covered by checksum)
+  # When checksum_bytes == size_bytes: checksum is current
+  # When checksum_bytes < size_bytes: checksum is stale (after append)
 - size_bytes: number
-- s3_key: string | null
-- s3_bucket: string | null
+- s3_key: string | null (NULL if inline/SBO)
+- s3_bucket: string | null (NULL if inline/SBO)
+- payload: Buffer | null (inline storage for ≤64KB, NULL if S3)
 - created_at: TimestampMs
-- last_accessed_at: TimestampMs
-
-### RunFileRecord
-- run_id: UUID
-- path: string
-- checksum: string
-- size_bytes: number
+- last_referenced_at: TimestampMs
 
 ### UsageRecordDb
 - id: UUID

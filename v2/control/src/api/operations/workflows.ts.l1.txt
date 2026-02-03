@@ -14,6 +14,35 @@
 - `GET /v1/workflows/:id/stream` - SSE stream for real-time progress
   - Events: node_started, node_completed, node_failed, progress, workflow_completed, workflow_failed
 
+## WebSocket Endpoints (CLI Real-time Streaming)
+- `WS /v1/runs/:id/logs` - Stream run logs in real-time
+  - Auth: Token passed as query param `?token=` on WebSocket upgrade
+  - Token expiry: If token expires mid-stream, server sends close frame with code 4401
+    - Client should reconnect with fresh token
+  - Messages (server→client): { type: 'log', stream: 'stdout'|'stderr', data, timestamp }
+  - Messages (client→server): { type: 'subscribe', streams: ['stdout', 'stderr'] }
+  - Supports backpressure: client sends { type: 'ready' } to receive next batch
+  - Connection closes when run completes or client disconnects
+
+- `WS /v1/workflows/:id/progress` - Stream workflow progress
+  - Auth: Token passed as query param `?token=` on WebSocket upgrade
+  - Token expiry: If token expires mid-stream, server sends close frame with code 4401
+    - Client should reconnect with fresh token
+  - Messages (server→client):
+    - { type: 'node_started', nodeId, nodeType, timestamp }
+    - { type: 'node_completed', nodeId, output, timestamp }
+    - { type: 'node_failed', nodeId, error, timestamp }
+    - { type: 'workflow_completed', output, timestamp }
+    - { type: 'workflow_failed', error, timestamp }
+  - Connection closes when workflow completes or client disconnects
+
+## Log Streaming Architecture
+1. Agent sends logs to `POST /v1/agent/logs`
+2. Control plane stores in objects table
+3. Control plane forwards to WebSocket subscribers (fan-out)
+4. CLI connects via `WS /v1/runs/:id/logs` to receive real-time logs
+5. CLI can also use `GET /v1/runs/:id/logs` for historical logs (pagination)
+
 ## Preflight
 - `GET /v1/preflight` - Run preflight checks before submission
   - Checks: orphans, budget, credentials, capacity

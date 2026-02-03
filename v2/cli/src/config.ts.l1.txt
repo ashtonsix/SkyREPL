@@ -1,11 +1,41 @@
 # cli.types.ts - CLI Types
 
 ## Config Types
-- `ReplConfig` - profiles, files, control?
-- `ProfileConfig` - provider, spec, command, region?, timeout?, workdir?, spot?, init?, hold?, snapshot?
-- `FilesConfig` - include[], exclude[], artifacts[]
-- `ControlPlaneConfig` - url, auth?
-- `AuthConfig` - type ('token' | 'oauth'), token?, oauth_provider?
+
+### ReplConfig
+- profiles: Record<string, ProfileConfig>
+- files: FilesConfig
+- control?: ControlPlaneConfig
+
+### ProfileConfig (Ch10.2)
+- provider: ProviderName
+- spec: string
+- command?: string
+- region?: string
+- timeout?: string (duration, e.g., "1h", "30m")
+- workdir?: string
+- spot?: boolean
+- init?: string (init script path)
+- hold?: string (duration, e.g., "5m")
+- snapshot?: boolean
+- checkpoint_on_timeout?: boolean  # Create checkpoint before timeout kill
+- checkpoint_on_interrupt?: boolean  # Create checkpoint on spot interrupt
+- keep_on_failure?: boolean  # Don't cleanup on failure (debugging)
+- keep_on_success?: boolean  # Don't cleanup on success (warm pool)
+
+### FilesConfig
+- include: string[]
+- exclude: string[]
+- artifacts: string[]
+
+### ControlPlaneConfig
+- url: string
+- auth?: AuthConfig
+
+### AuthConfig
+- type: 'token' | 'oauth'
+- token?: string
+- oauth_provider?: string
 
 ## Output
 - `OutputMode` - 'pretty' | 'json' | 'quiet'

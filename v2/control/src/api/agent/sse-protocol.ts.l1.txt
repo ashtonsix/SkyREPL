@@ -1,5 +1,12 @@
 # sse-protocol.ts - SSE Command Protocol
 
+# Note: Timing constants import from ../../../../shared/src/config/timing.ts.l2.txt
+# - SSE_RECONNECT_BASE_MS (2s)
+# - SSE_RECONNECT_MAX_MS (64s)
+# - SSE_MAX_RETRIES (10)
+# - HEARTBEAT_ACK_TIMEOUT_MS (30s)
+# - PANIC_DIAGNOSTICS_TIMEOUT_MS (2s)
+
 ## Stream: Control Plane → Agent
 - Endpoint: GET /v1/agent/commands?instance_id=X&allocation_id=Y
 - Header: Accept: text/event-stream
@@ -26,9 +33,9 @@
 - sync_complete triggers CLAIMED→ACTIVE transition
 
 ## Connection Management
-- Auto-reconnect: exponential backoff 2s → 64s, max 10 retries
-- Heartbeat timeout: 30s no ack → agent shutdown
-- Panic diagnostics: POST /v1/instances/:id/panic (best-effort, 2s timeout)
+- Auto-reconnect: exponential backoff SSE_RECONNECT_BASE_MS (2s) → SSE_RECONNECT_MAX_MS (64s), max SSE_MAX_RETRIES (10) retries
+- Heartbeat timeout: HEARTBEAT_ACK_TIMEOUT_MS (30s) no ack → agent shutdown
+- Panic diagnostics: POST /v1/instances/:id/panic (best-effort, PANIC_DIAGNOSTICS_TIMEOUT_MS / 2s timeout)
 
 ## Implementation Notes
 - Byte-by-byte reading (Python 8KB buffer deadlocks on ~150 byte messages)

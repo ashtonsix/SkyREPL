@@ -40,14 +40,15 @@
 - workflow_id: number
 - snapshot_id: number
 
-## Extend Hold
+## Extend Debug Hold
 
-### ExtendHoldRequest
+### ExtendDebugHoldRequest
 - allocation_id: number
 - extension_ms: number
 
-### ExtendHoldResponse
-- new_hold_until: number
+### ExtendDebugHoldResponse
+- new_debug_hold_until: number
+- max_hold_until: number (24h from completed_at)
 
 ## Cancel
 

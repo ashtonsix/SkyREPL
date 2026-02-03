@@ -1,5 +1,12 @@
 # extensions.ts - Extension Framework
 
+# Note: Timing constants import from ../../../shared/src/config/timing.ts.l2.txt
+# Base cache TTLs (providers can override):
+# - CACHE_SPOT_PRICES_TTL_MS (5m)
+# - CACHE_CAPACITY_TTL_MS (1m)
+# - CACHE_INSTANCE_STATE_TTL_MS (30s)
+# - CACHE_INSTANCE_TYPES_TTL_MS (1h)
+
 Hooks, caching, and event bridges for provider-specific behavior.
 Hooks are lightweight (<1s) - they trigger workflows, don't do work themselves.
 
@@ -107,36 +114,48 @@ invokeAllHooks(hook: keyof ProviderLifecycleHooks, ...args) -> Promise<void>
 Ephemeral cache for provider data with TTL.
 Not persisted - re-fetched on restart.
 
-### getWithCache<T>(key: string, ttlMs: number, fetcher: () -> Promise<T>) -> Promise<T>
+### getWithCache<T>(key: string, ttlMs: number, fetcher: () -> Promise<T>, options?: CacheOptions) -> Promise<T>
 - Return cached value if not expired
 - Otherwise call fetcher, cache result, return
 - Cache key should include provider name
+- options.bypassCache: If true, skip cache read and always fetch fresh (still updates cache)
+
+interface CacheOptions {
+  bypassCache?: boolean;  // Skip cache read, always fetch fresh (for critical operations)
+}
 
 ### invalidateCache(pattern: string) -> void
 - Invalidate all keys matching pattern
 - Used when data known to be stale
+- Pattern matching: 'instance:*', 'aws:*', etc.
+
+### invalidateInstanceCache(instanceId: number) -> void
+- Clear cached state for specific instance
+- Called by: spawn completion, terminate completion, allocation state transitions
+- Ensures subsequent reads see fresh state
 
 ### clearProviderCache(provider: ProviderName) -> void
 - Clear all cached data for provider
+- Used on provider reconfiguration or test isolation
 
 ## TTL Configuration by Provider
 
 AWS:
-- 'aws:spot_prices:*': 300_000 (5 min)
-- 'aws:capacity:*': 60_000 (1 min)
-- 'aws:instance:*': 30_000 (30s)
+- 'aws:spot_prices:*': CACHE_SPOT_PRICES_TTL_MS (5 min, base default)
+- 'aws:capacity:*': CACHE_CAPACITY_TTL_MS (1 min, base default)
+- 'aws:instance:*': CACHE_INSTANCE_STATE_TTL_MS (30s, base default)
 - 'aws:warm_volumes': No TTL, explicitly managed
 
 Lambda Labs:
-- 'lambda:instance_types': 3_600_000 (1 hour, rarely changes)
-- 'lambda:instance:*': 30_000 (30s)
+- 'lambda:instance_types': CACHE_INSTANCE_TYPES_TTL_MS (1 hour, base default, rarely changes)
+- 'lambda:instance:*': CACHE_INSTANCE_STATE_TTL_MS (30s, base default)
 
 RunPod:
-- 'runpod:gpu_types': 3_600_000 (1 hour)
-- 'runpod:pod:*': 30_000 (30s)
+- 'runpod:gpu_types': CACHE_INSTANCE_TYPES_TTL_MS (1 hour, base default)
+- 'runpod:pod:*': CACHE_INSTANCE_STATE_TTL_MS (30s, base default)
 
 OrbStack:
-- 'orbstack:vm:*': 10_000 (10s, local is fast)
+- 'orbstack:vm:*': getProviderTiming('CACHE_INSTANCE_STATE_TTL_MS', 'orbstack') (10s, provider override)
 
 ## Event Types
 
@@ -152,6 +171,62 @@ OrbStack:
 - lastCheck: number
 - latencyMs: number
 - errors?: string[]
+
+## Cache Invalidation Integration
+
+Cache invalidation hooks are called on known state changes to prevent stale reads:
+
+### State Transition Triggers
+
+```typescript
+// After spawn completes
+async function onSpawnComplete(instanceId: number) {
+  invalidateInstanceCache(instanceId);
+  // Subsequent allocation claims will see fresh state
+}
+
+// After terminate completes
+async function onTerminateComplete(instanceId: number) {
+  invalidateInstanceCache(instanceId);
+  // Subsequent orphan scans won't see terminated instance
+}
+
+// After allocation state change
+async function onAllocationStateChange(allocationId: number, instanceId: number) {
+  invalidateInstanceCache(instanceId);
+  // Workflow nodes see updated allocation state immediately
+}
+```
+
+### Cache Bypass for Critical Operations
+
+Operations requiring guaranteed fresh state use bypassCache flag:
+
+```typescript
+// Orphan detection
+const instances = await getWithCache(
+  `${provider}:instances`,
+  30000,
+  () => provider.list(),
+  { bypassCache: true }  // Always fetch fresh for orphan detection
+);
+
+// Allocation claim (verify instance still available)
+const instance = await getWithCache(
+  `instance:${instanceId}:external`,
+  30000,
+  () => provider.get(providerId),
+  { bypassCache: true }  // Verify instance exists before claiming
+);
+
+// Budget threshold checks
+const currentSpend = await getWithCache(
+  `${provider}:spend:${period}`,
+  30000,
+  () => provider.getSpend(period),
+  { bypassCache: true }  // Accurate spend for budget alerts
+);
+```
 
 ## Hooks vs Workflows
 

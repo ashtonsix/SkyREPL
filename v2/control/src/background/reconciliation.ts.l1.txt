@@ -1,7 +1,12 @@
 # reconciliation.ts - Reconciliation Task
 
+# Note: Timing constants import from ../../../../shared/src/config/timing.ts.l2.txt
+# - RECONCILIATION_INTERVAL_MS (60s)
+# - STALE_DETECTION_MS (30s)
+# - CLAIMED_TIMEOUT_MS (10m)
+
 ## Cycle
-- Every 5 minutes (configurable via RECONCILIATION_INTERVAL_MS)
+- Every RECONCILIATION_INTERVAL_MS (60s)
 
 ## Instance State Sync
 - Query provider API for instance status
@@ -9,7 +14,7 @@
 - Update workflow_state on drift
 
 ## Heartbeat Timeout
-- Find instances with last_heartbeat > 30s ago
+- Find instances with last_heartbeat > STALE_DETECTION_MS (30s) ago
 - Mark as suspected dead
 - Trigger termination workflow if confirmed
 
@@ -17,6 +22,32 @@
 - Check spawn:pending instances
 - Query provider for completion/failure
 - Update state accordingly
+
+## Stuck CLAIMED Allocation Recovery
+- Query: allocations WHERE status='CLAIMED' AND updated_at < NOW - CLAIMED_TIMEOUT_MS
+- Timeout: CLAIMED_TIMEOUT_MS (10 minutes, sync timeout enforced)
+- Cause: Control plane crash after agent sync_complete but before DB update
+- Action: Transition allocation CLAIMED → FAILED
+- Side effects: Instance marked suspect, workflow marked failed
+- Log: "Recovered stuck CLAIMED allocation ${allocationId} after ${elapsed}ms"
+- Note: Agent may have successfully started run, but allocation state is inconsistent
+- Recovery: User can retry workflow or manually terminate instance
+
+## Orphan AVAILABLE Allocation Cleanup (Warm Pool Health Check)
+- Query: allocations WHERE status='AVAILABLE'
+- For each AVAILABLE allocation:
+  1. Load instance from DB
+  2. Verify instance exists in provider API (cached state from instance sync)
+  3. If instance NOT found in provider:
+     - Transition allocation AVAILABLE → FAILED
+     - Log: "Marked orphan AVAILABLE allocation ${allocationId} as FAILED - instance ${instanceId} not found"
+     - Cause: Instance terminated externally, or provider state sync lag
+  4. If instance found but status='terminated':
+     - Transition allocation AVAILABLE → FAILED
+     - Log: "Marked orphan AVAILABLE allocation ${allocationId} as FAILED - instance ${instanceId} terminated"
+- Purpose: Prevents warm pool pollution where AVAILABLE allocations reference dead instances
+- Next claim attempt would fail, releasing allocation back to pool - infinite loop
+- This breaks the loop by marking allocation FAILED permanently
 
 ## Error Handling
 - Transient API failures: log and retry next cycle

@@ -12,6 +12,13 @@
 - Query db.getAllObjects() filtered by provider and type IN ('volume', 'snapshot', 'tailscale_machine')
 - Cross-reference cloud resources with DB records by provider_id
 - For each cloud resource not in DB:
+  - A13: Check for recovery path (two-phase spawn crash):
+    - Extract instance_id from resource.tags['skyrepl:instance_id']
+    - If tag exists: query DB for instance WHERE id = instance_id AND provider_id IS NULL
+    - If found: UPDATE instances SET provider_id = resource.providerId WHERE id = instance_id
+    - Log: "Recovered orphan: linked cloud ${resource.providerId} to DB instance ${instance_id}"
+    - Skip adding to orphanedResources (now tracked)
+    - Continue to next resource
   - Parse resource name to extract controlId, manifestIdPrefix, instanceIdPrefix
   - Calculate ageMs = Date.now() - resource.createdAt
   - Determine likelyCurrentSession = resource.createdAt > sessionStartTime

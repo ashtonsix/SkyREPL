@@ -1,12 +1,189 @@
-# workflow-snapshot.ts - Snapshot Workflow
+# snapshot.ts - Snapshot Intent
+
+## Exports
+
+```typescript
+export interface SnapshotInput {
+  instanceId: number;               // Instance to snapshot
+  name?: string;                    // Snapshot name (auto-generated if omitted)
+  initChecksum?: string;            // Checksum for future warm pool matching
+  waitForComplete?: boolean;        // Default: true (wait for snapshot to complete)
+  timeoutMs?: number;               // Default: 1800000 (30 minutes)
+  idempotencyKey?: string;
+}
+
+export interface SnapshotOutput {
+  workflowId: number;
+  snapshotId: number;
+  providerSnapshotId: string;       // Provider's snapshot ID
+  name: string;
+  sizeBytes?: number;               // Populated when snapshot completes
+  createdAt: number;
+}
+
+// Entry point
+export async function snapshot(input: SnapshotInput): Promise<Workflow>;
+
+// Workflow definition
+export const snapshotWorkflow: WorkflowDefinition;
+```
 
 ## Purpose
-Create snapshot of instance state
+Create a snapshot of an instance's disk state for future reuse.
+Snapshots enable fast instance provisioning by restoring from a known state.
+
+## SNAPSHOT SCOPE
+
+**What snapshots capture:**
+- DISK STATE: Root filesystem, installed packages, system configuration
+- Base image modifications (apt packages, pip installs, system settings)
+- Provider-specific instance state (AMI for AWS, image for Lambda/RunPod)
+
+**What snapshots DO NOT capture:**
+- Workdir state (/work/run_*) - cleaned on every run
+- Ephemeral data (temp files, caches in /tmp)
+- Run-specific artifacts or outputs
+
+**Key principle:**
+- Workdir state preserved via artifacts, NOT snapshots
+- Snapshots are for environment reuse, not data persistence
+- Every run starts with clean workdir, regardless of snapshot usage
+
+## Workflow Graph
+
+```
+┌──────────────────────────┐
+│  validate-snapshot-req   │ Check instance exists and state
+└───────────┬──────────────┘
+            │
+┌───────────▼──────────────┐
+│    prepare-instance      │ Sync filesystem, clean temp files
+└───────────┬──────────────┘
+            │
+┌───────────▼──────────────┐
+│    stop-if-needed        │ Stop instance if running (optional)
+└───────────┬──────────────┘
+            │
+┌───────────▼──────────────┐
+│    create-snapshot       │ Call provider.createSnapshot()
+└───────────┬──────────────┘
+            │
+┌───────────▼──────────────┐
+│   wait-for-snapshot      │ Poll until snapshot ready (30min timeout)
+└───────────┬──────────────┘
+            │
+┌───────────▼──────────────┐
+│   register-snapshot      │ Create snapshot object in DB
+└───────────┬──────────────┘
+            │
+┌───────────▼──────────────┐
+│   restart-if-needed      │ Restart instance if it was stopped
+└───────────┬──────────────┘
+            │
+┌───────────▼──────────────┐
+│       finalize           │ Seal manifest
+└──────────────────────────┘
+```
 
 ## Nodes
-1. validate-instance: Check instance is running or stopped
-2. stop-if-needed: Stop instance if running
-3. create-snapshot: Call provider.createSnapshot()
-4. persist-snapshot: Store snapshot record in DB
-5. restart-if-needed: Restart instance if it was stopped
-6. finalize: Seal manifest
+
+1. **validate-snapshot-req**: Validate input and check instance state
+   - Load instance by ID
+   - Verify instance exists and is accessible
+   - Check provider supports snapshots (capabilities.snapshots=true)
+   - Returns: { instance, provider, requiresStop }
+
+2. **prepare-instance**: Prepare instance for clean snapshot
+   - Send SSE command to agent: PrepareSnapshotMessage { type: 'prepare_snapshot', command_id, instance_id }
+   - Agent actions:
+     - Syncs filesystems (sync)
+     - Clears temp files (rm -rf /tmp/* /var/tmp/*)
+     - **Clears workdir: rm -rf /work/run_* (critical - no workdir state in snapshot)**
+     - Flushes buffers (sync; echo 3 > /proc/sys/vm/drop_caches)
+   - Agent responds via POST /v1/agent/snapshot-ready with PrepareSnapshotAckMessage
+   - Waits for acknowledgment (command_ack protocol + snapshot-ready endpoint)
+   - Timeout: 5 minutes
+   - Compensation: None needed (read-only)
+
+3. **stop-if-needed**: Stop instance if required by provider
+   - Some providers require stopped instances for snapshots
+   - If requiresStop=true: call provider.stop(providerId)
+   - Wait for instance status='stopped'
+   - Returns: { wasStopped: boolean }
+   - Compensation: Start instance if it was stopped
+
+4. **create-snapshot**: Initiate snapshot creation
+   - Generate name if not provided: `repl-{instanceId}-{timestamp}`
+   - Call provider.createSnapshot(providerId, { name, tags })
+   - Tags include: instance_id, spec, init_checksum, created_by='skyrepl'
+   - Returns: { snapshotRequestId, providerSnapshotId }
+   - Compensation: provider.deleteSnapshot(providerSnapshotId) if exists
+
+5. **wait-for-snapshot**: Poll for snapshot completion
+   - Poll provider.getSnapshotStatus(snapshotRequestId) every 30s
+   - Timeout: 30 minutes (configurable)
+   - Success: status='completed' with sizeBytes
+   - Failure: status='failed' → throw SnapshotFailedError
+   - Returns: { providerSnapshotId, sizeBytes, completedAt }
+
+6. **register-snapshot**: Create snapshot record in database
+   - Create object record with type='snapshot'
+   - Set tags: instance_id, spec, init_checksum, name, provider_snapshot_id
+   - Emit resource to manifest: ctx.emitResource('object', objectId, { priority: 10 })
+   - Returns: { snapshotId }
+   - Compensation: Delete object record
+
+7. **restart-if-needed**: Restart instance if it was stopped
+   - If wasStopped=true: call provider.start(providerId)
+   - Wait for instance status='running'
+   - Update instance.workflow_state back to previous state
+   - Compensation: None (stopping instance is acceptable failure mode)
+
+8. **finalize**: Complete workflow
+   - Seal manifest: db.sealManifest(manifestId)
+   - Update instance.workflow_state if needed
+   - Returns: { sealed: true }
+
+## Provider Abstraction
+
+Providers must implement SnapshotCapability:
+
+```typescript
+interface SnapshotCapability {
+  createSnapshot(providerId: string, options: CreateSnapshotOptions): Promise<SnapshotRequest>;
+  getSnapshotStatus(requestId: string): Promise<SnapshotStatus>;
+  deleteSnapshot(providerSnapshotId: string): Promise<void>;
+  getSnapshotByName?(name: string): Promise<ProviderSnapshot | null>;
+}
+
+interface CreateSnapshotOptions {
+  name: string;
+  tags: Record<string, string>;
+  description?: string;
+}
+
+interface SnapshotStatus {
+  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  providerSnapshotId?: string;
+  sizeBytes?: number;
+  error?: string;
+  progress?: number;  // 0-100 percentage
+}
+```
+
+## Error Handling
+
+- INSTANCE_NOT_FOUND: Instance doesn't exist → fail immediately
+- PROVIDER_NO_SNAPSHOT_SUPPORT: Provider doesn't support snapshots → fail immediately
+- SNAPSHOT_IN_PROGRESS: Another snapshot already running → fail with conflict
+- SNAPSHOT_TIMEOUT: Snapshot took >30 minutes → fail, cleanup partial snapshot
+- PROVIDER_API_ERROR: Provider error during snapshot → retry with backoff
+- DISK_FULL: Not enough space for snapshot → fail immediately
+
+## Notes
+
+- Snapshots are stored as objects with type='snapshot'
+- Snapshot cleanup uses manifest expiry (default retention: 30 days)
+- init_checksum enables warm pool matching: new runs can reuse instances
+  spawned from matching snapshots
+- Snapshots are provider-specific (AWS AMI, Lambda image, RunPod template, etc.)

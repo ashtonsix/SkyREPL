@@ -24,7 +24,8 @@
   - Receive workflow.complete event
   - Output includes exit_code
   - Output includes artifacts
-  - Allocation state updated (HELD or COMPLETE)
+  - Allocation state updated to COMPLETE
+  - Optional debug_hold_until set if configured
   - Connection closed after complete
 
 ## Terminate Tests
@@ -63,17 +64,18 @@
   - Snapshot recorded in database
   - Provider metadata stored
 
-## Extend Hold Tests
-- POST /api/v2/extend-hold
+## Extend Debug Hold Tests
+- POST /api/v2/extend-debug-hold
   - Request body: {allocation_id, duration_minutes}
   - Returns 202 with workflow_id
-  - Updates hold_until timestamp
+  - Updates debug_hold_until timestamp
   - Returns updated allocation in output
+  - Only works on COMPLETE allocations
 - Respects max hold duration
-  - Max hold (e.g., 24 hours) configured
+  - Max hold (24 hours from completed_at) enforced
   - Request beyond max → capped at max
   - Warning in response
-  - Total hold duration tracked
+  - Cannot extend beyond absolute limit
 
 ## Cancel Tests
 - POST /api/v2/cancel

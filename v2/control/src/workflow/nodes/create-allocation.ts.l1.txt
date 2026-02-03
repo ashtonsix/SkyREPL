@@ -11,8 +11,8 @@
   - instance_id: instanceId
   - run_id: runId
   - status: 'CLAIMED'
-  - claimed_at: current timestamp
   - created_at: current timestamp
+  - updated_at: current timestamp
 - Add allocation to manifest via ctx.emitResource()
 - Return allocationId
 
@@ -21,5 +21,5 @@
 - Note: Instance cleanup is handled separately by spawn-instance compensation
 
 ## Key Calls
-- db.createAllocation({ instance_id, run_id, status: 'CLAIMED', claimed_at: now })
+- db.createAllocation({ instance_id, run_id, status: 'CLAIMED', created_at: now, updated_at: now })
 - ctx.emitResource('allocation', allocationId)

@@ -16,6 +16,7 @@
 - init_checksum TEXT NOT NULL
 - created_at INTEGER NOT NULL
 - last_heartbeat INTEGER
+  # NULL if heartbeat never received
 Indexes: idx_instances_manifest, idx_instances_workflow_state, idx_instances_heartbeat, idx_instances_spawn_key, UNIQUE(provider, provider_id)
 
 ## runs
@@ -43,12 +44,11 @@ Indexes: idx_runs_manifest, idx_runs_workflow_state, idx_runs_created, idx_runs_
 - current_manifest_id INTEGER
 - user TEXT NOT NULL DEFAULT 'ubuntu'
 - workdir TEXT NOT NULL DEFAULT '/home/ubuntu/work'
-- hold_until INTEGER
-- hold_reason TEXT
-- max_hold_duration_ms INTEGER DEFAULT 86400000
+- debug_hold_until INTEGER (nullable, applies only to COMPLETE allocations)
+- completed_at INTEGER (set when status transitions to COMPLETE or FAILED)
 - created_at INTEGER NOT NULL
 - updated_at INTEGER NOT NULL
-Indexes: idx_allocations_run, idx_allocations_instance, idx_allocations_manifest, idx_allocations_status, idx_warm_pool, idx_allocations_hold_until
+Indexes: idx_allocations_run, idx_allocations_instance, idx_allocations_manifest, idx_allocations_status, idx_warm_pool, idx_allocations_debug_hold
 
 ## workflows
 - id INTEGER PRIMARY KEY AUTOINCREMENT
@@ -108,29 +108,21 @@ Indexes: idx_manifest_resources_resource, idx_manifest_resources_priority
 ## objects
 - id INTEGER PRIMARY KEY AUTOINCREMENT
 - type TEXT NOT NULL
+  # Object types: 'artifact', 'snapshot', 'log', 'run_file' (NOT 'blob' - blobs are separate table)
+- blob_id INTEGER NOT NULL
+  # Foreign key to blobs table. All objects use blobs for payload storage.
 - provider TEXT NOT NULL
 - provider_object_id TEXT
-- size_bytes INTEGER NOT NULL
-- reservation INTEGER
-  # Optional. Invariant: reservation >= size_bytes when set.
-  # If object is expected to grow beyond 4KB, set reservation to expected final size.
-  # This causes immediate S3 allocation (skip inline storage).
-- content_type TEXT
-- payload BLOB
-- s3_key TEXT
-- s3_bucket TEXT
-- checksum TEXT
-  # Content hash (sha256). NULL if not yet computed or not applicable.
-  # For content-addressable blobs, used for deduplication via idx_objects_checksum.
-- checksum_bytes INTEGER
-  # Number of bytes covered by checksum. When checksum_bytes == size_bytes, checksum is current.
-  # When checksum_bytes < size_bytes (after append operations), checksum is stale.
-  # NULL when checksum is NULL.
+  # Provider-specific identifier (e.g., snapshot ID, artifact ID)
+- metadata_json TEXT
+  # Type-specific metadata (filename, content-type, etc.)
 - expires_at INTEGER
 - current_manifest_id INTEGER
 - created_at INTEGER NOT NULL
 - accessed_at INTEGER
-Indexes: idx_objects_manifest, idx_objects_checksum, idx_objects_expires, idx_objects_type, UNIQUE(provider, provider_object_id)
+Indexes: idx_objects_manifest, idx_objects_blob, idx_objects_expires, idx_objects_type, UNIQUE(provider, provider_object_id)
+FOREIGN KEY: blob_id REFERENCES blobs(id) ON DELETE RESTRICT
+# ON DELETE RESTRICT: prevents blob deletion while objects reference it (GC handles this)
 
 ## object_tags
 - object_id INTEGER NOT NULL
@@ -139,10 +131,29 @@ PRIMARY KEY: (object_id, tag)
 FOREIGN KEY: object_id REFERENCES objects(id) ON DELETE CASCADE
 Indexes: idx_object_tags_tag
 
-# NOTE: There is no separate 'blobs' table. Blobs are stored as objects with
-# type='blob'. The checksum column on objects enables deduplication (query
-# by checksum before insert). For blob garbage collection, query objects
-# WHERE type='blob' that have no referencing run_file objects.
+## blobs
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- bucket TEXT NOT NULL
+  # Logical grouping for blob collections (e.g., 'run-files', 'artifacts', 'logs')
+- checksum TEXT NOT NULL
+  # Content hash (sha256). NOT unique - logs use append, creating multiple blobs with same checksum prefix.
+- checksum_bytes INTEGER
+  # Bytes covered by checksum. NULL when checksum not computed.
+  # When checksum_bytes == size_bytes: checksum is current
+  # When checksum_bytes < size_bytes: checksum is stale (after append, needs recomputation)
+- s3_key TEXT
+  # S3 object key. NULL if inline (SBO).
+- s3_bucket TEXT
+  # S3 bucket name. NULL if inline (SBO).
+- payload BLOB
+  # Inline storage for small blobs (≤64KB). NULL if stored in S3.
+- size_bytes INTEGER NOT NULL
+- created_at INTEGER NOT NULL
+- last_referenced_at INTEGER NOT NULL
+  # Updated when objects reference this blob. Used by GC to identify stale blobs.
+Indexes: idx_blobs_dedup (bucket, checksum), idx_blobs_last_referenced
+# CAS dedup is OPTIONAL: opt-in per object type via idx_blobs_dedup, not schema constraint
+# Background GC finds blobs with no referencing objects (DB cascade can't reach S3)
 
 ## usage_records
 - id INTEGER PRIMARY KEY AUTOINCREMENT

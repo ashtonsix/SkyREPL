@@ -4,32 +4,18 @@
 
 ## Purpose
 
-The CLI is the primary user interface to SkyREPL. In V2, the CLI becomes thin:
-it submits workflow requests to the control plane and displays progress, rather
-than orchestrating operations directly. This section specifies command structure,
-configuration management, progress display, and SSH integration.
-
-Key Change: CLI orchestration logic moves to control plane workflows.
+The CLI is the primary user interface to SkyREPL. It submits workflow requests
+to the control plane and displays progress - a thin display layer rather than
+an orchestrator. This section specifies command structure, configuration
+management, progress display, and SSH integration.
 
 ## 10.1 Architectural Role
 
-### V1 vs V2 Architecture
-
-```
-V1: CLI orchestrates directly
-    CLI -> spawn instance -> sync files -> start run -> poll status
-    CLI holds state, handles retries, manages lifecycle
-
-V2: CLI submits workflows and displays progress
-    CLI -> POST /v1/workflows/launch-run -> SSE stream -> display progress
-    Orchestration happens server-side; CLI is thin display layer
-```
-
-### CLI Responsibilities in V2
+### CLI Responsibilities
 
 1. **Configuration parsing** - Read repl.toml, resolve profiles
 2. **Workflow submission** - Construct and submit workflow requests
-3. **Progress display** - Render WebSocket stream as human-readable output
+3. **Progress display** - Render SSE stream as human-readable output
 4. **SSH integration** - Maintain ~/.repl/ssh_config for native SSH access
 5. **Artifact retrieval** - Download artifacts via presigned URLs
 6. **Control plane lifecycle** - Start/stop local control plane (dev)
@@ -71,13 +57,14 @@ cli/src/
     └── setup.ts         # repl init/setup
 ```
 
-### What CLI No Longer Does
+### Not CLI Responsibilities
 
+These belong to the control plane, not the CLI:
 - Instance polling and state management
 - Retry logic for spawn failures
 - Direct provider API calls
-- Grace period management (now HELD state via allocations)
-- Warm pool decision making (server-side via workflows)
+- Debug hold management (debug_hold_until via allocations - see Ch5)
+- Warm pool decision making
 
 ## 10.2 Command Reference
 
@@ -153,20 +140,14 @@ All commands accept:
 
 ### ID Display Format
 
-The CLI displays resource IDs as slugs for brevity:
-- Runs: `run-9ix` (maps to integer ID 12345 in API)
-- Instances: `inst-1h2i` (maps to integer ID 67890 in API)
-- Allocations: `alloc-xyz` (prefix format)
+**Slugs** are base-36 alphanumeric representations of integer IDs, displayed
+for brevity (e.g., ID 12345 → slug "9ix"):
+- `run-9ix` (maps to integer ID 12345)
+- `inst-1h2i` (maps to integer ID 67890)
+- `alloc-xyz`
 
-**Slug Definition:**
-A slug is a base-36 alphanumeric representation that directly corresponds to
-the integer ID. Example: ID 12345 → slug "9ix"
-
-**Input Handling:**
-- CLI accepts slug format only (`run-9ix`) for all commands
-- Tab completion: Users type prefix and press tab to select intended match
-- API responses include both `id` (integer) and `slug` fields
-- JSON output mode shows both formats for scripting flexibility
+CLI accepts slug format only. Tab completion resolves prefixes. API responses
+include both `id` (integer) and `slug` fields; JSON output shows both.
 
 ## 10.3 Run Commands
 
@@ -197,16 +178,12 @@ repl run --dry-run                 # Validate without launching
 
 **Output (TTY):**
 
-Progress display shows:
-- Workflow and run IDs
-- Each workflow node with status (starting, done with duration, failed with error)
-- Progress bars for file sync operations
-- Run output (stdout/stderr) once execution begins
-- Summary receipt on completion with: run ID, instance, duration, exit code, cost,
-  allocation info, SSH shortcut, artifact pull command
-
-Exact formatting emerges from implementation. Key principle: show workflow progress
-as it happens via SSE stream, then show actionable next steps.
+Progress display shows workflow and run IDs, node status (starting/done/failed),
+progress bars for file sync, run output once execution begins, and a summary
+receipt on completion (run ID, instance, duration, exit code, cost, allocation
+info, SSH shortcut, artifact pull command). Exact formatting emerges from
+implementation; key principle is workflow progress via SSE, then actionable
+next steps.
 
 **Output (JSON, --no-stream):**
 ```json
@@ -220,7 +197,7 @@ as it happens via SSE stream, then show actionable next steps.
 
 ### repl run status <run-id>
 
-Get run status (separate from `repl status` which is control plane health).
+Get run status (distinct from `repl status` which shows control plane health).
 
 **Usage:**
 ```bash
@@ -228,8 +205,7 @@ repl run status run-xyz789   # Specific run status
 repl run status run-xyz      # Prefix resolution
 ```
 
-**Output:**
-Displays run ID, status, workflow state, instance info, allocation, timestamps, and duration.
+**Output:** Run ID, status, workflow state, instance info, allocation, timestamps, duration.
 
 ### repl logs <run-id>
 
@@ -267,9 +243,7 @@ run-abc123  completed  45m 12s    $1.23    2024-01-31 13:00
 run-def456  failed     2m 05s     $0.08    2024-01-31 12:15
 ```
 
-**Note on Pagination:**
-The CLI defaults to 50 results per page (matching API default).
-This can be adjusted with `--limit` flag.
+Defaults to 50 results per page (matching API default), adjustable with `--limit`.
 
 ### repl cancel <run-id>
 
@@ -354,8 +328,6 @@ and status (creating, available, failed).
 
 ### repl orphan list/whitelist
 
-Orphan resource management.
-
 **Usage:**
 ```bash
 repl orphan list                        # List all orphaned resources
@@ -364,13 +336,10 @@ repl orphan list --type instance        # Filter by resource type
 repl orphan whitelist <resource-id>     # Mark as intentionally unmanaged
 ```
 
-**Behavior:**
+Lists cloud resources not tracked in the database. See Chapter 12 (Orphans) for
+detection algorithm and whitelist semantics.
 
-Lists resources detected in cloud providers that aren't tracked in the control
-plane database. Integrates with the preflight orphan detection system.
-
-**Output:** Table showing resource ID, provider, type (instance, volume, etc.),
-created timestamp, and estimated daily cost.
+**Output:** Table with resource ID, provider, type, created timestamp, estimated daily cost.
 
 ### repl usage [period]
 
@@ -404,42 +373,25 @@ repl init                   # Start interactive setup
 repl init --noninteractive  # Use defaults where possible
 ```
 
-**Behavior:**
+**Setup Sequence:**
 
-Guides user through complete SkyREPL setup in this order:
+1. **Provider Setup** - Select providers (AWS, Lambda Labs, RunPod), configure
+   each via `repl setup-provider`, verify connectivity
 
-1. **Provider Setup**
-   - Prompt for which providers to configure (AWS, Lambda Labs, RunPod)
-   - For each provider, call `repl setup-provider <provider>` flow
-   - Verify connectivity after each provider
+2. **Control Plane Setup** - Choose local or cloud deployment mode:
+   - Local: configure MinIO, data directory; optionally enable Funnel to expose
+     control plane so remote agents can connect without joining Tailnet
+   - Cloud: configure endpoint and authentication
+   - Initialize database schema, start and verify health
 
-2. **Control Plane Setup**
-   - Choose deployment mode: local (funnel) or cloud
-   - If local: configure MinIO credentials, choose data directory
-   - If local with funnel: Enable Funnel to expose local control plane to public internet
-     so remote agents can connect without joining Tailnet
-   - If cloud: configure cloud deployment endpoint, authentication
-     (note: Funnel has limited purpose when control is deployed on cloud, as agents
-     connect directly)
-   - Initialize database schema
-   - Start control plane and verify health
+3. **Local Environment Setup** - Generate SSH config include snippet with
+   instructions, create ~/.repl directory structure, generate example repl.toml
 
-3. **Local Environment Setup**
-   - Generate SSH config include snippet
-   - Show instructions for adding to ~/.ssh/config
-   - Create ~/.repl directory structure
-   - Generate example repl.toml in current directory
+4. **Verification** - Run `repl verify-setup`, display summary, show example
+   `repl run` command
 
-4. **Verification**
-   - Run `repl verify-setup` to confirm all components working
-   - Display summary of configured providers and endpoints
-   - Show next steps: example `repl run` command
-
-**Output:**
-
-Progress indicators for each step. Clear error messages if any step fails,
-with suggestions for manual resolution. On success, display welcome message
-with quick start examples.
+**Output:** Progress per step; clear errors with resolution suggestions; welcome
+message with quick start examples on success.
 
 ## 10.6 Control Plane Commands
 
@@ -482,7 +434,7 @@ Interactive wizard that collects:
 3. SSH key configuration
 4. Connectivity verification
 
-Saves configuration to `~/.repl/control.env`. Format of prompts emerges from implementation.
+Saves configuration to `~/.repl/control.env`. Prompt format emerges from implementation.
 
 ### repl verify-setup
 
@@ -508,21 +460,14 @@ Summary with overall pass/fail.
 
 ### Token-Based Authentication
 
-The CLI authenticates with the control plane using bearer tokens.
+**Token Storage:** `~/.repl/auth.json` with format `{"control_plane_url": "token_value"}`,
+file permissions 0600.
 
-**Token Storage:**
-- Tokens stored in `~/.repl/auth.json`
-- Format: `{"control_plane_url": "token_value"}`
-- File permissions: 0600 (user read/write only)
+**Token Lifecycle:** Issued during `repl init` or `repl auth login`; includes
+expiry timestamp checked before each API call; automatic refresh if refresh
+token available; re-authentication if refresh fails.
 
-**Token Lifecycle:**
-- Tokens issued during `repl init` or `repl auth login`
-- Tokens include expiry timestamp
-- CLI checks expiry before each API call
-- Automatic refresh if refresh token available
-- Re-authentication required if refresh fails
-
-**Note**: For multi-user authentication requirements, see Chapter 15.7 Security.
+For multi-user authentication, see Chapter 15.7 Security.
 
 ### repl auth login/logout/status
 
@@ -553,8 +498,7 @@ User: local-dev
 ```
 
 **Logout Behavior:**
-Removes token from `~/.repl/auth.json`. Does not revoke token server-side
-(server tokens have TTL).
+Removes token from `~/.repl/auth.json` without server-side revocation (tokens have TTL).
 
 ## 10.8 Updates and Feedback
 
@@ -569,20 +513,13 @@ repl update --check                     # Check only, don't update
 repl update --yes                       # Auto-apply without prompt
 ```
 
-**Behavior:**
+**Behavior:** Query update server, compare versions (semver), show changelog if
+update available, prompt to update (unless --yes), download and replace binary,
+verify installation.
 
-1. Query update server for latest version
-2. Compare with current version (semantic versioning)
-3. If update available, show changelog summary
-4. Prompt user to update (unless --yes)
-5. Download new binary and replace current
-6. Verify installation
-
-**Update Check Frequency:**
-- Automatic check every 7 days (can be disabled)
-- Store last check timestamp in `~/.repl/state.json`
-- Display notification on next command if update available
-- Never interrupt running workflows for updates
+**Update Check Frequency:** Every 7 days (configurable), timestamp in
+`~/.repl/state.json`, notification on next command if available, never
+interrupts running workflows.
 
 **Output:**
 ```
@@ -608,34 +545,19 @@ repl feedback --bug                     # Bug report template
 repl feedback --feature                 # Feature request template
 ```
 
-**Behavior:**
+Opens interactive form or editor ($EDITOR). Template includes type
+(bug/feature/general), summary, details, reproduction steps (if bug),
+environment info, optional log attachment (user consent), optional contact email.
 
-Opens interactive form or editor (via $EDITOR) for feedback submission.
+**Submission:** Posts to feedback API, assigns ticket ID, confirms with ID.
+Optional diagnostic bundle (sanitized logs, config).
 
-**Template Fields:**
-- Type: bug/feature/general
-- Summary: Brief description
-- Details: Full description
-- Reproduction steps (if bug)
-- Environment: OS, CLI version, providers
-- Logs: Option to attach recent logs (user consent)
-- Contact: Optional email for follow-up
-
-**Submission:**
-- Posts to feedback API endpoint
-- Assigns ticket ID for tracking
-- Displays confirmation with ticket ID
-- Option to attach diagnostic bundle (logs, config - sanitized)
-
-**Privacy:**
-- Sanitizes API keys and tokens from logs
-- User explicitly opts-in to log attachment
-- Shows what data will be sent before submission
+**Privacy:** Sanitizes API keys/tokens from logs; explicit opt-in for log
+attachment; shows data before submission.
 
 ## 10.9 Preflight Warnings
 
-Before operations that launch workflows or allocate resources, CLI displays
-preflight warnings:
+Before `repl run` and other resource-allocating commands, CLI displays warnings:
 
 ### Warning Types
 
@@ -686,21 +608,37 @@ Notice: 2 allocations currently held
 Estimated idle cost: $3.50/hr
 ```
 
+**Low Disk Space:**
+```
+Warning: Low disk space on warm pool instances
+  inst-abc123 (g6.xlarge) - 15% free (12GB of 80GB)
+  inst-def456 (H100)      - 8% free (6GB of 80GB)
+
+Consider running 'repl instance cleanup' or terminating stale instances.
+Continue? [y/N]
+```
+
+**Shared Instance Notice (SSH connection):**
+
+When `ssh <allocation-id>` targets an instance with other active allocations:
+
+```
+Notice: Instance has 1 other active allocation
+  alloc-xyz (run-789) - ACTIVE, started 5m ago
+
+Resources (CPU, memory, disk I/O) are shared. Debugging activity may affect the active run.
+Connecting to alloc-abc (COMPLETE, debug hold)...
+```
+
+Informational only (non-blocking) to avoid disrupting debugging workflows.
+
 ### Preflight Behavior
 
-- Warnings displayed before `repl run` command execution
-- Non-blocking: user can proceed with confirmation
-- Bypass with `--yes` or `--no-preflight` flags
-- Warnings logged to control plane for audit
-- Preflight checks query control plane preflight API
+Non-blocking warnings; user can proceed with confirmation or bypass with `--yes`
+or `--no-preflight`. Warnings logged to control plane for audit.
 
-**Preflight API Integration:**
-CLI calls `GET /v1/preflight?operation=launch-run` before submission.
-Server returns warnings array. CLI renders and prompts user.
-
-**Note:** The preflight endpoint is documented in the API spec (section 9.2.9).
-It performs server-side validation and returns warnings for orphaned resources,
-budget limits, credential expiry, and stale allocations before workflow submission.
+CLI calls `GET /v1/preflight?operation=launch-run` (see Ch9 section 9.2.9);
+server returns warnings array; CLI renders and prompts.
 
 ## 10.10 Configuration File Format
 
@@ -795,13 +733,10 @@ Durations use suffix notation:
 | h      | hours    | 2h      |
 | d      | days     | 1d      |
 
-### Checkpoint Scripts (V2 Feature)
+### Checkpoint Scripts
 
-**New in V2:** Support for graceful checkpoint handling before spot instance termination.
-
-When using spot instances, you can configure a checkpoint script that will be executed
-when the cloud provider sends a termination notice. This enables saving training state,
-model checkpoints, or other critical data before the instance is reclaimed.
+Checkpoint scripts execute when cloud providers send spot termination notices,
+enabling graceful state saving before instance reclamation.
 
 ```toml
 [profile.gpu-training]
@@ -815,17 +750,12 @@ checkpoint_timeout = "60s"              # Max execution time
 
 **Checkpoint Script Behavior:**
 
-1. **Trigger**: Cloud provider sends spot termination notice (typically 2 min warning)
-2. **Execution**: Agent executes checkpoint_script in the remote workdir
-3. **Environment**: Script receives environment variables:
-   - `SKYREPL_CHECKPOINT_REASON=spot_termination`
-   - `SKYREPL_RUN_ID=run-xyz789`
-   - `SKYREPL_WORKDIR=/home/ubuntu/work`
-4. **Timeout**: Script must complete within checkpoint_timeout (default: 60s)
-5. **Artifacts**: Files matching artifact patterns are synced after checkpoint completes
-6. **Exit Handling**:
-   - Exit code 0: Checkpoint successful, artifacts synced, instance terminated
-   - Non-zero: Checkpoint failed, logged as warning, instance still terminated
+1. **Trigger**: Provider spot termination notice (see provider-specific timing below)
+2. **Execution**: Agent runs checkpoint_script in remote workdir with environment:
+   `SKYREPL_CHECKPOINT_REASON`, `SKYREPL_RUN_ID`, `SKYREPL_WORKDIR`
+3. **Timeout**: Must complete within checkpoint_timeout (default: 60s)
+4. **Artifacts**: Synced after checkpoint completes
+5. **Exit**: Code 0 = success; non-zero = warning logged; instance terminated either way
 
 **Example Checkpoint Script:**
 
@@ -858,14 +788,10 @@ except Exception as e:
 # aws s3 sync ./results s3://my-bucket/run-$SKYREPL_RUN_ID/
 ```
 
-**Integration with V2 Architecture:**
+Checkpoint execution handled by agent (Ch11); workflow engine orchestrates
+checkpoint → artifact sync → cleanup; control plane tracks status in run metadata.
 
-- Checkpoint execution is handled by the agent (see Chapter 11: Agent Protocol)
-- Workflow engine orchestrates checkpoint → artifact sync → cleanup sequence
-- Control plane tracks checkpoint status in run metadata
-- Failed checkpoints are logged but don't block termination (spot instances must be released)
-
-**Provider-Specific Behavior:**
+**Provider Spot Warning Times:**
 
 | Provider    | Warning Time | Notes                                   |
 |-------------|--------------|---------------------------------------- |
@@ -873,13 +799,9 @@ except Exception as e:
 | Lambda Labs | 30 seconds   | Via webhook notification                |
 | RunPod      | 1 minute     | Via RunPod API polling                  |
 
-**Best Practices:**
-
-- Keep checkpoint scripts fast (<60s total execution)
-- Test checkpoint scripts in regular (non-spot) runs first
-- Use incremental checkpoints during training, emergency checkpoint as backup
-- Include checkpoint files in artifacts patterns for automatic sync
-- Log checkpoint progress for debugging
+**Best Practices:** Keep scripts fast (<60s); test in non-spot runs first; use
+incremental checkpoints during training with emergency checkpoint as backup;
+include checkpoint files in artifact patterns; log progress for debugging.
 
 ### Files Section
 
@@ -904,13 +826,10 @@ artifacts = ["results/*", "model*.pt", "logs/**/*.log"]
 
 ### SSE Stream Rendering
 
-The CLI connects to the SSE endpoint at `GET /v1/workflows/:id/stream` and renders events.
+CLI connects to `GET /v1/workflows/:id/stream` (SSE) and renders events.
+(Agent↔control also uses SSE for commands - see Ch11.)
 
-**Architecture Note:** Both CLI↔control and agent↔control communication use SSE
-(Server-Sent Events) for streaming. The API spec documents this as `text/event-stream`.
-CLI receives workflow progress updates via SSE, while agents receive commands via SSE.
-
-Events received via SSE:
+Events received:
 
 | Event Type           | Display                                         |
 |----------------------|-------------------------------------------------|
@@ -939,18 +858,13 @@ Events received via SSE:
 
 ### Receipt Format
 
-On workflow completion, display a summary including:
-- Run ID, instance info, duration, exit code, cost
-- Allocation ID and hold time remaining
-- Actionable commands: SSH access, extend hold, pull artifacts
-
-Exact formatting emerges from implementation - keep it simple initially.
+On completion: run ID, instance info, duration, exit code, cost, allocation ID
+with hold time remaining, actionable commands (SSH, extend hold, pull artifacts).
+Exact formatting emerges from implementation.
 
 ## 10.12 SSH Integration
 
-### SSH Config Generation
-
-The CLI maintains `~/.repl/ssh_config` with entries for active allocations:
+CLI maintains `~/.repl/ssh_config` with entries for active allocations:
 
 ```
 # ShyREPL SSH Config
@@ -973,28 +887,14 @@ Host alloc-abc123 alloc-abc
   ...
 ```
 
-### SSH Config Include
-
-Users add to `~/.ssh/config`:
-
-```
-Include ~/.repl/ssh_config
-```
+Users add `Include ~/.repl/ssh_config` to `~/.ssh/config`.
 
 ### ProxyCommand for JIT Tailscale
 
-The `ProxyCommand` in SSH config enables just-in-time Tailscale authentication.
+`~/.repl/bin/ssh_proxy_command.sh` enables just-in-time Tailscale authentication:
+extract allocation ID → query API for IP → ensure Tailscale connected (trigger
+auth if needed) → exec `nc` to establish tunnel.
 
-**Script Location:** `~/.repl/bin/ssh_proxy_command.sh`
-
-**Behavior:**
-1. Extract allocation ID from hostname argument
-2. Query control plane API for allocation details
-3. Check Tailscale connectivity to target IP
-4. If Tailscale not connected, trigger auth flow
-5. Once connected, exec `nc` to establish SSH tunnel
-
-**Implementation:**
 ```bash
 #!/bin/bash
 # ~/.repl/bin/ssh_proxy_command.sh
@@ -1011,37 +911,21 @@ This enables transparent SSH access without manual Tailscale setup.
 
 ### SSH Routing
 
-SSH entries are keyed by allocation ID:
-- Full ID: `ssh alloc-def456-7890-abcd-ef12`
-- Short ID: `ssh alloc-def`
-
-Short IDs are resolved to full IDs via prefix matching.
+SSH entries keyed by allocation ID; short IDs (`ssh alloc-def`) resolved to full
+IDs via prefix matching.
 
 ### SSH Activity Detection
 
-When SSH connection is active:
-1. Control plane detects via heartbeat
-2. Auto-extends HELD state by 5 minutes
-3. Prevents premature allocation cleanup
+Control plane detects active SSH via heartbeat, auto-extends debug_hold_until by 5
+minutes, prevents premature allocation cleanup. See Ch5 for debug hold semantics.
 
 ## 10.13 Output Modes
 
-### Pretty Mode (default)
+**Pretty Mode (default):** Human-friendly with ANSI colors (if supported),
+progress bars, timestamps, tables, receipt summaries.
 
-Human-friendly output with:
-- ANSI colors (if terminal supports)
-- Progress bars
-- Timestamps
-- Tables with headers
-- Receipt summaries
-
-### JSON Mode (--json)
-
-Machine-readable output:
-- One JSON object per command
-- Stable field names
-- No ANSI codes
-- Suitable for scripting
+**JSON Mode (--json):** Machine-readable; one JSON object per command, stable
+field names, no ANSI codes, suitable for scripting.
 
 **Example:**
 ```json
@@ -1062,87 +946,43 @@ Machine-readable output:
 }
 ```
 
-### Quiet Mode (--quiet)
-
-Minimal output:
-- Only errors and final results
-- No progress indicators
-- No informational messages
+**Quiet Mode (--quiet):** Only errors and final results; no progress or
+informational messages.
 
 ## 10.14 Error Handling
 
 ### Error Categories
 
-Errors map to API error categories (see API spec):
-- validation: Invalid profile, missing config
-- auth: Invalid token, expired credentials
-- not_found: Run not found, instance not found
-- conflict: Run already cancelled
-- rate_limit: Budget exceeded, capacity error
-- internal: Server error, network failure
-
-Exit codes are implementation details - use non-zero for errors.
+Map to API categories (see Ch9): validation, auth, not_found, conflict,
+rate_limit, internal. Exit codes: non-zero for errors (specific codes are
+implementation detail).
 
 ### Error Output
 
-Errors should include:
-- Clear error message
-- Actionable suggestions where possible
-- Debug info (request ID, relevant IDs) for troubleshooting
+Include clear message, actionable suggestions, debug info (request ID, relevant
+IDs) for troubleshooting.
 
 ### Retry Behavior
 
-The CLI does NOT retry failed API calls - server handles retries via workflows.
-Network-level transient errors (connection refused, DNS failure) may be retried
-at the HTTP client level with reasonable backoff.
+CLI does not retry failed API calls (server handles via workflows). Network
+transient errors (connection refused, DNS) may be retried at HTTP client level
+with backoff.
 
 ## 10.15 Shell Completion
 
-Shell completion for bash, zsh, and fish.
+Supports bash, zsh, fish via `repl completion <shell>`.
 
-**Usage:**
-```bash
-# Bash
-source <(repl completion bash)
-# or add to ~/.bashrc:
-echo 'source <(repl completion bash)' >> ~/.bashrc
+**Static completions:** Commands, flags, profile names from repl.toml, common
+duration values.
 
-# Zsh
-source <(repl completion zsh)
-# or add to ~/.zshrc:
-echo 'source <(repl completion zsh)' >> ~/.zshrc
-
-# Fish
-repl completion fish | source
-# or add to config.fish:
-repl completion fish > ~/.config/fish/completions/repl.fish
-```
-
-**Completion Features:**
-
-Static completions:
-- Command names and subcommands
-- Flag names and values (where enumerable)
-- Profile names from repl.toml
-- Common duration values (5m, 30m, 1h, 2h)
-
-Dynamic completions (via API):
-- Run IDs (from recent runs)
-- Instance IDs
-- Allocation IDs
-- Provider names (from configured providers)
-- Snapshot IDs
-
-**Performance:**
-- Cache dynamic completions for 30 seconds
-- Timeout API calls after 200ms
-- Fall back to static completions if API unreachable
+**Dynamic completions (via API):** Run/instance/allocation/snapshot IDs,
+provider names. Cached 30 seconds, API timeout 200ms, falls back to static if
+unreachable.
 
 ## 10.16 Implementation Notes
 
-### What to Build First (MVP)
+### MVP Commands
 
-Core commands for basic workflow:
 1. `repl run [profile]` - Submit run, stream progress
 2. `repl list` - List runs
 3. `repl logs <run-id>` - Stream logs
@@ -1151,21 +991,14 @@ Core commands for basic workflow:
 6. `repl instance list/terminate` - Instance management
 7. SSH config generation (basic, without JIT Tailscale)
 
-### What to Defer (Post-MVP)
+### Defer to Post-MVP
 
-- Detailed receipt formatting (start simple, improve iteratively)
-- `--dry-run` flag (useful but not critical)
-- Auto-update background checks (manual `repl update` sufficient for MVP)
-- Advanced shell completion caching strategies
-- OAuth flows for cloud control plane (use token-based initially)
+Detailed receipt formatting, `--dry-run`, auto-update background checks,
+advanced completion caching, OAuth flows (use token-based initially).
 
 ### Thin Client Principle
 
-The CLI must remain thin. If you find yourself adding:
-- Retry logic beyond network transients -> Move to server
-- State caching beyond config -> Move to server
-- Decision logic (warm pool, fallback) -> Move to server
-- Provider-specific code -> Wrong place
-
-The CLI's job: parse config, submit workflows, display progress, manage SSH config
+Move to server if adding: retry logic beyond network transients, state caching
+beyond config, decision logic (warm pool, fallback), provider-specific code.
+CLI responsibilities: config parsing, workflow submission, progress display, SSH config.
 

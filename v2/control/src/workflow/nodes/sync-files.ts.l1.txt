@@ -1,23 +1,89 @@
 # sync-files.ts - Sync Files Node
 
-## Input Type
-{ runId: string, instanceId: string, files: { path: string, checksum: string }[] }
+## Exports
 
-## Output Type
-{ fileCount: number, totalBytes: number }
+```typescript
+export interface SyncFilesInput {
+  runId: string;
+  instanceId: string;
+  files: { path: string; checksum: string }[];
+}
+
+export interface SyncFilesOutput {
+  fileCount: number;
+  totalBytes: number;
+  downloadUrls: { path: string; url: string; checksum: string }[];
+}
+
+export const syncFilesExecutor: NodeExecutor<SyncFilesInput, SyncFilesOutput>;
+```
+
+## Purpose
+
+Prepare file download URLs and send sync request to agent via SSE.
 
 ## Execute Steps
-- Call storage.prepareFilesForRun(runId, files) to get download URLs
-- Query instance to get SSE endpoint details
-- Send SyncFilesMessage via agent SSE stream with { runId, files: [{ path, url, checksum }] }
-- Agent will download files in parallel, verify checksums, write to workdir
-- No wait needed here - start-run node waits for sync_complete
+
+```
+async function execute(ctx, input): Promise<SyncFilesOutput>
+  1. Validate input:
+     - Verify files array is not empty (or allow empty for no-file runs)
+     - Verify all checksums are valid format
+
+  2. Get instance:
+     - instance = await db.getInstance(input.instanceId)
+     - If !instance: throw ValidationError('Instance not found')
+     - If instance.status !== 'running': throw InvalidStateError('Instance not running')
+
+  3. Prepare download URLs:
+     - Try: urls = await storage.prepareFilesForRun(input.runId, input.files)
+     - Catch StorageError: throw with context (which file failed)
+
+  4. Send SSE message:
+     - Try: await sse.sendMessage(input.instanceId, {
+         type: 'sync_files',
+         runId: input.runId,
+         files: urls
+       })
+     - Catch SSEConnectionError: throw ProviderApiError('Agent not connected')
+
+  5. Return:
+     - { fileCount: urls.length, totalBytes: sum(file sizes), downloadUrls: urls }
+```
 
 ## Compensation
+
 - No compensation needed (files are cleaned up during allocation cleanup)
 - Workdir will be wiped on next run via warm pool reuse
+- Partial downloads are overwritten on retry
+
+## Error Handling
+
+| Error | Source | Response | L1 Documented |
+|-------|--------|----------|---------------|
+| Instance not found | Internal/User | Fail immediately (VALIDATION_ERROR) | Yes |
+| Instance not running | Internal | Fail immediately (INVALID_STATE_TRANSITION) | Yes |
+| Storage URL generation failure | Internal | Fail immediately (DATABASE_ERROR) | Yes |
+| SSE connection failure | External | Retry with backoff (PROVIDER_API_ERROR) | Yes |
+| File not found in storage | Internal | Fail immediately (VALIDATION_ERROR) | Yes |
 
 ## Key Calls
-- storage.prepareFilesForRun()
-- db.getInstance()
+
+- db.getInstance(instanceId)
+- storage.prepareFilesForRun(runId, files)
 - sse.sendMessage(instanceId, { type: 'sync_files', runId, files })
+
+## Notes
+
+- No blocking wait here - start-run node waits for sync_complete
+- Agent downloads files in parallel, verifies checksums, writes to workdir
+- If agent reports sync failure, it's captured in start-run node via sync_complete event
+
+## URL Generation and Timing
+
+- Presigned URLs generated at node start (step 3)
+- URLs sent to agent via SSE (step 4) - adds latency
+- Effective URL TTL = PRESIGNED_URL_TTL - SSE_latency - download_time
+- PRESIGNED_URL_TTL = 900000ms (15 minutes) for files <100MB
+- For large files (>100MB): Use multipart URLs with 1 hour TTL
+- Agent can request URL refresh via POST /v1/storage/refresh-url if transfer exceeds 10 minutes

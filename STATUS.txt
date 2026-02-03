@@ -1,0 +1,85 @@
+================================================================================
+PROJECT STATUS
+================================================================================
+Last updated: 2026-02-04
+
+================================================================================
+1. OVERVIEW
+================================================================================
+
+SkyREPL is a cloud compute orchestration platform for running computational
+workloads on ephemeral compute instances. Part of the Sky Computing ecosystem
+(SkyPilot as prominent touchstone), SkyREPL focuses on lifecycle management.
+
+Key insight: Cloud orchestration isn't a compute problem - it's a lifecycle
+chaos problem. Tracking what's running, ensuring cleanup, avoiding cost surprises.
+
+================================================================================
+2. SPECIFICATION STATUS
+================================================================================
+
+**Status: COMPLETE**
+
+~15,000 lines across 15 chapters. Ready for implementation.
+
+Chapters:
+  01 Introduction        09 API
+  02 Material            10 CLI
+  03 Resources           11 Agent
+  04 Manifest            12 Orphans
+  05 Allocations         13 Types
+  06 Workflows           14 Implementation
+  07 Intents             15 Operations
+  08 Providers
+
+Key design elements:
+- Three-tier model: MANIFEST → RESOURCE → MATERIAL
+- 5-state allocation machine: AVAILABLE → CLAIMED → ACTIVE → COMPLETE (+FAILED)
+- Warm pool via allocations WHERE status='AVAILABLE'
+- Workflow DAG engine with 4 patterns
+- Intent contracts for provider abstraction
+
+================================================================================
+3. PSEUDO-IMPLEMENTATION STATUS (v2/)
+================================================================================
+
+**Current state: L1 complete, L2 transition begun**
+
+Fidelity levels:
+  .l1.txt  - Bullet-point outlines (COMPLETE - 128 files)
+  .l2.txt  - Detailed pseudocode (IN PROGRESS - 1 file)
+  .l3.txt  - Partial implementation (not started)
+  (none)   - Working code (not started)
+
+Structure:
+  v2/
+  ├── control/    Control plane (VPS deployment)
+  ├── cli/        CLI client (user machine)
+  ├── shared/     Types shared between control + CLI
+  ├── agent/      Python agent (on instances)
+  └── tests/      Tests organized by component
+
+First L2 file: shared/src/config/timing.ts.l2.txt
+
+================================================================================
+4. MINIMUM VIABLE KERNEL
+================================================================================
+
+First implementation target:
+- Single intent (launch-run) + OrbStack provider
+- Workflow engine with Conditional-Branch pattern
+- Allocations: CLAIMED → ACTIVE → COMPLETE
+- Manifests: DRAFT → SEALED
+- Basic material layer (instances, runs, allocations)
+
+================================================================================
+5. WORKLOG REFERENCES
+================================================================================
+
+Cold (archived):
+  worklogs/001_WORKLOG_L1_RESTRUCTURING.txt  - Structural overhaul
+  worklogs/002_WORKLOG_R0X_L1_REFINEMENT.txt - L1 refinement rounds
+  worklogs/003_WORKLOG_TIMINGS.txt           - Timing consolidation
+
+Spec history:
+  specification/WORKLOG_REVISIONS.txt - Revision history

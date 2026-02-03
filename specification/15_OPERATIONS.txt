@@ -4,10 +4,9 @@
 
 ## Purpose
 
-This section covers operational concerns for running SkyREPL in production:
-observability, CI/CD, database migrations, auto-updates, licensing, and security.
-These aspects support long-term maintainability and enable sustainable commercial
-deployment.
+Operational concerns for running SkyREPL in production: observability, CI/CD,
+database migrations, auto-updates, licensing, and security. These support long-term
+maintainability and enable sustainable commercial deployment.
 
 ================================================================================
 
@@ -16,14 +15,14 @@ deployment.
 ### Telemetry Stack
 
 OpenTelemetry for structured logging and traces, Loki for log aggregation, Grafana
-for visualization. Workflows are tagged with runtime topology signatures (provider,
-region, instance type) to enable grouping and comparison across similar executions.
+for visualization. Workflows tagged with runtime topology signatures (provider,
+region, instance type) enable grouping and comparison across similar executions.
 
 ### Error Reporting
 
 Self-managed deployments have opt-in error reporting (Sentry or similar). Managed
-SkyREPL instances have mandatory telemetry for operational support. Users control
-what metadata is attached (stripped PII by default).
+instances have mandatory telemetry for operational support. Users control attached
+metadata (stripped PII by default).
 
 ### Workflow Observability
 
@@ -38,65 +37,42 @@ starts on AWS."
 
 ### OrbStack Generalization
 
-OrbStack provider serves as the testing backend. All control plane logic is
-testable locally without cloud credentials. CI runs full workflow test suite
-against OrbStack instances in isolated environments.
+OrbStack provider serves as local testing backend. All control plane logic is
+testable without cloud credentials. CI runs full workflow test suite against
+OrbStack in isolated environments.
 
-The testing philosophy rests on contract-based generalization:
+**Contract-based testing philosophy:**
 
-- Intent contracts define provider-agnostic behavior: required inputs, guaranteed
-  outputs, allowed phases, cleanup priorities.
-- OrbStack implements these contracts identically to cloud providers, plus chaos
-  injection for failure scenarios.
-- The test suite validates that the control plane handles contract-compliant
-  behavior correctly: retry logic, compensation, state transitions.
-- When a provider implements the same contracts, it inherits the validated behavior.
-- The shared 80% (everything at the contract level) is tested once via OrbStack,
-  not repeated per provider.
-
-Key insight: We're not testing "OrbStack works therefore AWS works" - we're testing
-"the control plane handles intent contracts correctly, and any provider implementing
-those contracts gets the same behavior." The contract is the unit of trust. See
-Chapter 8 for how providers declare contract compliance.
+Intent contracts (Chapter 7) define provider-agnostic behavior: required inputs,
+guaranteed outputs, allowed phases, cleanup priorities. The contract is the unit
+of trust. Tests validate that the control plane handles contract-compliant behavior
+correctly (retry logic, compensation, state transitions). Any provider implementing
+the same contracts inherits the validated behavior - the shared 80% tests once
+via OrbStack, not repeated per provider.
 
 ### Fault Injection
 
 Chaos testing via controlled provider failures (timeouts, capacity errors, network
-partitions). Validates crash recovery and orphan cleanup under arbitrary kill points.
-
-OrbStack implements fault injection hooks that simulate real-world provider failures
-while maintaining intent contract compliance. Intent contracts ensure failure handling
-tested against OrbStack applies to all conforming providers. For example, a simulated
-timeout during provision_instance still respects the contract's cleanup priorities
-and required outputs.
+partitions). OrbStack implements fault injection hooks simulating real-world
+failures while maintaining contract compliance. Example: simulated timeout during
+provision_instance respects contract cleanup priorities and required outputs.
 
 ### Contract Compliance Testing
 
-Each provider must pass a contract compliance test suite that verifies correct
-implementation of intent contracts. This is separate from integration testing:
+Each provider must pass a contract compliance test suite verifying correct
+implementation. Separate from integration testing:
 
-- Registry-based parametric testing pattern (described in Chapter 8) enables running
-  the same contract compliance suite against all providers.
-- Capability-gated tests skip gracefully when a provider lacks a specific capability
-  (e.g., idempotent spawn, snapshot creation).
-- Contract compliance is explicit verification of required fields, phase transitions,
-  idempotency guarantees, and error handling - not implicit coverage via integration
-  tests.
-- Once a provider passes contract compliance, the control plane behavior validated
-  via OrbStack testing applies to that provider.
+- Registry-based parametric testing (Chapter 8) runs the same suite against all providers
+- Capability-gated tests skip when provider lacks a capability (e.g., snapshot creation)
+- Explicitly verifies required fields, phase transitions, idempotency, error handling
+- Passing compliance means OrbStack-validated control plane behavior applies
 
 ### Property-Based Testing
 
 Core invariant: "Kill workflow at any step -> no orphaned resources." fast-check
-or similar library generates random kill points and verifies cleanup succeeds.
-Additional properties validate allocation state transitions and manifest lifecycle.
-
-Intent contracts provide the specification for these tests. Each intent defines
-required outputs and cleanup priorities (see Chapter 7). Property tests verify
-intent contract compliance under all failure scenarios: random kill points, resource
-exhaustion, partial completion states. Contract adherence ensures that validation
-passing for one provider (OrbStack) applies to all providers implementing the same
-contracts.
+generates random kill points and verifies cleanup succeeds. Additional properties
+validate allocation state transitions and manifest lifecycle. Each intent's
+required outputs and cleanup priorities (Chapter 7) provide test specifications.
 
 ================================================================================
 
@@ -117,8 +93,7 @@ deployments where downtime requires fast recovery. Not all migrations are revers
 ### Migration Testing
 
 CI validates migrations apply cleanly against empty database and realistic fixtures.
-Property test: apply all migrations then rollback all -> database state matches
-fresh init.
+Property test: apply all migrations then rollback all → database state matches fresh init.
 
 ================================================================================
 
@@ -127,20 +102,20 @@ fresh init.
 ### Update Mechanism
 
 Control plane checks for updates on startup (opt-out via config). Updates download
-new binary and restart service. Preflight check validates migration compatibility
-and database backup exists before applying.
+new binary and restart service. Preflight validates migration compatibility and
+database backup before applying.
 
 ### Multi-User Authorization
 
 Single-user deployments auto-update by default. Multi-user deployments (>1 active
-user in last 30 days) require admin authorization. Preflight warning shows changelog
-and estimated downtime before proceeding.
+user in last 30 days) require admin authorization. Preflight shows changelog and
+estimated downtime before proceeding.
 
 ### Rollback Safety
 
 Previous version binary retained for emergency rollback. Database migrations log
-applied SQL for manual reversal if needed. Critical failures during update trigger
-automatic rollback to last known-good state.
+applied SQL for manual reversal. Critical failures during update trigger automatic
+rollback to last known-good state.
 
 ================================================================================
 
@@ -150,23 +125,32 @@ automatic rollback to last known-good state.
 
 Source-available license (BSL 1.1 or similar). Free tier for deployments with ≤3
 users. Commercial tier: $18/month base (includes 3 users), $6/month per additional
-seat.
+seat. License enforcement focuses on redistribution, not internal use or source
+modification.
+
+### Seat Tracking
+
+Control plane tracks user activity per month. Users identified by API key fingerprint
+or OAuth identity. Anonymous usage (no auth) counts as single shared seat. Billing
+API provides monthly active user counts for self-service upgrades. Admins prompted
+to deactivate users inactive >1 month (one-click deactivation frees seat but
+preserves history).
 
 ### User-Month Billing
 
-Only bill user-months when user was actually active (executed runs, viewed dashboard,
-or invoked CLI that month). Dormant users don't count toward seat usage. Prevents
+Bill user-months only when user was active (executed runs, viewed dashboard, or
+invoked CLI that month). Dormant users don't count toward seat usage. Prevents
 billing inflation for seasonal usage patterns.
 
-### Nagging Tiers
+### Enforcement Tiers
 
 **Underprovision 1-5 seats:**
 - Preflight warning on `repl run` + 5-second delay
 - Warning includes upgrade link and current seat usage
-- Does not block functionality (nag-ware, not enforcement)
+- Doesn't block functionality (nag-ware, not enforcement)
 
 **Missed 1 billing period:**
-- Nag with warning messages on CLI invocations
+- Warning messages on CLI invocations
 - Email reminders to admin contacts
 - No functional restrictions yet
 
@@ -175,28 +159,9 @@ billing inflation for seasonal usage patterns.
 - Read-only access for all users
 - Admin must resolve billing to restore access
 
-### Overprovision Handling
-
-If licensed seats exceeded by >5 users, new signups create "inactive" accounts with
-read-only access. Admin must explicitly activate users or upgrade seat count.
-
-### Inactive User Prompts
-
-Prompt admins to deactivate users inactive >1 month. Control plane dashboard shows
-inactive user list with last activity timestamp. One-click deactivation preserves
-user history but frees seat allocation.
-
-### Source Modification Tolerance
-
-Tolerate source modification for self-managed deployments. License enforcement
-focuses on redistribution, not internal use. Crackdown targets commercial redistribution
-or SaaS offerings, not legitimate customization.
-
-### Seat Tracking
-
-Control plane tracks user activity per month. Users identified by API key fingerprint
-or OAuth identity. Anonymous usage (no auth) counts as single shared seat. Billing
-API provides monthly active user counts for self-service upgrade.
+**Underprovision by >5 users:**
+- New signups create "inactive" accounts with read-only access
+- Admin must explicitly activate users or upgrade seat count
 
 ================================================================================
 
@@ -204,15 +169,15 @@ API provides monthly active user counts for self-service upgrade.
 
 ### Self-Managed
 
-User runs control plane on their own VPS. Full control over data and configuration.
-User responsible for updates and maintenance. Suitable for organizations with existing
+User runs control plane on own VPS. Full control over data and configuration. User
+responsible for updates and maintenance. Suitable for organizations with existing
 infrastructure and DevOps capacity.
 
 ### Managed
 
-Multi-tenant control plane pilots user-connected clouds. We NEVER run user code
-directly (liability, AML/ATF concerns). We provision infrastructure on their behalf,
-but they run their code on their machines. Clear separation of control plane
+Multi-tenant control plane pilots user-connected clouds. NEVER runs user code
+directly (liability, AML/ATF/content concerns). Provisions infrastructure on user 
+behalf, but users run code on their machines. Clear separation of control plane
 orchestration from execution environment. Managed deployments handle updates,
 monitoring, and availability automatically.
 
@@ -229,8 +194,8 @@ never logged in plaintext.
 ### Authorization
 
 Basic role system: Admin (all operations), User (run jobs, view own resources),
-Viewer (read-only). Workflow permissions checked upfront before execution starts,
-not lazily during execution. Prevents partial execution followed by auth failure.
+Viewer (read-only). Workflow permissions checked upfront before execution, not
+lazily during execution. Prevents partial execution followed by auth failure.
 
 ### API Security
 
@@ -242,7 +207,7 @@ encouraged via expiry warnings (90-day default).
 
 Run environment variables encrypted at rest. Agent decrypts on instance startup
 using ephemeral key from control plane. Secrets never logged or stored in workflow
-traces. Audit log tracks secret access (who, when, which run).
+traces. Audit log tracks secret access: who, when, which run.
 
 ================================================================================
 
@@ -252,20 +217,285 @@ traces. Audit log tracks secret access (who, when, which run).
 
 scripts/extra/ pattern for diagnostics and custom integrations. User-contributed
 scripts for common tasks live outside core codebase, easily modified without
-affecting system stability. Encourages community contributions without mainline
-code quality concerns.
+affecting system stability. Encourages community contributions without mainline code
+quality concerns.
 
-### AI Agent Piloting
+### AI Agent Piloting (Future)
 
-Workflow observability creates dataset for agent-assisted debugging. Future capability,
-not v1 scope. Structured logs with topology signatures enable ML-based anomaly
-detection. Example: "P99 latency spike on Lambda Labs us-west correlates with
-weekend spot market dynamics."
+Workflow observability creates datasets for agent-assisted debugging. Structured
+logs with topology signatures enable ML-based anomaly detection. Example: "P99
+latency spike on Lambda Labs us-west correlates with weekend spot market dynamics."
 
 ### Profiling
 
 Covered by chaos testing + property-based tests. No separate profiling infrastructure
 needed initially. Performance characteristics emerge from observability data during
-normal operations. If bottlenecks appear, targeted profiling added per-component.
+normal operations. If bottlenecks appear, add targeted per-component profiling.
+
+================================================================================
+
+## 15.9 Timing Configuration
+
+This section provides non-normative operational guidance for timing-related
+configuration. All values are tunable via environment variables. Adjust based on
+deployment characteristics (network latency, provider mix, workload patterns).
+
+### Constraint Chains
+
+Timing parameters must satisfy ordering constraints. Control plane validates
+constraints at startup and fails fast on violations.
+
+**Heartbeat Chain (liveness detection):**
+```
+heartbeat_interval < heartbeat_ack_timeout <= stale_detection_threshold
+```
+- Agent sends heartbeats faster than timeout threshold
+- Allows tolerance for missed beats before declaring failure
+- Control and agent agree on when to consider connection dead
+
+**Cleanup Chain (orphan prevention):**
+```
+reconciliation_interval < manifest_cleanup_interval
+```
+- Reconciliation runs multiple times before manifest cleanup
+- Gives multiple chances to detect orphans
+- Manifest cleanup is fallback, not primary mechanism
+
+**Hold Duration Chain (cost control):**
+```
+default_hold <= max_ssh_extension <= max_explicit_extension <= absolute_max_hold
+```
+- Default hold is shortest (normal case)
+- SSH activity can extend, but bounded
+- Explicit extension can go further, still bounded
+- Absolute max prevents runaway costs
+
+**Workflow Chain:**
+```
+node_timeout < workflow_timeout
+compensation_timeout <= node_timeout (rollback should complete in time)
+```
+
+**Spawn/Snapshot Chain:**
+```
+spawn_poll_interval << spawn_timeout
+snapshot_poll_interval << snapshot_timeout
+orphan_min_age > spawn_timeout (avoid killing in-progress spawns)
+```
+
+### Suggested Default Values
+
+Values below are production-reasonable starting points. All times in human-readable
+format; internally converted to milliseconds.
+
+**Heartbeat & Liveness:**
+
+| Parameter | Env Var | Suggested | Notes |
+|-----------|---------|-----------|-------|
+| Heartbeat interval | REPL_HEARTBEAT_INTERVAL | 10s | Agent → control frequency |
+| Ack timeout | REPL_HEARTBEAT_ACK_TIMEOUT | 30s | Agent shuts down if no ack |
+| Stale detection | REPL_STALE_DETECTION | 30s | Control marks allocation failed |
+
+Trade-off: Lower values = faster failure detection, more network overhead. For
+high-latency networks, consider 20s/60s/60s.
+
+**Hold Duration:**
+
+| Parameter | Env Var | Suggested | Notes |
+|-----------|---------|-----------|-------|
+| Default hold | REPL_DEFAULT_HOLD | 5m | After run completion |
+| SSH extension | REPL_SSH_EXTENSION | 5m | Per detection |
+| Max SSH extension | REPL_MAX_SSH_EXTENSION | 2h | Cumulative cap |
+| Explicit extension | REPL_EXPLICIT_EXTENSION | 30m | User-requested default |
+| Max explicit | REPL_MAX_EXPLICIT_EXTENSION | 8h | Per-extension cap |
+| Absolute max | REPL_ABSOLUTE_MAX_HOLD | 24h | Hard limit from completion |
+
+Trade-off: Longer holds = more debugging time, higher cost risk.
+
+**Background Tasks:**
+
+| Parameter | Env Var | Suggested | Notes |
+|-----------|---------|-----------|-------|
+| Heartbeat check | REPL_HEARTBEAT_CHECK_INTERVAL | 30s | Detect stale heartbeats |
+| Hold expiry check | REPL_HOLD_EXPIRY_CHECK_INTERVAL | 60s | Release expired holds |
+| Reconciliation | REPL_RECONCILIATION_INTERVAL | 60s | Provider state sync |
+| Manifest cleanup | REPL_MANIFEST_CLEANUP_INTERVAL | 5m | Must be > reconciliation |
+| Orphan scan | REPL_ORPHAN_SCAN_INTERVAL | 1h | Full orphan detection |
+| Blob GC | REPL_BLOB_GC_INTERVAL | 24h | Unreferenced blob cleanup |
+
+Trade-off: More frequent checks = faster cleanup, more DB/API load.
+
+**Workflow Engine:**
+
+| Parameter | Env Var | Suggested | Notes |
+|-----------|---------|-----------|-------|
+| Node timeout | REPL_NODE_TIMEOUT | 5m | Per-node default |
+| Workflow timeout | REPL_WORKFLOW_TIMEOUT | 60m | Overall limit |
+| Compensation timeout | REPL_COMPENSATION_TIMEOUT | 5m | Rollback handler |
+| Cancel verification | REPL_CANCEL_VERIFICATION | 90s | 3x heartbeat |
+
+**Provider Operations:**
+
+| Parameter | Env Var | Suggested | Notes |
+|-----------|---------|-----------|-------|
+| Spawn timeout | REPL_SPAWN_TIMEOUT | 10m | Instance provisioning |
+| Spawn poll interval | REPL_SPAWN_POLL_INTERVAL | 5s | Status check frequency |
+| Terminate timeout | REPL_TERMINATE_TIMEOUT | 5m | Instance termination |
+| Snapshot timeout | REPL_SNAPSHOT_TIMEOUT | 30m | Snapshot creation |
+| Snapshot poll | REPL_SNAPSHOT_POLL_INTERVAL | 30s | Status check frequency |
+| Drain timeout | REPL_DRAIN_TIMEOUT | 60s | SSH disconnect grace |
+
+**Cleanup & GC:**
+
+| Parameter | Env Var | Suggested | Notes |
+|-----------|---------|-----------|-------|
+| CLAIMED timeout | REPL_CLAIMED_TIMEOUT | 10m | CLAIMED → FAILED threshold |
+| Orphan min age | REPL_ORPHAN_MIN_AGE | 10m | Grace before cleanup |
+| Blob grace period | REPL_BLOB_GRACE_PERIOD | 24h | Before blob deletion |
+| Session threshold | REPL_RECENT_SESSION_THRESHOLD | 1h | "Current session" cutoff |
+
+**Retry & Backoff:**
+
+| Parameter | Env Var | Suggested | Notes |
+|-----------|---------|-----------|-------|
+| Retry base delay | REPL_RETRY_BASE_DELAY | 2s | Exponential base |
+| Retry max delay | REPL_RETRY_MAX_DELAY | 60s | Backoff cap |
+| Max attempts | REPL_RETRY_MAX_ATTEMPTS | 5 | Retry count |
+| SSE reconnect base | REPL_SSE_RECONNECT_BASE | 2s | Agent reconnect |
+| SSE reconnect max | REPL_SSE_RECONNECT_MAX | 64s | Agent reconnect cap |
+
+**Agent:**
+
+| Parameter | Env Var | Suggested | Notes |
+|-----------|---------|-----------|-------|
+| Log local buffer | REPL_LOG_LOCAL_BUFFER | 100ms | Local flush interval |
+| Log network batch | REPL_LOG_NETWORK_BATCH | 5s | Network send interval |
+| Spot check interval | REPL_SPOT_CHECK_INTERVAL | 5s | Interruption check |
+| Checkpoint budget | REPL_SPOT_CHECKPOINT_BUDGET | 90s | Max checkpoint time |
+| Command ack timeout | REPL_COMMAND_ACK_TIMEOUT | 30s | Retry unacked commands |
+| Shutdown grace | REPL_AGENT_SHUTDOWN_GRACE | 5s | Before self-terminate |
+| Panic diagnostics | REPL_PANIC_DIAGNOSTICS_TIMEOUT | 2s | Best-effort send |
+
+**File Transfer:**
+
+| Parameter | Env Var | Suggested | Notes |
+|-----------|---------|-----------|-------|
+| Presigned URL TTL | REPL_PRESIGNED_URL_TTL | 4h | S3 URL expiration |
+| Sync timeout | REPL_SYNC_TIMEOUT | 10m | File sync wait |
+| Artifact collection | REPL_ARTIFACT_COLLECTION_TIMEOUT | 30m | Post-run collection |
+
+**CLI:**
+
+| Parameter | Env Var | Suggested | Notes |
+|-----------|---------|-----------|-------|
+| Default run timeout | REPL_CLI_DEFAULT_TIMEOUT | 1h | Via --timeout |
+| API timeout | REPL_CLI_API_TIMEOUT | 30s | Request timeout |
+| Completion cache | REPL_COMPLETION_CACHE_TTL | 30s | Shell completion |
+| Completion API | REPL_COMPLETION_API_TIMEOUT | 200ms | Fast fallback |
+
+**Cache TTLs:**
+
+| Parameter | Env Var | Suggested | Notes |
+|-----------|---------|-----------|-------|
+| Spot prices | REPL_CACHE_SPOT_PRICES_TTL | 5m | Price data |
+| Capacity | REPL_CACHE_CAPACITY_TTL | 1m | Availability |
+| Instance state | REPL_CACHE_INSTANCE_STATE_TTL | 30s | Provider state |
+| Instance types | REPL_CACHE_INSTANCE_TYPES_TTL | 1h | Static catalog |
+
+### Provider-Specific Overrides
+
+Providers inherit base timing values and may override specific parameters.
+
+**OrbStack (local development):**
+- spawn_timeout: 30s (instant provisioning)
+- spawn_poll_interval: 1s
+- terminate_timeout: 10s
+- cache_instance_state_ttl: 10s
+- reconciliation_interval: 10s
+
+Fast iteration trumps network efficiency in local dev.
+
+**Lambda Labs / RunPod:**
+- spawn_timeout: 5m (faster than AWS typical)
+
+**AWS:**
+Uses base defaults. Consider longer spawn_timeout (15m) for capacity-constrained
+regions or large instance types.
+
+### Deployment Profiles
+
+**Development (OrbStack):**
+Aggressive timings for fast feedback. Lower hold durations to avoid cluttering
+local resources. Example:
+
+```bash
+REPL_HEARTBEAT_INTERVAL=5s
+REPL_STALE_DETECTION=15s
+REPL_DEFAULT_HOLD=1m
+REPL_RECONCILIATION_INTERVAL=10s
+```
+
+**Production (single-user):**
+Suggested defaults work well. Consider:
+
+```bash
+REPL_ABSOLUTE_MAX_HOLD=12h  # Tighter cost control
+```
+
+**Production (multi-user/managed):**
+More conservative timeouts, longer grace periods:
+
+```bash
+REPL_HEARTBEAT_ACK_TIMEOUT=45s
+REPL_STALE_DETECTION=45s
+REPL_ORPHAN_MIN_AGE=15m
+REPL_MANIFEST_CLEANUP_INTERVAL=10m
+```
+
+**High-latency networks:**
+Account for network delays:
+
+```bash
+REPL_HEARTBEAT_INTERVAL=20s
+REPL_HEARTBEAT_ACK_TIMEOUT=60s
+REPL_STALE_DETECTION=60s
+REPL_CLI_API_TIMEOUT=60s
+```
+
+### Failure Modes
+
+**Network partition (agent-control):**
+Both sides detect failure independently. Agent via ack_timeout, control via
+stale_detection. Both initiate cleanup. Termination is idempotent.
+
+**Slow provider response:**
+Spawn/snapshot timeouts prevent indefinite waiting. Compensation terminates
+partial resources. Reconciliation catches anything missed.
+
+**Presigned URL expiry during transfer:**
+Large file transfers may exceed TTL. Client should request fresh URLs for
+long transfers. Multipart upload mitigates this for large files.
+
+**Race: hold expiry vs active SSH:**
+Hold expiry is the contract. SSH activity extends hold only if heartbeat reports
+activity before expiry check runs. Users can explicitly extend if needed.
+
+### Observability
+
+Track these metrics to detect timing-related issues:
+
+- Heartbeat ack latency distribution (P50, P95, P99)
+- Stale heartbeat detection rate
+- Hold expiry count (normal vs forced)
+- Orphan detection rate per reconciliation cycle
+- Spawn timeout rate by provider
+- Compensation execution time
+- Retry rate by operation type
+
+Alerts to consider:
+- Heartbeat ack P99 approaching ack_timeout
+- Orphan rate exceeding baseline
+- Spawn timeout rate exceeding 1%
+- Compensation failures
 
 ================================================================================

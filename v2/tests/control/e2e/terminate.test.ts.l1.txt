@@ -15,10 +15,10 @@
   - Streams progress
 - Allocations cleaned up
   - All allocations for instance updated
-  - ACTIVE allocations drained first
-  - HELD allocations released
+  - ACTIVE allocations transitioned to COMPLETE
   - AVAILABLE allocations removed
-  - Final status: COMPLETE or deleted
+  - COMPLETE allocations remain (history preserved)
+  - Debug holds checked before termination
 - Tailscale deregistered
   - Instance removed from Tailscale network
   - Tailscale API called

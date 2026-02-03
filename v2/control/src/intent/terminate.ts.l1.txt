@@ -1,11 +1,200 @@
-# workflow-terminate.ts - Terminate Workflow
+# terminate.ts - Terminate Intent
+
+## Exports
+
+```typescript
+export interface TerminateInput {
+  instanceId?: string;
+  selector?: InstanceSelector;
+  force?: boolean;           // Skip graceful shutdown, default: false
+  idempotencyKey?: string;
+}
+
+export interface InstanceSelector {
+  provider?: string;
+  status?: string;
+  tags?: Record<string, string>;
+}
+
+export interface TerminateOutput {
+  workflowId: string;
+  instanceId: string;
+  allocationsTerminated: number;
+  providerTerminated: boolean;
+}
+
+// Entry point
+export async function terminate(input: TerminateInput): Promise<Workflow>;
+
+// Workflow definition
+export const terminateWorkflow: WorkflowDefinition;
+```
 
 ## Purpose
-Terminate instance and clean up allocations
 
-## Nodes
-1. resolve-target: Get instance and active allocations
-2. terminate-allocations: Transition allocations to COMPLETE
-3. terminate-instance: Call provider.terminateInstance()
-4. update-db: Mark instance status='terminated'
-5. finalize: Seal manifest
+Terminate instance and clean up allocations.
+
+## Workflow Graph
+
+```
+┌─────────────────┐
+│  resolve-target │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────────┐
+│terminate-allocations│
+└────────┬────────────┘
+         │
+         ▼
+┌─────────────────┐
+│terminate-instance│
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│    update-db    │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│    finalize     │
+└─────────────────┘
+```
+
+## Node Definitions (Inline)
+
+These nodes are simple enough to define inline rather than as separate files.
+
+### 1. resolve-target
+
+```typescript
+interface ResolveTargetInput {
+  instanceId?: string;
+  selector?: InstanceSelector;
+}
+
+interface ResolveTargetOutput {
+  instance: Instance;
+  allocations: Allocation[];
+}
+
+async function execute(ctx, input): Promise<ResolveTargetOutput>
+  1. Resolve instance:
+     - If input.instanceId: instance = await db.getInstance(input.instanceId)
+     - Else if input.selector: instance = await db.findInstance(input.selector)
+     - If !instance: throw ValidationError('Instance not found')
+
+  2. Get active allocations:
+     - allocations = await db.listAllocations({
+         instanceId: instance.id,
+         status: ['CLAIMED', 'ACTIVE']
+       })
+     - Also check for COMPLETE allocations with debug hold:
+       - completeWithHold = await db.listAllocations({
+           instanceId: instance.id,
+           status: ['COMPLETE'],
+           debugHoldActive: true  // WHERE debug_hold_until > NOW
+         })
+     - If completeWithHold.length > 0 AND !input.force:
+       - throw ValidationError('Instance has active debug hold, use force=true to override')
+
+  3. Return { instance, allocations }
+
+// No compensation (read-only)
+```
+
+### 2. terminate-allocations
+
+```typescript
+interface TerminateAllocationsInput {
+  allocations: Allocation[];
+}
+
+interface TerminateAllocationsOutput {
+  transitionedCount: number;
+  transitionedIds: string[];
+}
+
+async function execute(ctx, input): Promise<TerminateAllocationsOutput>
+  1. For each allocation:
+     - If status='ACTIVE': Send cancel command first (best-effort)
+       - await sse.sendMessage(instanceId, { type: 'cancel_run', run_id: allocation.run_id })
+       - Wait for run_complete or heartbeat inactivity (up to CANCEL_VERIFICATION_TIMEOUT_MS = 90s)
+       - Prevents race where agent keeps running after instance terminated
+     - await db.updateAllocationStatus(allocation.id, 'COMPLETE')
+     - ctx.emitResource('allocation', allocation.id)
+
+  2. Return { transitionedCount, transitionedIds }
+
+async function compensate(ctx, input): Promise<void>
+  // Allocations stay COMPLETE - no revert needed
+  // Instance termination will happen regardless
+```
+
+### 3. terminate-instance
+
+```typescript
+interface TerminateInstanceInput {
+  instance: Instance;
+  force: boolean;
+}
+
+interface TerminateInstanceOutput {
+  terminated: boolean;
+  providerResponse?: unknown;
+}
+
+async function execute(ctx, input): Promise<TerminateInstanceOutput>
+  1. Get provider:
+     - provider = await ctx.getProvider(input.instance.provider)
+
+  2. Terminate in provider:
+     - Try: await provider.terminate(input.instance.provider_id)
+     - Catch NOT_FOUND: Handle gracefully (already terminated)
+     - Catch other: throw ProviderApiError
+
+  3. Return { terminated: true }
+
+async function compensate(ctx, input): Promise<void>
+  // Cannot un-terminate an instance
+  // Log warning and continue
+```
+
+### 4. update-db
+
+```typescript
+interface UpdateDbInput {
+  instanceId: string;
+}
+
+interface UpdateDbOutput {
+  updated: boolean;
+}
+
+async function execute(ctx, input): Promise<UpdateDbOutput>
+  1. Update instance record:
+     - await db.updateInstance(input.instanceId, {
+         status: 'terminated',
+         workflow_state: 'terminate:complete',
+         terminated_at: Date.now()
+       })
+
+  2. Return { updated: true }
+
+// No compensation (instance already terminated in provider)
+```
+
+### 5. finalize
+
+Uses shared finalize node from `workflow/nodes/finalize.ts`
+
+## Error Handling
+
+| Node | Error | Response |
+|------|-------|----------|
+| resolve-target | Instance not found | Fail immediately (VALIDATION_ERROR) |
+| terminate-allocations | State transition failure | Log and continue (best-effort) |
+| terminate-instance | Provider API error | Retry with backoff |
+| terminate-instance | NOT_FOUND | Handle gracefully (idempotent) |
+| update-db | Database error | Fail immediately |

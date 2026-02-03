@@ -58,19 +58,22 @@
   - Correct isolation
   - Both accessible simultaneously
 
-## Hold Interaction Tests
-- HELD allocation not available for reuse
-  - Run 1 completes with --hold
-  - Allocation status → HELD
-  - Run 2 (same spec) doesn't find it
-  - New instance spawned for Run 2
-- HELD→COMPLETE makes available
-  - Hold expires or explicitly released
-  - Allocation status HELD→COMPLETE
-  - Run 3 (same spec) can claim it
-  - Reuse now works
-- Spawns new instance if urgent
-  - All matching allocations are HELD
-  - New run needs immediate start
-  - New instance spawned
-  - Doesn't wait for hold expiry
+## Warm Pool Replenishment Tests
+- COMPLETE allocation with warm pool replenishment
+  - Run 1 completes successfully
+  - Allocation status → COMPLETE
+  - New AVAILABLE allocation created on same instance
+  - Original allocation remains COMPLETE (with optional debug_hold_until)
+  - Run 2 (same spec) finds AVAILABLE allocation
+  - Reuses same instance
+- Debug hold does not block warm pool
+  - Run 1 completes with debug_hold_until set
+  - Original allocation: status=COMPLETE, debug_hold_until > NOW
+  - New AVAILABLE allocation created anyway
+  - Run 2 can claim the AVAILABLE allocation
+  - Both allocations exist on same instance
+- Multiple sequential runs on same instance
+  - Each run gets its own allocation record
+  - Allocations are never reused/recycled
+  - Instance accumulates allocation history
+  - Warm pool always consists of fresh AVAILABLE allocations

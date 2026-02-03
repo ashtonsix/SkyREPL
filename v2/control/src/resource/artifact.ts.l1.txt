@@ -8,8 +8,8 @@
 - run_id, path, size_bytes, keep
 
 ## Storage Strategy
-- ≤4KB: inline in objects.payload
-- >4KB: S3, payload=null, use s3_key/s3_bucket
+- ≤64KB: inline in objects.payload
+- >64KB: S3, payload=null, use s3_key/s3_bucket
 
 ## Presigned URLs
 - Generate for download regardless of storage location

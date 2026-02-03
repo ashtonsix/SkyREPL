@@ -17,3 +17,15 @@
 ## Triggers
 - Auto-regenerate on allocation state changes
 - Update on IP changes
+
+## Shared Instance Notice
+Before connecting, check if target instance has other active allocations:
+- Query GET /v1/instances/:id/allocations
+- If other ACTIVE allocations exist, display notice:
+  ```
+  Notice: Instance has N other active allocation(s)
+    alloc-xyz (run-789) - ACTIVE, started 5m ago
+  Resources (CPU, memory, disk I/O) are shared.
+  ```
+- Notice is informational (non-blocking)
+- Helps users understand why debugging may affect/be affected by other work

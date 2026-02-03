@@ -48,27 +48,27 @@
   - Checksum covers: base image, init script, env
   - Mismatch logged for debugging
 
-## Hold State Tests
-- Run completes with HELD allocation
+## Debug Hold Tests
+- Run completes with debug hold
   - Run completes successfully
-  - Allocation status → HELD
-  - hold_until timestamp set (e.g., +1 hour)
+  - Allocation status → COMPLETE
+  - debug_hold_until timestamp set (e.g., +1 hour)
   - Instance remains running
-- SSH accessible during hold
-  - repl ssh connects to held allocation
+  - New AVAILABLE allocation created for warm pool
+- SSH accessible during debug hold
+  - repl ssh connects to allocation with debug_hold_until > NOW
   - Shell access works
   - Files from run accessible
   - Environment preserved
-- Hold expires
-  - hold_until time passes
-  - Background job transitions HELD→COMPLETE
-  - Instance not immediately terminated
-  - Becomes AVAILABLE for reuse or cleanup
-- Hold extension works
-  - repl extend-hold command
-  - hold_until updated
-  - Max hold duration respected
-  - Extension confirmed in output
+- Debug hold expires
+  - debug_hold_until time passes
+  - Background job clears debug_hold_until (sets to NULL)
+  - Allocation remains COMPLETE
+  - Instance becomes eligible for termination
+- Instance termination blocked by debug hold
+  - Termination checked for ANY allocation with debug_hold_until > NOW
+  - Termination fails with error if debug hold active
+  - Use --force to override debug hold
 
 ## Error Cases
 - Invalid command fails
@@ -93,13 +93,13 @@
   - Files synced to allocation workdir
   - Sync completes before command runs
   - Files accessible in command
-- Deduplication works
-  - Same file checksum reused
-  - No duplicate upload
+- Deduplication works (opt-in)
+  - Same file checksum reused via idx_blobs_dedup
+  - No duplicate upload for dedupable buckets
   - Fast sync for unchanged files
-  - Ref counting correct
+  - Background GC merges any race duplicates
 - Large files use S3
-  - File >4KB triggers S3 upload
+  - File >64KB triggers S3 upload
   - Presigned URL generated
   - Agent downloads from S3
-  - Small files use inline storage
+  - Small files (≤64KB) use inline storage (SBO)

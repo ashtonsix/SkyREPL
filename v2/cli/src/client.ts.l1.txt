@@ -1,21 +1,35 @@
 # client.ts - HTTP Client for Control Plane
 
+# Note: Timing constants import from ../../shared/src/config/timing.ts.l2.txt
+# - CLI_API_TIMEOUT_MS (30s)
+# - RETRY_BASE_DELAY_MS (2s)
+# - RETRY_MAX_DELAY_MS (60s)
+# - RETRY_MAX_ATTEMPTS (5)
+
 ## Authentication
 - Bearer token from ~/.repl/auth.json
 - Auto token refresh when expired (refresh 5min before expiry)
 
 ## Request Handling
 - Base URL from REPL_CONTROL_URL or ~/.repl/config
-- Timeout: 30s default, configurable per-request
-- Retry: exponential backoff (2s, 4s, 8s) for 5xx and network errors
-- Max retries: 3 for idempotent requests, 0 for non-idempotent
+- Timeout: CLI_API_TIMEOUT_MS (30s) default, configurable per-request
+- Retry: exponential backoff (RETRY_BASE_DELAY_MS → RETRY_MAX_DELAY_MS) for 5xx and network errors
+- Max retries: RETRY_MAX_ATTEMPTS for idempotent requests, 0 for non-idempotent
 - Idempotency key generation (UUID v4) for POST/PATCH/DELETE
 
 ## Response Handling
 - Parse JSON responses
-- Extract error details from { error: { code, message, category } }
+- Extract error details from { error: { code, message, category, details, retryAfterMs } }
+- Capture trace ID from X-Trace-Id header for debugging
 - Map categories to user-friendly messages
 - Include request ID in error output for support
+
+## Error Handling
+- 401 Unauthorized: Invalid/expired token → trigger re-authentication
+- 403 Forbidden: Valid token, insufficient permissions → show permission error
+- 429 Rate Limit: Use retry_after_ms from error details for backoff
+  - Show user-friendly message: "Rate limited. Retrying in {ms}ms..."
+- 5xx Server Errors: Retry with exponential backoff (up to max retries)
 
 ## Endpoints
 - Local: http://localhost:3000

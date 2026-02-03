@@ -5,51 +5,34 @@
 ## Purpose
 
 Intents are offline types/interfaces/generics for testing and verification of
-workflow implementations. They are NOT runtime concepts - providers implement
+workflow implementations. They are NOT runtime concepts—providers implement
 workflows to fulfill an intent.
 
-Each intent defines:
+**Each intent defines:**
 - Expected outputs (e.g., "Launch Instance" emits a manifest containing an instance)
-- A micro-library of helpers/builders for common patterns
 - Type constraints for testing workflow implementations
-- Expected statuses/phases for CLI consistent output (all providers implementing an
-  intent must emit the same intermediate statuses so CLI can display consistent
-  progress across different provider implementations; e.g., launch-run might define
+- Expected statuses/phases for consistent CLI progress display (e.g., launch-run
   phases: provisioning, configuring, ready, executing, complete)
+- A micro-library of helpers/builders for common patterns
 
-**Testing Role**: Intents enable testing generalization through OrbStack. Because all
+**Testing Role**: Intents are the foundation of SkyREPL's testing strategy. All
 providers implementing an intent must satisfy the same contract (expected outputs,
-status phases, resource emissions), testing workflows against OrbStack's intent
-implementation provides confidence that the workflow will behave correctly on any
-provider following the same intent.
+status phases, resource emissions). Testing workflows against OrbStack's intent
+implementation—including chaos scenarios (fault injection, network failures,
+capacity errors)—provides confidence that the control plane handles any
+contract-compliant provider correctly.
 
-This is the foundation of SkyREPL's testing strategy: if the control plane handles
-OrbStack's chaos scenarios (fault injection, network failures, capacity errors) well,
-and other providers (AWS, Lambda Labs, RunPod) follow the intent contract, the control
-plane should behave well on those providers too.
+Cross-Reference: Chapter 6 (Workflows) covers HOW intents are fulfilled. Chapter 8
+(Providers) covers OrbStack's testing/chaos role.
 
-Cross-Reference: See Chapter 8 (Providers) for OrbStack's testing/chaos role, and
-Chapter 15.2 for the testing infrastructure details.
+**Compensation scope**: Compensation applies to single nodes only. Multi-node failures
+rely on manifest tracking for cleanup at the policy level. Workflows do NOT cascade
+compensation through completed nodes.
 
-This section provides complete specifications for the four essential intents
-that drive the system: launch-run (execute computation), terminate-instance
-(cleanup), create-snapshot (fast restart), and cleanup-manifest (resource
-reclamation).
-
-Each intent specification includes: output expectations, helper libraries,
-pattern applications, and verification requirements.
-
-Cross-Reference: See Chapter 6 (Workflows) for HOW intents are fulfilled. Workflows
-are the execution mechanism that implements what intents specify. This chapter
-focuses on WHAT workflows must achieve.
-
-NOTE: Compensation applies to single nodes only. If a workflow fails after multiple
-nodes complete, the manifest tracks all created resources for cleanup at the
-manifest/policy level. Workflows do NOT cascade compensation through completed nodes.
-
-NOTE: Compensation applies to single nodes only. If a workflow fails after multiple
-nodes complete, the manifest tracks all created resources for cleanup at the
-manifest/policy level. Workflows do NOT cascade compensation through completed nodes.
+**This chapter specifies four intents**: launch-run (execute computation),
+terminate-instance (cleanup), create-snapshot (fast restart), and cleanup-manifest
+(resource reclamation). Each specification includes output expectations, pattern
+applications, and verification requirements.
 
 ## 7.1 launch-run Intent
 
@@ -144,7 +127,7 @@ ctx.applyPattern('conditional-branch', {
 });
 ```
 
-**CB at claim-warm-allocation**: Try-fallback (triggerOnError=true) optimistic claim with spawn fallback
+**CB at claim-warm-allocation**: Try-fallback (triggerOnError=true) for optimistic claim with spawn fallback
 
 ```typescript
 // This CB is applied if claim-warm-allocation fails:
@@ -201,7 +184,7 @@ async function finalizeRun(ctx: NodeContext): Promise<{ snapshotPending: boolean
 
 **syncFiles handler details:**
 
-The sync-files node is a combined operation that:
+The sync-files node combines multiple operations:
 1. Generates presigned URLs for all file checksums
 2. Sends single `start_run` message to agent with files list
 3. Agent downloads files in parallel
@@ -209,16 +192,16 @@ The sync-files node is a combined operation that:
 5. Control receives sync_complete and transitions allocation CLAIMED→ACTIVE
 6. Node completes after receiving sync_complete
 
-This replaces the old two-step process (download_files → start_job) with a single atomic operation.
+This replaces the two-step process (download_files → start_job) with a single atomic operation.
 
 ### Resource Emissions
 
-| Node              | Resource   | Cleanup Priority | Example Call                                     |
-|-------------------|------------|------------------|--------------------------------------------------|
-| spawn-instance    | instance   | 50               | `ctx.emitResource('instance', instanceId, 50)`   |
+| Node              | Resource   | Cleanup Priority | Example Call                                       |
+|-------------------|------------|------------------|----------------------------------------------------|
+| spawn-instance    | instance   | 50               | `ctx.emitResource('instance', instanceId, 50)`     |
 | create-allocation | allocation | 90               | `ctx.emitResource('allocation', allocationId, 90)` |
-| (workflow start)  | run        | 80               | `ctx.emitResource('run', runId, 80)`             |
-| create-snapshot*  | object     | 10               | `ctx.emitResource('object', objectId, 10)`       |
+| (workflow start)  | run        | 80               | `ctx.emitResource('run', runId, 80)`               |
+| create-snapshot*  | object     | 10               | `ctx.emitResource('object', objectId, 10)`         |
 
 *Only if createSnapshot=true and exitCode=0
 
@@ -231,19 +214,19 @@ This replaces the old two-step process (download_files → start_job) with a sin
 | spawn-instance   | Retry-with-Alternative (region)             |
 | wait-for-boot    | Timeout → terminate instance                |
 | sync-files       | Allocation → FAILED, terminate instance     |
-| await-completion | Timeout → run cancelled, HELD               |
+| await-completion | Timeout → run cancelled, COMPLETE+debug_hold|
 
 ### Snapshot-Based Restart
 
-**Note**: Restart from snapshot is a variation of launch-run, not a separate workflow.
+**Note**: Restart from snapshot is a launch-run variation, not a separate workflow.
 
 When a snapshot exists:
-- **resolve-instance** step can match against snapshot-based instances in warm pool
+- **resolve-instance** can match against snapshot-based instances in warm pool
 - Warm pool matching logic prefers instances created from matching snapshots
 - If no warm match, **spawn-instance** can use snapshot as boot source (provider-dependent)
 - Feature installation (IAR at wait-for-boot) is skipped when booting from snapshot
 
-This reduces cold start time from ~2-3min to ~30s for repeat runs with identical init state.
+This reduces cold start time (e.g., from minutes to seconds) for repeat runs with identical init state.
 
 ## 7.2 terminate-instance Intent
 
@@ -269,10 +252,10 @@ This reduces cold start time from ~2-3min to ~30s for repeat runs with identical
 │  └─────────┬─────────┘     └──────────────────┘     └────────┬─────────┘    │
 │            │                                                 │              │
 │            │◄────────────────────────────────────────────────┘              │
-│            │                           (60s grace period, then force)       │
+│            │                  (ssh_drain_grace_period, then force)         │
 │            ▼                                                                │
 │  ┌──────────────────┐                                                       │
-│  │ cleanup-features │ ─────────────► PFO: Parallel teardown by feature     │
+│  │ cleanup-features │ ─────────────► PFO: Parallel teardown by feature      │
 │  └─────────┬────────┘                                                       │
 │            │                                                                │
 │            ▼                                                                │
@@ -297,14 +280,15 @@ This reduces cold start time from ~2-3min to ~30s for repeat runs with identical
 
 1. **VALIDATE**: Verify instance exists, acquire termination lock
 2. **DRAIN-ALLOCATIONS**: Archive ACTIVE allocations, notify agent
-3. **DRAIN-SSH**: Notify users, wait 60s, force disconnect
-4. **CLEANUP-FEATURES**: Parallel teardown of all FeatureInstallations (Tailscale, GPU drivers, monitoring, etc.)
-   - Uses Parallel-Fan-Out pattern (see cleanup-manifest line 379 for similar usage)
-   - Each feature's teardownHandler runs independently
-   - Partial failures logged but don't block other features or workflow
+3. **DRAIN-SSH**: Notify users, wait ssh_drain_grace_period, force disconnect
+4. **CLEANUP-FEATURES**: Parallel teardown of all FeatureInstallations (Tailscale,
+   GPU drivers, monitoring). Uses Parallel-Fan-Out; partial failures don't block.
+5. **TERMINATE-PROVIDER**: Call provider.terminate(), wait for confirmation
+6. **CLEANUP-RECORDS**: Update status, close usage records
+
+**cleanup-features implementation:**
 
 ```typescript
-// In cleanup-features node handler:
 async function cleanupFeatures(ctx: NodeContext): Promise<{ featuresCleanedUp: number }> {
   ctx.log('info', 'Starting feature cleanup', { instanceId: ctx.input.instanceId });
 
@@ -325,25 +309,20 @@ async function cleanupFeatures(ctx: NodeContext): Promise<{ featuresCleanedUp: n
 }
 ```
 
-5. **TERMINATE-PROVIDER**: Call provider.terminate(), wait for confirmation
-6. **CLEANUP-RECORDS**: Update status, close usage records
-
 ### FeatureInstallation Teardown Interface
 
-During cleanup-features (step 4), each installed feature's teardownHandler is invoked:
+Each feature's teardownHandler is invoked during cleanup-features (step 4):
 
 ```typescript
 interface FeatureInstallation {
-  teardownHandler?: () => Promise<void>;  // Called during cleanup-features
+  teardownHandler?: () => Promise<void>;
 }
 ```
 
-Example feature teardown handlers:
+Example handlers:
 - **Tailscale**: Deregister device, delete TailscaleMachine object
-- **GPU drivers**: No teardown needed (ephemeral instance)
+- **GPU drivers**: No teardown (ephemeral instance)
 - **Monitoring agents**: Stop processes, deregister from monitoring service
-
-The cleanup-features node uses Parallel-Fan-Out to run all teardown handlers concurrently. Per-feature error handling ensures partial failures don't block other teardowns.
 
 ### SSH Session Handling
 
@@ -351,18 +330,20 @@ The cleanup-features node uses Parallel-Fan-Out to run all teardown handlers con
 async function drainSshSessions(ctx: NodeContext): Promise<{ forcedDisconnects: number }> {
   const activeSessions = await db.query(`
     SELECT a.id FROM allocations a
-    WHERE a.instance_id = ? AND a.status = 'HELD' AND a.hold_reason = 'ssh_active'
-  `, [ctx.input.instanceId]);
+    WHERE a.instance_id = ?
+      AND a.status = 'COMPLETE'
+      AND a.debug_hold_until > ?
+  `, [ctx.input.instanceId, Date.now()]);
 
   // Broadcast termination notice
   await broadcastSshMessage(instance.ip, {
-    message: `Instance terminating in ${timeoutMs / 1000}s. Please save your work.`,
+    message: `Instance terminating in ${timeoutMs / 1000}s. Save your work.`,
   });
 
   // Wait for graceful disconnect
   await sleep(timeoutMs);
 
-  // Force remaining
+  // Force remaining sessions
   const remaining = await checkActiveSessions(instanceId);
   for (const session of remaining) {
     await forceDisconnectSession(session.allocationId);
@@ -397,7 +378,7 @@ async function drainSshSessions(ctx: NodeContext): Promise<{ forcedDisconnects: 
 │               │                                                             │
 │               ▼                                                             │
 │  ┌───────────────────┐                                                      │
-│  │ wait-for-snapshot │◄─────── timeout: 30 minutes                         │
+│  │ wait-for-snapshot │◄─────── timeout: SNAPSHOT_TIMEOUT                   │
 │  └─────────┬─────────┘                                                      │
 │            │                                                                │
 │            ▼                                                                │
@@ -506,6 +487,11 @@ CLEANUP PRIORITY ORDER (highest first):
   │  50: Instances    │ Terminate via provider                            │
   │  10: Snapshots    │ Provider snapshots (last - may be reused)         │
   └───────────────────────────────────────────────────────────────────────┘
+
+Priority ordering enables natural parallel fanout during cleanup. Resources at
+priority 65 (features like Tailscale detach) execute in parallel with each other,
+then priority 50 (instance termination) runs last. This is not sequential
+processing—priorities group concurrent operations while enforcing dependency order.
 ```
 
 ### Per-Provider Scoping
@@ -603,26 +589,11 @@ async function cleanupObjects(objectIds: string[]): Promise<{ s3Deleted: number 
   return { s3Deleted };
 }
 
-// Blob cleanup (delete if no run_file references exist)
-async function cleanupBlob(checksum: string): Promise<boolean> {
-  // Check if any run_file objects still reference this blob
-  const refCount = await db.query(`
-    SELECT COUNT(*) as count FROM objects
-    WHERE type = 'run_file' AND checksum = ?
-  `, [checksum]);
-
-  if (refCount[0]?.count === 0) {
-    const blob = await db.query(`
-      SELECT * FROM objects WHERE type = 'blob' AND checksum = ?
-    `, [checksum]);
-    if (blob[0]?.s3_key) {
-      await s3.deleteObject({ Bucket: blob[0].s3_bucket, Key: blob[0].s3_key });
-    }
-    await db.query(`DELETE FROM objects WHERE type = 'blob' AND checksum = ?`, [checksum]);
-    return true;
-  }
-  return false;
-}
+// NOTE: Blob cleanup is handled by background GC, not inline during manifest cleanup.
+// Objects reference blobs via blob_id FK with ON DELETE RESTRICT, so blobs cannot be
+// deleted while objects reference them. Background GC periodically finds unreferenced
+// blobs (24h grace period) and deletes both S3 objects and blob records.
+// See Ch2 "Background Blob GC" for implementation details.
 ```
 
 ### Error Handling
@@ -642,16 +613,15 @@ const CLEANUP_ERROR_HANDLING = {
 
 ### Retry-with-Alternative (RWA) Pattern
 
-The RWA pattern is available for custom workflows but is **not used** in the intents shown above. Intents prefer:
-- **Conditional-Branch** for failover paths (e.g., claim-warm → spawn fallback)
-- **Node-level retry** with idempotency for transient failures
+The RWA pattern is **not used** in the intents above—intents prefer Conditional-Branch
+for failover paths and node-level retry for transient failures.
 
-RWA is most useful in custom user workflows where:
-- Multiple regions/providers can be attempted sequentially
-- Each attempt needs independent compensation (single-node cleanup)
+RWA is designed for custom user workflows requiring runtime failover (e.g., region
+selection during execution rather than at submission). Use cases:
+- Multiple regions/providers attempted sequentially
+- Each attempt needs independent compensation
 - Deterministic failover isn't possible upfront
 
-Example custom workflow usage:
 ```typescript
 // Custom workflow: try multiple regions for spot capacity
 ctx.applyPattern('retry-with-alternative', {
@@ -664,6 +634,4 @@ ctx.applyPattern('retry-with-alternative', {
   reason: 'Spot capacity unavailable in us-east-1'
 });
 ```
-
-Intents avoid RWA because region selection happens at workflow submission time, not during execution. Custom workflows may need runtime failover across regions.
 

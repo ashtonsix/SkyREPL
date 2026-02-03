@@ -4,53 +4,51 @@
 
 ## Purpose
 
-The allocation system provides the fundamental lifecycle primitive for run
-execution. It replaces the implicit grace_period mechanism with an explicit
-state machine that tracks run-to-instance bindings through their complete
-lifecycle: from warm pool availability, through active execution, to post-run
-hold states for debugging.
+Allocations in AVAILABLE state form the warm pool. The warm pool query is just:
+`SELECT * FROM allocations WHERE status='AVAILABLE'`.
 
-Key Innovation: Allocations in AVAILABLE state ARE the warm pool. No separate
-concept needed. The warm pool query is just: SELECT * FROM allocations WHERE
-status='AVAILABLE'.
+The allocation system provides the lifecycle primitive for run execution: an
+explicit state machine tracking run-to-instance bindings from warm pool
+availability, through active execution, to completion. Post-run debugging is
+enabled via debug_hold_until timestamps that block termination without adding
+state complexity.
 
 ## 5.1 Core Schema
 
 ```typescript
 interface Allocation {
   id: string;
-  run_id: string | null;        // NULL = AVAILABLE state
+  run_id: string | null;           // NULL = AVAILABLE state
   instance_id: string;
   status: AllocationStatus;
-  user: string;                  // SSH user for this allocation
-  workdir: string;               // Isolated workdir path
+  user: string;                    // SSH user for this allocation
+  workdir: string;                 // Isolated workdir path
   current_manifest_id: string | null;
-  hold_until: number | null;     // Timestamp for HELD expiry
-  hold_reason: string | null;    // 'ssh_active' | 'explicit' | 'default'
-  created_at: number;            // Allocation creation
-  updated_at: number;            // Last status change
+  debug_hold_until: number | null; // Blocks termination if > NOW, enables SSH
+  created_at: number;              // Allocation creation
+  updated_at: number;              // Last status change
 }
 ```
 
 PRINCIPLES:
-- Two timestamps (created_at, updated_at) - no per-state timestamps
+- Two timestamps (created_at, updated_at)—no per-state timestamps
 - Detailed timeline derived from workflow nodes if needed
-- Allocation is the lifecycle primitive - keep it clean
+- Allocation is the lifecycle primitive—keep it clean
 
 ## 5.2 Allocation State Machine
 
 ### State Definitions
 
 ```
-AVAILABLE → CLAIMED → ACTIVE → HELD → COMPLETE
+AVAILABLE → CLAIMED → ACTIVE → COMPLETE
                                ↘ FAILED
 ```
 
 **AVAILABLE** - Instance advertises empty run slot
 - run_id is NULL
-- instance_id points to a ready instance
+- instance_id points to ready instance
 - workdir prepared for new run
-- THIS IS THE WARM POOL (warm pool is a query result, not separate concept)
+- THIS IS THE WARM POOL (query result, not separate concept)
 
 **CLAIMED** - Run assigned, workdir being prepared
 - run_id set to target run
@@ -62,27 +60,21 @@ AVAILABLE → CLAIMED → ACTIVE → HELD → COMPLETE
 - Command running on instance
 - Logs streaming
 - Transition trigger: Control receives sync_complete from agent
-- Transitions to HELD on completion (normal), FAILED on lifecycle error
+- Transitions to COMPLETE on completion (normal), FAILED on lifecycle error
 
-**HELD** - Run finished but allocation preserved
-- Replaces grace_period mechanism
-- SSH access enabled for debugging
-- hold_until timestamp controls duration
-- Can be extended (SSH activity, explicit CLI command)
-- CRITICAL: HELD does NOT preclude new AVAILABLE allocations on same instance
-- HELD DOES preclude instance termination (cannot terminate while any allocation HELD)
-
-**COMPLETE** - Allocation finalized
+**COMPLETE** - Allocation finalized (terminal state)
 - Metrics and logs persisted
 - Workdir retained until instance termination (different workdirs per allocation enable post-run debugging)
-- Instance slot available for new allocations
+- Instance slot available for new allocations (warm pool replenishment happens here)
 - Record kept for historical queries
+- debug_hold_until field may be set to block termination and enable SSH access
+- SSH access allowed if debug_hold_until > NOW
 
 **FAILED** - Lifecycle failure (not run/workload error)
-- Something went wrong during lifecycle (file sync failed, etc.)
-- Instance may be in bad state, NOT suitable for future allocations
+- Lifecycle error occurred (file sync failed, etc.)
+- Instance may be in bad state, unsuitable for future allocations
 - Triggers instance termination or investigation
-- Distinct from run failure (exit_code != 0) which is normal completion
+- Distinct from run failure (exit_code != 0), which is normal completion
 
 ### State Transition Diagram
 
@@ -97,22 +89,27 @@ AVAILABLE → CLAIMED → ACTIVE → HELD → COMPLETE
           ↑                      │                      │
           │                      │                      │
           │                      │ sync fails           │ finish (success/fail)
-          │                      │ or timeout           │
-          │                      ↓                      ↓
-          │               ┌────────────┐         ┌────────────┐
-          │               │   FAILED   │         │    HELD    │
-          │               └─────┬──────┘         └─────┬──────┘
+          │                      │ or timeout           │ - set debug_hold_until
+          │                      ↓                      │   if keep_on_complete
+          │               ┌────────────┐                │ - replenish warm pool
+          │               │   FAILED   │                │   (create AVAILABLE)
+          │               └─────┬──────┘                ↓
+          │                     │                ┌────────────┐
+          │                     │                │  COMPLETE  │
+          │                     │                └─────┬──────┘
           │                     │                      │
-          │                     │                      │ hold expires
-          │                     │                      │ or released
-          │                     ↓                      ↓
-          │               ┌─────────────┐       ┌────────────┐
-          │               │ (terminate  │       │  COMPLETE  │
-          │               │  instance)  │       └─────┬──────┘
-          │               └─────────────┘             │
-          │                                           │
-          │            new allocation created         │
-          └───────────────────────────────────────────┘
+          │                     │ (terminate           │ (allows new allocs
+          │                     │  instance)           │  + termination)
+          │                     ↓                      │
+          │               ┌─────────────┐              │
+          │               │   (cleanup  │              │
+          │               │    failed   │              │
+          │               │   instance) │              │
+          │               └─────────────┘              │
+          │                                            │
+          │            new allocation created          │
+          │            (warm pool replenishment)       │
+          └────────────────────────────────────────────┘
 
 
                          FAILURE PATHS (from any active state)
@@ -138,16 +135,15 @@ AVAILABLE → CLAIMED → ACTIVE → HELD → COMPLETE
 
     TERMINAL STATES:
       COMPLETE    Normal end state, allows new allocations + instance termination
+                  (unless debug_hold_until > NOW, which blocks termination)
       FAILED      Error end state, typically triggers instance termination
 ```
 
-KEY SEMANTICS:
-
-KEY SEMANTICS:
-- HELD allocations allow new AVAILABLE allocations on same instance
-- HELD allocations prevent instance termination
-- COMPLETE allocations are finalized, allow new allocations AND termination
-- FAILED allocations typically trigger instance termination (bad state)
+KEY SEMANTICS (terminal state behaviors):
+- COMPLETE: allows new allocations AND instance termination
+  - Exception: if debug_hold_until > NOW, termination is blocked
+  - SSH access allowed when COMPLETE with debug_hold_until > NOW
+- FAILED: typically triggers instance termination (instance may be compromised)
 
 ### Transition Triggers and Side Effects
 
@@ -156,14 +152,12 @@ type AllocationStatus =
   | 'AVAILABLE'
   | 'CLAIMED'
   | 'ACTIVE'
-  | 'HELD'
   | 'COMPLETE'
   | 'FAILED';  // Lifecycle failure (file sync error, etc.) - instance is suspect
 
 interface TransitionContext {
   runId?: string;
-  holdDurationMs?: number;
-  holdReason?: 'ssh_active' | 'explicit' | 'debug' | 'default';
+  debugHoldDurationMs?: number;
   timestamp: number;
 }
 
@@ -171,8 +165,7 @@ interface TransitionContext {
 const VALID_TRANSITIONS: Record<AllocationStatus, AllocationStatus[]> = {
   'AVAILABLE': ['CLAIMED'],
   'CLAIMED': ['ACTIVE', 'FAILED'],  // ACTIVE triggered by sync_complete
-  'ACTIVE': ['HELD', 'FAILED'],
-  'HELD': ['COMPLETE'],
+  'ACTIVE': ['COMPLETE', 'FAILED'],
   'COMPLETE': [],  // Terminal state (eventually archived)
   'FAILED': [],    // Terminal state (instance terminated)
 };
@@ -182,13 +175,13 @@ const TRANSITION_TRIGGERS = {
   'AVAILABLE→CLAIMED': 'Warm pool allocation claimed by workflow',
   'CLAIMED→ACTIVE': 'Agent reports sync_complete (files downloaded successfully)',
   'CLAIMED→FAILED': 'Agent reports sync failure or timeout',
-  'ACTIVE→HELD': 'Run completes (success or failure), hold period begins',
+  'ACTIVE→COMPLETE': 'Run completes (success or failure); sets debug_hold_until if configured; replenishes warm pool',
   'ACTIVE→FAILED': 'Lifecycle error during execution (concrete triggers below)',
-  'HELD→COMPLETE': 'Hold period expires, allocation finalized',
 };
 
 // ACTIVE→FAILED concrete triggers:
-// - Agent heartbeat timeout (>30 seconds without heartbeat)
+// - Agent heartbeat timeout (exceeds stale_detection_threshold, see Ch15 §15.9)
+//   Constraint: heartbeat_interval < ack_timeout <= stale_detection_threshold
 // - SSH connection loss to instance (network partition)
 // - Instance termination by provider (spot interruption, maintenance)
 // - Fatal agent error (agent crash, OOM, unrecoverable error)
@@ -213,8 +206,12 @@ function validateAllocationTransition(
   return { valid: true };
 }
 
-function allowsSSHAccess(status: AllocationStatus): boolean {
-  return status === 'ACTIVE' || status === 'HELD';
+function allowsSSHAccess(allocation: Allocation): boolean {
+  if (allocation.status === 'ACTIVE') return true;
+  if (allocation.status === 'COMPLETE' && allocation.debug_hold_until) {
+    return allocation.debug_hold_until > Date.now();
+  }
+  return false;
 }
 
 function isInWarmPool(status: AllocationStatus): boolean {
@@ -222,13 +219,32 @@ function isInWarmPool(status: AllocationStatus): boolean {
 }
 ```
 
+### 5.2.1 Race Condition: ACTIVE→COMPLETE vs ACTIVE→FAILED
+
+**Problem**: Run completion races with infrastructure failure. Agent sends `run_complete`,
+then infrastructure dies (heartbeat timeout, spot interruption). Both attempt to
+transition ACTIVE to different states.
+
+**Resolution**: Optimistic locking with first-write-wins semantics.
+
+```typescript
+// Both handlers use: UPDATE ... WHERE status = 'ACTIVE'
+// Only one succeeds; loser sees changes === 0 and logs warning
+```
+
+**Key Properties**:
+- `WHERE status = 'ACTIVE'` ensures only one transition succeeds (first write wins)
+- Workflow checks `workflow_events` for `run_complete`; if found, treats as success even if allocation FAILED
+- No false failures: run completion always honored if evidence exists
+
+**Edge Cases**:
+- Agent wins race → COMPLETE; timeout handler sees COMPLETE, returns
+- Timeout wins race → FAILED; agent logs warning; workflow finds run_complete event, treats as success
+- Spot interrupt during run_complete → COMPLETE wins (already transitioned)
+
 ## 5.3 Warm Pool Mechanics
 
-### Key Insight: AVAILABLE IS the Warm Pool
-
-An allocation in AVAILABLE state IS a warm pool advertisement. There is no
-separate "warm pool" table or concept. The warm pool is simply a query result:
-
+No separate table—the warm pool is a query result:
 ```sql
 SELECT * FROM allocations WHERE status = 'AVAILABLE' AND <matching criteria>
 ```
@@ -254,8 +270,8 @@ async function createAvailableAllocation(
   const result = await db.execute(`
     INSERT INTO allocations (
       run_id, instance_id, status, user, workdir, current_manifest_id,
-      hold_until, hold_reason, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      debug_hold_until, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `, [
     null, // run_id is NULL for AVAILABLE
     instanceId,
@@ -263,8 +279,7 @@ async function createAvailableAllocation(
     options.user ?? getDefaultUser(instance.provider),
     workdir,
     options.manifestId ?? null,
-    null, // hold_until
-    null, // hold_reason
+    null, // debug_hold_until
     Date.now(),
     Date.now(),
   ]);
@@ -361,16 +376,13 @@ async function claimWarmPoolAllocation(
 
 ### Per-Allocation SSH Routing
 
-**Key Principle:** SSH connections are per-allocation, not per-instance. Each allocation
-gets its own SSH host entry, workdir, and user context. Running `ssh <allocation_id>`
-lands you in the correct instance/user/workdir for that specific run.
+SSH connections are per-allocation, not per-instance. Each allocation gets its
+own SSH host entry, workdir, and user context. Running `ssh <allocation_id>`
+lands you in the correct instance/user/workdir.
 
-**Why Per-Allocation SSH:**
-- Different workdirs mean old runs remain accessible after completion
-- Multiple allocations can coexist on same instance (future capability)
-- Reduces HELD state importance (previous runs don't block new ones) but doesn't
-  eliminate it (still can't terminate instance with active SSH)
-- Clean separation between concurrent or sequential runs on same instance
+Benefits: different workdirs keep old runs accessible; multiple allocations can
+coexist on the same instance; clean separation between concurrent or sequential
+runs.
 
 ### Allocation SSH Properties
 
@@ -392,12 +404,32 @@ interface Allocation {
 
 **Workdir Isolation:**
 - Each allocation gets unique workdir: `/home/ubuntu/work_1`, `/home/ubuntu/work_2`, etc.
-- Counter increments per instance to ensure uniqueness
+- Counter increments per instance for uniqueness
 - Previous allocations' workdirs persist until instance termination
-- This is intentional: enables SSH access to old allocations for debugging while new work executes
+- Intentional: enables SSH to old allocations while new work executes
 - Multiple workdirs accumulate (work_1, work_2, work_3...) during instance lifetime
-- Workdir cleanup timing: Instance termination, NOT allocation completion
-- Rationale: Users can SSH to previous run's workdir while new allocation executes
+- Cleanup timing: instance termination, not allocation completion
+
+**Workdir Isolation Considerations:**
+
+Workdirs provide path isolation only—not process or filesystem isolation.
+Allocations on the same instance share:
+
+- User home directory (`~/.local`, `~/.cache`, pip/conda environments)
+- System temp space (`/tmp`, `/var/tmp`)
+- Disk IOPS and throughput limits
+- CPU and memory
+
+Example: `pip install --user` in Allocation A affects Allocation B. Filling `/tmp`
+or exhausting IOPS impacts concurrent allocations.
+
+**Mitigations (guidance, not requirements):**
+- Pre-claim disk space check (warn if <20% free)
+- Preflight warning when disk usage exceeds 80%
+- Future: `chroot`, systemd units, or containers for harder isolation
+- Future: Per-allocation cgroups limits
+
+Pre-claim checks are advisory (warnings, not blockers) to preserve warm pool efficiency.
 
 ### Per-Allocation SSH Entries
 
@@ -459,13 +491,9 @@ function generateSSHConfigEntry(entry: AllocationSSHEntry): string {
 
 ### Tailscale JIT Installation via ProxyCommand
 
-**Overview:**
-Tailscale provides secure mesh networking between control plane and instances. Installation
-happens Just-In-Time (JIT) on first SSH connection attempt, triggered transparently via
-SSH ProxyCommand. This ensures zero-latency for instances that don't need Tailscale while
-making it instantly available when SSH is needed.
-
-**ProxyCommand Integration:**
+Tailscale provides secure mesh networking. Installation happens Just-In-Time on
+first SSH connection via ProxyCommand: zero-latency for batch jobs, instantly
+available when SSH is needed.
 
 SSH config entries include a ProxyCommand that intercepts connection attempts:
 
@@ -537,10 +565,10 @@ The `ssh_proxy_command.sh` script runs on every SSH connection attempt and handl
          │<═════════════════════════════════════════════│   ESTABLISHED  │
          └──────────────────────────────────────────────└────────────────┘
 
-  TIMING (example defaults)
-  ─────────────────────────
-    Poll interval:        configurable (e.g., 2 seconds)
-    Timeout:              configurable (e.g., 120 seconds)
+  TIMING
+  ──────
+    Poll interval:        configurable (see Ch15 §15.9)
+    Timeout:              configurable (see Ch15 §15.9)
     Typical install:      15-30 seconds (varies by network)
 
   STATUS VALUES
@@ -726,7 +754,7 @@ async function reportTailscaleStatus(status: string, ip: string | null): Promise
 
 **User Experience:**
 
-From user perspective, Tailscale installation is completely transparent:
+Tailscale installation is completely transparent:
 
 ```bash
 $ ssh a1b2c3d4
@@ -741,29 +769,17 @@ ubuntu@instance:~/work_1$
 
 **Key Design Points:**
 
-1. **Zero overhead for non-SSH workloads:** Instances don't install Tailscale unless user
-   attempts SSH connection. Batch jobs that never need debugging run without any Tailscale
-   overhead.
+1. **Zero overhead for batch jobs:** Tailscale only installed on first SSH attempt
+2. **Transparent:** User runs `ssh <allocation-id>` and it works; first connection shows progress
+3. **Benchmark warning:** Installation during active job triggers warning (daemon startup consumes CPU/memory)
+4. **Fallback:** If Tailscale fails, ProxyCommand falls back to public IP
+5. **Idempotent:** Multiple SSH attempts won't trigger duplicate installations
+6. **Persistent:** Once installed, Tailscale remains for future allocations
 
-2. **Transparent installation:** User doesn't need to know about Tailscale - they just run
-   `ssh <allocation-id>` and it works. First connection shows installation progress.
+### debug_hold_until Extension via SSH Activity
 
-3. **Benchmark warning:** Installation during active job is detected and warned about,
-   since Tailscale daemon startup consumes CPU/memory that may skew benchmark results.
-
-4. **Fallback to public IP:** If Tailscale installation fails or IP is unavailable,
-   ProxyCommand falls back to public IP for connection (if available).
-
-5. **Idempotent triggers:** Multiple SSH attempts during installation won't trigger
-   duplicate installations - status is tracked and checked before triggering.
-
-6. **Persistent across allocations:** Once installed, Tailscale remains active for all
-   future allocations on that instance. JIT installation is truly "just-in-time once".
-
-### HELD State Extension via SSH Activity
-
-SIMPLIFIED APPROACH: Heartbeat reports which allocations have active SSH. Control
-plane extends those. Simple bidirectional communication, no complex polling.
+Agent heartbeat reports allocations with active SSH; control plane extends their
+debug_hold_until timestamp. Simple bidirectional communication.
 
 **Architecture:**
 
@@ -786,12 +802,13 @@ plane extends those. Simple bidirectional communication, no complex polling.
   │                         │    {               │            ↓            │
   │                         │      instance_id,  │  4. For each ID in      │
   │                         │      active_ssh:   │     active_allocations: │
-  │                         │        [id1, id2]  │       extend hold_until │
-  │                         │    }               │            │            │
+  │                         │        [id1, id2]  │       extend            │
+  │                         │    }               │       debug_hold_until  │
+  │                         │                    │            │            │
   │                         │                    │            ↓            │
   │                         │                    │  5. Update allocation   │
-  │                         │                    │     hold_reason =       │
-  │                         │                    │     'ssh_active'        │
+  │                         │                    │     debug_hold_until    │
+  │                         │                    │     timestamp           │
   │                         │                    │                         │
   └─────────────────────────┘                    └─────────────────────────┘
 
@@ -887,60 +904,63 @@ async function handleHeartbeat(req: HeartbeatRequest): Promise<void> {
     last_heartbeat: req.timestamp,
   });
 
-  // Extend holds for allocations with active SSH
+  // Extend debug holds for allocations with active SSH
   for (const allocationId of req.active_allocations) {
-    await extendAllocationHold(allocationId, {
+    await extendAllocationDebugHold(allocationId, {
       extensionMs: SSH_ACTIVITY_EXTENSION_MS,
-      reason: 'ssh_active',
       maxExtensionMs: MAX_SSH_EXTENSION_MS,
     });
   }
 }
 
-async function extendAllocationHold(
+async function extendAllocationDebugHold(
   allocationId: string,
-  options: { extensionMs: number; reason: string; maxExtensionMs?: number }
-): Promise<{ success: boolean; newHoldUntil?: number }> {
+  options: { extensionMs: number; maxExtensionMs?: number }
+): Promise<{ success: boolean; newDebugHoldUntil?: number }> {
   return db.transaction(async () => {
     const allocation = await db.getAllocationForUpdate(allocationId);
-    if (!allocation || allocation.status !== 'HELD') {
+
+    // Only extend if ACTIVE or (COMPLETE with existing debug_hold_until)
+    if (!allocation ||
+        (allocation.status !== 'ACTIVE' &&
+         !(allocation.status === 'COMPLETE' && allocation.debug_hold_until))) {
       return { success: false };
     }
 
     const now = Date.now();
-    const currentHoldUntil = allocation.hold_until ?? now;
+    const currentDebugHoldUntil = allocation.debug_hold_until ?? now;
 
-    // Calculate when hold started (use updated_at as proxy since we don't have held_at)
-    const heldAt = allocation.updated_at;
+    // Calculate when allocation completed (use updated_at as proxy)
+    const completedAt = allocation.updated_at;
 
-    let newHoldUntil = Math.max(currentHoldUntil, now) + options.extensionMs;
-    const maxHoldUntil = heldAt + (options.maxExtensionMs ?? MAX_HOLD_DURATION_MS);
+    let newDebugHoldUntil = Math.max(currentDebugHoldUntil, now) + options.extensionMs;
+    const maxHoldUntil = completedAt + (options.maxExtensionMs ?? MAX_DEBUG_HOLD_DURATION_MS);
 
-    if (newHoldUntil > maxHoldUntil) newHoldUntil = maxHoldUntil;
+    if (newDebugHoldUntil > maxHoldUntil) newDebugHoldUntil = maxHoldUntil;
 
     // Absolute hard limit (24 hours)
-    const absoluteLimit = heldAt + MAX_HOLD_DURATION_MS;
-    if (newHoldUntil > absoluteLimit) newHoldUntil = absoluteLimit;
+    const absoluteLimit = completedAt + MAX_DEBUG_HOLD_DURATION_MS;
+    if (newDebugHoldUntil > absoluteLimit) newDebugHoldUntil = absoluteLimit;
 
     await db.updateAllocation(allocationId, {
-      hold_until: newHoldUntil,
-      hold_reason: options.reason,
+      debug_hold_until: newDebugHoldUntil,
       updated_at: Date.now(),
     });
 
-    return { success: true, newHoldUntil };
+    return { success: true, newDebugHoldUntil };
   });
 }
 ```
 
 ### SSH Config Regeneration
 
-SSH config must be regenerated when allocations change to maintain IDE integration
-(VSCode Remote dropdowns, terminal autocomplete).
+SSH config regenerates when allocations change to maintain IDE integration (VSCode
+Remote dropdowns, terminal autocomplete).
 
 **Triggers for regeneration:**
-- Allocation enters ACTIVE or HELD state (new SSH target available)
-- Allocation leaves HELD state (SSH target no longer valid)
+- Allocation enters ACTIVE state (new SSH target available)
+- Allocation enters COMPLETE with debug_hold_until set (SSH target available for debugging)
+- Allocation debug_hold_until expires (SSH target no longer valid)
 - Instance IP changes (Tailscale ready, public IP assigned)
 - New allocation created on existing instance (additional SSH entry)
 
@@ -953,10 +973,13 @@ async function regenerateSSHConfig(): Promise<void> {
     SELECT a.*, i.ip, i.provider
     FROM allocations a
     JOIN instances i ON a.instance_id = i.id
-    WHERE a.status IN ('ACTIVE', 'HELD')
+    WHERE (
+        a.status = 'ACTIVE'
+        OR (a.status = 'COMPLETE' AND a.debug_hold_until > ?)
+      )
       AND i.workflow_state NOT LIKE 'terminate:%'
     ORDER BY a.created_at ASC
-  `);
+  `, [Date.now()]);
 
   // Generate SSH config entries
   const entries = activeAllocations.map(alloc => {
@@ -978,20 +1001,19 @@ async function regenerateSSHConfig(): Promise<void> {
 }
 ```
 
-The CLI watches for these changes and regenerates ~/.ssh/config.d/skyrepl or
-equivalent. This is a client-side concern - the control plane just needs to expose
-current allocation state via API.
+The CLI watches for changes and regenerates ~/.ssh/config.d/skyrepl. This is
+client-side—control plane exposes current allocation state via API.
 
 **Multiple Allocations per Instance:**
-When instance has multiple allocations (HELD + new ACTIVE), SSH config includes
-entries for both:
+When instances have multiple allocations (COMPLETE with debug_hold_until + new ACTIVE),
+SSH config includes both:
 
 ```
 Host a1b2c3d4
     HostName 10.0.0.5
     User ubuntu
     RemoteCommand cd /home/ubuntu/work_1 && exec $SHELL -l
-    # ... (previous allocation in HELD)
+    # ... (previous allocation in COMPLETE with debug_hold_until > NOW)
 
 Host e5f6g7h8
     HostName 10.0.0.5
@@ -1002,46 +1024,82 @@ Host e5f6g7h8
 
 Same instance, different allocation IDs, different workdirs.
 
-## 5.5 Replacing Grace Period
+## 5.5 Background Reconciliation
 
-### Mapping from Current Behavior
+### 5.5.1 CLAIMED Allocation Timeout
 
-| Current Behavior | New Behavior |
-|------------------|--------------|
-| `grace_period_ms` on job | Allocation HELD with `hold_until` |
-| `grace_period_on_failure_ms` | Different hold duration config |
-| Instance stays running | Instance remains, allocation HELD |
-| Implicit countdown | Explicit `hold_until` timestamp |
-| No extension mechanism | SSH auto-extends, CLI explicit extend |
+CLAIMED allocations exceeding CLAIMED_TIMEOUT (see Ch15 §15.9) trigger CLAIMED→FAILED transition.
+(Timeout value accommodates slow file downloads while catching stuck claim attempts.)
 
-### Configuration Options
+Implemented as background reconciliation task (see Ch15 §15.9 for interval).
 
 ```typescript
-interface HoldDurationConfig {
-  defaultHoldMs: number;           // Short hold after normal completion
-  failureHoldMs: number;           // Longer hold after failure (debugging)
-  sshExtensionMs: number;          // Extension per SSH activity detection
-  maxSshExtensionMs: number;       // Cap on cumulative SSH extensions
-  explicitExtensionMs: number;     // Extension per explicit CLI command
-  maxExplicitExtensionMs: number;  // Cap on cumulative explicit extensions
-  absoluteMaxHoldMs: number;       // Hard limit (cost protection)
+async function reconcileClaimedAllocations(): Promise<void> {
+  const staleAllocations = await db.query(`
+    SELECT id FROM allocations
+    WHERE status = 'CLAIMED'
+      AND updated_at < ?
+  `, [Date.now() - timing.CLAIMED_TIMEOUT_MS]);
+
+  for (const allocation of staleAllocations) {
+    await db.updateAllocation(allocation.id, {
+      status: 'FAILED',
+      updated_at: Date.now()
+    });
+
+    logger.warn('CLAIMED allocation timed out', {
+      allocation_id: allocation.id,
+      age_ms: Date.now() - allocation.updated_at
+    });
+  }
+}
+```
+
+## 5.6 Background Task Intervals
+
+Background task intervals and thresholds: see Ch15 §15.9
+
+- **Hold expiry**: Clear expired debug_hold_until timestamps
+- **Heartbeat stale check**: Mark instances stale when heartbeat exceeds threshold
+- **Orphan scan**: Detect untracked cloud resources
+- **Manifest cleanup**: Process expired manifests
+- **CLAIMED timeout**: Fail stale CLAIMED allocations
+
+## 5.7 Debug Hold Configuration
+
+Debug holds enable post-run investigation by blocking instance termination after
+allocation completion. The `debug_hold_until` timestamp provides explicit control
+over when allocations release their termination block, with automatic extension
+during active SSH sessions and manual extension via CLI.
+
+### 5.7.1 Configuration Options
+
+```typescript
+interface DebugHoldDurationConfig {
+  defaultDebugHoldMs: number;           // Short hold after normal completion
+  failureDebugHoldMs: number;           // Longer hold after failure (debugging)
+  sshExtensionMs: number;               // Extension per SSH activity detection
+  maxSshExtensionMs: number;            // Cap on cumulative SSH extensions
+  explicitExtensionMs: number;          // Extension per explicit CLI command
+  maxExplicitExtensionMs: number;       // Cap on cumulative explicit extensions
+  absoluteMaxDebugHoldMs: number;       // Hard limit (cost protection)
 }
 
 // Example defaults (non-normative, adjust based on operational experience)
-const EXAMPLE_HOLD_CONFIG: HoldDurationConfig = {
-  defaultHoldMs: 5 * 60 * 1000,           // 5 minutes
-  failureHoldMs: 15 * 60 * 1000,          // 15 minutes
-  sshExtensionMs: 5 * 60 * 1000,          // 5 minutes
-  maxSshExtensionMs: 2 * 60 * 60 * 1000,  // 2 hours
-  explicitExtensionMs: 30 * 60 * 1000,    // 30 minutes
+const EXAMPLE_DEBUG_HOLD_CONFIG: DebugHoldDurationConfig = {
+  defaultDebugHoldMs: 5 * 60 * 1000,           // 5 minutes
+  failureDebugHoldMs: 15 * 60 * 1000,          // 15 minutes
+  sshExtensionMs: 5 * 60 * 1000,               // 5 minutes
+  maxSshExtensionMs: 2 * 60 * 60 * 1000,       // 2 hours
+  explicitExtensionMs: 30 * 60 * 1000,         // 30 minutes
   maxExplicitExtensionMs: 8 * 60 * 60 * 1000,  // 8 hours
-  absoluteMaxHoldMs: 24 * 60 * 60 * 1000, // 24 hours
+  absoluteMaxDebugHoldMs: 24 * 60 * 60 * 1000, // 24 hours
 };
 
-// CONSTRAINT: defaultHoldMs <= maxSshExtensionMs <= maxExplicitExtensionMs <= absoluteMaxHoldMs
+// CONSTRAINT: defaultDebugHoldMs <= maxSshExtensionMs <= maxExplicitExtensionMs <= absoluteMaxDebugHoldMs
 ```
 
-### Tiered Extension System
+### 5.7.2 Tiered Extension System
 
 ```
 Tier 1: Auto (SSH Active)
@@ -1060,7 +1118,7 @@ Tier 3: Explicit Long
 - Max: 24 hours absolute
 ```
 
-### CLI Command: `repl extend`
+### 5.7.3 CLI Command: `repl extend`
 
 ```typescript
 async function cliExtendCommand(allocationIdOrDuration?: string, durationArg?: string): Promise<void> {
@@ -1081,19 +1139,223 @@ async function cliExtendCommand(allocationIdOrDuration?: string, durationArg?: s
     allocation = await materializeAllocation(config.allocationId);
   } else {
     const recent = await db.query(`
-      SELECT id FROM allocations WHERE status = 'HELD' ORDER BY updated_at DESC LIMIT 1
-    `);
+      SELECT id FROM allocations
+      WHERE (status = 'ACTIVE' OR (status = 'COMPLETE' AND debug_hold_until > ?))
+      ORDER BY updated_at DESC LIMIT 1
+    `, [Date.now()]);
     allocation = await materializeAllocation(recent[0].id);
   }
 
-  const extensionMs = durationStr ? parseDuration(durationStr) : holdConfig.explicitExtensionMs;
-  const result = await extendAllocationHold(allocation.id, {
+  const extensionMs = durationStr ? parseDuration(durationStr) : debugHoldConfig.explicitExtensionMs;
+  const result = await extendAllocationDebugHold(allocation.id, {
     extensionMs,
-    reason: 'explicit',
-    maxExtensionMs: durationStr ? holdConfig.absoluteMaxHoldMs : holdConfig.maxExplicitExtensionMs,
+    maxExtensionMs: durationStr ? debugHoldConfig.absoluteMaxDebugHoldMs : debugHoldConfig.maxExplicitExtensionMs,
   });
 
   console.log(`Extended allocation ${allocation.id.substring(0, 8)}`);
-  console.log(`  Hold until: ${new Date(result.newHoldUntil).toLocaleString()}`);
+  console.log(`  Debug hold until: ${new Date(result.newDebugHoldUntil).toLocaleString()}`);
 }
+```
+
+### ACTIVE→COMPLETE Transition Details
+
+The ACTIVE→COMPLETE transition is the critical point where debugging holds are set
+and warm pool replenishment occurs.
+
+```typescript
+async function transitionToComplete(
+  allocationId: string,
+  options: {
+    exitCode: number;
+    keepOnComplete?: boolean;
+    debugHoldDurationMs?: number;
+  }
+): Promise<void> {
+  await db.transaction(async () => {
+    const allocation = await db.getAllocationForUpdate(allocationId);
+    if (!allocation || allocation.status !== 'ACTIVE') {
+      throw new Error(`Allocation ${allocationId} not in ACTIVE state`);
+    }
+
+    const now = Date.now();
+    const updates: Partial<Allocation> = {
+      status: 'COMPLETE',
+      updated_at: now,
+    };
+
+    // Set debug_hold_until if configured
+    if (options.keepOnComplete) {
+      const holdDurationMs = options.debugHoldDurationMs ??
+        (options.exitCode === 0
+          ? debugHoldConfig.defaultDebugHoldMs
+          : debugHoldConfig.failureDebugHoldMs);
+
+      updates.debug_hold_until = now + holdDurationMs;
+    }
+
+    await db.updateAllocation(allocationId, updates);
+
+    // Warm pool replenishment: create new AVAILABLE allocation if eligible
+    const instance = await materializeInstance(allocation.instance_id);
+    const shouldReplenish = await checkReplenishmentEligibility(instance, allocation);
+
+    if (shouldReplenish) {
+      await createAvailableAllocation(instance.id, {
+        user: allocation.user,
+        manifestId: allocation.current_manifest_id,
+      });
+    }
+  });
+}
+
+async function checkReplenishmentEligibility(
+  instance: Instance,
+  completedAllocation: Allocation
+): Promise<boolean> {
+  // Only replenish if instance is healthy and not scheduled for termination
+  if (instance.workflow_state?.includes('terminate')) return false;
+  if (instance.last_heartbeat < Date.now() - HEARTBEAT_TIMEOUT_MS) return false;
+
+  // Check if instance is at capacity (MAX_ALLOCATIONS_PER_INSTANCE)
+  const activeCount = await db.query(`
+    SELECT COUNT(*) as count FROM allocations
+    WHERE instance_id = ? AND status IN ('CLAIMED', 'ACTIVE')
+  `, [instance.id]);
+
+  if (activeCount[0].count >= MAX_ALLOCATIONS_PER_INSTANCE) return false;
+
+  return true;
+}
+```
+
+**Key behaviors:**
+1. Transition always happens immediately when run finishes (no delay in state machine)
+2. debug_hold_until is set based on exit code and configuration
+3. Warm pool replenishment creates new AVAILABLE allocation on same instance
+4. Termination is blocked if any allocation has debug_hold_until > NOW
+
+### Hold Expiry Background Task
+
+A background task periodically clears expired debug_hold_until timestamps. This
+does NOT transition allocation state—it only clears the timestamp, which unblocks
+termination.
+
+```typescript
+// Background task runs every 60 seconds
+async function holdExpiryTask(): Promise<void> {
+  const now = Date.now();
+
+  // Find allocations with expired debug holds
+  const expiredAllocations = await db.query(`
+    SELECT id, instance_id, debug_hold_until
+    FROM allocations
+    WHERE status = 'COMPLETE'
+      AND debug_hold_until IS NOT NULL
+      AND debug_hold_until <= ?
+  `, [now]);
+
+  for (const alloc of expiredAllocations) {
+    await db.updateAllocation(alloc.id, {
+      debug_hold_until: null,
+      updated_at: now,
+    });
+
+    // Trigger SSH config regeneration (allocation no longer SSH-accessible)
+    await triggerSSHConfigRegeneration();
+  }
+
+  if (expiredAllocations.length > 0) {
+    console.log(`Cleared ${expiredAllocations.length} expired debug holds`);
+  }
+}
+
+// Start background task
+setInterval(holdExpiryTask, 60 * 1000);
+```
+
+**Termination Blocking Semantics:**
+
+```typescript
+async function canTerminateInstance(instanceId: string): Promise<boolean> {
+  const now = Date.now();
+
+  // Check if any allocation on this instance has an active debug hold
+  const blockedAllocations = await db.query(`
+    SELECT id FROM allocations
+    WHERE instance_id = ?
+      AND status = 'COMPLETE'
+      AND debug_hold_until IS NOT NULL
+      AND debug_hold_until > ?
+    LIMIT 1
+  `, [instanceId, now]);
+
+  return blockedAllocations.length === 0;
+}
+
+async function terminateInstance(instanceId: string): Promise<void> {
+  const canTerminate = await canTerminateInstance(instanceId);
+
+  if (!canTerminate) {
+    throw new Error(
+      `Cannot terminate instance ${instanceId}: has allocations with active debug holds. ` +
+      `Use 'repl release <allocation-id>' to clear holds or wait for expiry.`
+    );
+  }
+
+  // Proceed with termination workflow
+  await launchTerminateIntent(instanceId);
+}
+```
+
+**CLI Command: `repl release`**
+
+Manually clear debug_hold_until to unblock termination:
+
+```typescript
+async function cliReleaseCommand(allocationIdOrInstance?: string): Promise<void> {
+  const now = Date.now();
+
+  if (!allocationIdOrInstance) {
+    // Release all expired holds across all allocations
+    const result = await db.execute(`
+      UPDATE allocations
+      SET debug_hold_until = NULL, updated_at = ?
+      WHERE status = 'COMPLETE'
+        AND debug_hold_until IS NOT NULL
+        AND debug_hold_until > ?
+    `, [now, now]);
+
+    console.log(`Released ${result.changes} active debug holds`);
+    await triggerSSHConfigRegeneration();
+    return;
+  }
+
+  // Check if input is allocation ID or instance ID
+  const allocation = await findAllocation(allocationIdOrInstance);
+
+  if (allocation) {
+    // Release specific allocation
+    await db.updateAllocation(allocation.id, {
+      debug_hold_until: null,
+      updated_at: now,
+    });
+
+    console.log(`Released debug hold for allocation ${allocation.id.substring(0, 8)}`);
+    await triggerSSHConfigRegeneration();
+  } else {
+    // Treat as instance ID, release all allocations on instance
+    const result = await db.execute(`
+      UPDATE allocations
+      SET debug_hold_until = NULL, updated_at = ?
+      WHERE instance_id = ?
+        AND status = 'COMPLETE'
+        AND debug_hold_until IS NOT NULL
+        AND debug_hold_until > ?
+    `, [now, allocationIdOrInstance, now]);
+
+    console.log(`Released ${result.changes} debug holds on instance ${allocationIdOrInstance.substring(0, 8)}`);
+    await triggerSSHConfigRegeneration();
+  }
+}
+```
 

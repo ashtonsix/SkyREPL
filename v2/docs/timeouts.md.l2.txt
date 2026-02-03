@@ -1,0 +1,156 @@
+# Timeout and Interval Design
+
+Design rationale, constraint relationships, and failure mode analysis for timing configuration.
+
+**Implementation:** See `shared/src/config/timing.ts.l2.txt` for constants, env vars, and provider overrides.
+
+## Constraint Chains
+
+Timing parameters must satisfy ordering constraints. Violations detected at startup.
+
+### Heartbeat Chain
+```
+heartbeat_interval < heartbeat_ack_timeout <= stale_detection_threshold
+```
+
+**Why:** Agent sends heartbeats faster than the timeout threshold. This allows tolerance for missed beats (network blip, GC pause) before declaring failure. Both sides agree on when to consider the connection dead.
+
+**Trade-off:** Lower interval = faster failure detection, more network overhead. High-latency networks need wider margins.
+
+### Cleanup Chain
+```
+reconciliation_interval < manifest_cleanup_interval
+```
+
+**Why:** Reconciliation runs multiple times before manifest cleanup fires. This gives multiple chances to detect orphans via provider state sync. Manifest cleanup is the fallback safety net, not the primary orphan detection mechanism.
+
+### Hold Duration Chain
+```
+default_hold <= max_ssh_extension <= max_explicit_extension <= absolute_max_hold
+```
+
+**Why:** Holds are bounded to prevent runaway costs. Default hold is shortest (normal exit path). SSH activity can extend for interactive debugging. Explicit extension goes further for complex debugging. Absolute max is the hard safety limit.
+
+**Trade-off:** Longer holds = more debugging flexibility, higher cost risk.
+
+### Workflow Chain
+```
+node_timeout < workflow_timeout
+compensation_timeout <= node_timeout
+```
+
+**Why:** Individual nodes shouldn't run forever. Overall workflow has a larger budget. Compensation (rollback) must complete within node timeout so failed workflows clean up promptly.
+
+### Spawn/Orphan Chain
+```
+orphan_min_age > spawn_timeout
+```
+
+**Why:** Don't terminate instances as orphans while they're still being spawned. The grace period must exceed the longest reasonable spawn time plus some buffer.
+
+## Failure Modes
+
+### Network Partition (Agent-Control)
+
+Both sides detect failure independently:
+- Agent: No ack within `ack_timeout` → initiate shutdown
+- Control: No heartbeat within `stale_detection` → mark allocation FAILED
+
+Both sides initiate cleanup. Instance termination is idempotent (provider APIs handle double-terminate gracefully).
+
+### Slow Provider Response
+
+Spawn/snapshot timeouts prevent indefinite waiting. When timeout fires:
+1. Workflow node fails
+2. Compensation terminates any partial resources
+3. Reconciliation catches anything missed (belt and suspenders)
+
+### Presigned URL Expiry During Transfer
+
+Large file transfers may exceed URL TTL. Mitigations:
+- Client can request fresh URLs for long transfers
+- Multipart upload for large files (each part gets fresh URL)
+- TTL is generous (4h) for typical workloads
+
+### Race: Hold Expiry vs Active SSH
+
+Hold expiry is the contract. SSH activity extends hold only if:
+1. Agent reports SSH activity in heartbeat
+2. Heartbeat arrives before expiry check runs
+3. Total SSH extension hasn't exceeded max
+
+If user needs more time, they can explicitly extend. The slack window (60s) provides margin for heartbeat/check timing.
+
+### Stale Heartbeat vs Transient Network
+
+Agent may appear dead during brief network outage. Mitigations:
+- Ack timeout > 2x heartbeat interval (tolerates missed beats)
+- Agent retries heartbeat with exponential backoff
+- Only declare failure after sustained timeout
+
+### Orphan False Positive
+
+Instance may be classified as orphan while spawn workflow is still running. Mitigations:
+- `orphan_min_age` exceeds typical spawn time
+- Orphan scan checks for matching spawn workflows
+- Classification is conservative (when in doubt, keep alive)
+
+## Provider Considerations
+
+### Cloud Providers (AWS, Lambda, RunPod)
+
+- Respect API rate limits (don't poll too aggressively)
+- Spawn times vary by instance type and region capacity
+- AWS spot can take longer than on-demand
+- Lambda/RunPod generally faster than AWS
+
+### Local Development (OrbStack)
+
+- No API rate limits (it's local)
+- Instant provisioning (30s timeout is generous)
+- Fast feedback loop is more important than network efficiency
+- Aggressive timing speeds up dev iteration
+
+## Testing
+
+### Key Race Conditions
+
+1. Heartbeat arrives just before stale check
+2. SSH disconnect just before hold expiry check
+3. Reconciliation runs during spawn workflow
+4. Manifest cleanup during active workflow
+5. Concurrent claim attempts on same allocation
+
+### Testing Modified Timings
+
+```bash
+# Fast-iteration (simulate OrbStack-like behavior)
+REPL_HEARTBEAT_INTERVAL="2s" \
+REPL_STALE_DETECTION="6s" \
+REPL_RECONCILIATION_INTERVAL="5s" \
+npm run dev
+
+# Stress test hold expiry
+REPL_DEFAULT_HOLD="10s" \
+REPL_HOLD_EXPIRY_CHECK_INTERVAL="3s" \
+npm test -- hold-expiry.test.ts
+```
+
+## Observability
+
+### Metrics to Track
+
+- Heartbeat ack latency distribution (p50, p95, p99)
+- Stale heartbeat detection rate
+- Hold expiry count (user-initiated vs automatic)
+- Orphan detection rate per reconciliation cycle
+- Spawn/snapshot timeout rate by provider
+- Compensation execution time
+- Presigned URL expiry during active transfer
+
+### Alert Thresholds
+
+- Heartbeat p99 approaching stale_detection → network or load issue
+- Orphan rate exceeding baseline → possible spawn workflow bug
+- Spawn timeout rate >1% → provider capacity or config issue
+- Compensation failures → cleanup logic needs attention

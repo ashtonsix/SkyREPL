@@ -4,26 +4,42 @@
 { runId: string, spec: InstanceSpec, initChecksum?: string }
 
 ## Output Type
-{ allocationId: string, instanceId: string, fromWarmPool: true }
+{ allocationId: string, instanceId: string, fromWarmPool: true, warnings?: string[] }
 
 ## Execute Steps
 - Call db.findWarmAllocation(spec, initChecksum) to find AVAILABLE allocation
 - Spec must match: instance type, region, GPU count, disk size
 - initChecksum must match if provided (ensures correct init script)
+- If found: Run pre-claim validation (advisory, non-blocking)
 - If found: Call db.claimAllocation(allocationId, runId) for atomic claim
-- Claim uses SQL: UPDATE allocations SET status='CLAIMED', run_id=?, claimed_at=? WHERE id=? AND status='AVAILABLE'
-- If affected rows = 0: Another workflow won the race, return null (triggers spawn path)
+- Claim uses SQL: UPDATE allocations SET status='CLAIMED', run_id=?, updated_at=? WHERE id=? AND status='AVAILABLE'
+- If affected rows = 0: Another workflow won the race - emit event and fallback
+  - ctx.emitEvent({ type: 'warm_pool_claim_lost', allocationId, runId })
+  - Return null to trigger fallback to spawn path via conditional-branch pattern
+  - Workflow engine routes to spawn-instance node when claim returns null
 - If affected rows = 1: Success, query instance_id from allocation
 - Add allocation to manifest via ctx.emitResource()
-- Return allocationId, instanceId, fromWarmPool=true
+- Return allocationId, instanceId, fromWarmPool=true, warnings (if any)
+
+## Pre-Claim Validation (blocking)
+- Check disk space via agent heartbeat metrics (last known state)
+- Warn if diskFreePercent < 20% (advisory, non-blocking)
+- Check for other active allocations on same instance (CRITICAL, blocking)
+- Query: SELECT COUNT(*) FROM allocations WHERE instance_id = ? AND status = 'ACTIVE'
+- If activeCount > 0: Fail claim with INVALID_STATE_TRANSITION error
+- Rationale: Single-tenant model - one active run per instance at a time
+- Error message: "Instance ${instanceId} already has active allocation ${activeAllocationId}"
+- This enforces the single-tenant constraint at claim time, not just at advisory level
 
 ## Compensation
 - Release allocation back to warm pool: db.updateAllocationStatus(allocationId, 'AVAILABLE')
-- Clear run_id and claimed_at fields
+- Clear run_id and reset updated_at fields
 - This allows another run to reuse the allocation
 
 ## Key Calls
 - db.findWarmAllocation()
+- db.getInstanceMetrics() - For pre-claim validation
+- db.countActiveAllocations() - For shared instance check
 - db.claimAllocation()
 - db.updateAllocationStatus()
 - ctx.emitResource('allocation', allocationId)

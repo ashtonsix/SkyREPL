@@ -16,7 +16,7 @@
 
 ## SSH Config Generation
 - `generateSSHConfig(allocations): string`
-  - For each ACTIVE/HELD allocation
+  - For each ACTIVE allocation or COMPLETE allocation with debug_hold_until > NOW
   - Generate SSH config entry with Tailscale IP
   - Write to ~/.repl/ssh_config
 - Format:

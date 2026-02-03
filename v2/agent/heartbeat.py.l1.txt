@@ -1,11 +1,20 @@
 # heartbeat.py - Heartbeat Thread
 
+# Note: Timing constants reference ../../shared/src/config/timing.ts.l2.txt
+# - HEARTBEAT_INTERVAL_MS (10s)
+# - HEARTBEAT_ACK_TIMEOUT_MS (30s)
+# - SSH_ACTIVITY_SLACK_MS (60s)
+
 ## Critical
 Send IMMEDIATE heartbeat before first sleep (closes timing gap)
 
 ## Loop
-Every 10s: POST /v1/agent/heartbeat
-Payload: tailscale_ip, active_ssh_sessions, tailscale_status, workflow_state, command_ack
+Every HEARTBEAT_INTERVAL_MS (10s): POST /v1/agent/heartbeat
+Payload: tailscale_ip, active_ssh_sessions, tailscale_status, workflow_state, pending_command_acks
+
+## Timing Note
+SSH activity detected via heartbeat has up to SSH_ACTIVITY_SLACK_MS (60s) slack window before hold-expiry processes it.
+This is acceptable - SSH extension is best-effort, not guaranteed.
 
 ## Timeout
-No ack for 30s → initiate shutdown
+No ack for HEARTBEAT_ACK_TIMEOUT_MS (30s) → initiate shutdown

@@ -1,15 +1,102 @@
 # patterns.ts - Workflow Patterns
 
-## insert-and-reconverge
+## Exports
+
+```typescript
+export type PatternType =
+  | 'single-step'              // Ch6.1: Single node workflow
+  | 'insert-and-reconverge'
+  | 'conditional-branch'
+  | 'parallel-fan-out'
+  | 'retry-with-alternative';
+
+// Constants (Ch6)
+export const MAX_PARALLEL_BRANCHES = 10;
+export const MAX_ALTERNATIVES = 5;
+export const MAX_RETRY_ATTEMPTS = 3;
+
+export interface PatternConfig {
+  type: PatternType;
+  nodes: string[];
+  condition?: (ctx: NodeContext) => boolean;
+  alternatives?: AlternativeNodeConfig[];
+}
+
+// Pattern application functions
+export function applyInsertAndReconverge(
+  workflow: Workflow,
+  afterNodeId: string,
+  insertedNode: WorkflowNode,
+  beforeNodeId: string
+): void;
+
+export function applyConditionalBranch(
+  workflow: Workflow,
+  decisionNodeId: string,
+  branches: { condition: string; nodeId: string }[]
+): void;
+
+export function applyParallelFanOut(
+  workflow: Workflow,
+  forkNodeId: string,
+  parallelNodes: WorkflowNode[],
+  joinNodeId: string
+): void;
+
+export function applyRetryWithAlternative(
+  workflow: Workflow,
+  failedNodeId: string,
+  alternativeConfig: AlternativeNodeConfig
+): WorkflowNode;
+```
+
+## Pattern Descriptions
+
+### single-step (Ch6.1)
+Single node workflow - execute one operation with no branching.
+
+**Use case:** Simple operations like extend-debug-hold, cancel-run
+**Example:** extend-debug-hold workflow has one node that updates allocation.debug_hold_until
+
+### insert-and-reconverge
 Insert node A' before B: A → B becomes A → A' → B (both must complete)
 
-## conditional-branch
+**Use case:** Add setup step before existing operation
+**Example:** Insert tailscale-install before start-run
+
+### conditional-branch
 Choose between two paths based on condition or error
 
-## parallel-fan-out
+**Use case:** Warm pool vs spawn decision, spot vs on-demand fallback
+**Example:** Check warm pool → branch to claim-allocation or spawn-instance
+
+### parallel-fan-out
 Execute multiple branches concurrently, join when all complete
 
-## retry-with-alternative
+**Use case:** Multi-region deployment, parallel artifact uploads
+**Example:** Deploy to us-east-1 and us-west-2 simultaneously
+
+**A4: PARALLEL_FAILURE_POLICY**
+- If ANY branch fails, ALL branches are affected
+- Completed branches ARE compensated when a sibling branch fails
+- Workflow fails if any parallel branch fails
+- Rationale: Parallel branches are part of same logical operation
+- Example: If us-east-1 deploy succeeds but us-west-2 fails:
+  1. us-west-2 branch compensation runs (cleanup failed deploy)
+  2. us-east-1 branch compensation runs (cleanup successful deploy)
+  3. Workflow fails overall
+- To allow partial success, use separate workflows instead of parallel branches
+
+**B5: SKIPPED NODE HANDLING**
+- Skipped nodes count as "satisfied" for dependency resolution
+- Join node doesn't wait for skipped branches
+- Example: If conditional branch skips parallel branch A:
+  1. Branch A nodes marked as 'skipped'
+  2. Join node treats skipped nodes as satisfied dependencies
+  3. Join node executes when all non-skipped branches complete
+- Prevents deadlock when parallel branches are conditionally skipped
+
+### retry-with-alternative
 On failure, compensate and try alternative approach
 
 **Triggered by:**
@@ -20,7 +107,7 @@ On failure, compensate and try alternative approach
 **Execution:**
 1. Original node fails with retryable error
 2. Engine calls node compensation handler
-3. Create new node with alternative config
+3. Create new node with alternative config via applyRetryWithAlternative()
 4. Alternative node maintains same output contract
 5. Downstream nodes continue with alternative's output
 
@@ -37,3 +124,10 @@ spawn-instance-us-east-1 (CAPACITY_UNAVAILABLE)
 - Alternative must satisfy same output contract
 - Each retry increments attempt counter
 - After max retries exhausted → fail workflow
+
+## Implementation Notes
+
+- Patterns modify workflow node graph in-place
+- Node dependencies updated automatically
+- Pattern application logged for debugging
+- Invalid pattern application throws ValidationError

@@ -1,10 +1,37 @@
 # spot.py - Spot Monitor (only interruptible instances)
 
+# Note: Timing constants reference ../../shared/src/config/timing.ts.l2.txt
+# - SPOT_CHECK_INTERVAL_MS (5s)
+# - SPOT_CHECKPOINT_BUDGET_MS (90s)
+
 ## Loop
-Every 5s: Check EC2 metadata for interruption notice
+Every SPOT_CHECK_INTERVAL_MS (5s): Check EC2 metadata for interruption notice
 
 ## IMDSv2
 GET token, then GET /latest/meta-data/spot/instance-action
 
 ## On Interruption (2 min warning)
-Execute checkpoint script, upload artifacts, send spot_interrupt message
+1. Send SpotInterruptStartMessage (POST /v1/agent/spot-interrupt-start)
+   - Include time_remaining_ms (from IMDS response)
+   - Signals: Interrupt detected, checkpoint starting
+2. Execute checkpoint script with timeout:
+   - Cap timeout at SPOT_CHECKPOINT_BUDGET_MS (90s)
+   - Overrides user checkpoint_timeout if larger
+   - Leaves 30s for artifact upload and messaging
+3. Upload artifacts (best-effort, 20-30s window)
+4. Send SpotInterruptCompleteMessage (POST /v1/agent/spot-interrupt-complete)
+   - Include checkpoint_exit_code (exit code of checkpoint script, if ran)
+   - Include artifacts_uploaded (count of successfully uploaded artifacts)
+   - Signals: Checkpoint done, ready for termination
+
+## Two-Phase Protocol
+- Phase 1: SpotInterruptStartMessage signals interrupt detected
+- Phase 2: SpotInterruptCompleteMessage signals checkpoint and upload complete
+- Control waits for spot_interrupt_complete before transitioning to FAILED
+- Timeout: 30s from spot_interrupt_start
+- If timeout expires: Control transitions to FAILED anyway (artifact loss acceptable)
+
+## Timing Budget (120s total)
+- Checkpoint: SPOT_CHECKPOINT_BUDGET_MS (90s max)
+- Artifact upload: 20s
+- Messaging overhead: 10s buffer

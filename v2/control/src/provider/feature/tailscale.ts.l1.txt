@@ -49,6 +49,31 @@ reconcile?(context: FeatureReconcileContext) -> Promise<ReconcileResult>
   - Detect: machines in DB but offline/missing in tailnet (drift)
   - Return lists for core to handle
 
+  Implementation:
+  1. Query Tailscale API for all machines with skyrepl:* tags
+  2. Query DB for all feature_installations WHERE feature_type='tailscale'
+  3. Compare: machines in API but not DB = orphans
+  4. Compare: machines in DB but offline/missing in API = drift
+  5. Return { orphans: OrphanedFeature[], drift: DriftedFeature[] }
+
+  OrphanedFeature:
+    - machineId: string (Tailscale machine ID)
+    - hostname: string
+    - ipv4: string
+    - lastSeen: number
+    - tags: string[]
+    - estimatedCost: 0 (features don't have direct cost, but tracking for visibility)
+
+  DriftedFeature:
+    - instanceId: number (from DB)
+    - machineId: string
+    - status: 'offline' | 'missing' | 'unauthorized'
+    - lastSeenInProvider?: number
+
+  Note: Reconcile is called by orphan-cleanup background task.
+  Orphaned Tailscale machines are reported to user via `repl orphan list --features`.
+  Manual cleanup via `repl orphan terminate --features` or auto-cleanup if ephemeral.
+
 onInstanceHeartbeat?(instanceId) -> Promise<void>
   - Optional: check machine online status
   - Update DB if status changed

@@ -1,10 +1,75 @@
 # logs.py - Log Flusher Thread
 
-## Batching
-Collect stdout/stderr, flush every 100ms
+# Note: Timing constants reference ../../shared/src/config/timing.ts.l2.txt
+# - LOG_LOCAL_BUFFER_MS (100ms)
+# - LOG_NETWORK_BATCH_MS (5s)
+
+## Batching Strategy
+
+Two-level batching optimizes for both responsiveness and network efficiency:
+
+### Local Buffer
+- Collect stdout/stderr into memory buffer
+- Flush to send queue every LOG_LOCAL_BUFFER_MS (100ms)
+- Ensures low-latency local processing
+
+### Network Batch (time or size threshold)
+- Send queued logs to control plane every LOG_NETWORK_BATCH_MS (5s)
+- OR when queue exceeds 64KB
+- Reduces HTTP request overhead
+- Backpressure: If network slow, logs still buffered locally
 
 ## POST /v1/agent/logs
-Array of: run_id, allocation_id, stream, data, timestamp
+
+Payload: LogMessage[]
+
+```python
+LogMessage = {
+    run_id: str,
+    allocation_id: str,
+    stream: 'stdout' | 'stderr' | 'sync_complete',
+    data: str,
+    timestamp: int,
+    phase: 'sync' | 'running' | 'complete',
+    batch_sequence_id: int,  # Monotonic counter per agent session, ensures ordering
+    sync_success?: bool,  # Only for sync_complete
+    error?: str,          # Only on failures
+}
+```
 
 ## sync_complete
-Special stream value that triggers CLAIMED → ACTIVE transition
+
+Special stream value that triggers CLAIMED → ACTIVE transition.
+- Emitted once after files downloaded and init script (if any) completes
+- sync_success=True: Transition proceeds
+- sync_success=False: Transition to FAILED, error details included
+- CRITICAL: sync_complete bypasses batching - sent immediately via flush_and_send()
+- Reason: sync_complete latency counts against allocation timeout
+
+## flush_and_send()
+
+Immediate send for critical events:
+- Flushes current log buffer
+- Sends immediately without waiting for 5s batch interval
+- Used for: sync_complete, run_complete, critical errors
+
+## State Tracking
+
+- batch_sequence_id: Monotonic counter starting at 0
+  - Incremented for each batch sent to control plane
+  - Persists across retries (same batch keeps same ID)
+  - Used by control to reorder batches that arrive out-of-order
+- dropped_logs_count: Total count of logs dropped due to buffer overflow
+  - Incremented when logs are dropped
+  - Included in HeartbeatMessage
+  - Allows control to detect and alert on log loss
+
+## Error Handling
+
+- Network failure: Buffer logs locally, retry with exponential backoff
+- Buffer overflow (>1MB):
+  - Drop oldest logs
+  - Insert synthetic log entry: "[WARN] Log buffer overflow, {n} oldest entries dropped"
+  - Increment dropped_logs_count
+  - Include dropped_logs_count in next heartbeat
+- Control plane returns 5xx: Retry with backoff (1s → 32s max)

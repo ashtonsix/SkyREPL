@@ -1,0 +1,271 @@
+# WORKLOG: Timing Consolidation
+Status: COMPLETE
+Started: 2026-02-04
+
+## Context
+
+This worklog represents two milestones:
+1. **Spec cleanup**: Made normative vs non-normative distinctions explicit
+   (constraint relationships are normative; specific values are examples)
+2. **First L2 work**: shared/src/config/timing.ts.l2.txt is the first file
+   promoted from L1 to L2 fidelity level
+
+## Problem Statement
+
+Timing values are scattered across 15 spec chapters (~100 values) and 45+ v2/ files (~50 values). Issues:
+1. Duplication - same value defined in multiple places
+2. Normative/non-normative confusion - spec mixes hard constraints with example values
+3. No single source of truth - changes require updating multiple locations
+4. Constraint relationships implicit - easy to break invariants during tuning
+
+## Findings Summary
+
+### Values Found
+
+| Location | Count | Notes |
+|----------|-------|-------|
+| Spec chapters | ~100 | Many marked as examples |
+| v2/ pseudo-impl | ~50+ | Hard-coded constants |
+| v2/docs/timeouts.md.l1.txt | 0 | Structure only, no values |
+
+### Consistency Check
+
+Most values are consistent between spec and v2/, but both sources have problems:
+- **Spec**: Values inline with prose, unclear which are normative
+- **v2/**: Values scattered across files as magic numbers
+
+### Categories Identified
+
+| Category | Example Values | Constraint Type |
+|----------|----------------|-----------------|
+| Heartbeat chain | 10s interval, 30s ack, 30s stale | Ordering constraint |
+| Hold duration | 5m default, 30m extend, 24h max | Bounded range |
+| Background tasks | 30s-1h intervals | Tunable per deployment |
+| Provider operations | 5m spawn, 30m snapshot | Provider-dependent |
+| Cleanup | 10m orphan age, 24h blob grace | Safety margins |
+| Retries | 2s-60s backoff | Tunable |
+| Cache TTLs | 30s-1h per resource type | Performance tuning |
+
+## Resolution Plan
+
+### Phase A: Spec Cleanup
+
+Goal: Separate normative constraints from operational guidance
+
+**A1. Add "Timing Constraints" section to Ch02 (MATERIAL)**
+- Define constraint vocabulary: "MUST", "SHOULD", "MAY", "typically"
+- Document constraint chains (heartbeat, cleanup, hold)
+- Reference from other chapters
+
+**A2. Update each chapter's timing references**
+Replace inline values with:
+- Constraint references: "heartbeat_interval < ack_timeout (see §2.X)"
+- Non-normative markers: "typical deployment uses 30s [NON-NORMATIVE]"
+- Config references: "see TIMEOUTS table for defaults"
+
+**A3. Create normative timing tables in spec**
+One table per category with columns:
+| Parameter | Constraint | Default | Range | Rationale |
+
+### Phase B: v2/ Consolidation
+
+Goal: Single source of truth for timing constants
+
+**B1. Create shared/src/config/timing.ts.l2.txt**
+```
+// Centralized timing constants with documentation
+export const TIMING = {
+  // Heartbeat chain (constraint: interval < ack < stale)
+  HEARTBEAT_INTERVAL_MS: 10_000,
+  HEARTBEAT_ACK_TIMEOUT_MS: 30_000,
+  STALE_DETECTION_MS: 30_000,
+
+  // Hold chain (constraint: default < max_ssh < max_explicit < absolute)
+  DEFAULT_HOLD_MS: 300_000,  // 5 min
+  MAX_SSH_EXTENSION_MS: 7_200_000,  // 2h
+  MAX_EXPLICIT_EXTENSION_MS: 28_800_000,  // 8h
+  ABSOLUTE_MAX_HOLD_MS: 86_400_000,  // 24h
+
+  // ... etc
+} as const;
+
+// Constraint validators
+export function validateTimingConstraints(): void {
+  assert(TIMING.HEARTBEAT_INTERVAL_MS < TIMING.HEARTBEAT_ACK_TIMEOUT_MS);
+  // ... etc
+}
+```
+
+**B2. Update v2/ files to import from timing.ts**
+Replace magic numbers with `TIMING.X` references
+
+**B3. Expand v2/docs/timeouts.md.l1.txt → .l2.txt**
+Add:
+- Actual default values (reference timing.ts)
+- Tuning guidance per deployment type
+- Provider-specific adjustments
+- Example configurations (development, production, high-latency)
+
+### Phase C: Documentation
+
+**C1. Operational tuning guide**
+Create v2/docs/tuning-guide.md.l1.txt:
+- When to adjust which values
+- Trade-offs (faster detection vs more false positives)
+- Deployment profiles
+
+**C2. Config file format**
+Define how users override defaults:
+- Environment variables
+- Config file (skyrepl.config.ts)
+- CLI flags for one-off changes
+
+## Specific Values to Normalize
+
+### Heartbeat Chain (A-priority - affects liveness)
+| Parameter | Spec Value | v2/ Value | Recommended | Notes |
+|-----------|------------|-----------|-------------|-------|
+| heartbeat_interval | 10s | 10s | 10s | Agent → control |
+| ack_timeout | 30s | 30s | 30s | Agent shutdown trigger |
+| stale_detection | 30s | 30s | 30s | Control marks allocation FAILED |
+
+### Hold Duration Chain
+| Parameter | Spec Value | v2/ Value | Recommended | Notes |
+|-----------|------------|-----------|-------------|-------|
+| default_hold | 5m | 5m | 5m | After run completion |
+| ssh_extension | 5m per detect | 5m | 5m per | Configurable |
+| max_ssh_extension | 2h | — | 2h | Cap on SSH-based extensions |
+| explicit_extension | 30m | 30m | 30m | User-requested |
+| max_explicit | 8h | — | 8h | Cap on explicit extensions |
+| absolute_max | 24h | 24h | 24h | Hard limit |
+
+### Background Tasks
+| Parameter | Spec Value | v2/ Value | Recommended | Notes |
+|-----------|------------|-----------|-------------|-------|
+| heartbeat_check | 30s | 30s | 30s | — |
+| hold_expiry_check | 60s | 60s | 60s | — |
+| manifest_cleanup | 60s | 5m | 5m | Spec says 60s, v2 says 5m - INCONSISTENCY |
+| reconciliation | 60s | 60s | 60s | — |
+| orphan_scan | 1h | 1h | 1h | — |
+| blob_gc | — | 24h | 24h | Not in spec |
+
+### Provider Operations
+| Parameter | Spec Value | v2/ Value | Recommended | Notes |
+|-----------|------------|-----------|-------------|-------|
+| spawn_timeout | 5-10m | 5m | 10m | Provider-dependent |
+| terminate_timeout | 5m | — | 5m | — |
+| snapshot_timeout | 30m | 30m | 30m | — |
+
+### Workflow Engine
+| Parameter | Spec Value | v2/ Value | Recommended | Notes |
+|-----------|------------|-----------|-------------|-------|
+| node_timeout | 5m | 5m | 5m | Per-node default |
+| workflow_timeout | 60m | 60m | 60m | Overall |
+| compensation_timeout | — | 5m | 5m | Rollback handler |
+| cancel_verification | — | 90s | 90s | 3x heartbeat |
+
+### Retry/Backoff
+| Parameter | Spec Value | v2/ Value | Recommended | Notes |
+|-----------|------------|-----------|-------------|-------|
+| base_delay | 2s | 2s | 2s | — |
+| max_delay | 60s | 60s | 60s | Cap |
+| max_retries | 5 | varies | 5 | — |
+
+### Cache TTLs (Provider-Specific)
+| Resource | Spec Value | v2/ Value | Recommended | Notes |
+|----------|------------|-----------|-------------|-------|
+| spot_prices | 5m | 5m | 5m | — |
+| capacity | 1m | 1m | 1m | — |
+| instance_state | 30s | 30s | 30s | — |
+| instance_types | — | 1h | 1h | Lambda/RunPod |
+
+## Inconsistencies Found
+
+| Item | Spec | v2/ | Resolution |
+|------|------|-----|------------|
+| manifest_cleanup interval | 60s (Ch05:1062) | 5m (main.ts) | Use 5m, update spec |
+| CLAIMED timeout | 10m (Ch05:1030) | — | Add to v2/ |
+| pending workflow timeout | 30m (Ch06:829) | — | Add to v2/ |
+
+## Execution Order
+
+1. [A1] Define constraint vocabulary in spec Ch02
+2. [B1] Create timing.ts.l2.txt with all values
+3. [A2] Update spec chapters to reference constraints
+4. [B2] Update v2/ files to use timing.ts
+5. [B3] Expand timeouts.md.l1.txt with values
+6. [C1] Create tuning guide
+7. [A3] Add normative tables to spec
+
+## Decisions (User Answers)
+
+Q1: **Env vars with good defaults** - Runtime configurable
+Q2: **Provider inheritance** - Providers override defaults, don't specify every timing for every provider
+Q3: **Constraints only in spec** - Move operational guidance to Ch15 OPERATIONS with non-normative suggested values
+
+## Revised Execution Plan
+
+1. Create `shared/src/config/timing.ts.l2.txt` with env var support + provider overrides
+2. Update spec chapters: remove specific values, add constraint references
+3. Add "Timing Configuration" section to Ch15 OPERATIONS with suggested values
+4. Expand `v2/docs/timeouts.md.l2.txt` with implementation details
+5. Update v2/ files to import from timing.ts
+
+---
+
+## Log
+
+### 2026-02-04 - Initial Analysis
+- Searched spec (100+ values) and v2/ (50+ values)
+- Found mostly consistent values, main issue is organization
+- Created resolution plan with 3 phases
+- Identified 3 inconsistencies to fix
+- Drafted normative tables for all timing categories
+
+### 2026-02-04 - Execution Complete
+All tasks completed:
+
+1. **Created timing.ts.l2.txt** - Centralized timing config with:
+   - 50+ timing constants with env var overrides
+   - Provider inheritance mechanism (OrbStack, Lambda, RunPod overrides)
+   - Constraint validation at startup
+   - Helper functions (backoff, duration formatting)
+
+2. **Updated spec chapters** (Ch03-Ch12):
+   - Removed ~40 specific timing values
+   - Replaced with constraint references + "see Ch15 §15.9"
+   - Kept examples already marked as non-normative
+
+3. **Added Ch15 §15.9 Timing Configuration**:
+   - Constraint chains documented
+   - Full env var reference with suggested defaults
+   - Provider-specific overrides
+   - Deployment profiles (dev, prod, high-latency)
+   - Failure modes and observability guidance
+
+4. **Expanded timeouts.md to L2**:
+   - Added concrete values
+   - Implementation notes
+   - Testing patterns
+
+5. **Updated v2/ files** (17 files):
+   - Added timing.ts imports
+   - Replaced magic numbers with TIMING.X references
+
+Files modified:
+- v2/shared/src/config/timing.ts.l2.txt (new)
+- v2/docs/timeouts.md.l2.txt (renamed, expanded)
+- specification/03_RESOURCES.txt
+- specification/04_MANIFEST.txt
+- specification/05_ALLOCATIONS.txt
+- specification/06_WORKFLOWS.txt
+- specification/07_INTENTS.txt
+- specification/08_PROVIDERS.txt
+- specification/09_API.txt
+- specification/11_AGENT.txt
+- specification/12_ORPHANS.txt
+- specification/15_OPERATIONS.txt
+- v2/agent/*.l1.txt (4 files)
+- v2/control/src/*.l1.txt (10 files)
+- v2/cli/src/*.l1.txt (2 files)
+- v2/shared/src/types.ts.l1.txt
