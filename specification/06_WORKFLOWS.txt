@@ -855,7 +855,7 @@ async function cancelWorkflow(workflowId: string, reason: string): Promise<void>
   });
 
   // If agent alive: receives cancel → stops run → emits run_complete → workflow completes
-  // If agent dead: heartbeat timeout (e.g., 30s) → ACTIVE→FAILED → workflow fails
+  // If agent dead: heartbeat timeout (e.g., 25m) → ACTIVE→FAILED → workflow fails
 }
 ```
 

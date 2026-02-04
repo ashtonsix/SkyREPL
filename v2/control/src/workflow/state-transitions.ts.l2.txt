@@ -1,0 +1,690 @@
+# state-transitions.ts - State machine ownership and transition rules (L2 Pseudocode)
+
+## Imports
+
+```typescript
+import { getDatabase, queryOne, transaction } from '../material/db';
+import { TIMING } from '../../../../shared/src/config/timing';
+```
+
+## Canonical TransitionResult Pattern
+
+The TransitionResult type is the canonical pattern for all state transitions.
+It enables callers to distinguish between different failure modes:
+- NOT_FOUND: Resource doesn't exist
+- WRONG_STATE: Resource exists but in unexpected state
+- RACE_LOST: Resource was modified between read and write (CAS failure)
+
+```typescript
+/**
+ * Result type for atomic state transitions.
+ * All state transitions in the system MUST use this pattern.
+ */
+export type TransitionResult<T> =
+  | { success: true; data: T }
+  | { success: false; reason: 'NOT_FOUND' | 'WRONG_STATE' | 'RACE_LOST'; current?: T };
+
+/**
+ * Helper to create success result
+ */
+export function transitionSuccess<T>(data: T): TransitionResult<T> {
+  return { success: true, data };
+}
+
+/**
+ * Helper to create failure result
+ */
+export function transitionFailure<T>(
+  reason: 'NOT_FOUND' | 'WRONG_STATE' | 'RACE_LOST',
+  current?: T
+): TransitionResult<T> {
+  return { success: false, reason, current };
+}
+```
+
+## Two-Phase CAS Pattern
+
+All state transitions use two-phase compare-and-swap (CAS):
+
+1. **Phase 1 (Read)**: SELECT to verify current state and capture updated_at
+2. **Phase 2 (Write)**: UPDATE with WHERE updated_at = original
+
+This ensures:
+- Atomic state verification and transition
+- Detection of concurrent modifications
+- Clear failure semantics
+
+```typescript
+/**
+ * Generic two-phase CAS transition.
+ *
+ * @param table - Table name
+ * @param id - Row ID
+ * @param fromStatus - Expected current status (or array for multi-source)
+ * @param toStatus - Target status
+ * @param additionalUpdates - Extra fields to update
+ * @returns TransitionResult with success/failure details
+ */
+export async function atomicTransition<T extends { id: number; status: string; updated_at: number }>(
+  table: string,
+  id: number,
+  fromStatus: string | string[],
+  toStatus: string,
+  additionalUpdates: Record<string, unknown> = {}
+): Promise<TransitionResult<T>> {
+  const db = getDatabase();
+
+  return transaction(() => {
+    // Phase 1: Read current state
+    const current = queryOne<T>(`SELECT * FROM ${table} WHERE id = ?`, [id]);
+
+    if (!current) {
+      return transitionFailure<T>('NOT_FOUND');
+    }
+
+    // Check status (supports single status or array of valid source statuses)
+    const validStatuses = Array.isArray(fromStatus) ? fromStatus : [fromStatus];
+    if (!validStatuses.includes(current.status)) {
+      return transitionFailure<T>('WRONG_STATE', current);
+    }
+
+    // Phase 2: CAS update with updated_at guard
+    const now = Date.now();
+    const updateFields = { status: toStatus, updated_at: now, ...additionalUpdates };
+    const setClause = Object.keys(updateFields).map(k => `${k} = ?`).join(', ');
+    const values = Object.values(updateFields);
+
+    const result = db.prepare(`
+      UPDATE ${table}
+      SET ${setClause}
+      WHERE id = ? AND updated_at = ?
+    `).run(...values, id, current.updated_at);
+
+    if (result.changes === 0) {
+      // Race lost - row was modified between SELECT and UPDATE
+      const latest = queryOne<T>(`SELECT * FROM ${table} WHERE id = ?`, [id]);
+      return transitionFailure<T>('RACE_LOST', latest ?? undefined);
+    }
+
+    // Return updated record
+    const updated = queryOne<T>(`SELECT * FROM ${table} WHERE id = ?`, [id]);
+    return transitionSuccess<T>(updated!);
+  });
+}
+```
+
+## Allocation State Machine Types
+
+```typescript
+export type AllocationStatus = 'AVAILABLE' | 'CLAIMED' | 'ACTIVE' | 'COMPLETE' | 'FAILED';
+
+export interface Allocation {
+  id: number;
+  instance_id: number;
+  run_id: number | null;
+  status: AllocationStatus;
+  workdir: string;
+  completed_at: number | null;
+  debug_hold_until: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+// Valid transitions per status
+const ALLOCATION_TRANSITIONS: Record<AllocationStatus, AllocationStatus[]> = {
+  AVAILABLE: ['CLAIMED', 'FAILED'],
+  CLAIMED: ['ACTIVE', 'FAILED'],
+  ACTIVE: ['COMPLETE', 'FAILED'],
+  COMPLETE: [],  // Terminal
+  FAILED: [],    // Terminal
+};
+```
+
+## Allocation Transition Functions
+
+### claimAllocation (AVAILABLE -> CLAIMED)
+
+```typescript
+/**
+ * Claim an available allocation for a run.
+ *
+ * Owner: Workflow (claim-allocation node)
+ * Concurrency: Uses two-phase CAS to handle race between multiple workflows
+ */
+export async function claimAllocation(
+  allocationId: number,
+  runId: number
+): Promise<TransitionResult<Allocation>> {
+  const db = getDatabase();
+
+  return transaction(() => {
+    // Phase 1: Read and verify AVAILABLE + no run_id
+    const allocation = queryOne<Allocation>(
+      'SELECT * FROM allocations WHERE id = ? AND status = ? AND run_id IS NULL',
+      [allocationId, 'AVAILABLE']
+    );
+
+    if (!allocation) {
+      // Could be not found, wrong status, or already claimed
+      const current = queryOne<Allocation>('SELECT * FROM allocations WHERE id = ?', [allocationId]);
+      if (!current) {
+        return transitionFailure<Allocation>('NOT_FOUND');
+      }
+      return transitionFailure<Allocation>('WRONG_STATE', current);
+    }
+
+    // Phase 2: CAS update
+    const now = Date.now();
+    const result = db.prepare(`
+      UPDATE allocations
+      SET run_id = ?, status = 'CLAIMED', updated_at = ?
+      WHERE id = ? AND updated_at = ?
+    `).run(runId, now, allocationId, allocation.updated_at);
+
+    if (result.changes === 0) {
+      const latest = queryOne<Allocation>('SELECT * FROM allocations WHERE id = ?', [allocationId]);
+      return transitionFailure<Allocation>('RACE_LOST', latest ?? undefined);
+    }
+
+    const updated = queryOne<Allocation>('SELECT * FROM allocations WHERE id = ?', [allocationId]);
+    return transitionSuccess<Allocation>(updated!);
+  });
+}
+```
+
+### activateAllocation (CLAIMED -> ACTIVE)
+
+```typescript
+/**
+ * Activate a claimed allocation after sync completes.
+ *
+ * Owner: Control plane (on sync_complete log)
+ */
+export async function activateAllocation(
+  allocationId: number
+): Promise<TransitionResult<Allocation>> {
+  return atomicTransition<Allocation>(
+    'allocations',
+    allocationId,
+    'CLAIMED',
+    'ACTIVE'
+  );
+}
+```
+
+### completeAllocation (ACTIVE -> COMPLETE)
+
+```typescript
+/**
+ * Complete an active allocation after run finishes.
+ *
+ * Owner: Workflow (finalize node)
+ * Note: Run exit_code != 0 is NOT a failure - still transitions to COMPLETE
+ *
+ * Race condition: If allocation already FAILED when transition attempted,
+ * treat as success (run completed despite allocation failure).
+ */
+export async function completeAllocation(
+  allocationId: number,
+  options: { debugHoldUntil?: number } = {}
+): Promise<TransitionResult<Allocation>> {
+  const db = getDatabase();
+
+  return transaction(() => {
+    const allocation = queryOne<Allocation>(
+      'SELECT * FROM allocations WHERE id = ?',
+      [allocationId]
+    );
+
+    if (!allocation) {
+      return transitionFailure<Allocation>('NOT_FOUND');
+    }
+
+    // Special case: If already FAILED, treat as success
+    // (run completed despite infrastructure failure)
+    if (allocation.status === 'FAILED') {
+      return transitionSuccess<Allocation>(allocation);
+    }
+
+    if (allocation.status !== 'ACTIVE') {
+      return transitionFailure<Allocation>('WRONG_STATE', allocation);
+    }
+
+    const now = Date.now();
+    const result = db.prepare(`
+      UPDATE allocations
+      SET status = 'COMPLETE', completed_at = ?, debug_hold_until = ?, updated_at = ?
+      WHERE id = ? AND updated_at = ?
+    `).run(now, options.debugHoldUntil ?? null, now, allocationId, allocation.updated_at);
+
+    if (result.changes === 0) {
+      const latest = queryOne<Allocation>('SELECT * FROM allocations WHERE id = ?', [allocationId]);
+      // If race lost to FAILED transition, treat as success
+      if (latest?.status === 'FAILED') {
+        return transitionSuccess<Allocation>(latest);
+      }
+      return transitionFailure<Allocation>('RACE_LOST', latest ?? undefined);
+    }
+
+    const updated = queryOne<Allocation>('SELECT * FROM allocations WHERE id = ?', [allocationId]);
+    return transitionSuccess<Allocation>(updated!);
+  });
+}
+```
+
+### failAllocation (AVAILABLE|CLAIMED|ACTIVE -> FAILED)
+
+```typescript
+/**
+ * Fail an allocation due to infrastructure issues.
+ *
+ * Owner: Control plane (timeout/error) or Agent (spot interrupt)
+ *
+ * @param expectedStatus - The status we expect the allocation to be in.
+ *                        This MUST be specified to prevent accidental state corruption.
+ */
+export async function failAllocation(
+  allocationId: number,
+  expectedStatus: 'AVAILABLE' | 'CLAIMED' | 'ACTIVE'
+): Promise<TransitionResult<Allocation>> {
+  return atomicTransition<Allocation>(
+    'allocations',
+    allocationId,
+    expectedStatus,  // WHERE guard - only fail if in expected state
+    'FAILED'
+  );
+}
+
+/**
+ * Fail allocation from any non-terminal state.
+ * Use when you need to fail regardless of current state (e.g., instance terminated).
+ *
+ * WARNING: Use failAllocation() with explicit expectedStatus when possible.
+ * This variant should only be used for cleanup when state is uncertain.
+ */
+export async function failAllocationAnyState(
+  allocationId: number
+): Promise<TransitionResult<Allocation>> {
+  return atomicTransition<Allocation>(
+    'allocations',
+    allocationId,
+    ['AVAILABLE', 'CLAIMED', 'ACTIVE'],  // Accept any non-terminal state
+    'FAILED'
+  );
+}
+```
+
+## Manifest State Machine
+
+```typescript
+export type ManifestStatus = 'DRAFT' | 'SEALED';
+
+export interface Manifest {
+  id: number;
+  status: ManifestStatus;
+  expires_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/**
+ * Seal a draft manifest.
+ *
+ * Owner: Workflow (seal-manifest node or workflow completion)
+ */
+export async function sealManifest(
+  manifestId: number,
+  expiresAt: number
+): Promise<TransitionResult<Manifest>> {
+  return atomicTransition<Manifest>(
+    'manifests',
+    manifestId,
+    'DRAFT',
+    'SEALED',
+    { expires_at: expiresAt }
+  );
+}
+```
+
+## Workflow State Machine
+
+```typescript
+export type WorkflowStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'rolling_back';
+
+export interface Workflow {
+  id: number;
+  manifest_id: number;
+  type: string;
+  status: WorkflowStatus;
+  input: Record<string, unknown>;
+  output: Record<string, unknown> | null;
+  error: string | null;
+  started_at: number | null;
+  finished_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/**
+ * Start a pending workflow.
+ *
+ * Owner: Workflow engine (executeLoop)
+ */
+export async function startWorkflow(
+  workflowId: number
+): Promise<TransitionResult<Workflow>> {
+  return atomicTransition<Workflow>(
+    'workflows',
+    workflowId,
+    'pending',
+    'running',
+    { started_at: Date.now() }
+  );
+}
+
+/**
+ * Complete a running workflow.
+ *
+ * Owner: Workflow engine (completeWorkflow)
+ */
+export async function completeWorkflow(
+  workflowId: number,
+  output: Record<string, unknown>
+): Promise<TransitionResult<Workflow>> {
+  return atomicTransition<Workflow>(
+    'workflows',
+    workflowId,
+    'running',
+    'completed',
+    { output: JSON.stringify(output), finished_at: Date.now() }
+  );
+}
+
+/**
+ * Fail a running workflow.
+ *
+ * Owner: Workflow engine (handleWorkflowFailure)
+ */
+export async function failWorkflow(
+  workflowId: number,
+  error: string
+): Promise<TransitionResult<Workflow>> {
+  return atomicTransition<Workflow>(
+    'workflows',
+    workflowId,
+    ['running', 'rolling_back'],  // Can fail from either state
+    'failed',
+    { error, finished_at: Date.now() }
+  );
+}
+
+/**
+ * Cancel a running workflow.
+ *
+ * Owner: API handler (engine.cancel)
+ */
+export async function cancelWorkflow(
+  workflowId: number
+): Promise<TransitionResult<Workflow>> {
+  return atomicTransition<Workflow>(
+    'workflows',
+    workflowId,
+    'running',
+    'cancelled',
+    { finished_at: Date.now() }
+  );
+}
+
+/**
+ * Start rollback for a failed workflow.
+ *
+ * Owner: Workflow engine (on node failure with compensation)
+ */
+export async function startRollback(
+  workflowId: number
+): Promise<TransitionResult<Workflow>> {
+  return atomicTransition<Workflow>(
+    'workflows',
+    workflowId,
+    'running',
+    'rolling_back'
+  );
+}
+```
+
+## Node State Machine
+
+```typescript
+export type NodeStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+
+export interface WorkflowNode {
+  id: number;
+  workflow_id: number;
+  name: string;
+  status: NodeStatus;
+  input: Record<string, unknown>;
+  output: Record<string, unknown> | null;
+  error: string | null;
+  attempt: number;
+  started_at: number | null;
+  finished_at: number | null;
+}
+
+/**
+ * Start a pending node.
+ *
+ * Owner: Workflow engine (executeNode)
+ */
+export async function startNode(
+  nodeId: number
+): Promise<TransitionResult<WorkflowNode>> {
+  const db = getDatabase();
+
+  return transaction(() => {
+    const node = queryOne<WorkflowNode>('SELECT * FROM workflow_nodes WHERE id = ?', [nodeId]);
+
+    if (!node) {
+      return transitionFailure<WorkflowNode>('NOT_FOUND');
+    }
+
+    if (node.status !== 'pending') {
+      return transitionFailure<WorkflowNode>('WRONG_STATE', node);
+    }
+
+    const now = Date.now();
+    db.prepare(`
+      UPDATE workflow_nodes
+      SET status = 'running', started_at = ?, attempt = attempt + 1
+      WHERE id = ?
+    `).run(now, nodeId);
+
+    const updated = queryOne<WorkflowNode>('SELECT * FROM workflow_nodes WHERE id = ?', [nodeId]);
+    return transitionSuccess<WorkflowNode>(updated!);
+  });
+}
+
+/**
+ * Complete a running node.
+ *
+ * Owner: Node executor (handler returns success)
+ */
+export async function completeNode(
+  nodeId: number,
+  output: Record<string, unknown>
+): Promise<TransitionResult<WorkflowNode>> {
+  const db = getDatabase();
+
+  return transaction(() => {
+    const node = queryOne<WorkflowNode>('SELECT * FROM workflow_nodes WHERE id = ?', [nodeId]);
+
+    if (!node) {
+      return transitionFailure<WorkflowNode>('NOT_FOUND');
+    }
+
+    if (node.status !== 'running') {
+      return transitionFailure<WorkflowNode>('WRONG_STATE', node);
+    }
+
+    const now = Date.now();
+    db.prepare(`
+      UPDATE workflow_nodes
+      SET status = 'completed', output = ?, finished_at = ?
+      WHERE id = ?
+    `).run(JSON.stringify(output), now, nodeId);
+
+    const updated = queryOne<WorkflowNode>('SELECT * FROM workflow_nodes WHERE id = ?', [nodeId]);
+    return transitionSuccess<WorkflowNode>(updated!);
+  });
+}
+
+/**
+ * Fail a running node.
+ *
+ * Owner: Node executor (handler throws error)
+ */
+export async function failNode(
+  nodeId: number,
+  error: string
+): Promise<TransitionResult<WorkflowNode>> {
+  const db = getDatabase();
+
+  return transaction(() => {
+    const node = queryOne<WorkflowNode>('SELECT * FROM workflow_nodes WHERE id = ?', [nodeId]);
+
+    if (!node) {
+      return transitionFailure<WorkflowNode>('NOT_FOUND');
+    }
+
+    if (node.status !== 'running') {
+      return transitionFailure<WorkflowNode>('WRONG_STATE', node);
+    }
+
+    const now = Date.now();
+    db.prepare(`
+      UPDATE workflow_nodes
+      SET status = 'failed', error = ?, finished_at = ?
+      WHERE id = ?
+    `).run(error, now, nodeId);
+
+    const updated = queryOne<WorkflowNode>('SELECT * FROM workflow_nodes WHERE id = ?', [nodeId]);
+    return transitionSuccess<WorkflowNode>(updated!);
+  });
+}
+
+/**
+ * Reset a failed node for retry.
+ *
+ * Owner: Workflow engine (retry logic)
+ */
+export async function resetNodeForRetry(
+  nodeId: number,
+  retryReason: string
+): Promise<TransitionResult<WorkflowNode>> {
+  const db = getDatabase();
+
+  return transaction(() => {
+    const node = queryOne<WorkflowNode>('SELECT * FROM workflow_nodes WHERE id = ?', [nodeId]);
+
+    if (!node) {
+      return transitionFailure<WorkflowNode>('NOT_FOUND');
+    }
+
+    if (node.status !== 'failed') {
+      return transitionFailure<WorkflowNode>('WRONG_STATE', node);
+    }
+
+    db.prepare(`
+      UPDATE workflow_nodes
+      SET status = 'pending', error = NULL, finished_at = NULL
+      WHERE id = ?
+    `).run(nodeId);
+
+    const updated = queryOne<WorkflowNode>('SELECT * FROM workflow_nodes WHERE id = ?', [nodeId]);
+    return transitionSuccess<WorkflowNode>(updated!);
+  });
+}
+
+/**
+ * Skip a pending node.
+ *
+ * Owner: Workflow engine (conditional branch not taken, or cancellation)
+ */
+export async function skipNode(
+  nodeId: number
+): Promise<TransitionResult<WorkflowNode>> {
+  return atomicTransition<WorkflowNode>(
+    'workflow_nodes',
+    nodeId,
+    'pending',
+    'skipped'
+  );
+}
+```
+
+## Usage Examples
+
+### Handling TransitionResult
+
+```typescript
+// Example: Claiming an allocation with proper error handling
+async function handleAllocationClaim(allocationId: number, runId: number) {
+  const result = await claimAllocation(allocationId, runId);
+
+  if (result.success) {
+    logger.info('allocation_claimed', { allocationId, runId });
+    return result.data;
+  }
+
+  // Handle specific failure cases
+  switch (result.reason) {
+    case 'NOT_FOUND':
+      throw new NotFoundError(`Allocation ${allocationId} not found`);
+
+    case 'WRONG_STATE':
+      logger.warn('claim_wrong_state', {
+        allocationId,
+        expectedStatus: 'AVAILABLE',
+        actualStatus: result.current?.status
+      });
+      throw new ConflictError(`Allocation in ${result.current?.status} state, not AVAILABLE`);
+
+    case 'RACE_LOST':
+      logger.info('claim_race_lost', {
+        allocationId,
+        currentStatus: result.current?.status,
+        currentRunId: result.current?.run_id
+      });
+      // Caller can retry with different allocation
+      return null;
+  }
+}
+```
+
+### Background Task Pattern
+
+```typescript
+// Example: Reconciliation task failing stuck allocations
+async function reconcileStuckClaimed() {
+  const stuckAllocations = queryMany<Allocation>(`
+    SELECT * FROM allocations
+    WHERE status = 'CLAIMED'
+      AND updated_at < ?
+  `, [Date.now() - TIMING.CLAIMED_TIMEOUT_MS]);
+
+  for (const allocation of stuckAllocations) {
+    // CRITICAL: Specify expected status to prevent accidental corruption
+    const result = await failAllocation(allocation.id, 'CLAIMED');
+
+    if (result.success) {
+      logger.info('recovered_stuck_claimed', { allocationId: allocation.id });
+    } else if (result.reason === 'WRONG_STATE') {
+      // State changed since query - allocation may have progressed normally
+      logger.debug('stuck_allocation_resolved', {
+        allocationId: allocation.id,
+        currentStatus: result.current?.status
+      });
+    }
+    // RACE_LOST or NOT_FOUND are fine - another process handled it
+  }
+}
+```

@@ -8,13 +8,13 @@
 
 ## Execute Steps
 - For each orphan in orphanedResources:
-  - If orphan.inferredInfo.manifestIdPrefix exists:
-    - Query db.getManifestByIdPrefix(manifestIdPrefix) to find matching manifest
+  - If orphan.inferredInfo.manifestSlug exists:
+    - Query db.getManifestBySlug(manifestSlug) to find matching manifest
     - If manifest found and status != 'sealed':
       - Add to matched array with { orphan, manifestId }
     - Else:
       - Add to unmatched array
-  - Else (no manifest prefix or manifest prefix is 'none'):
+  - Else (no manifest slug or manifest slug is 'none'):
     - Add to unmatched array
 - Return { matched, unmatched }
 
@@ -22,6 +22,6 @@
 - No compensation needed (read-only operation)
 
 ## Key Calls
-- db.getManifestByIdPrefix(manifestIdPrefix)
+- db.getManifestBySlug(manifestSlug)
 - Context: ctx.emitMetadata('matched_count', matched.length)
 - Context: ctx.emitMetadata('unmatched_count', unmatched.length)

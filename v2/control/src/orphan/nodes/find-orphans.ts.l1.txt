@@ -19,7 +19,7 @@
     - Log: "Recovered orphan: linked cloud ${resource.providerId} to DB instance ${instance_id}"
     - Skip adding to orphanedResources (now tracked)
     - Continue to next resource
-  - Parse resource name to extract controlId, manifestIdPrefix, instanceIdPrefix
+  - Parse resource name to extract controlId, manifestSlug, instanceSlug
   - Calculate ageMs = Date.now() - resource.createdAt
   - Determine likelyCurrentSession = resource.createdAt > sessionStartTime
   - Add to orphanedResources array with metadata (providerId, resourceType, inferredInfo, ageMs, etc.)

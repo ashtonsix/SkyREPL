@@ -1,25 +1,59 @@
 # checkpoint.py - Checkpoint Handling
 
 ## Script Execution
-- Execute checkpoint_script from repl.toml on spot interruption
+- Execute checkpoint_script from repl.toml on spot interruption or heartbeat panic
 - Path relative to repl.toml location
 - Timeout enforcement via checkpoint_timeout
 
-## Timeout Constraints for Spot Interruption
+## Timeout Constraints
+
+### Spot Interruption
 - AWS spot warning window: 2 minutes (120 seconds)
-- MAX_SPOT_CHECKPOINT_MS = 90000 (90 seconds)
+- SPOT_CHECKPOINT_BUDGET_MS = 90000 (90 seconds)
 - Leaves 30 seconds for artifact upload and messaging
-- User-configured checkpoint_timeout capped at MAX_SPOT_CHECKPOINT_MS during spot interruption
-- Regular checkpoints (non-spot) can use full user-configured timeout
+- User-configured checkpoint_timeout capped at SPOT_CHECKPOINT_BUDGET_MS during spot
+
+### Heartbeat Panic
+- Panic window: 10 minutes (15m→25m)
+- PANIC_CHECKPOINT_BUDGET_MS = 300000 (5 minutes)
+- Leaves 5 minutes for artifact upload and messaging
+- User-configured checkpoint_timeout capped at PANIC_CHECKPOINT_BUDGET_MS during panic
 
 ## Environment Variables
-- SKYREPL_CHECKPOINT_REASON=spot_termination
+- SKYREPL_CHECKPOINT_REASON=spot_termination | heartbeat_timeout
 - SKYREPL_RUN_ID, SKYREPL_WORKDIR
 
 ## Output Handling
 - Stream stdout/stderr as regular logs
 - Terminate script if timeout exceeded
 
+## Failover URL Support
+- For S3-backed artifacts, StartRunMessage includes failover_url
+- On primary URL upload failure: retry with failover_url
+- Both URLs point to same S3 key (different presigned signature)
+- 4h presign TTL sufficient for 25m panic window
+
+## Artifact Upload Prioritization
+Different strategies for spot vs panic based on timing constraints:
+
+### Spot Interruption (20s budget): Size Ascending
+- Sort artifacts by file size, smallest first
+- Rationale: Maximize artifact count in tight window
+- 10 small files > 1 large file when time is critical
+- If budget exhausted, larger (often redundant/verbose) files are skipped
+
+### Heartbeat Panic (4m budget): Recency Descending
+- Sort artifacts by modification time, newest first
+- Rationale: Recent work is most valuable, older artifacts may be stale
+- 4m budget usually sufficient for all artifacts
+- If budget exhausted, older (potentially recoverable) artifacts are skipped
+
+### Implementation
+- `prioritize_artifacts(urls, strategy)` returns sorted list
+- Strategy determined by checkpoint reason: spot_termination → 'size_asc', heartbeat_timeout → 'recency_desc'
+- File metadata (size, mtime) read once at prioritization time
+
 ## Integration
-- Runs after spot interruption detection
+- Runs after spot interruption detection OR heartbeat panic threshold
 - Runs before artifact upload
+- Shared execute_checkpoint() function for both paths

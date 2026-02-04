@@ -164,7 +164,6 @@ The types.ts file contains ONLY types that are:
 
 /** INTEGER PRIMARY KEY, displayed as base-36 slug (e.g., ID 12345 → "9ix") */
 export type ID = number;
-export type UUID = ID;    // Deprecated alias for migration
 
 /** Unix timestamp in milliseconds */
 export type TimestampMs = number;
@@ -259,7 +258,7 @@ export type FeatureProviderName = 'tailscale' | string;
 
 /** Materialized Instance resource */
 export interface Instance {
-  id: UUID;
+  id: ID;
   provider: ProviderName;
   providerId: string;
   spec: string;
@@ -273,7 +272,7 @@ export interface Instance {
   spawnIdempotencyKey: string | null;  // Format: ${workflow_id}:${node_id}
   createdAt: TimestampMs;
   lastHeartbeat: TimestampMs;
-  currentManifestId: UUID | null;
+  currentManifestId: ID | null;
 
   // Relationships (populated based on materialization depth)
   features?: FeatureInstallation[];
@@ -286,7 +285,7 @@ export interface Instance {
 
 /** Materialized Run resource */
 export interface Run {
-  id: UUID;
+  id: ID;
   command: string;
   workdir: string;
   maxDurationMs: DurationMs;
@@ -301,7 +300,7 @@ export interface Run {
   createdAt: TimestampMs;
   startedAt: TimestampMs | null;
   finishedAt: TimestampMs | null;
-  currentManifestId: UUID | null;
+  currentManifestId: ID | null;
 
   // Relationships (populated based on materialization depth)
   files?: RunFile[];
@@ -312,16 +311,16 @@ export interface Run {
 
 /** Materialized Allocation resource */
 export interface Allocation {
-  id: UUID;
-  runId: UUID | null;
-  instanceId: UUID;
+  id: ID;
+  runId: ID | null;
+  instanceId: ID;
   user: string;
   workdir: string;
   status: AllocationStatus;
   debugHoldUntil: TimestampMs | null;  // Blocks termination if > NOW, enables SSH when COMPLETE
   createdAt: TimestampMs;
   updatedAt: TimestampMs;
-  currentManifestId: UUID | null;
+  currentManifestId: ID | null;
 
   // Relationships (populated based on materialization depth)
   instance?: Instance;
@@ -330,16 +329,16 @@ export interface Allocation {
 
 /** Materialized Workflow resource */
 export interface Workflow {
-  id: UUID;
+  id: ID;
   type: string;
-  parentWorkflowId: UUID | null;
+  parentWorkflowId: ID | null;
   depth: number;
   status: WorkflowExecutionStatus;
   currentNode: string | null;
   input: Record<string, unknown>;
   output: Record<string, unknown> | null;
   error: WorkflowError | null;
-  manifestId: UUID | null;
+  manifestId: ID | null;
   traceId: string | null;
   idempotencyKey: string | null;
   createdAt: TimestampMs;
@@ -356,8 +355,8 @@ export interface Workflow {
 
 /** Materialized Manifest resource */
 export interface Manifest {
-  id: UUID;
-  workflowId: UUID;
+  id: ID;
+  workflowId: ID;
   status: ManifestStatus;
   defaultCleanupPriority: number;
   retentionMs: DurationMs | null;
@@ -375,7 +374,7 @@ export interface Manifest {
 
 /** Snapshot resource (object-backed) */
 export interface Snapshot {
-  id: UUID;
+  id: ID;
   provider: ProviderName;
   providerId: string;
   spec: string;
@@ -391,8 +390,8 @@ export interface Snapshot {
 
 /** Artifact resource (object-backed) */
 export interface Artifact {
-  id: UUID;
-  runId: UUID;
+  id: ID;
+  runId: ID;
   path: string;
   sizeBytes: number;
   keep: boolean;
@@ -401,8 +400,8 @@ export interface Artifact {
 
 /** Feature installation (object-backed) */
 export interface FeatureInstallation {
-  id: UUID;
-  instanceId: UUID;
+  id: ID;
+  instanceId: ID;
   featureName: string;
   version: string;
   status: 'installing' | 'ready' | 'failed';
@@ -413,8 +412,8 @@ export interface FeatureInstallation {
 
 /** Tailscale machine (object-backed) */
 export interface TailscaleMachine {
-  id: UUID;
-  instanceId: UUID;
+  id: ID;
+  instanceId: ID;
   tailscaleIp: string;
   hostname: string;
   authKeyUsed: boolean;
@@ -441,10 +440,10 @@ export interface RunLogEntry {
 
 /** Usage record (materialized billing data) */
 export interface UsageRecord {
-  id: UUID;
-  instanceId: UUID;
-  allocationId: UUID | null;
-  runId: UUID | null;
+  id: ID;
+  instanceId: ID;
+  allocationId: ID | null;
+  runId: ID | null;
   provider: ProviderName;
   spec: string;
   region: string | null;
@@ -457,8 +456,8 @@ export interface UsageRecord {
 
 /** Workflow node */
 export interface WorkflowNode {
-  id: UUID;
-  workflowId: UUID;
+  id: ID;
+  workflowId: ID;
   nodeId: string;
   nodeType: string;
   status: NodeStatus;
@@ -474,9 +473,9 @@ export interface WorkflowNode {
 
 /** Manifest resource link */
 export interface ManifestResource {
-  manifestId: UUID;
+  manifestId: ID;
   resourceType: 'instance' | 'run' | 'allocation' | 'object';
-  resourceId: UUID;
+  resourceId: ID;
   cleanupPriority: number | null;
   addedAt: TimestampMs;
   ownerType: 'manifest' | 'workflow' | 'policy';  // Who added this resource
@@ -540,7 +539,7 @@ export type ErrorCategory =
 export interface PatternAuditEntry {
   pattern: PatternType;
   timestamp: TimestampMs;
-  workflowId: UUID;
+  workflowId: ID;
   triggeredBy: string;
   details: Record<string, unknown>;
 }
@@ -595,13 +594,13 @@ identifiers:
 
 ```typescript
 // Specific ID types (all INTEGER PRIMARY KEY, but semantically distinct)
-export type InstanceId = UUID;
-export type RunId = UUID;
-export type AllocationId = UUID;
-export type WorkflowId = UUID;
-export type ManifestId = UUID;
-export type ObjectId = UUID;
-export type NodeRecordId = UUID;
+export type InstanceId = ID;
+export type RunId = ID;
+export type AllocationId = ID;
+export type WorkflowId = ID;
+export type ManifestId = ID;
+export type ObjectId = ID;
+export type NodeRecordId = ID;
 
 // Provider IDs (NOT INTEGER PKs - provider-specific format)
 export type ProviderId = string;  // i-xxxxx, pod-xxxxx, etc.
@@ -731,7 +730,7 @@ Standard request/response wrappers for API consistency.
 ```typescript
 // api/resources.types.ts
 
-import type { UUID, TimestampMs, ErrorCategory } from '../types';
+import type { ID, TimestampMs, ErrorCategory } from '../types';
 
 // =============================================================================
 // REQUEST ENVELOPES
@@ -886,7 +885,7 @@ names and primitive types (number for booleans, string for JSON).
 ```typescript
 // db.types.ts
 
-import type { UUID, TimestampMs, AllocationStatus, ManifestStatus } from './types';
+import type { ID, TimestampMs, AllocationStatus, ManifestStatus } from './types';
 
 // =============================================================================
 // RECORD TYPES (Database Rows)
@@ -894,7 +893,7 @@ import type { UUID, TimestampMs, AllocationStatus, ManifestStatus } from './type
 
 /** Instance database record */
 export interface InstanceRecord {
-  id: UUID;
+  id: ID;
   provider: string;
   provider_id: string;
   spec: string;
@@ -902,7 +901,7 @@ export interface InstanceRecord {
   ip: string | null;
   workflow_state: string;  // Format: <workflow>:<phase>
   workflow_error: string | null;  // Error details if workflow_state ends in ':error'
-  current_manifest_id: UUID | null;
+  current_manifest_id: ID | null;
   spawn_idempotency_key: string | null;  // Format: ${workflow_id}:${node_id}
   is_spot: number;  // SQLite boolean: 0 or 1
   spot_request_id: string | null;
@@ -913,13 +912,13 @@ export interface InstanceRecord {
 
 /** Run database record */
 export interface RunRecord {
-  id: UUID;
+  id: ID;
   command: string;
   workdir: string;
   max_duration_ms: number;
   workflow_state: string;  // Format: <workflow>:<phase>
   workflow_error: string | null;  // Error details if workflow_state ends in ':error'
-  current_manifest_id: UUID | null;
+  current_manifest_id: ID | null;
   exit_code: number | null;
   init_checksum: string | null;
   create_snapshot: number;  // SQLite boolean
@@ -932,11 +931,11 @@ export interface RunRecord {
 
 /** Allocation database record */
 export interface AllocationRecord {
-  id: UUID;
-  run_id: UUID | null;
-  instance_id: UUID;
+  id: ID;
+  run_id: ID | null;
+  instance_id: ID;
   status: AllocationStatus;
-  current_manifest_id: UUID | null;
+  current_manifest_id: ID | null;
   user: string;
   workdir: string;
   debug_hold_until: TimestampMs | null;  // Blocks termination if > NOW, enables SSH when COMPLETE
@@ -946,16 +945,16 @@ export interface AllocationRecord {
 
 /** Workflow database record */
 export interface WorkflowRecord {
-  id: UUID;
+  id: ID;
   type: string;
-  parent_workflow_id: UUID | null;
+  parent_workflow_id: ID | null;
   depth: number;
   status: string;
   current_node: string | null;
   input_json: string;
   output_json: string | null;
   error_json: string | null;
-  manifest_id: UUID | null;
+  manifest_id: ID | null;
   trace_id: string | null;
   idempotency_key: string | null;
   timeout_ms: number | null;         // Workflow timeout in milliseconds
@@ -967,8 +966,8 @@ export interface WorkflowRecord {
 
 /** Workflow node database record */
 export interface WorkflowNodeRecord {
-  id: UUID;
-  workflow_id: UUID;
+  id: ID;
+  workflow_id: ID;
   node_id: string;
   node_type: string;
   status: string;
@@ -984,8 +983,8 @@ export interface WorkflowNodeRecord {
 
 /** Manifest database record */
 export interface ManifestRecord {
-  id: UUID;
-  workflow_id: UUID;
+  id: ID;
+  workflow_id: ID;
   status: ManifestStatus;
   default_cleanup_priority: number;
   retention_ms: number | null;
@@ -996,9 +995,9 @@ export interface ManifestRecord {
 
 /** Manifest resource link record */
 export interface ManifestResourceRecord {
-  manifest_id: UUID;
+  manifest_id: ID;
   resource_type: string;
-  resource_id: UUID;
+  resource_id: ID;
   cleanup_priority: number | null;
   added_at: TimestampMs;
   owner_type: string;  // 'manifest' | 'workflow' | 'policy'
@@ -1007,7 +1006,7 @@ export interface ManifestResourceRecord {
 
 /** Object database record */
 export interface ObjectRecord {
-  id: UUID;
+  id: ID;
   type: string;
   provider: string | null;
   provider_object_id: string | null;
@@ -1018,7 +1017,7 @@ export interface ObjectRecord {
   s3_key: string | null;
   s3_bucket: string | null;
   expires_at: TimestampMs | null;
-  current_manifest_id: UUID | null;
+  current_manifest_id: ID | null;
   created_at: TimestampMs;
   updated_at: TimestampMs;
 }
@@ -1059,10 +1058,10 @@ export interface ProviderStateRecord {
 
 /** Usage record for billing (database record) */
 export interface UsageRecordDb {
-  id: UUID;
-  instance_id: UUID;
-  allocation_id: UUID | null;
-  run_id: UUID | null;
+  id: ID;
+  instance_id: ID;
+  allocation_id: ID | null;
+  run_id: ID | null;
   provider: string;
   spec: string;
   region: string | null;
@@ -1261,7 +1260,7 @@ API types are specific shapes for HTTP request and response bodies.
 // api/resources.types.ts
 
 import type {
-  UUID, Instance, Run, Allocation, Workflow, Manifest, Snapshot, Artifact,
+  ID, Instance, Run, Allocation, Workflow, Manifest, Snapshot, Artifact,
   ProviderName, TimestampMs, DurationMs,
 } from '../types';
 import type { ApiResponse, ListResponse, ListRequest } from './common.types';
@@ -1300,7 +1299,7 @@ export type CreateInstanceResponse = ApiResponse<Instance>;
 export interface DeleteInstanceRequest {
   force?: boolean;  // Skip drain/cleanup
 }
-export type DeleteInstanceResponse = ApiResponse<{ workflowId: UUID }>;
+export type DeleteInstanceResponse = ApiResponse<{ workflowId: ID }>;
 
 // =============================================================================
 // RUNS API
@@ -1348,7 +1347,7 @@ export interface FileUploadManifest {
 
 export type CreateRunResponse = ApiResponse<{
   run: Run;
-  workflowId: UUID;
+  workflowId: ID;
 }>;
 
 /** POST /v1/runs/:id/cancel */
@@ -1368,8 +1367,8 @@ export type GetAllocationResponse = ApiResponse<Allocation>;
 export interface ListAllocationsRequest extends ListRequest {
   filters?: {
     status?: string | string[];
-    instanceId?: UUID;
-    runId?: UUID;
+    instanceId?: ID;
+    runId?: ID;
   };
 }
 export type ListAllocationsResponse = ListResponse<Allocation>;
@@ -1399,7 +1398,7 @@ export interface ListWorkflowsRequest extends ListRequest {
   filters?: {
     type?: string | string[];
     status?: string | string[];
-    parentWorkflowId?: UUID;
+    parentWorkflowId?: ID;
   };
 }
 export type ListWorkflowsResponse = ListResponse<Workflow>;
@@ -1424,7 +1423,7 @@ export type GetManifestResponse = ApiResponse<Manifest>;
 export interface ListManifestsRequest extends ListRequest {
   filters?: {
     status?: string | string[];
-    workflowId?: UUID;
+    workflowId?: ID;
     expiresAfter?: TimestampMs;
     expiresBefore?: TimestampMs;
   };
@@ -1563,7 +1562,7 @@ Blueprint types define static workflow structure.
 ```typescript
 // workflows/engine.types.ts
 
-import type { UUID, PatternType } from '../types';
+import type { ID, PatternType } from '../types';
 
 // =============================================================================
 // WORKFLOW DEFINITION (BLUEPRINTS)
@@ -1642,7 +1641,7 @@ Runtime types represent workflow execution state.
 ```typescript
 // workflows/engine.types.ts (continued)
 
-import type { UUID, TimestampMs, WorkflowExecutionStatus, NodeStatus } from '../types';
+import type { ID, TimestampMs, WorkflowExecutionStatus, NodeStatus } from '../types';
 
 // =============================================================================
 // WORKFLOW INSTANCE (RUNTIME)
@@ -1653,21 +1652,21 @@ export interface WorkflowSubmission {
   type: WorkflowType;
   input: Record<string, unknown>;
   idempotencyKey?: string;
-  parentWorkflowId?: UUID;
+  parentWorkflowId?: ID;
   priority?: 'low' | 'normal' | 'high';
   timeout?: number;
 }
 
 /** Workflow submission result */
 export interface WorkflowSubmissionResult {
-  workflowId: UUID;
+  workflowId: ID;
   status: 'created' | 'deduplicated';
-  existingWorkflowId?: UUID;  // If deduplicated
+  existingWorkflowId?: ID;  // If deduplicated
 }
 
 /** Real-time workflow status (for progress display) */
 export interface WorkflowProgress {
-  workflowId: UUID;
+  workflowId: ID;
   type: WorkflowType;
   status: WorkflowExecutionStatus;
   currentNode: string | null;
@@ -1726,7 +1725,7 @@ NodeContext is the primary interface for node execution.
 // workflows/engine.types.ts (continued)
 
 import type {
-  UUID, TimestampMs, WorkflowError, NodeError, PatternType,
+  ID, TimestampMs, WorkflowError, NodeError, PatternType,
 } from '../types';
 
 // =============================================================================
@@ -1736,7 +1735,7 @@ import type {
 /** Context provided to node executors */
 export interface NodeContext<TInput = Record<string, unknown>> {
   // Identity
-  readonly workflowId: UUID;
+  readonly workflowId: ID;
   readonly nodeId: string;
   readonly nodeType: string;
   readonly attempt: number;
@@ -1745,15 +1744,15 @@ export interface NodeContext<TInput = Record<string, unknown>> {
   readonly input: TInput;
 
   // Manifest (resource ownership)
-  readonly manifestId: UUID;
+  readonly manifestId: ID;
 
   // Hierarchy
   readonly depth: number;
-  readonly parentWorkflowId: UUID | null;
+  readonly parentWorkflowId: ID | null;
 
   // Resource Management
-  emitResource(type: ResourceType, id: UUID, priority?: number): Promise<void>;
-  claimResource(fromNodeId: string, type: ResourceType): Promise<UUID>;
+  emitResource(type: ResourceType, id: ID, priority?: number): Promise<void>;
+  claimResource(fromNodeId: string, type: ResourceType): Promise<ID>;
   listEmittedResources(): Promise<EmittedResource[]>;
 
   // Pattern Application
@@ -1791,7 +1790,7 @@ export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 export interface EmittedResource {
   type: ResourceType;
-  id: UUID;
+  id: ID;
   priority: number;
   emittedAt: TimestampMs;
 }
@@ -1809,8 +1808,8 @@ export interface SubworkflowOptions {
 }
 
 export interface SubworkflowHandle {
-  workflowId: UUID;
-  manifestId: UUID;
+  workflowId: ID;
+  manifestId: ID;
   wait(): Promise<SubworkflowResult>;
   cancel(reason: string): Promise<void>;
 }
@@ -1922,10 +1921,10 @@ export interface NodeExecutor<
 
 /** Context for compensation (single-node cleanup on failure) */
 export interface CompensationContext<TOutput = Record<string, unknown>> {
-  workflowId: UUID;
+  workflowId: ID;
   nodeId: string;
   output: TOutput;
-  manifestId: UUID;
+  manifestId: ID;
   log(level: LogLevel, message: string, data?: Record<string, unknown>): void;
 }
 
@@ -1951,22 +1950,22 @@ export interface WorkflowEngine {
   submit(request: WorkflowSubmission): Promise<WorkflowSubmissionResult>;
 
   /** Get workflow by ID */
-  get(workflowId: UUID): Promise<Workflow | null>;
+  get(workflowId: ID): Promise<Workflow | null>;
 
   /** Get workflow progress for UI */
-  getProgress(workflowId: UUID): Promise<WorkflowProgress | null>;
+  getProgress(workflowId: ID): Promise<WorkflowProgress | null>;
 
   /** Cancel a running workflow */
-  cancel(workflowId: UUID, reason: string): Promise<void>;
+  cancel(workflowId: ID, reason: string): Promise<void>;
 
   /** Pause a running workflow */
-  pause(workflowId: UUID): Promise<void>;
+  pause(workflowId: ID): Promise<void>;
 
   /** Resume a paused workflow */
-  resume(workflowId: UUID): Promise<void>;
+  resume(workflowId: ID): Promise<void>;
 
   /** Retry a failed workflow from failure point */
-  retry(workflowId: UUID): Promise<void>;
+  retry(workflowId: ID): Promise<void>;
 
   /** Register node executor */
   registerExecutor(nodeType: string, executor: NodeExecutor): void;
@@ -1976,7 +1975,7 @@ export interface WorkflowEngine {
 
   /** Subscribe to workflow events */
   subscribe(
-    workflowId: UUID,
+    workflowId: ID,
     callback: (event: WorkflowEvent) => void
   ): () => void;
 }
@@ -1991,11 +1990,11 @@ shared/src/api/workflows.ts instead.
 ```typescript
 // control/src/intent/launch-run.types.ts
 
-import type { UUID, ProviderName, DurationMs, Checksum, TimestampMs } from '@skyrepl/shared';
+import type { ID, ProviderName, DurationMs, Checksum, TimestampMs } from '@skyrepl/shared';
 
 /** Input for launch-run intent (internal to control plane) */
 export interface LaunchRunInput {
-  runId: UUID;
+  runId: ID;
   command: string;
   workdir: string;
   spec: string;
@@ -2019,11 +2018,11 @@ export interface FileManifestEntry {
 
 /** Output from launch-run intent */
 export interface LaunchRunOutput {
-  runId: UUID;
-  instanceId: UUID;
-  allocationId: UUID;
+  runId: ID;
+  instanceId: ID;
+  allocationId: ID;
   exitCode: number;
-  snapshotId: UUID | null;
+  snapshotId: ID | null;
   spotInterrupted: boolean;
 }
 
@@ -2031,14 +2030,14 @@ export interface LaunchRunOutput {
 
 /** Input for terminate intent */
 export interface TerminateInstanceInput {
-  instanceId: UUID;
+  instanceId: ID;
   force: boolean;
   sshDrainTimeoutMs: DurationMs;
 }
 
 /** Output from terminate intent */
 export interface TerminateInstanceOutput {
-  instanceId: UUID;
+  instanceId: ID;
   terminatedAt: TimestampMs;
   forcedSshDisconnects: number;
   tailscaleDeregistered: boolean;
@@ -2048,15 +2047,15 @@ export interface TerminateInstanceOutput {
 
 /** Input for snapshot intent */
 export interface CreateSnapshotInput {
-  instanceId: UUID;
-  runId: UUID | null;
+  instanceId: ID;
+  runId: ID | null;
   name: string;
   initChecksum: Checksum;
 }
 
 /** Output from snapshot intent */
 export interface CreateSnapshotOutput {
-  snapshotId: UUID;
+  snapshotId: ID;
   providerSnapshotId: string;
   sizeBytes: number;
 }
@@ -2065,7 +2064,7 @@ export interface CreateSnapshotOutput {
 
 /** Input for cleanup intent */
 export interface CleanupManifestInput {
-  manifestId: UUID;
+  manifestId: ID;
 }
 
 /** Output from cleanup intent */
@@ -2078,7 +2077,7 @@ export interface CleanupManifestOutput {
 
 export interface CleanupError {
   resourceType: string;
-  resourceId: UUID;
+  resourceId: ID;
   error: string;
   action: 'skipped' | 'retried' | 'failed';
 }
@@ -2093,7 +2092,7 @@ export interface CleanupError {
 
 LAYER 1: PRIMITIVES (types.ts)
 +-----------------------------------------------------------------------------+
-|  ID/UUID    TimestampMs    DurationMs    Checksum    ProviderName           |
+|  ID    TimestampMs    DurationMs    Checksum    ProviderName                |
 |  FeatureProviderName                                                        |
 +-----------------------------------------------------------------------------+
                                     |
@@ -2172,7 +2171,7 @@ OWNERSHIP RELATIONSHIPS
 1. Define the materialized type in `types.ts`:
    ```typescript
    export interface NewResource {
-     id: UUID;
+     id: ID;
      // ... fields
    }
    ```
@@ -2180,7 +2179,7 @@ OWNERSHIP RELATIONSHIPS
 2. Define the record type in `db.types.ts`:
    ```typescript
    export interface NewResourceRecord {
-     id: UUID;
+     id: ID;
      // ... snake_case fields
    }
    ```

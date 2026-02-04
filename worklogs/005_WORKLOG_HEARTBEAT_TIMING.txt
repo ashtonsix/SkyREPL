@@ -1,0 +1,429 @@
+================================================================================
+WORKLOG: Heartbeat Timing & Graceful Panic (T5)
+================================================================================
+Status: SPEC + L1/L2 COMPLETE (pending L3/L4)
+Started: 2026-02-04
+L1/L2 Complete: 2026-02-05
+
+================================================================================
+USER DIRECTIVES
+================================================================================
+
+Original T5 requirement (from TODO.txt):
+
+  Heartbeat Timeout: increasing to 15 minutes significantly lowers the "false
+  positive" termination rate, with the accepted compromise of an increased
+  "cost leak" window if an instance genuinely hangs. Given SkyREPL's core
+  insight is lifecycle chaos, 15 minutes is a safe "researcher-friendly"
+  default. Agent should commit to self-termination at minute 15, and actually
+  terminate at minute ~16-20, using the same checkpoint path as spot
+  interruption to handle (harden for resilience if control plane unavailable:
+  second presigned S3 URL the agent can try if first fails, when control plane
+  comes back online manifest created before workflow started will show where to
+  find artifact [just update to include second failover location],
+  reconcillation should be able to infer instance terminated and that a
+  checkpoint was uploaded immediately before. this means users who configure
+  checkpoints properly and launch multi-hour/day jobs that interrupt due to
+  agent panic don't lose work done up until point of panic). Timing constraints
+  need to be updated: normatively, control plane shouldn't terminate instance
+  that fails heartbeat until unreachable for "agent commits to self termination
+  after X duration without heartbeat ack" + "expected time for agent to
+  checkpoint" + margin; advisory: 15 minutes self-termination, 25 minutes
+  control plane forces termination.
+
+Additional requirement (2026-02-04):
+
+  Early Warning System: DEGRADED_CONTROL status update at 2 minutes to provide
+  UX visibility before the 15-minute cut.
+
+================================================================================
+TIMING MODEL
+================================================================================
+
+Timeline (agent perspective):
+```
+t=0        Last successful heartbeat ack
+t=2m       DEGRADED_CONTROL status (early warning, UX visibility)
+t=15m      Agent commits to self-termination, starts checkpoint
+t=16-20m   Agent checkpoint complete, self-terminates
+t=25m      Control plane forces termination (if agent failed to self-term)
+```
+
+Timing constants (timing.ts.l2.txt updates):
+```typescript
+HEARTBEAT_INTERVAL_MS: 10_000          // 10s (unchanged)
+HEARTBEAT_DEGRADED_MS: 120_000         // 2m  (NEW - early warning threshold)
+HEARTBEAT_ACK_TIMEOUT_MS: 900_000      // 15m (was 30s - agent self-term trigger)
+STALE_DETECTION_MS: 1_500_000          // 25m (was 30s - control plane force-term)
+```
+
+Constraint (normative):
+  HEARTBEAT_INTERVAL_MS < HEARTBEAT_DEGRADED_MS < HEARTBEAT_ACK_TIMEOUT_MS
+    < STALE_DETECTION_MS
+
+Rationale for 25m control plane timeout:
+  15m (agent self-term) + 5m (checkpoint budget) + 5m (margin) = 25m
+
+================================================================================
+EARLY WARNING DISCOVERY (Explore Results)
+================================================================================
+
+Five parallel explore agents examined the codebase for early warning patterns.
+
+### Key Finding: No Intermediate Warning States Exist
+
+Current system is BINARY:
+- Healthy: last_heartbeat < 30s ago
+- Failed: last_heartbeat >= 30s → immediate `suspect:heartbeat_timeout`
+
+No gradual degradation. No user-visible warning before failure.
+
+### Existing Patterns to Leverage
+
+1. **workflow_state format**: `<workflow>:<phase>` (e.g., `spawn:pending`)
+   - DEGRADED_CONTROL fits as: `degraded:control_plane_unreachable`
+   - Agent already reports workflow_state in HeartbeatMessage
+
+2. **CLI preflight warnings** (v2/cli/src/preflight.ts.l1.txt):
+   - Existing tiers: info / warning / critical
+   - Types: orphans, budget, credentials, stale_allocations, provider_issues
+   - DEGRADED instances could appear here
+
+3. **HeartbeatMessage fields** (v2/shared/src/api/agent.ts.l1.txt:70-77):
+   - workflow_state: string (can carry degraded status)
+   - dropped_logs_count: number (existing degradation signal)
+   - Could add: `control_plane_status?: 'connected' | 'degraded' | 'unreachable'`
+
+4. **Status icons** (v2/cli/src/ui/formatters.ts.l1.txt):
+   - ⏳ pending, ⏵ running, ✓ done, ✗ failed
+   - Could add: ⚠️ degraded
+
+### Agent-Side Detection
+
+Current (v2/agent/heartbeat.py.l1.txt):
+- Tracks time since last ack
+- At 30s: initiate shutdown
+- No intermediate reporting
+
+Proposed:
+```python
+time_since_ack = now - last_ack_time
+if time_since_ack > HEARTBEAT_DEGRADED_MS:  # 2m
+    workflow_state = 'degraded:control_plane_unreachable'
+    # Continue heartbeating, but report degraded status
+elif time_since_ack > HEARTBEAT_ACK_TIMEOUT_MS:  # 15m
+    initiate_panic_checkpoint()
+```
+
+### Control Plane Visibility
+
+Option A: Agent reports degraded status in HeartbeatMessage
+  - Control plane stores in instance.workflow_state
+  - CLI queries and displays
+  - Pro: Simple, uses existing infrastructure
+  - Con: Only visible when heartbeat succeeds (ironic)
+
+Option B: Control plane derives degraded from last_heartbeat
+  - No agent change needed
+  - Reconciliation marks degraded at 2m before suspect at 25m
+  - CLI queries last_heartbeat and derives status
+  - Pro: Works even if heartbeats failing
+  - Con: Requires reconciliation change + CLI derivation logic
+
+Option C: Hybrid (RECOMMENDED)
+  - Agent reports degraded status when it detects 2m gap
+  - Control plane ALSO derives degraded from last_heartbeat for display
+  - Double confirmation: agent knows it's degraded, control plane can verify
+
+### CLI Integration Points
+
+1. `repl status` / `repl list` - Show degraded instances with ⚠️ icon
+2. `repl run` preflight - Warn if target instance is degraded
+3. Real-time progress - Show degraded status during workflow execution
+4. SSH connect - Notice if instance control plane connection is degraded
+
+### Files to Modify for Early Warning
+
+Agent:
+  v2/agent/heartbeat.py.l1.txt    Add 2m degraded detection
+  v2/agent/heartbeat.py.l2.txt    Full implementation
+
+Shared:
+  v2/shared/src/api/agent.ts.l1.txt    Add control_plane_status field (optional)
+  v2/shared/src/config/timing.ts.l2.txt    Add HEARTBEAT_DEGRADED_MS
+
+Control:
+  v2/control/src/background/reconciliation.ts    Derive degraded status
+  v2/control/src/api/agent/agent.ts.l1.txt       Store degraded status
+
+CLI:
+  v2/cli/src/ui/formatters.ts.l1.txt    Add ⚠️ degraded icon
+  v2/cli/src/preflight.ts.l1.txt        Add degraded_instance warning type
+
+================================================================================
+SPIKE RESULTS (from TODO Triage worklog)
+================================================================================
+
+Four additional explore agents examined checkpoint/timing. Key findings:
+
+### 1. Timing Files Mapped
+
+16+ files need updates for 15m agent / 25m control plane timeout:
+
+Primary:
+  v2/shared/src/config/timing.ts.l2.txt:35-37
+    - HEARTBEAT_ACK_TIMEOUT_MS: 30_000 → 900_000
+    - STALE_DETECTION_MS: 30_000 → 1_500_000
+    - Add: HEARTBEAT_DEGRADED_MS: 120_000
+
+Spec (example values, non-normative):
+  spec/15_OPERATIONS.txt:249-254, 291-300  Heartbeat chain constraint, defaults
+  spec/09_API.txt:1589-1625                Heartbeat endpoint
+  spec/11_AGENT.txt:380-386                Self-termination backup safety
+
+Agent:
+  v2/agent/heartbeat.py.l1.txt:15-20       30s → 15m self-term trigger
+  v2/agent/spot.py.l1.txt:13-37            Checkpoint timing (reuse path)
+  v2/agent/checkpoint.py.l1.txt:9-12       Add failover URL support
+
+Control:
+  v2/control/src/background/reconciliation.ts.l1.txt:16-19  25m stale detection
+
+### 2. Checkpoint Failover Design
+
+Current state:
+  - Single presigned URL per blob (4h TTL from timing.ts)
+  - Generated at workflow start via StartRunMessage
+
+Required:
+  - Dual URLs (primary + failover) for checkpoint blobs
+  - Agent tries primary, falls back to failover if primary fails
+  - Both URLs point to same logical blob (same S3 key, different presign)
+
+Options explored:
+  A) Include failover URLs in StartRunMessage ← RECOMMENDED
+     - Cleanest: URLs generated at workflow start alongside primary
+     - No schema changes needed
+     - 4h TTL sufficient for 25m window
+  B) Store in manifest metadata
+     - More complex, requires manifest update
+  C) Pre-generate at instance launch
+     - Wasteful if checkpoint never needed
+
+Decision: Option A (StartRunMessage)
+
+### 3. Panic Checkpoint Path Reuse
+
+Current spot flow:
+  Detect interrupt → Log start msg → Checkpoint (90s) → Upload → Log complete
+
+Heartbeat panic flow (NEW):
+  Same flow with SKYREPL_CHECKPOINT_REASON=heartbeat_timeout
+
+Shared logic extraction:
+```python
+def execute_checkpoint(reason: str, timeout_ms: int) -> bool:
+    """Run user checkpoint script with timeout."""
+    # Set SKYREPL_CHECKPOINT_REASON env var
+    # Execute checkpoint script
+    # Return success/failure
+
+def upload_artifacts(urls: ArtifactUrls, priority_order: List[str]) -> int:
+    """Upload artifacts in priority order within remaining time budget."""
+    # Shared between spot and panic paths
+```
+
+New messages:
+  HeartbeatPanicStartMessage   - Agent logs panic start
+  HeartbeatPanicCompleteMessage - Agent logs panic complete with checkpoint status
+
+### 4. Reconciliation Changes
+
+Current (30s):
+  - Instance stale after 30s without heartbeat
+  - Immediate FAILED transition
+
+Required (25m):
+  - Instance stale after 25m without heartbeat
+  - Before forcing termination, check for checkpoint upload
+  - Detection: Query objects table for checkpoint created after last heartbeat
+
+Logic:
+```
+if checkpoint.created_at > allocation.last_heartbeat_at:
+    # Agent checkpointed before dying - graceful termination
+    transition to COMPLETE
+else:
+    # No checkpoint - crash, data potentially lost
+    transition to FAILED
+```
+
+### 5. Confidence Assessment
+
+| Component              | Confidence | Notes                              |
+|------------------------|------------|------------------------------------|
+| Timing constant change | HIGH       | Mechanical update, well-mapped     |
+| Checkpoint path reuse  | HIGH       | Clear pattern from spot.py         |
+| Failover URL (Option A)| HIGH       | Clean design, no schema changes    |
+| DEGRADED_CONTROL       | HIGH       | Simple status addition             |
+| Reconciliation detect  | MEDIUM     | New logic, needs careful testing   |
+
+================================================================================
+SCOPE
+================================================================================
+
+### In Scope
+
+1. Timing constant updates (timing.ts, spec chapters)
+2. Agent DEGRADED_CONTROL status at 2m
+3. Agent self-termination at 15m with checkpoint
+4. Failover URL generation in StartRunMessage
+5. Checkpoint path reuse (spot + panic)
+6. Reconciliation checkpoint detection before force-term
+7. L1 + L2 file updates (lockstep)
+
+### Out of Scope
+
+- Spot interrupt prioritization algorithm (L2.6, separate worklog)
+- Schema additions (checkpoint_uploaded_at column) - defer unless needed
+
+================================================================================
+IMPLEMENTATION PLAN
+================================================================================
+
+Phase 1: Timing & Early Warning (Foundation)
+  1.1 Update timing.ts.l2.txt with new constants (including HEARTBEAT_DEGRADED_MS)
+  1.2 Update heartbeat.py.l1.txt with 2m degraded detection + 15m panic trigger
+  1.3 Create heartbeat.py.l2.txt with full logic
+  1.4 Add workflow_state 'degraded:control_plane_unreachable' handling
+  1.5 Update CLI formatters with ⚠️ degraded icon
+  1.6 Update spec chapters (non-normative examples)
+
+Phase 2: Checkpoint Reuse (Agent)
+  2.1 Extract shared checkpoint logic in spot.py
+  2.2 Add panic checkpoint path to heartbeat.py
+  2.3 Create checkpoint.py.l2.txt with failover support
+  2.4 Add HeartbeatPanicStart/Complete messages
+
+Phase 3: Failover URLs (Control)
+  3.1 Update StartRunMessage to include failover URLs
+  3.2 Update workflow start to generate dual presigned URLs
+  3.3 Update agent to use failover on primary failure
+
+Phase 4: Reconciliation (Control)
+  4.1 Update reconciliation.ts with 25m timeout
+  4.2 Add checkpoint detection before force-term
+  4.3 Update reconciliation.ts.l2.txt
+
+Phase 5: Verification
+  5.1 Trace full panic flow end-to-end
+  5.2 Verify timing constraints hold
+  5.3 Update worklog with completion
+
+================================================================================
+FILES TO MODIFY
+================================================================================
+
+Spec (non-normative examples):
+  spec/05_ALLOCATIONS.txt         ACTIVE→FAILED trigger timing
+  spec/09_API.txt                 Heartbeat endpoint response
+  spec/11_AGENT.txt               Self-termination, panic diagnostics
+  spec/15_OPERATIONS.txt          Heartbeat chain constraint, defaults table
+
+Shared:
+  v2/shared/src/config/timing.ts.l2.txt    New constants
+  v2/shared/src/api/agent.ts.l1.txt        DEGRADED_CONTROL status, messages
+
+Agent:
+  v2/agent/heartbeat.py.l1.txt    Degraded detection, 15m self-term
+  v2/agent/heartbeat.py.l2.txt    (CREATE) Full implementation
+  v2/agent/spot.py.l1.txt         Extract shared checkpoint logic
+  v2/agent/spot.py.l2.txt         (CREATE) With shared extraction
+  v2/agent/checkpoint.py.l1.txt   Failover URL support
+  v2/agent/checkpoint.py.l2.txt   (CREATE) Full implementation
+
+Control:
+  v2/control/src/background/reconciliation.ts.l1.txt  25m timeout, degraded derivation
+  v2/control/src/background/reconciliation.ts.l2.txt  Checkpoint detection
+  v2/control/src/workflow/nodes/start-run.ts.l1.txt   Failover URLs
+  v2/control/src/api/agent/sse-protocol.ts.l1.txt     StartRunMessage update
+  v2/control/src/api/agent/agent.ts.l1.txt            Store degraded status
+
+CLI:
+  v2/cli/src/ui/formatters.ts.l1.txt    Add ⚠️ degraded icon
+  v2/cli/src/preflight.ts.l1.txt        Add degraded_instance warning type
+  v2/cli/src/commands/list.ts.l1.txt    Display degraded status
+  v2/cli/src/commands/status.ts.l1.txt  Display degraded status (if exists)
+
+================================================================================
+LOG
+================================================================================
+
+### 2026-02-04 - Worklog Created
+- Extracted T5 requirements and spike results from TODO Triage worklog
+- Added DEGRADED_CONTROL early warning requirement
+- Defined timing model with 2m/15m/25m thresholds
+- Scoped implementation into 5 phases
+- Confidence: HIGH overall (MEDIUM on reconciliation detection)
+
+### 2026-02-04 - Early Warning Discovery
+- Dispatched 5 parallel explore agents for early warning patterns
+- Key finding: NO intermediate warning states exist (binary healthy/failed)
+- Identified existing patterns to leverage:
+  - workflow_state format: `degraded:control_plane_unreachable`
+  - CLI preflight warning tiers (info/warning/critical)
+  - HeartbeatMessage.workflow_state field
+  - Status icons (can add ⚠️ for degraded)
+- Recommended Option C (Hybrid): Agent reports + control plane derives
+- Updated Phase 1 to include early warning implementation
+- Added CLI integration points to scope
+
+### 2026-02-05 - Implementation Complete (Spec + L1/L2)
+- Updated timing.ts.l2.txt:
+  - Added HEARTBEAT_DEGRADED_MS (2m) early warning constant
+  - Changed HEARTBEAT_ACK_TIMEOUT_MS: 30s → 15m (agent self-term)
+  - Changed STALE_DETECTION_MS: 30s → 25m (control plane force-term)
+  - Added PANIC_CHECKPOINT_BUDGET_MS (5m) for heartbeat panic
+  - Updated constraint validation: interval < degraded < ack_timeout < stale_detection
+  - Added isHeartbeatDegraded() helper
+
+- Updated agent.ts.l1.txt:
+  - Added HeartbeatPanicStartMessage and HeartbeatPanicCompleteMessage
+  - Added failover_url field to files array in StartRunMessage
+
+- Updated heartbeat.py L1/L2:
+  - L1: Added 2m degraded detection, 15m panic trigger, timeline
+  - L2: Created full implementation with panic checkpoint path
+
+- Updated checkpoint.py L1/L2:
+  - L1: Added heartbeat_timeout reason, failover URL support
+  - L2: Created shared execute_checkpoint() with dual URL support
+
+- Updated spot.py L1/L2:
+  - L1: Updated to reference shared checkpoint logic
+  - L2: Created with comparison table (spot vs panic)
+
+- Updated reconciliation.ts L1/L2:
+  - L1: Added degraded detection at 2m, checkpoint awareness at 25m
+  - L2: Added detectDegradedHeartbeats(), checkGracefulPanic(), updated heartbeat timeout logic
+
+- Updated CLI files:
+  - formatters.ts.l1.txt: Added ⚠️ degraded icon
+  - preflight.ts.l1.txt: Added degraded_instance warning type
+
+- Updated spec chapters (non-normative examples):
+  - 15_OPERATIONS.txt: Updated defaults table (2m/15m/25m), background tasks
+  - 11_AGENT.txt: Updated timing constants table, lifecycle diagram, added
+    "Degraded State and Graceful Panic" section with full timeline
+  - 09_API.txt: Updated heartbeat notes, added §9.5.6-9.5.9 for spot interrupt
+    and heartbeat panic endpoints (POST /v1/agent/spot-interrupt-start, etc.)
+  - 05_ALLOCATIONS.txt: Updated timing examples (30s→10s interval, added chain)
+  - 06_WORKFLOWS.txt: Updated heartbeat timeout example (30s→25m)
+
+================================================================================
+CROSS-REFERENCES
+================================================================================
+
+Prior spike: WORKLOG_TODO_TRIAGE.txt (Phase 1 Research, T5 Spike sections)
+Timing consolidation: worklogs/003_WORKLOG_TIMINGS.txt (Wl3)
+Spot checkpoint: v2/agent/spot.py.l1.txt

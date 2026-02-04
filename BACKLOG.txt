@@ -1,0 +1,28 @@
+================================================================================
+TODO: Active Backlog
+================================================================================
+Last updated: 2026-02-05
+
+================================================================================
+VERIFICATION ONLY (No design work needed)
+================================================================================
+
+L2.2: In-flight blob deduplication
+  Status: DESIGN ALREADY EXISTS - verification only
+  Finding: Spec explicitly uses eventual consistency (no UNIQUE constraint)
+  Evidence: spec/02_MATERIAL.txt:611,630,639 - "NOT unique", index for perf only
+  Pattern: Both uploads succeed → GC merges within 24h (garbage-collection.ts.l2.txt)
+  Action: Verify storage.ts.l2.txt documents this as intentional
+
+================================================================================
+DEFERRED (Low urgency / edge cases)
+================================================================================
+
+T2: Tailscale JIT installation timing
+  Rationale: Optimization for cold time-to-connect, not correctness
+  When: Install between jobs (not during job, not on cold start)
+  Exception: Interactive mode (Jupyter) → install on start
+
+L2.7: Materialization depth (shallow vs deep)
+  Rationale: API design, can defer until N+1 becomes a problem
+  Deliverable: `include` param, batch loading, default shallow

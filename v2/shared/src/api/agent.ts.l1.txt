@@ -9,12 +9,13 @@
 - allocation_id: number
 - command: string
 - workdir: string
-- files: Array<{ path: string, checksum: string, url: string }>
+- files: Array<{ path: string, checksum: string, url: string, failover_url?: string }>
   - path: Relative path in workdir (e.g., "train.py", "data/config.yaml")
   - checksum: SHA256 checksum for verification (e.g., "sha256:abc123...")
   - url: Presigned S3 URL or control plane URL for download
     - S3 for files >64KB: presigned GET URL
     - Control plane for files ≤64KB: GET /v1/blobs/:checksum
+  - failover_url?: Secondary presigned URL for resilience (S3 only, same blob, different presign)
 - artifacts: string[]  # Glob patterns to collect (e.g., ["**/*.pt", "checkpoints/**"])
 - run_init?: boolean   # Run init script before command
 - init_script?: string # Init script content (if run_init=true)
@@ -41,6 +42,7 @@
 
 ### HeartbeatAckMessage
 - type: 'heartbeat_ack'
+- control_plane_id: string  # Unique control plane identifier (agent validates consistency)
 
 ### PrepareSnapshotAckMessage
 - type: 'prepare_snapshot_ack'
@@ -86,6 +88,17 @@
 - run_id: number
 - checkpoint_exit_code?: number  # Exit code of checkpoint script (0=success, non-zero=failure, undefined=not run)
 - artifacts_uploaded: number  # Count of artifacts successfully uploaded during interrupt window
+
+### HeartbeatPanicStartMessage (Phase 1)
+- type: 'heartbeat_panic_start'
+- run_id: number
+- time_since_ack_ms: number  # Time since last successful heartbeat ack (should be ~15m)
+
+### HeartbeatPanicCompleteMessage (Phase 2)
+- type: 'heartbeat_panic_complete'
+- run_id: number
+- checkpoint_exit_code?: number  # Exit code of checkpoint script (0=success, non-zero=failure, undefined=not run)
+- artifacts_uploaded: number  # Count of artifacts successfully uploaded during panic window
 
 ### PanicRequest
 - type: 'panic'

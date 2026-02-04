@@ -1,0 +1,1001 @@
+# db.ts - Database Layer (L2 Pseudocode)
+
+# Note: Timing imports from ../../../../shared/src/config/timing.ts.l2.txt
+# - calculateBackoff(attempt) for jittered exponential backoff
+
+## Imports
+
+```typescript
+import Database from 'better-sqlite3';
+import { calculateBackoff } from '../../../../shared/src/config/timing';
+import {
+  DATABASE_CONNECTION_ERROR,
+  CONSTRAINT_VIOLATION,
+  MIGRATION_ERROR,
+  TRANSACTION_ERROR
+} from '../errors';
+```
+
+## Types
+
+```typescript
+interface Instance {
+  id: number;
+  manifest_id: number;
+  provider: string;
+  provider_id: string;
+  instance_type: string;
+  region: string;
+  workflow_state: string;
+  last_heartbeat: number;
+  created_at: number;
+  updated_at: number;
+}
+
+interface Run {
+  id: number;
+  manifest_id: number;
+  command: string;
+  exit_code: number | null;
+  workflow_state: string;
+  created_at: number;
+  updated_at: number;
+}
+
+interface Allocation {
+  id: number;
+  instance_id: number;
+  run_id: number | null;
+  status: 'AVAILABLE' | 'CLAIMED' | 'ACTIVE' | 'COMPLETE' | 'FAILED';
+  workdir: string;
+  completed_at: number | null;
+  debug_hold_until: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+interface Manifest {
+  id: number;
+  status: 'DRAFT' | 'SEALED';
+  expires_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+interface ManifestResource {
+  id: number;
+  manifest_id: number;
+  resource_type: string;
+  resource_id: number;
+  owner_type: string | null;
+  owner_id: number | null;
+  cleanup_priority: number;
+  cleanup_processed_at: number | null;
+  created_at: number;
+}
+
+interface Blob {
+  id: number;
+  bucket: string;
+  checksum: string | null;
+  s3_key: string | null;
+  s3_bucket: string | null;
+  size_bytes: number;
+  last_referenced_at: number;
+  created_at: number;
+}
+
+interface Object {
+  id: number;
+  blob_id: number;
+  object_type: 'artifact' | 'snapshot' | 'log' | 'run_file';
+  name: string;
+  expires_at: number | null;
+  created_at: number;
+}
+
+interface Workflow {
+  id: number;
+  manifest_id: number;
+  type: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'rolling_back';
+  input: Record<string, unknown>;
+  output: Record<string, unknown> | null;
+  error: string | null;
+  started_at: number | null;
+  finished_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+interface WorkflowNode {
+  id: number;
+  workflow_id: number;
+  name: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+  input: Record<string, unknown>;
+  output: Record<string, unknown> | null;
+  error: string | null;
+  attempt: number;
+  started_at: number | null;
+  finished_at: number | null;
+}
+```
+
+## Connection Management
+
+```typescript
+let connection: Database | null = null;
+
+export function initDatabase(path: string): Database {
+  connection = new Database(path);
+
+  // Enable WAL mode for better concurrency
+  connection.pragma('journal_mode = WAL');
+
+  // Enable foreign keys
+  connection.pragma('foreign_keys = ON');
+
+  // Busy timeout (milliseconds) - SQLite waits this long when table is locked
+  connection.pragma('busy_timeout = 5000');
+
+  return connection;
+}
+
+export function getDatabase(): Database {
+  if (!connection) {
+    throw DATABASE_CONNECTION_ERROR('Database not initialized');
+  }
+  if (!connection.open) {
+    throw DATABASE_CONNECTION_ERROR('Database connection closed');
+  }
+  return connection;
+}
+
+export function closeDatabase(): void {
+  if (connection) {
+    connection.close();
+    connection = null;
+  }
+}
+```
+
+## Migrations
+
+```typescript
+interface Migration {
+  version: number;
+  sql: string;
+}
+
+const MIGRATIONS: Migration[] = [
+  // Loaded from migrations/*.sql files
+];
+
+export function getMigrationVersion(): number {
+  const db = getDatabase();
+  const result = db.prepare('SELECT version FROM schema_version').get() as { version: number } | undefined;
+  return result?.version ?? 0;
+}
+
+function getLatestMigrationVersion(): number {
+  return MIGRATIONS.length;
+}
+
+export function runMigrations(): void {
+  const db = getDatabase();
+  const current = getMigrationVersion();
+  const target = getLatestMigrationVersion();
+
+  if (current > target) {
+    throw MIGRATION_ERROR(`Database version ${current} is newer than code version ${target}`);
+  }
+
+  for (const migration of MIGRATIONS.slice(current)) {
+    try {
+      db.transaction(() => {
+        db.exec(migration.sql);
+        db.prepare('UPDATE schema_version SET version = ?').run(migration.version);
+      })();
+    } catch (e) {
+      throw MIGRATION_ERROR(`Migration ${migration.version} failed: ${(e as Error).message}`);
+    }
+  }
+}
+```
+
+## Query Helpers
+
+```typescript
+export function queryOne<T>(sql: string, params: unknown[] = []): T | null {
+  const db = getDatabase();
+  const stmt = db.prepare(sql);
+  const row = stmt.get(...params) as T | undefined;
+  return row ?? null;
+}
+
+export function queryMany<T>(sql: string, params: unknown[] = []): T[] {
+  const db = getDatabase();
+  const stmt = db.prepare(sql);
+  return stmt.all(...params) as T[];
+}
+
+export function execute(sql: string, params: unknown[] = []): void {
+  const db = getDatabase();
+  const stmt = db.prepare(sql);
+  stmt.run(...params);
+}
+
+/**
+ * Execute function within a transaction with SQLITE_BUSY retry.
+ * Uses calculateBackoff() for jittered exponential backoff to prevent thundering herd.
+ */
+export function transaction<T>(fn: () => T, retries = 3): T {
+  const db = getDatabase();
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return db.transaction(fn)();
+    } catch (e) {
+      const error = e as { code?: string; message: string };
+
+      if (error.code === 'SQLITE_BUSY' && attempt < retries) {
+        // Jittered exponential backoff: base * 2^attempt with ±10% jitter
+        // Prevents thundering herd when multiple transactions retry simultaneously
+        const delay = calculateBackoff(attempt);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+        continue;
+      }
+
+      throw TRANSACTION_ERROR(error.message);
+    }
+  }
+
+  // Unreachable, but TypeScript needs this
+  throw TRANSACTION_ERROR('Transaction retry exhausted');
+}
+```
+
+## Instance Operations
+
+```typescript
+export function getInstance(id: number): Instance | null {
+  return queryOne<Instance>(
+    'SELECT * FROM instances WHERE id = ?',
+    [id]
+  );
+}
+
+export function getInstanceByProviderId(provider: string, providerId: string): Instance | null {
+  return queryOne<Instance>(
+    'SELECT * FROM instances WHERE provider = ? AND provider_id = ?',
+    [provider, providerId]
+  );
+}
+
+export function createInstance(data: Omit<Instance, 'id' | 'created_at' | 'updated_at'>): Instance {
+  const now = Date.now();
+  const db = getDatabase();
+
+  const stmt = db.prepare(`
+    INSERT INTO instances (manifest_id, provider, provider_id, instance_type, region, workflow_state, last_heartbeat, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const result = stmt.run(
+    data.manifest_id,
+    data.provider,
+    data.provider_id,
+    data.instance_type,
+    data.region,
+    data.workflow_state,
+    data.last_heartbeat,
+    now,
+    now
+  );
+
+  return getInstance(result.lastInsertRowid as number)!;
+}
+
+export function updateInstance(id: number, updates: Partial<Instance>): Instance {
+  const db = getDatabase();
+  const now = Date.now();
+
+  const fields = Object.keys(updates).filter(k => k !== 'id');
+  const setClause = fields.map(f => `${f} = ?`).join(', ');
+  const values = fields.map(f => updates[f as keyof Instance]);
+
+  db.prepare(`UPDATE instances SET ${setClause}, updated_at = ? WHERE id = ?`)
+    .run(...values, now, id);
+
+  return getInstance(id)!;
+}
+
+export function listInstances(filter?: { provider?: string; workflow_state?: string }): Instance[] {
+  let sql = 'SELECT * FROM instances WHERE 1=1';
+  const params: unknown[] = [];
+
+  if (filter?.provider) {
+    sql += ' AND provider = ?';
+    params.push(filter.provider);
+  }
+  if (filter?.workflow_state) {
+    sql += ' AND workflow_state = ?';
+    params.push(filter.workflow_state);
+  }
+
+  return queryMany<Instance>(sql, params);
+}
+```
+
+## Allocation Operations
+
+```typescript
+export function getAllocation(id: number): Allocation | null {
+  return queryOne<Allocation>('SELECT * FROM allocations WHERE id = ?', [id]);
+}
+
+export function createAllocation(data: Omit<Allocation, 'id' | 'created_at' | 'updated_at'>): Allocation {
+  const now = Date.now();
+  const db = getDatabase();
+
+  try {
+    const stmt = db.prepare(`
+      INSERT INTO allocations (instance_id, run_id, status, workdir, completed_at, debug_hold_until, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const result = stmt.run(
+      data.instance_id,
+      data.run_id,
+      data.status,
+      data.workdir,
+      data.completed_at,
+      data.debug_hold_until,
+      now,
+      now
+    );
+
+    return getAllocation(result.lastInsertRowid as number)!;
+  } catch (e) {
+    const error = e as { code?: string };
+    if (error.code === 'SQLITE_CONSTRAINT_FOREIGNKEY') {
+      throw CONSTRAINT_VIOLATION('Instance not found');
+    }
+    throw e;
+  }
+}
+
+export function updateAllocationStatus(id: number, status: Allocation['status']): Allocation {
+  const db = getDatabase();
+  const now = Date.now();
+
+  db.prepare('UPDATE allocations SET status = ?, updated_at = ? WHERE id = ?')
+    .run(status, now, id);
+
+  return getAllocation(id)!;
+}
+
+/**
+ * Atomic claim with compare-and-swap (CAS) for race protection.
+ *
+ * CONCURRENCY: Uses two-phase CAS pattern:
+ * 1. SELECT to verify state and capture updated_at
+ * 2. UPDATE with WHERE updated_at = original to detect concurrent modification
+ *
+ * Returns null if claim fails (not found, wrong state, or race lost).
+ */
+export function claimAllocation(id: number, runId: number): Allocation | null {
+  const db = getDatabase();
+
+  return db.transaction(() => {
+    // Phase 1: Read current state
+    const allocation = queryOne<Allocation>(
+      'SELECT * FROM allocations WHERE id = ? AND status = ? AND run_id IS NULL',
+      [id, 'AVAILABLE']
+    );
+
+    if (!allocation) {
+      // Not found, wrong status, or already claimed
+      return null;
+    }
+
+    // Phase 2: CAS update with updated_at guard
+    const now = Date.now();
+    const result = db.prepare(`
+      UPDATE allocations
+      SET run_id = ?, status = 'CLAIMED', updated_at = ?
+      WHERE id = ? AND updated_at = ?
+    `).run(runId, now, id, allocation.updated_at);
+
+    if (result.changes === 0) {
+      // Race lost - another transaction modified the row
+      return null;
+    }
+
+    return getAllocation(id);
+  })();
+}
+
+export function findAvailableAllocation(spec: { instance_type: string; region?: string }): Allocation | null {
+  let sql = `
+    SELECT a.* FROM allocations a
+    JOIN instances i ON a.instance_id = i.id
+    WHERE a.status = 'AVAILABLE' AND a.run_id IS NULL
+      AND i.instance_type = ?
+  `;
+  const params: unknown[] = [spec.instance_type];
+
+  if (spec.region) {
+    sql += ' AND i.region = ?';
+    params.push(spec.region);
+  }
+
+  sql += ' LIMIT 1';
+
+  return queryOne<Allocation>(sql, params);
+}
+```
+
+## Run Operations
+
+```typescript
+export function getRun(id: number): Run | null {
+  return queryOne<Run>('SELECT * FROM runs WHERE id = ?', [id]);
+}
+
+export function createRun(data: Omit<Run, 'id' | 'created_at' | 'updated_at'>): Run {
+  const now = Date.now();
+  const db = getDatabase();
+
+  const stmt = db.prepare(`
+    INSERT INTO runs (manifest_id, command, exit_code, workflow_state, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+
+  const result = stmt.run(
+    data.manifest_id,
+    data.command,
+    data.exit_code,
+    data.workflow_state,
+    now,
+    now
+  );
+
+  return getRun(result.lastInsertRowid as number)!;
+}
+
+export function updateRun(id: number, updates: Partial<Run>): Run {
+  const db = getDatabase();
+  const now = Date.now();
+
+  const fields = Object.keys(updates).filter(k => k !== 'id');
+  const setClause = fields.map(f => `${f} = ?`).join(', ');
+  const values = fields.map(f => updates[f as keyof Run]);
+
+  db.prepare(`UPDATE runs SET ${setClause}, updated_at = ? WHERE id = ?`)
+    .run(...values, now, id);
+
+  return getRun(id)!;
+}
+
+export function listRuns(filter?: { manifest_id?: number; workflow_state?: string }): Run[] {
+  let sql = 'SELECT * FROM runs WHERE 1=1';
+  const params: unknown[] = [];
+
+  if (filter?.manifest_id) {
+    sql += ' AND manifest_id = ?';
+    params.push(filter.manifest_id);
+  }
+  if (filter?.workflow_state) {
+    sql += ' AND workflow_state = ?';
+    params.push(filter.workflow_state);
+  }
+
+  return queryMany<Run>(sql, params);
+}
+```
+
+## Manifest Operations
+
+```typescript
+export function getManifest(id: number): Manifest | null {
+  return queryOne<Manifest>('SELECT * FROM manifests WHERE id = ?', [id]);
+}
+
+export function createManifest(type: string): Manifest {
+  const now = Date.now();
+  const db = getDatabase();
+
+  const stmt = db.prepare(`
+    INSERT INTO manifests (status, expires_at, created_at, updated_at)
+    VALUES ('DRAFT', NULL, ?, ?)
+  `);
+
+  const result = stmt.run(now, now);
+  return getManifest(result.lastInsertRowid as number)!;
+}
+
+export function sealManifest(id: number): void {
+  const db = getDatabase();
+  const now = Date.now();
+
+  const result = db.prepare(`
+    UPDATE manifests SET status = 'SEALED', updated_at = ?
+    WHERE id = ? AND status = 'DRAFT'
+  `).run(now, id);
+
+  if (result.changes === 0) {
+    const manifest = getManifest(id);
+    if (!manifest) {
+      throw CONSTRAINT_VIOLATION('Manifest not found');
+    }
+    if (manifest.status === 'SEALED') {
+      throw CONSTRAINT_VIOLATION('Manifest already sealed');
+    }
+  }
+}
+
+interface AddResourceOptions {
+  ownerType?: 'workflow' | 'user' | 'system';
+  ownerId?: number;
+  cleanupPriority?: number;
+  allowRecovery?: boolean;
+}
+
+export function addResourceToManifest(
+  manifestId: number,
+  resourceType: string,
+  resourceId: number,
+  options: AddResourceOptions = {}
+): void {
+  const db = getDatabase();
+  const now = Date.now();
+
+  const manifest = getManifest(manifestId);
+  if (!manifest) {
+    throw CONSTRAINT_VIOLATION('Manifest not found');
+  }
+
+  // Enforce immutability: SEALED manifests reject additions
+  // Exception: A13 recovery path can update provider_id for orphan matching
+  if (manifest.status !== 'DRAFT' && !options.allowRecovery) {
+    throw CONSTRAINT_VIOLATION('Cannot add resources to sealed manifest');
+  }
+
+  db.prepare(`
+    INSERT INTO manifest_resources (manifest_id, resource_type, resource_id, owner_type, owner_id, cleanup_priority, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    manifestId,
+    resourceType,
+    resourceId,
+    options.ownerType ?? null,
+    options.ownerId ?? null,
+    options.cleanupPriority ?? 50,
+    now
+  );
+}
+
+export function getManifestResources(manifestId: number): ManifestResource[] {
+  return queryMany<ManifestResource>(
+    'SELECT * FROM manifest_resources WHERE manifest_id = ? ORDER BY cleanup_priority DESC',
+    [manifestId]
+  );
+}
+
+export function deleteManifest(id: number): void {
+  const db = getDatabase();
+
+  db.transaction(() => {
+    // Cascade delete manifest_resources
+    db.prepare('DELETE FROM manifest_resources WHERE manifest_id = ?').run(id);
+    db.prepare('DELETE FROM manifests WHERE id = ?').run(id);
+  })();
+}
+
+export function listExpiredManifests(cutoffTime: number): Manifest[] {
+  return queryMany<Manifest>(
+    'SELECT * FROM manifests WHERE status = ? AND expires_at < ?',
+    ['SEALED', cutoffTime]
+  );
+}
+```
+
+## Workflow Operations
+
+```typescript
+export function getWorkflow(id: number): Workflow | null {
+  return queryOne<Workflow>('SELECT * FROM workflows WHERE id = ?', [id]);
+}
+
+export function createWorkflow(data: Omit<Workflow, 'id' | 'created_at' | 'updated_at'>): Workflow {
+  const now = Date.now();
+  const db = getDatabase();
+
+  const stmt = db.prepare(`
+    INSERT INTO workflows (manifest_id, type, status, input, output, error, started_at, finished_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const result = stmt.run(
+    data.manifest_id,
+    data.type,
+    data.status,
+    JSON.stringify(data.input),
+    data.output ? JSON.stringify(data.output) : null,
+    data.error,
+    data.started_at,
+    data.finished_at,
+    now,
+    now
+  );
+
+  return getWorkflow(result.lastInsertRowid as number)!;
+}
+
+export function updateWorkflow(id: number, updates: Partial<Workflow>): Workflow {
+  const db = getDatabase();
+  const now = Date.now();
+
+  const fields = Object.keys(updates).filter(k => k !== 'id');
+  const values = fields.map(f => {
+    const val = updates[f as keyof Workflow];
+    if (f === 'input' || f === 'output') {
+      return val ? JSON.stringify(val) : null;
+    }
+    return val;
+  });
+  const setClause = fields.map(f => `${f} = ?`).join(', ');
+
+  db.prepare(`UPDATE workflows SET ${setClause}, updated_at = ? WHERE id = ?`)
+    .run(...values, now, id);
+
+  return getWorkflow(id)!;
+}
+
+export function getWorkflowNodes(workflowId: number): WorkflowNode[] {
+  return queryMany<WorkflowNode>(
+    'SELECT * FROM workflow_nodes WHERE workflow_id = ?',
+    [workflowId]
+  );
+}
+
+export function createWorkflowNode(data: Omit<WorkflowNode, 'id'>): WorkflowNode {
+  const db = getDatabase();
+
+  const stmt = db.prepare(`
+    INSERT INTO workflow_nodes (workflow_id, name, status, input, output, error, attempt, started_at, finished_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const result = stmt.run(
+    data.workflow_id,
+    data.name,
+    data.status,
+    JSON.stringify(data.input),
+    data.output ? JSON.stringify(data.output) : null,
+    data.error,
+    data.attempt,
+    data.started_at,
+    data.finished_at
+  );
+
+  return queryOne<WorkflowNode>('SELECT * FROM workflow_nodes WHERE id = ?', [result.lastInsertRowid])!;
+}
+
+export function updateWorkflowNode(id: number, updates: Partial<WorkflowNode>): WorkflowNode {
+  const db = getDatabase();
+
+  const fields = Object.keys(updates).filter(k => k !== 'id');
+  const values = fields.map(f => {
+    const val = updates[f as keyof WorkflowNode];
+    if (f === 'input' || f === 'output') {
+      return val ? JSON.stringify(val) : null;
+    }
+    return val;
+  });
+  const setClause = fields.map(f => `${f} = ?`).join(', ');
+
+  db.prepare(`UPDATE workflow_nodes SET ${setClause} WHERE id = ?`)
+    .run(...values, id);
+
+  return queryOne<WorkflowNode>('SELECT * FROM workflow_nodes WHERE id = ?', [id])!;
+}
+```
+
+## Blob Operations
+
+```typescript
+export function getBlob(id: number): Blob | null {
+  return queryOne<Blob>('SELECT * FROM blobs WHERE id = ?', [id]);
+}
+
+/**
+ * Create blob with optional CAS deduplication.
+ *
+ * Dedup is opt-in per bucket:
+ * - Dedupable: 'run-files', 'artifacts' - check checksum first
+ * - Non-dedupable: 'logs' - always create new
+ */
+export function createBlob(data: Omit<Blob, 'id' | 'created_at'>): Blob {
+  const now = Date.now();
+  const db = getDatabase();
+
+  const DEDUPABLE_BUCKETS = ['run-files', 'artifacts'];
+
+  // For dedupable buckets, check if blob exists
+  if (DEDUPABLE_BUCKETS.includes(data.bucket) && data.checksum) {
+    const existing = findBlobByChecksum(data.bucket, data.checksum);
+    if (existing) {
+      // Update last_referenced_at and return existing
+      updateBlobLastReferenced(existing.id);
+      return existing;
+    }
+  }
+
+  const stmt = db.prepare(`
+    INSERT INTO blobs (bucket, checksum, s3_key, s3_bucket, size_bytes, last_referenced_at, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const result = stmt.run(
+    data.bucket,
+    data.checksum,
+    data.s3_key,
+    data.s3_bucket,
+    data.size_bytes,
+    data.last_referenced_at,
+    now
+  );
+
+  return getBlob(result.lastInsertRowid as number)!;
+}
+
+export function findBlobByChecksum(bucket: string, checksum: string): Blob | null {
+  return queryOne<Blob>(
+    'SELECT * FROM blobs WHERE bucket = ? AND checksum = ? LIMIT 1',
+    [bucket, checksum]
+  );
+}
+
+export function updateBlobLastReferenced(id: number): void {
+  const db = getDatabase();
+  const now = Date.now();
+
+  db.prepare('UPDATE blobs SET last_referenced_at = ? WHERE id = ?')
+    .run(now, id);
+}
+```
+
+## Object Operations
+
+```typescript
+export function getObject(id: number): Object | null {
+  return queryOne<Object>('SELECT * FROM objects WHERE id = ?', [id]);
+}
+
+export function createObject(data: Omit<Object, 'id' | 'created_at'>): Object {
+  const now = Date.now();
+  const db = getDatabase();
+
+  const stmt = db.prepare(`
+    INSERT INTO objects (blob_id, object_type, name, expires_at, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+
+  const result = stmt.run(
+    data.blob_id,
+    data.object_type,
+    data.name,
+    data.expires_at,
+    now
+  );
+
+  // Touch blob last_referenced_at
+  updateBlobLastReferenced(data.blob_id);
+
+  return getObject(result.lastInsertRowid as number)!;
+}
+
+export function addObjectTag(objectId: number, key: string, value: string): void {
+  const db = getDatabase();
+
+  db.prepare(`
+    INSERT INTO object_tags (object_id, key, value)
+    VALUES (?, ?, ?)
+    ON CONFLICT (object_id, key) DO UPDATE SET value = excluded.value
+  `).run(objectId, key, value);
+}
+
+export function findObjectByTag(key: string, value: string): Object | null {
+  return queryOne<Object>(`
+    SELECT o.* FROM objects o
+    JOIN object_tags t ON o.id = t.object_id
+    WHERE t.key = ? AND t.value = ?
+  `, [key, value]);
+}
+```
+
+## Warm Pool Operations
+
+```typescript
+export function findWarmAllocation(
+  spec: { instance_type: string; region?: string },
+  initChecksum?: string
+): Allocation | null {
+  let sql = `
+    SELECT a.* FROM allocations a
+    JOIN instances i ON a.instance_id = i.id
+    WHERE a.status = 'AVAILABLE' AND a.run_id IS NULL
+      AND i.instance_type = ?
+      AND i.workflow_state LIKE '%:complete'
+  `;
+  const params: unknown[] = [spec.instance_type];
+
+  if (spec.region) {
+    sql += ' AND i.region = ?';
+    params.push(spec.region);
+  }
+
+  if (initChecksum) {
+    sql += ' AND a.init_checksum = ?';
+    params.push(initChecksum);
+  }
+
+  sql += ' ORDER BY a.created_at ASC LIMIT 1';
+
+  return queryOne<Allocation>(sql, params);
+}
+
+export function getWarmPoolStats(): { available: number; bySpec: Record<string, number> } {
+  const db = getDatabase();
+
+  const total = queryOne<{ count: number }>(
+    "SELECT COUNT(*) as count FROM allocations WHERE status = 'AVAILABLE'"
+  );
+
+  const bySpec = queryMany<{ spec: string; count: number }>(`
+    SELECT i.instance_type || ':' || i.region as spec, COUNT(*) as count
+    FROM allocations a
+    JOIN instances i ON a.instance_id = i.id
+    WHERE a.status = 'AVAILABLE'
+    GROUP BY spec
+  `);
+
+  return {
+    available: total?.count ?? 0,
+    bySpec: Object.fromEntries(bySpec.map(r => [r.spec, r.count]))
+  };
+}
+```
+
+## Orphan Operations
+
+```typescript
+export function getTrackedInstanceIds(): Set<number> {
+  const rows = queryMany<{ id: number }>('SELECT id FROM instances');
+  return new Set(rows.map(r => r.id));
+}
+
+export function getActiveManifestIds(): Set<number> {
+  const now = Date.now();
+  const rows = queryMany<{ id: number }>(`
+    SELECT id FROM manifests
+    WHERE status = 'DRAFT' OR (status = 'SEALED' AND expires_at > ?)
+  `, [now]);
+  return new Set(rows.map(r => r.id));
+}
+
+interface OrphanScanResult {
+  provider: string;
+  scanned_at: number;
+  orphans_found: number;
+  orphan_ids: string[];
+}
+
+export function recordOrphanScan(result: OrphanScanResult): void {
+  const db = getDatabase();
+
+  db.prepare(`
+    INSERT INTO orphan_scans (provider, scanned_at, orphans_found, orphan_ids)
+    VALUES (?, ?, ?, ?)
+  `).run(
+    result.provider,
+    result.scanned_at,
+    result.orphans_found,
+    JSON.stringify(result.orphan_ids)
+  );
+}
+
+export function addToWhitelist(providerId: string, reason: string): void {
+  const db = getDatabase();
+  const now = Date.now();
+
+  db.prepare(`
+    INSERT INTO orphan_whitelist (provider_id, reason, created_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT (provider_id) DO UPDATE SET reason = excluded.reason
+  `).run(providerId, reason, now);
+}
+
+export function isWhitelisted(providerId: string): boolean {
+  const result = queryOne<{ provider_id: string }>(
+    'SELECT provider_id FROM orphan_whitelist WHERE provider_id = ?',
+    [providerId]
+  );
+  return result !== null;
+}
+```
+
+## Delete Operations
+
+```typescript
+export function deleteInstance(id: number): void {
+  const db = getDatabase();
+
+  // Check no active allocations
+  const active = queryOne<{ id: number }>(`
+    SELECT id FROM allocations
+    WHERE instance_id = ? AND status NOT IN ('COMPLETE', 'FAILED')
+  `, [id]);
+
+  if (active) {
+    throw CONSTRAINT_VIOLATION('Cannot delete instance with active allocations');
+  }
+
+  db.prepare('DELETE FROM instances WHERE id = ?').run(id);
+}
+
+export function deleteRun(id: number): void {
+  const db = getDatabase();
+
+  const run = getRun(id);
+  if (run && !['completed', 'failed'].includes(run.workflow_state.split(':')[1] ?? '')) {
+    throw CONSTRAINT_VIOLATION('Cannot delete active run');
+  }
+
+  db.prepare('DELETE FROM runs WHERE id = ?').run(id);
+}
+
+export function deleteAllocation(id: number): void {
+  const db = getDatabase();
+
+  const allocation = getAllocation(id);
+  if (allocation && !['COMPLETE', 'FAILED'].includes(allocation.status)) {
+    throw CONSTRAINT_VIOLATION('Cannot delete active allocation');
+  }
+
+  db.prepare('DELETE FROM allocations WHERE id = ?').run(id);
+}
+
+export function deleteObject(id: number): void {
+  const db = getDatabase();
+  db.prepare('DELETE FROM objects WHERE id = ?').run(id);
+}
+
+export function deleteBlob(id: number): void {
+  // Used by GC only - checks no objects reference this blob
+  const db = getDatabase();
+
+  const refs = queryOne<{ count: number }>(
+    'SELECT COUNT(*) as count FROM objects WHERE blob_id = ?',
+    [id]
+  );
+
+  if (refs && refs.count > 0) {
+    throw CONSTRAINT_VIOLATION('Cannot delete blob with referencing objects');
+  }
+
+  db.prepare('DELETE FROM blobs WHERE id = ?').run(id);
+}
+
+export function deleteWorkflow(id: number): void {
+  const db = getDatabase();
+
+  db.transaction(() => {
+    db.prepare('DELETE FROM workflow_nodes WHERE workflow_id = ?').run(id);
+    db.prepare('DELETE FROM workflows WHERE id = ?').run(id);
+  })();
+}
+```

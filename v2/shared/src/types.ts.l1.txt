@@ -6,7 +6,6 @@
 ## PRIMITIVES
 
 - ID = number (INTEGER AUTOINCREMENT from database)
-- UUID = ID (deprecated alias for migration compatibility)
 - TimestampMs = number (Unix timestamp in milliseconds)
 - DurationMs = number (duration in milliseconds)
 - Checksum = string (SHA256 hash as hex string)
@@ -121,7 +120,7 @@ OrbStack ubuntu-22.04-4cpu-8gb:
 ## MATERIALIZED RESOURCES (Domain Objects)
 
 ### Instance
-- id: UUID
+- id: ID
 - provider: ProviderName
 - providerId: string (provider's instance ID like i-xxx)
 - spec: string (instance type like g5.xlarge)
@@ -131,11 +130,11 @@ OrbStack ubuntu-22.04-4cpu-8gb:
 - workflowError: string | null (JSON-serialized WorkflowError)
 - isSpot, spotRequestId, initChecksum, spawnIdempotencyKey
 - createdAt, lastHeartbeat: TimestampMs
-- currentManifestId: UUID | null
+- currentManifestId: ID | null
 - Optional (depth-based): features?, tailscaleMachine?, externalStatus?, externalIp?
 
 ### Run
-- id: UUID
+- id: ID
 - command: string
 - workdir: string
 - maxDurationMs: DurationMs
@@ -148,16 +147,16 @@ OrbStack ubuntu-22.04-4cpu-8gb:
 - createdAt: TimestampMs
 - startedAt: TimestampMs | null
 - finishedAt: TimestampMs | null
-- currentManifestId: UUID | null
+- currentManifestId: ID | null
 - files?: RunFile[] (populated based on depth)
 - logs?: RunLogEntry[] (populated based on depth)
 - artifacts?: Artifact[] (populated based on depth)
 - allocation?: Allocation (populated based on depth)
 
 ### Allocation
-- id: UUID
-- runId: UUID | null (null for AVAILABLE state)
-- instanceId: UUID
+- id: ID
+- runId: ID | null (null for AVAILABLE state)
+- instanceId: ID
 - user: string (Unix username, platform-dependent)
 - workdir: string
 - status: AllocationStatus
@@ -165,7 +164,7 @@ OrbStack ubuntu-22.04-4cpu-8gb:
 - createdAt: TimestampMs
 - updatedAt: TimestampMs
 - completedAt: TimestampMs | null
-- currentManifestId: UUID | null
+- currentManifestId: ID | null
 - instance?: Instance (populated based on depth)
 - run?: Run (populated based on depth)
 
@@ -176,16 +175,16 @@ NOTE: debugHoldUntil applies only to COMPLETE allocations:
 - SSH activity does NOT auto-extend (debugging tool, not indefinite hold)
 
 ### Workflow
-- id: UUID
+- id: ID
 - type: string (launch-run, terminate-instance, etc.)
-- parentWorkflowId: UUID | null
+- parentWorkflowId: ID | null
 - depth: number (max 3 for subworkflows)
 - status: WorkflowExecutionStatus
 - currentNode: string | null
 - input: Record<string, unknown> (parsed from JSON)
 - output: Record<string, unknown> | null
 - error: WorkflowError | null
-- manifestId: UUID | null
+- manifestId: ID | null
 - traceId: string | null (OpenTelemetry trace ID)
 - idempotencyKey: string | null
 - createdAt: TimestampMs
@@ -195,8 +194,8 @@ NOTE: debugHoldUntil applies only to COMPLETE allocations:
 - manifest?: Manifest (populated based on depth)
 
 ### Manifest
-- id: UUID
-- workflowId: UUID
+- id: ID
+- workflowId: ID
 - status: ManifestStatus
 - defaultCleanupPriority: number (0-100)
 - retentionMs: DurationMs | null
@@ -208,7 +207,7 @@ NOTE: debugHoldUntil applies only to COMPLETE allocations:
 ## SIMPLE RESOURCES (Object-backed)
 
 ### Snapshot
-- id: UUID
+- id: ID
 - provider: ProviderName
 - providerId: string (provider's snapshot ID)
 - spec: string
@@ -220,16 +219,16 @@ NOTE: debugHoldUntil applies only to COMPLETE allocations:
 - externalExists?: boolean (from provider API)
 
 ### Artifact
-- id: UUID
-- runId: UUID
+- id: ID
+- runId: ID
 - path: string (relative path in workdir)
 - sizeBytes: number
 - keep: boolean (exempt from auto-cleanup)
 - createdAt: TimestampMs
 
 ### FeatureInstallation
-- id: UUID
-- instanceId: UUID
+- id: ID
+- instanceId: ID
 - featureName: string (jupyter, code-server, etc.)
 - version: string
 - status: 'installing' | 'ready' | 'failed'
@@ -238,8 +237,8 @@ NOTE: debugHoldUntil applies only to COMPLETE allocations:
 - installedAt: TimestampMs
 
 ### TailscaleMachine
-- id: UUID
-- instanceId: UUID
+- id: ID
+- instanceId: ID
 - tailscaleIp: string
 - hostname: string
 - authKeyUsed: boolean
@@ -258,10 +257,10 @@ NOTE: debugHoldUntil applies only to COMPLETE allocations:
 - timestamp: TimestampMs
 
 ### UsageRecord
-- id: UUID
-- instanceId: UUID
-- allocationId: UUID | null
-- runId: UUID | null
+- id: ID
+- instanceId: ID
+- allocationId: ID | null
+- runId: ID | null
 - provider: ProviderName
 - spec: string
 - region: string | null
@@ -272,8 +271,8 @@ NOTE: debugHoldUntil applies only to COMPLETE allocations:
 - estimatedCostUsd: number | null
 
 ### WorkflowNode
-- id: UUID
-- workflowId: UUID
+- id: ID
+- workflowId: ID
 - nodeId: string (workflow-scoped identifier)
 - nodeType: string (handler type)
 - status: NodeStatus
@@ -287,9 +286,9 @@ NOTE: debugHoldUntil applies only to COMPLETE allocations:
 - finishedAt: TimestampMs | null
 
 ### ManifestResource
-- manifestId: UUID
+- manifestId: ID
 - resourceType: 'instance' | 'run' | 'allocation' | 'object'
-- resourceId: UUID
+- resourceId: ID
 - cleanupPriority: number | null (override manifest default)
 - addedAt: TimestampMs
 - ownerType: 'manifest' | 'workflow' | 'policy'  # Who added this resource

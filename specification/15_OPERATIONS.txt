@@ -293,11 +293,14 @@ format; internally converted to milliseconds.
 | Parameter | Env Var | Suggested | Notes |
 |-----------|---------|-----------|-------|
 | Heartbeat interval | REPL_HEARTBEAT_INTERVAL | 10s | Agent → control frequency |
-| Ack timeout | REPL_HEARTBEAT_ACK_TIMEOUT | 30s | Agent shuts down if no ack |
-| Stale detection | REPL_STALE_DETECTION | 30s | Control marks allocation failed |
+| Degraded threshold | REPL_HEARTBEAT_DEGRADED_MS | 2m | Early warning for connection issues |
+| Ack timeout | REPL_HEARTBEAT_ACK_TIMEOUT | 15m | Agent shuts down if no ack |
+| Stale detection | REPL_STALE_DETECTION | 25m | Control marks allocation failed |
 
-Trade-off: Lower values = faster failure detection, more network overhead. For
-high-latency networks, consider 20s/60s/60s.
+Trade-off: Lower values = faster failure detection, more network overhead. Longer
+values (shown above) provide researcher-friendly tolerance for network hiccups and
+brief control plane interruptions. For development or aggressive failure detection,
+consider tighter values like 10s/30s/30s/60s.
 
 **Hold Duration:**
 
@@ -316,7 +319,7 @@ Trade-off: Longer holds = more debugging time, higher cost risk.
 
 | Parameter | Env Var | Suggested | Notes |
 |-----------|---------|-----------|-------|
-| Heartbeat check | REPL_HEARTBEAT_CHECK_INTERVAL | 30s | Detect stale heartbeats |
+| Heartbeat check | REPL_HEARTBEAT_CHECK_INTERVAL | 60s | Detect stale heartbeats |
 | Hold expiry check | REPL_HOLD_EXPIRY_CHECK_INTERVAL | 60s | Release expired holds |
 | Reconciliation | REPL_RECONCILIATION_INTERVAL | 60s | Provider state sync |
 | Manifest cleanup | REPL_MANIFEST_CLEANUP_INTERVAL | 5m | Must be > reconciliation |
@@ -453,12 +456,12 @@ REPL_MANIFEST_CLEANUP_INTERVAL=10m
 ```
 
 **High-latency networks:**
-Account for network delays:
+Account for network delays (or use even longer values from suggested defaults):
 
 ```bash
 REPL_HEARTBEAT_INTERVAL=20s
-REPL_HEARTBEAT_ACK_TIMEOUT=60s
-REPL_STALE_DETECTION=60s
+REPL_HEARTBEAT_ACK_TIMEOUT=20m
+REPL_STALE_DETECTION=30m
 REPL_CLI_API_TIMEOUT=60s
 ```
 

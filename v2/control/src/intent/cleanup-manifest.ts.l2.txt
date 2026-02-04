@@ -1,0 +1,652 @@
+# cleanup-manifest.ts - Cleanup Manifest Intent (L2 Pseudocode)
+
+## Imports
+
+```typescript
+import { TIMING } from '../../../../shared/src/config/timing';
+import { queryMany, queryOne, transaction, getDatabase } from '../material/db';
+import {
+  TransitionResult,
+  transitionSuccess,
+  transitionFailure,
+  Allocation,
+  atomicTransition
+} from '../workflow/state-transitions';
+import { WorkflowDefinition, WorkflowContext } from '../workflow/engine.types';
+import { logger } from '../logger';
+```
+
+## Types
+
+```typescript
+export interface CleanupManifestInput {
+  manifestId: number;
+  force?: boolean;  // Skip expiry check (default: false)
+  idempotencyKey?: string;
+}
+
+export interface CleanupManifestOutput {
+  workflowId: number;
+  manifestId: number;
+  resourcesCleaned: number;
+  errors: Array<{ resourceType: string; resourceId: number; error: string }>;
+  completedAt: number;
+}
+
+interface ManifestResource {
+  id: number;
+  manifest_id: number;
+  resource_type: string;
+  resource_id: number;
+  owner_type: string | null;
+  owner_id: number | null;
+  cleanup_priority: number;
+  cleanup_processed_at: number | null;
+}
+
+interface Manifest {
+  id: number;
+  status: 'DRAFT' | 'SEALED';
+  expires_at: number | null;
+}
+```
+
+## Entry Point
+
+```typescript
+export async function cleanupManifest(input: CleanupManifestInput): Promise<Workflow> {
+  // Create and submit workflow
+  return submitWorkflow('cleanup-manifest', input, {
+    idempotencyKey: input.idempotencyKey
+  });
+}
+```
+
+## Workflow Definition
+
+```typescript
+export const cleanupManifestWorkflow: WorkflowDefinition = {
+  name: 'cleanup-manifest',
+  nodes: [
+    { name: 'validate-manifest', handler: validateManifest },
+    { name: 'load-resources', handler: loadResources, dependencies: ['validate-manifest'] },
+    { name: 'cleanup-allocations', handler: cleanupAllocations, dependencies: ['load-resources'] },
+    { name: 'cleanup-runs', handler: cleanupRuns, dependencies: ['cleanup-allocations'] },
+    { name: 'cleanup-artifacts', handler: cleanupArtifacts, dependencies: ['cleanup-runs'] },
+    { name: 'cleanup-features', handler: cleanupFeatures, dependencies: ['cleanup-artifacts'] },
+    { name: 'cleanup-objects', handler: cleanupObjects, dependencies: ['cleanup-features'] },
+    { name: 'cleanup-instances', handler: cleanupInstances, dependencies: ['cleanup-objects'] },
+    { name: 'cleanup-snapshots', handler: cleanupSnapshots, dependencies: ['cleanup-objects'] },
+    { name: 'delete-manifest', handler: deleteManifest, dependencies: ['cleanup-instances', 'cleanup-snapshots'] },
+    { name: 'finalize', handler: finalize, dependencies: ['delete-manifest'] },
+  ],
+  errorHandling: {
+    'allocations': 'skip_and_continue',
+    'runs': 'skip_and_continue',
+    'artifacts': 'skip_and_continue',
+    'features': 'skip_and_continue',
+    'objects': 'skip_and_continue',
+    'instances': 'retry_then_skip',
+    'snapshots': 'log_and_continue',
+    'manifest': 'fail_workflow',
+  }
+};
+```
+
+## Node Handlers
+
+### validate-manifest
+
+```typescript
+async function validateManifest(
+  ctx: WorkflowContext,
+  input: CleanupManifestInput
+): Promise<{ manifest: Manifest; canCleanup: boolean }> {
+  const manifest = queryOne<Manifest>(
+    'SELECT * FROM manifests WHERE id = ?',
+    [input.manifestId]
+  );
+
+  if (!manifest) {
+    throw new NotFoundError(`Manifest ${input.manifestId} not found`);
+  }
+
+  if (manifest.status !== 'SEALED') {
+    throw new ValidationError('Cannot cleanup DRAFT manifest');
+  }
+
+  const now = Date.now();
+  if (!input.force && manifest.expires_at && manifest.expires_at > now) {
+    throw new ValidationError('Manifest not expired yet (use force=true to override)');
+  }
+
+  return { manifest, canCleanup: true };
+}
+```
+
+### load-resources
+
+```typescript
+async function loadResources(
+  ctx: WorkflowContext,
+  _input: CleanupManifestInput,
+  deps: { 'validate-manifest': { manifest: Manifest } }
+): Promise<{ resourcesByPriority: Map<number, ManifestResource[]> }> {
+  const { manifest } = deps['validate-manifest'];
+
+  const resources = queryMany<ManifestResource>(
+    'SELECT * FROM manifest_resources WHERE manifest_id = ? ORDER BY cleanup_priority DESC',
+    [manifest.id]
+  );
+
+  // Group by priority
+  const resourcesByPriority = new Map<number, ManifestResource[]>();
+  for (const resource of resources) {
+    const list = resourcesByPriority.get(resource.cleanup_priority) || [];
+    list.push(resource);
+    resourcesByPriority.set(resource.cleanup_priority, list);
+  }
+
+  return { resourcesByPriority };
+}
+```
+
+### cleanup-allocations (Priority 90)
+
+```typescript
+/**
+ * Clean allocation records with atomic transitions.
+ *
+ * CRITICAL: Uses atomic UPDATE with IN clause for all valid source statuses.
+ * This prevents race conditions where allocation state changes between
+ * status check and transition.
+ *
+ * Pattern: UPDATE ... SET status='COMPLETE' WHERE id=? AND status IN (...)
+ * If 0 rows affected: allocation already COMPLETE or FAILED (idempotent)
+ */
+async function cleanupAllocations(
+  ctx: WorkflowContext,
+  input: CleanupManifestInput,
+  deps: { 'load-resources': { resourcesByPriority: Map<number, ManifestResource[]> } }
+): Promise<{ cleaned: number; errors: Array<{ resourceId: number; error: string }> }> {
+  const { resourcesByPriority } = deps['load-resources'];
+  const allocationResources = resourcesByPriority.get(90) || [];
+
+  let cleaned = 0;
+  const errors: Array<{ resourceId: number; error: string }> = [];
+
+  for (const resource of allocationResources) {
+    if (resource.resource_type !== 'allocation') continue;
+
+    try {
+      const result = await completeAllocationForCleanup(resource.resource_id);
+
+      if (result.success) {
+        cleaned++;
+        logger.info('allocation_cleaned', {
+          allocationId: resource.resource_id,
+          manifestId: input.manifestId
+        });
+      } else {
+        // NOT_FOUND or WRONG_STATE (already terminal) - skip silently
+        logger.debug('allocation_cleanup_skipped', {
+          allocationId: resource.resource_id,
+          reason: result.reason,
+          currentStatus: result.current?.status
+        });
+      }
+    } catch (error) {
+      errors.push({
+        resourceId: resource.resource_id,
+        error: (error as Error).message
+      });
+      logger.warn('allocation_cleanup_error', {
+        allocationId: resource.resource_id,
+        error: (error as Error).message
+      });
+      // Continue with other allocations (skip_and_continue policy)
+    }
+  }
+
+  return { cleaned, errors };
+}
+
+/**
+ * Complete allocation for cleanup using atomic transition.
+ *
+ * CRITICAL: Uses WHERE status IN (...) to accept any non-terminal state.
+ * This is safe for cleanup because we're moving to terminal COMPLETE state.
+ */
+async function completeAllocationForCleanup(
+  allocationId: number
+): Promise<TransitionResult<Allocation>> {
+  const db = getDatabase();
+
+  return transaction(() => {
+    // Phase 1: Read current state
+    const allocation = queryOne<Allocation>(
+      'SELECT * FROM allocations WHERE id = ?',
+      [allocationId]
+    );
+
+    if (!allocation) {
+      return transitionFailure<Allocation>('NOT_FOUND');
+    }
+
+    // Already in terminal state - idempotent success
+    if (allocation.status === 'COMPLETE' || allocation.status === 'FAILED') {
+      return transitionSuccess<Allocation>(allocation);
+    }
+
+    // Phase 2: Atomic UPDATE with IN clause for all non-terminal states
+    // This prevents race where allocation transitions between our SELECT and UPDATE
+    const now = Date.now();
+    const result = db.prepare(`
+      UPDATE allocations
+      SET status = 'COMPLETE', completed_at = ?, updated_at = ?
+      WHERE id = ? AND status IN ('AVAILABLE', 'CLAIMED', 'ACTIVE')
+    `).run(now, now, allocationId);
+
+    if (result.changes === 0) {
+      // Race lost - status changed to terminal state between SELECT and UPDATE
+      const latest = queryOne<Allocation>('SELECT * FROM allocations WHERE id = ?', [allocationId]);
+      if (latest && (latest.status === 'COMPLETE' || latest.status === 'FAILED')) {
+        // Terminal state is acceptable - idempotent
+        return transitionSuccess<Allocation>(latest);
+      }
+      return transitionFailure<Allocation>('RACE_LOST', latest ?? undefined);
+    }
+
+    const updated = queryOne<Allocation>('SELECT * FROM allocations WHERE id = ?', [allocationId]);
+    return transitionSuccess<Allocation>(updated!);
+  });
+}
+```
+
+### cleanup-runs (Priority 80)
+
+```typescript
+async function cleanupRuns(
+  ctx: WorkflowContext,
+  input: CleanupManifestInput,
+  deps: { 'load-resources': { resourcesByPriority: Map<number, ManifestResource[]> } }
+): Promise<{ cleaned: number; errors: Array<{ resourceId: number; error: string }> }> {
+  const { resourcesByPriority } = deps['load-resources'];
+  const runResources = resourcesByPriority.get(80) || [];
+
+  let cleaned = 0;
+  const errors: Array<{ resourceId: number; error: string }> = [];
+
+  for (const resource of runResources) {
+    if (resource.resource_type !== 'run') continue;
+
+    try {
+      const now = Date.now();
+      const result = getDatabase().prepare(`
+        UPDATE runs SET workflow_state = 'cleanup:complete', updated_at = ?
+        WHERE id = ? AND workflow_state != 'cleanup:complete'
+      `).run(now, resource.resource_id);
+
+      if (result.changes > 0) {
+        cleaned++;
+      }
+    } catch (error) {
+      errors.push({
+        resourceId: resource.resource_id,
+        error: (error as Error).message
+      });
+    }
+  }
+
+  return { cleaned, errors };
+}
+```
+
+### cleanup-artifacts (Priority 70)
+
+```typescript
+/**
+ * Clean artifact references with B21 double-processing protection.
+ *
+ * Uses cleanup_processed_at flag to prevent double-processing blob
+ * reference decrements during cleanup (crash recovery safe).
+ */
+async function cleanupArtifacts(
+  ctx: WorkflowContext,
+  input: CleanupManifestInput,
+  deps: { 'load-resources': { resourcesByPriority: Map<number, ManifestResource[]> } }
+): Promise<{ cleaned: number; errors: Array<{ resourceId: number; error: string }> }> {
+  const { resourcesByPriority } = deps['load-resources'];
+  const artifactResources = resourcesByPriority.get(70) || [];
+
+  let cleaned = 0;
+  const errors: Array<{ resourceId: number; error: string }> = [];
+
+  for (const resource of artifactResources) {
+    if (resource.resource_type !== 'artifact') continue;
+
+    try {
+      // B21: Check if already processed
+      const current = queryOne<{ cleanup_processed_at: number | null }>(
+        'SELECT cleanup_processed_at FROM manifest_resources WHERE id = ?',
+        [resource.id]
+      );
+
+      if (current?.cleanup_processed_at !== null) {
+        // Already processed - skip
+        continue;
+      }
+
+      // Process in transaction
+      transaction(() => {
+        const db = getDatabase();
+        const now = Date.now();
+
+        // Delete artifact object record
+        db.prepare('DELETE FROM objects WHERE id = ?').run(resource.resource_id);
+
+        // Mark as processed (B21)
+        db.prepare(`
+          UPDATE manifest_resources SET cleanup_processed_at = ?
+          WHERE id = ?
+        `).run(now, resource.id);
+      });
+
+      cleaned++;
+    } catch (error) {
+      errors.push({
+        resourceId: resource.resource_id,
+        error: (error as Error).message
+      });
+    }
+  }
+
+  return { cleaned, errors };
+}
+```
+
+### cleanup-features (Priority 65)
+
+```typescript
+async function cleanupFeatures(
+  ctx: WorkflowContext,
+  input: CleanupManifestInput,
+  deps: { 'load-resources': { resourcesByPriority: Map<number, ManifestResource[]> } }
+): Promise<{ cleaned: number; errors: Array<{ resourceId: number; error: string }> }> {
+  const { resourcesByPriority } = deps['load-resources'];
+  const featureResources = resourcesByPriority.get(65) || [];
+
+  let cleaned = 0;
+  const errors: Array<{ resourceId: number; error: string }> = [];
+
+  for (const resource of featureResources) {
+    if (resource.resource_type !== 'feature') continue;
+
+    try {
+      // Feature-specific cleanup (e.g., Tailscale detach)
+      // Implementation depends on feature type
+      await detachFeature(resource.resource_id);
+      cleaned++;
+    } catch (error) {
+      errors.push({
+        resourceId: resource.resource_id,
+        error: (error as Error).message
+      });
+      logger.warn('feature_detach_failed', {
+        featureId: resource.resource_id,
+        error: (error as Error).message,
+        recoveryNote: 'Will be detected by orphan scanner reconciliation'
+      });
+    }
+  }
+
+  return { cleaned, errors };
+}
+```
+
+### cleanup-objects (Priority 60)
+
+```typescript
+/**
+ * Clean generic objects with B21 double-processing protection.
+ */
+async function cleanupObjects(
+  ctx: WorkflowContext,
+  input: CleanupManifestInput,
+  deps: { 'load-resources': { resourcesByPriority: Map<number, ManifestResource[]> } }
+): Promise<{ cleaned: number; errors: Array<{ resourceId: number; error: string }> }> {
+  const { resourcesByPriority } = deps['load-resources'];
+  const objectResources = resourcesByPriority.get(60) || [];
+
+  let cleaned = 0;
+  const errors: Array<{ resourceId: number; error: string }> = [];
+
+  for (const resource of objectResources) {
+    if (!['log', 'run_file', 'snapshot'].includes(resource.resource_type)) continue;
+
+    try {
+      // B21: Check if already processed
+      const current = queryOne<{ cleanup_processed_at: number | null }>(
+        'SELECT cleanup_processed_at FROM manifest_resources WHERE id = ?',
+        [resource.id]
+      );
+
+      if (current?.cleanup_processed_at !== null) {
+        continue;
+      }
+
+      transaction(() => {
+        const db = getDatabase();
+        const now = Date.now();
+
+        db.prepare('DELETE FROM objects WHERE id = ?').run(resource.resource_id);
+        db.prepare(`
+          UPDATE manifest_resources SET cleanup_processed_at = ?
+          WHERE id = ?
+        `).run(now, resource.id);
+      });
+
+      cleaned++;
+    } catch (error) {
+      errors.push({
+        resourceId: resource.resource_id,
+        error: (error as Error).message
+      });
+    }
+  }
+
+  return { cleaned, errors };
+}
+```
+
+### cleanup-instances (Priority 50)
+
+```typescript
+async function cleanupInstances(
+  ctx: WorkflowContext,
+  input: CleanupManifestInput,
+  deps: { 'load-resources': { resourcesByPriority: Map<number, ManifestResource[]> } }
+): Promise<{ cleaned: number; errors: Array<{ resourceId: number; error: string }> }> {
+  const { resourcesByPriority } = deps['load-resources'];
+  const instanceResources = resourcesByPriority.get(50) || [];
+
+  let cleaned = 0;
+  const errors: Array<{ resourceId: number; error: string }> = [];
+
+  for (const resource of instanceResources) {
+    if (resource.resource_type !== 'instance') continue;
+
+    try {
+      const instance = queryOne<{ id: number; provider: string; provider_id: string; workflow_state: string }>(
+        'SELECT * FROM instances WHERE id = ?',
+        [resource.resource_id]
+      );
+
+      if (!instance) continue;
+
+      if (instance.workflow_state !== 'terminate:complete') {
+        const client = getProviderClient(instance.provider);
+        await client.terminate(instance.provider_id);
+
+        getDatabase().prepare(`
+          UPDATE instances SET workflow_state = 'terminate:complete', updated_at = ?
+          WHERE id = ?
+        `).run(Date.now(), instance.id);
+      }
+
+      cleaned++;
+    } catch (error) {
+      errors.push({
+        resourceId: resource.resource_id,
+        error: (error as Error).message
+      });
+      // retry_then_skip policy - log for retry
+      logger.error('instance_termination_failed', {
+        instanceId: resource.resource_id,
+        error: (error as Error).message
+      });
+    }
+  }
+
+  return { cleaned, errors };
+}
+```
+
+### cleanup-snapshots (Priority 10)
+
+```typescript
+async function cleanupSnapshots(
+  ctx: WorkflowContext,
+  input: CleanupManifestInput,
+  deps: { 'load-resources': { resourcesByPriority: Map<number, ManifestResource[]> } }
+): Promise<{ cleaned: number; errors: Array<{ resourceId: number; error: string }> }> {
+  const { resourcesByPriority } = deps['load-resources'];
+  const snapshotResources = resourcesByPriority.get(10) || [];
+
+  let cleaned = 0;
+  const errors: Array<{ resourceId: number; error: string }> = [];
+
+  for (const resource of snapshotResources) {
+    if (resource.resource_type !== 'snapshot') continue;
+
+    try {
+      // Get snapshot details
+      const snapshot = queryOne<{ provider_snapshot_id: string; provider: string }>(
+        'SELECT * FROM snapshots WHERE id = ?',
+        [resource.resource_id]
+      );
+
+      if (snapshot) {
+        const client = getProviderClient(snapshot.provider);
+        await client.deleteSnapshot(snapshot.provider_snapshot_id);
+      }
+
+      getDatabase().prepare('DELETE FROM objects WHERE id = ?').run(resource.resource_id);
+      cleaned++;
+    } catch (error) {
+      errors.push({
+        resourceId: resource.resource_id,
+        error: (error as Error).message
+      });
+    }
+  }
+
+  return { cleaned, errors };
+}
+```
+
+### delete-manifest
+
+```typescript
+async function deleteManifest(
+  ctx: WorkflowContext,
+  input: CleanupManifestInput
+): Promise<{ deleted: boolean }> {
+  const db = getDatabase();
+
+  transaction(() => {
+    // Cascade delete manifest_resources
+    db.prepare('DELETE FROM manifest_resources WHERE manifest_id = ?').run(input.manifestId);
+    db.prepare('DELETE FROM manifests WHERE id = ?').run(input.manifestId);
+  });
+
+  logger.info('manifest_deleted', { manifestId: input.manifestId });
+  return { deleted: true };
+}
+```
+
+### finalize
+
+```typescript
+async function finalize(
+  ctx: WorkflowContext,
+  input: CleanupManifestInput,
+  deps: Record<string, { cleaned?: number; errors?: Array<{ resourceId: number; error: string }> }>
+): Promise<CleanupManifestOutput> {
+  // Aggregate metrics from all cleanup nodes
+  let totalCleaned = 0;
+  const allErrors: Array<{ resourceType: string; resourceId: number; error: string }> = [];
+
+  for (const [nodeName, result] of Object.entries(deps)) {
+    if (result.cleaned) {
+      totalCleaned += result.cleaned;
+    }
+    if (result.errors) {
+      for (const error of result.errors) {
+        allErrors.push({
+          resourceType: nodeName.replace('cleanup-', ''),
+          ...error
+        });
+      }
+    }
+  }
+
+  logger.info('cleanup_manifest_complete', {
+    manifestId: input.manifestId,
+    resourcesCleaned: totalCleaned,
+    errorCount: allErrors.length
+  });
+
+  return {
+    workflowId: ctx.workflowId,
+    manifestId: input.manifestId,
+    resourcesCleaned: totalCleaned,
+    errors: allErrors,
+    completedAt: Date.now()
+  };
+}
+```
+
+## Compensation for Partial Cleanup
+
+```typescript
+/**
+ * Track cleanup progress for crash recovery.
+ *
+ * On restart, resume from last_completed_priority + 1,
+ * skipping resources at same priority with id <= last_completed_resource_id.
+ */
+interface ManifestCleanupState {
+  manifest_id: number;
+  last_completed_priority: number;
+  last_completed_resource_id: number;
+  started_at: number;
+  updated_at: number;
+}
+
+function updateCleanupProgress(
+  manifestId: number,
+  priority: number,
+  resourceId: number
+): void {
+  const now = Date.now();
+  getDatabase().prepare(`
+    INSERT INTO manifest_cleanup_state (manifest_id, last_completed_priority, last_completed_resource_id, started_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT (manifest_id) DO UPDATE SET
+      last_completed_priority = excluded.last_completed_priority,
+      last_completed_resource_id = excluded.last_completed_resource_id,
+      updated_at = excluded.updated_at
+  `).run(manifestId, priority, resourceId, now, now);
+}
+```

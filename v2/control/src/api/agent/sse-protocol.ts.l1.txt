@@ -24,7 +24,7 @@
 - CancelRunMessage: {type, run_id}
 - CaptureArtifactsMessage: {type, run_id}
 - TriggerTailscaleMessage: {type}
-- HeartbeatAckMessage: {type}
+- HeartbeatAckMessage: {type, control_plane_id}
 
 ## Agent Responses (HTTP POST, not SSE)
 - POST /v1/agent/logs: {run_id, allocation_id, stream, data, phase?, sync_success?}

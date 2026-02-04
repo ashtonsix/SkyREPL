@@ -19,7 +19,7 @@ Demonstrates 80% homogeneous path with minimal provider-specific code.
 - Build Lambda Labs API request
 - instance_type_name: from options.spec
 - region_name: from options.region
-- name: repl-${controlId}-${manifestIdShort}-${instanceIdShort}
+- name: repl-${controlId}-${manifestSlug}-${instanceSlug}
 - ssh_key_names: configured SSH keys
 - Call POST /instance-operations/launch
 - Return LambdaInstance

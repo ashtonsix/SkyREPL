@@ -1646,6 +1646,7 @@ interface AgentHeartbeatRequest {
 ```json
 {
   "ack": true,
+  "control_plane_id": "cp-abc123def456",
   "server_time": 1706749200000,
   "commands_pending": true
 }
@@ -1654,9 +1655,13 @@ interface AgentHeartbeatRequest {
 **Notes:**
 - Heartbeat interval: configurable (e.g., 10 seconds)
 - First heartbeat sent immediately on agent startup (before first sleep)
-- Missing heartbeat ack triggers agent shutdown (timeout configurable, e.g., 30 seconds)
-- Constraint: heartbeat timeout > heartbeat interval (allow missed beats)
+- Agent state progression on missing acks:
+  - 2m: Enter DEGRADED state (workflow_state = 'degraded:control_plane_unreachable')
+  - 15m: Initiate panic checkpoint and shutdown (see §9.5.8-9.5.9)
+- Constraint: interval < degraded < ack_timeout < stale_detection
 - Includes Tailscale/SSH metadata for warm pool management
+- workflow_state field can carry degraded status for CLI visibility
+- control_plane_id in response allows agent to detect if talking to wrong control plane (e.g., after failover). Agent stores expected ID from first ack and logs WARNING on mismatch.
 
 ### 9.5.3 POST /v1/agent/logs
 
@@ -1774,7 +1779,100 @@ interface AgentStatusRequest {
 **Note:** In v2, status updates are sent via log messages (sync_complete,
 run_complete). This endpoint maintained for backward compatibility.
 
-### 9.5.6 GET /v1/agent/commands (SSE)
+### 9.5.6 POST /v1/agent/spot-interrupt-start
+
+Signal spot interruption detected, checkpoint starting.
+
+**Request:**
+```typescript
+interface SpotInterruptStartRequest {
+  /** Run ID affected by spot interruption */
+  run_id: string;
+
+  /** Time remaining until forced termination (from IMDS) */
+  time_remaining_ms: number;
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "ack": true
+}
+```
+
+### 9.5.7 POST /v1/agent/spot-interrupt-complete
+
+Signal spot checkpoint complete, ready for termination.
+
+**Request:**
+```typescript
+interface SpotInterruptCompleteRequest {
+  run_id: string;
+  checkpoint_exit_code?: number;  // Exit code of checkpoint script
+  artifacts_uploaded: number;     // Count successfully uploaded
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "ack": true
+}
+```
+
+### 9.5.8 POST /v1/agent/heartbeat-panic-start
+
+Signal heartbeat timeout panic, checkpoint starting. Sent when agent has not
+received heartbeat ack for 15 minutes and is initiating graceful shutdown.
+
+**Request:**
+```typescript
+interface HeartbeatPanicStartRequest {
+  /** Run ID affected by panic */
+  run_id: string;
+
+  /** Time since last successful heartbeat ack (should be ~15m) */
+  time_since_ack_ms: number;
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "ack": true
+}
+```
+
+**Note:** This endpoint may fail (control plane unreachable is the trigger).
+Agent sends best-effort and continues with checkpoint regardless.
+
+### 9.5.9 POST /v1/agent/heartbeat-panic-complete
+
+Signal panic checkpoint complete. Sent after checkpoint script runs and
+artifacts uploaded, before agent self-terminates.
+
+**Request:**
+```typescript
+interface HeartbeatPanicCompleteRequest {
+  run_id: string;
+  checkpoint_exit_code?: number;  // Exit code of checkpoint script
+  artifacts_uploaded: number;     // Count successfully uploaded
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "ack": true
+}
+```
+
+**Note:** Control plane uses this to distinguish graceful panic (checkpoint
+preserved, transition to COMPLETE) from crash (no checkpoint, transition to
+FAILED). See Ch15 reconciliation for timeout detection logic.
+
+### 9.5.10 GET /v1/agent/commands (SSE)
 
 Server-Sent Events stream for commands from control plane to agent.
 Long-lived connection, agent-initiated, unidirectional (control → agent).
@@ -1811,7 +1909,7 @@ event: trigger_tailscale
 data: {"type":"trigger_tailscale"}
 
 event: heartbeat_ack
-data: {"type":"heartbeat_ack"}
+data: {"type":"heartbeat_ack","control_plane_id":"cp-abc123def456"}
 ```
 
 **Command Types:**
@@ -1855,6 +1953,7 @@ interface TriggerTailscaleMessage {
 
 interface HeartbeatAckMessage {
   type: 'heartbeat_ack';
+  control_plane_id: string;  // Unique control plane identifier (agent validates consistency)
 }
 ```
 

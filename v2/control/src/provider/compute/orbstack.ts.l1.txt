@@ -18,7 +18,7 @@ validating that the control plane handles contract-compliant behavior correctly.
 
 ### spawn(options)
 
-- Generate VM name: options.clientRequestId or repl-${controlId}-${manifestIdShort}-${instanceIdShort}
+- Generate VM name: options.clientRequestId or repl-${controlId}-${manifestSlug}-${instanceSlug}
 - Check chaos: if pendingFault('capacity_error'), throw CapacityError
 - Check existing: `orbstack list -q ${vmName}`
   - If exists: return existing (idempotent by name)

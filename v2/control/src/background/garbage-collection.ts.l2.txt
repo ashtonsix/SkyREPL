@@ -1,0 +1,390 @@
+# garbage-collection.ts - Garbage Collection Task (L2 Pseudocode)
+
+## Imports
+
+```typescript
+import { TIMING } from '../../../../shared/src/config/timing';
+import { queryMany, queryOne, transaction, getDatabase } from '../material/db';
+import { deleteFromS3 } from '../material/s3';
+import { logger } from '../logger';
+```
+
+## Types
+
+```typescript
+interface Blob {
+  id: number;
+  bucket: string;
+  checksum: string | null;
+  s3_key: string | null;
+  s3_bucket: string | null;
+  size_bytes: number;
+  last_referenced_at: number;
+}
+
+interface DuplicateGroup {
+  bucket: string;
+  checksum: string;
+  count: number;
+  keep_id: number;
+}
+
+interface GCMetrics {
+  blobs_deleted: number;
+  s3_objects_deleted: number;
+  bytes_freed: number;
+  duplicates_merged: number;
+  objects_expired: number;
+  idempotency_keys_deleted: number;
+}
+```
+
+## Constants
+
+```typescript
+const BATCH_SIZE = 500;
+const DEDUPABLE_BUCKETS = ['run-files', 'artifacts'];
+```
+
+## Main Loop
+
+```typescript
+/**
+ * Garbage collection task runs every BLOB_GC_INTERVAL_MS (24h).
+ * Purpose: Clean up orphaned blobs (no referencing objects) from S3 and DB.
+ * DB cascade can't reach S3, so GC is needed for S3 cleanup.
+ */
+export async function runGarbageCollectionCycle(): Promise<GCMetrics> {
+  const startTime = Date.now();
+  const metrics: GCMetrics = {
+    blobs_deleted: 0,
+    s3_objects_deleted: 0,
+    bytes_freed: 0,
+    duplicates_merged: 0,
+    objects_expired: 0,
+    idempotency_keys_deleted: 0
+  };
+
+  try {
+    // Update last_referenced_at for recently accessed blobs
+    await updateBlobReferences();
+
+    // Primary: Clean orphaned blobs
+    const blobMetrics = await cleanOrphanedBlobs();
+    metrics.blobs_deleted = blobMetrics.deleted;
+    metrics.s3_objects_deleted = blobMetrics.s3Deleted;
+    metrics.bytes_freed = blobMetrics.bytesFreed;
+
+    // Secondary: Merge duplicate blobs
+    metrics.duplicates_merged = await mergeDuplicateBlobs();
+
+    // Tertiary: Clean expired objects
+    metrics.objects_expired = await cleanExpiredObjects();
+
+    // Quaternary: Clean expired idempotency keys
+    metrics.idempotency_keys_deleted = await cleanExpiredIdempotencyKeys();
+
+    logger.info('gc_cycle_complete', {
+      ...metrics,
+      durationMs: Date.now() - startTime
+    });
+
+    return metrics;
+  } catch (error) {
+    logger.error('gc_cycle_failed', {
+      error: (error as Error).message,
+      durationMs: Date.now() - startTime
+    });
+    throw error;
+  }
+}
+
+export function startGarbageCollectionLoop(): void {
+  setInterval(runGarbageCollectionCycle, TIMING.BLOB_GC_INTERVAL_MS);
+  // Don't run immediately on startup (let system stabilize)
+}
+```
+
+## Update Blob References
+
+```typescript
+/**
+ * Touch last_referenced_at for blobs with recently accessed objects.
+ * Prevents GC from deleting recently-used blobs.
+ */
+async function updateBlobReferences(): Promise<void> {
+  const oneHourAgo = Date.now() - 3600_000;
+  const now = Date.now();
+
+  const result = getDatabase().prepare(`
+    UPDATE blobs SET last_referenced_at = ?
+    WHERE id IN (
+      SELECT DISTINCT blob_id FROM objects WHERE accessed_at > ?
+    )
+  `).run(now, oneHourAgo);
+
+  logger.debug('blob_references_updated', { count: result.changes });
+}
+```
+
+## Orphaned Blob Cleanup (Primary Task)
+
+```typescript
+interface BlobCleanupMetrics {
+  deleted: number;
+  s3Deleted: number;
+  bytesFreed: number;
+}
+
+/**
+ * Find and delete blobs with no referencing objects.
+ * Grace period prevents deletion during active workflow execution.
+ */
+async function cleanOrphanedBlobs(): Promise<BlobCleanupMetrics> {
+  const cutoff = Date.now() - TIMING.BLOB_GRACE_PERIOD_MS;
+  const metrics: BlobCleanupMetrics = { deleted: 0, s3Deleted: 0, bytesFreed: 0 };
+
+  // Find orphaned blobs
+  const orphanedBlobs = queryMany<Blob>(`
+    SELECT b.id, b.s3_key, b.s3_bucket, b.size_bytes
+    FROM blobs b
+    WHERE b.last_referenced_at < ?
+      AND NOT EXISTS (
+        SELECT 1 FROM objects o WHERE o.blob_id = b.id
+      )
+    LIMIT ?
+  `, [cutoff, BATCH_SIZE]);
+
+  for (const blob of orphanedBlobs) {
+    try {
+      // Delete from S3 first (if external storage)
+      if (blob.s3_key) {
+        await deleteFromS3(blob.s3_bucket!, blob.s3_key);
+        metrics.s3Deleted++;
+      }
+
+      // Delete from DB
+      getDatabase().prepare('DELETE FROM blobs WHERE id = ?').run(blob.id);
+      metrics.deleted++;
+      metrics.bytesFreed += blob.size_bytes;
+
+      logger.debug('blob_deleted', {
+        blobId: blob.id,
+        s3Key: blob.s3_key,
+        sizeBytes: blob.size_bytes
+      });
+    } catch (error) {
+      logger.error('blob_deletion_failed', {
+        blobId: blob.id,
+        error: (error as Error).message
+      });
+      // Continue with other blobs
+    }
+  }
+
+  return metrics;
+}
+```
+
+## Duplicate Blob Merger (Secondary Task)
+
+```typescript
+/**
+ * Merge duplicate blobs created by concurrent uploads.
+ *
+ * For dedupable buckets only (run-files, artifacts).
+ * Keeps oldest blob, updates object references, deletes duplicates.
+ *
+ * CRITICAL: Uses transaction with CAS guard to prevent concurrent merges
+ * from corrupting object references or pointing to deleted blobs.
+ */
+async function mergeDuplicateBlobs(): Promise<number> {
+  let totalMerged = 0;
+
+  // Find duplicate groups
+  const duplicateGroups = queryMany<DuplicateGroup>(`
+    SELECT bucket, checksum, COUNT(*) as count, MIN(id) as keep_id
+    FROM blobs
+    WHERE bucket IN (${DEDUPABLE_BUCKETS.map(() => '?').join(',')})
+      AND checksum IS NOT NULL
+    GROUP BY bucket, checksum
+    HAVING count > 1
+  `, DEDUPABLE_BUCKETS);
+
+  for (const group of duplicateGroups) {
+    try {
+      const merged = await mergeDuplicateGroup(group);
+      totalMerged += merged;
+    } catch (error) {
+      logger.error('duplicate_merge_failed', {
+        bucket: group.bucket,
+        checksum: group.checksum,
+        error: (error as Error).message
+      });
+      // Continue with other groups
+    }
+  }
+
+  return totalMerged;
+}
+
+/**
+ * Merge a single duplicate group with CAS guard.
+ *
+ * CRITICAL: The transaction re-verifies the duplicate set hasn't changed
+ * since the query. This prevents:
+ * - Concurrent merges from racing
+ * - Objects pointing to deleted blobs
+ * - Double-deletion of blobs
+ */
+async function mergeDuplicateGroup(group: DuplicateGroup): Promise<number> {
+  const db = getDatabase();
+
+  return transaction(() => {
+    // CAS guard: Re-query the duplicate set
+    const currentBlobs = queryMany<{ id: number }>(`
+      SELECT id FROM blobs
+      WHERE bucket = ? AND checksum = ?
+      ORDER BY id
+    `, [group.bucket, group.checksum]);
+
+    // Verify count matches - if not, another merge is in progress
+    if (currentBlobs.length !== group.count) {
+      logger.debug('duplicate_merge_skipped', {
+        bucket: group.bucket,
+        checksum: group.checksum,
+        expectedCount: group.count,
+        actualCount: currentBlobs.length
+      });
+      return 0;
+    }
+
+    const keepId = currentBlobs[0].id;  // Keep oldest (MIN id)
+    const duplicateIds = currentBlobs.slice(1).map(b => b.id);
+
+    if (duplicateIds.length === 0) {
+      return 0;
+    }
+
+    // Update object references to point to kept blob
+    const placeholders = duplicateIds.map(() => '?').join(',');
+    db.prepare(`
+      UPDATE objects SET blob_id = ?
+      WHERE blob_id IN (${placeholders})
+    `).run(keepId, ...duplicateIds);
+
+    // Delete duplicate blobs (NOT the kept one)
+    // Note: We don't delete from S3 because all duplicates have the same content
+    // The kept blob's S3 object remains valid
+    db.prepare(`
+      DELETE FROM blobs WHERE id IN (${placeholders})
+    `).run(...duplicateIds);
+
+    logger.info('duplicates_merged', {
+      bucket: group.bucket,
+      checksum: group.checksum,
+      keepBlobId: keepId,
+      mergedCount: duplicateIds.length
+    });
+
+    return duplicateIds.length;
+  });
+}
+```
+
+## Expired Object Cleanup (Tertiary Task)
+
+```typescript
+/**
+ * Delete objects that have passed their expiration time.
+ * Blobs are cleaned up by the primary GC task (grace period applies).
+ */
+async function cleanExpiredObjects(): Promise<number> {
+  const now = Date.now();
+  let deleted = 0;
+
+  const expiredObjects = queryMany<{ id: number }>(`
+    SELECT id FROM objects
+    WHERE expires_at IS NOT NULL AND expires_at < ?
+    LIMIT ?
+  `, [now, BATCH_SIZE]);
+
+  for (const obj of expiredObjects) {
+    try {
+      getDatabase().prepare('DELETE FROM objects WHERE id = ?').run(obj.id);
+      deleted++;
+    } catch (error) {
+      logger.error('object_deletion_failed', {
+        objectId: obj.id,
+        error: (error as Error).message
+      });
+    }
+  }
+
+  if (deleted > 0) {
+    logger.info('expired_objects_deleted', { count: deleted });
+  }
+
+  return deleted;
+}
+```
+
+## Idempotency Key Expiry (Quaternary Task)
+
+```typescript
+/**
+ * Clean up expired idempotency keys to prevent unbounded table growth.
+ *
+ * Idempotency keys ensure API requests are processed exactly once.
+ * They have a TTL (typically 24h) after which they can be safely deleted.
+ * Without GC, the table would grow unbounded.
+ */
+async function cleanExpiredIdempotencyKeys(): Promise<number> {
+  const now = Date.now();
+
+  // Find expired keys
+  const expiredKeys = queryMany<{ key: string }>(`
+    SELECT key FROM idempotency_keys
+    WHERE expires_at < ?
+    LIMIT ?
+  `, [now, BATCH_SIZE]);
+
+  if (expiredKeys.length === 0) {
+    return 0;
+  }
+
+  // Batch delete expired keys
+  const keys = expiredKeys.map(k => k.key);
+  const placeholders = keys.map(() => '?').join(',');
+
+  const result = getDatabase().prepare(`
+    DELETE FROM idempotency_keys WHERE key IN (${placeholders})
+  `).run(...keys);
+
+  const deleted = result.changes;
+
+  if (deleted > 0) {
+    logger.info('idempotency_keys_deleted', { count: deleted });
+  }
+
+  return deleted;
+}
+```
+
+## Metrics Export
+
+```typescript
+/**
+ * Export GC metrics for monitoring.
+ */
+export function getGCMetrics(): {
+  lastRunAt: number | null;
+  lastMetrics: GCMetrics | null;
+} {
+  // Would be stored in module state after each run
+  return {
+    lastRunAt: null,
+    lastMetrics: null
+  };
+}
+```

@@ -14,13 +14,14 @@ SkyREPL is a cloud compute orchestration platform for lifecycle management and r
 
 You are an orchestrator. Delegate work via subagents:
 
-| Model  | Use For                                                           |
-| ------ | ----------------------------------------------------------------- |
-| haiku  | Grep/search, file finding, basic lookups                          |
-| sonnet | Multi-file analysis, research requiring synthesis, standard plans |
-| opus   | Architectural decisions, nuanced trade-offs, deep reasoning       |
+| Type    | Use For                                                                   |
+| ------- | ------------------------------------------------------------------------- |
+| opus    | Default. Complex analysis, architectural decisions, ambiguous tasks       |
+| sonnet  | Bounded multi-file tasks with clear scope (e.g. "check all callers of X") |
+| haiku   | Single-file lookups, simple grep/search, mechanical extraction            |
+| explore | Codebase navigation and discovery (uses subagent_type=Explore)            |
 
-Default to the lightest model that handles the task. Dispatch multiple agents in parallel when possible.
+Default to opus. Drop down when confident a lighter model handles the task. Dispatch multiple agents in parallel when possible.
 
 ## Specification
 

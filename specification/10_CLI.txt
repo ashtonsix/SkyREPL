@@ -871,7 +871,8 @@ CLI maintains `~/.repl/ssh_config` with entries for active allocations:
 # Generated: 2024-01-31T14:32:00Z
 # Do not edit manually - regenerated on each run
 
-Host alloc-def456 alloc-def
+# Specific allocations (SSH uses first-match-wins rule)
+Host repl-def456
   HostName 100.64.1.23
   User ubuntu
   Port 22
@@ -881,10 +882,19 @@ Host alloc-def456 alloc-def
   IdentityFile ~/.ssh/repl-aws.pem
   ProxyCommand ~/.repl/bin/ssh_proxy_command.sh %n
 
-Host alloc-abc123 alloc-abc
+Host repl-abc123
   HostName 100.64.1.24
   User ubuntu
-  ...
+  Port 22
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+  LogLevel ERROR
+  IdentityFile ~/.ssh/repl-aws.pem
+  ProxyCommand ~/.repl/bin/ssh_proxy_command.sh %n
+
+# Catch-all fallback for unknown/stale slugs (must be last)
+Host repl-*
+  ProxyCommand ~/.repl/bin/ssh_fallback.sh %n
 ```
 
 Users add `Include ~/.repl/ssh_config` to `~/.ssh/config`.
@@ -909,10 +919,59 @@ exec nc "$IP" 22
 
 This enables transparent SSH access without manual Tailscale setup.
 
+### Catch-All Fallback
+
+`~/.repl/bin/ssh_fallback.sh` handles connections to unknown or stale allocation slugs:
+
+```bash
+#!/bin/bash
+# ~/.repl/bin/ssh_fallback.sh
+HOSTNAME="$1"
+SLUG="${HOSTNAME#repl-}"  # Extract slug from repl-xyz format
+
+# Query API for allocation by slug
+RESULT=$(repl-cli-internal resolve-allocation "$SLUG")
+
+case "$RESULT" in
+  NOT_FOUND)
+    echo "Error: Allocation '$SLUG' not found" >&2
+    echo "" >&2
+    echo "Did you mean one of these recent allocations?" >&2
+    repl-cli-internal list-recent-allocations >&2
+    exit 1
+    ;;
+  AMBIGUOUS:*)
+    echo "Error: Ambiguous prefix '$SLUG'" >&2
+    echo "" >&2
+    echo "Matching allocations:" >&2
+    echo "$RESULT" | tail -n +2 >&2  # Skip AMBIGUOUS: prefix
+    exit 1
+    ;;
+  STALE:*)
+    # Extract IP and connect, but warn about stale config
+    IP=$(echo "$RESULT" | cut -d: -f2)
+    echo "Warning: Config entry for '$SLUG' is stale. Run 'repl ssh-sync' to update." >&2
+    ~/.repl/bin/ensure_tailscale.sh "$IP"
+    exec nc "$IP" 22
+    ;;
+  *)
+    # Unique match with current IP
+    ~/.repl/bin/ensure_tailscale.sh "$RESULT"
+    exec nc "$RESULT" 22
+    ;;
+esac
+```
+
+This provides helpful error messages when:
+- Allocation slug doesn't exist (with suggestions)
+- Slug is ambiguous prefix (lists matches)
+- Config is out of sync (connects but suggests refresh)
+
 ### SSH Routing
 
-SSH entries keyed by allocation ID; short IDs (`ssh alloc-def`) resolved to full
-IDs via prefix matching.
+SSH config entries use full allocation slugs as host identifiers (e.g., `Host repl-def456`).
+Native SSH tab completion suggests hosts from config. Unknown slugs fall through to a
+catch-all `Host repl-*` entry that queries the API and provides "did you mean?" suggestions.
 
 ### SSH Activity Detection
 

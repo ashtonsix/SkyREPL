@@ -12,10 +12,11 @@
 - provider_issues: Provider API errors or quota warnings
 - low_disk_space: Warm pool instances with <20% free disk
 - shared_instance: Target instance has other active allocations
+- degraded_instance: Instance has degraded control plane connection (>2m since last heartbeat ack)
 
 ## Warning Levels
 - info: Display only (orphans from other sessions, shared_instance notice)
-- warning: Prompt for confirmation (budget near limit, low_disk_space)
+- warning: Prompt for confirmation (budget near limit, low_disk_space, degraded_instance)
 - critical: Block unless --force (credentials expired)
 
 ## Display Format
@@ -24,6 +25,7 @@
 - Include recommended actions
 - For low_disk_space: Show instance ID, free %, suggest cleanup
 - For shared_instance: List other allocations, their status and duration
+- For degraded_instance: Show instance ID, time since last ack, warn of potential data loss
 
 ## Bypass
 - --yes: Skip confirmation prompts, proceed on warnings

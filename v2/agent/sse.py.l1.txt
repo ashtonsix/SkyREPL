@@ -4,8 +4,36 @@
 GET /v1/agent/commands?instance_id=xxx
 Accept: text/event-stream
 
-## Reading
-Byte-by-byte to avoid 8KB buffer deadlock (messages are ~150 bytes)
+## Byte-by-Byte Reading
+- Avoids 8KB buffer deadlock (messages are ~150 bytes)
+- response.read(1) in loop until newline
+- Empty byte (b'') indicates socket close
+
+## SSE Event Parsing
+- Lines: "event: <type>" and "data: <json>"
+- Message separator: blank line (\n\n between events)
+- Yield parsed message when data line received
+
+## Message Types (from agent.types.ts)
+- start_run: Begin run with file sync and execution
+- cancel_run: Terminate running run
+- prepare_snapshot: Prepare instance for snapshot
+- capture_artifacts: Collect and upload artifacts
+- trigger_tailscale: Install/configure Tailscale
+- heartbeat_ack: Acknowledge agent heartbeat
 
 ## Reconnection
-Exponential backoff: 2s → 64s, max 10 retries
+- Exponential backoff: 2s base, 64s max
+- Config: REPL_SSE_RECONNECT_BASE (ms), REPL_SSE_RECONNECT_MAX (ms)
+- Max retries: 10 (REPL_SSE_MAX_RETRIES)
+- Fatal shutdown on max retries exhausted
+- Env vars in milliseconds (aligned with timing.ts)
+
+## Connection State
+- reconnect_count: Track total reconnections
+- last_message_time: For diagnostics
+- shutting_down: Flag to break read loop
+
+## Integration
+- Generator yields parsed messages to agent main loop
+- Executor dispatches by message type

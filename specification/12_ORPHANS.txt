@@ -43,22 +43,22 @@ repl-<control_id>-<manifest_id>-<instance_id>
 **Components:**
 - `repl`: Fixed prefix for identification
 - `<control_id>`: Control plane identifier (version_tag + random env value, persisted to ~/.repl/control.env)
-- `<manifest_id>`: First 8 characters of owning manifest UUID (or "none")
-- `<instance_id>`: First 8 characters of internal instance UUID
+- `<manifest_id>`: Base-36 slug of manifest ID (full, not truncated) (or "none")
+- `<instance_id>`: Base-36 slug of instance ID (full, not truncated)
 
 **Note:** Provider information is stored in cloud tags/metadata, not in the resource name.
 
 **Examples:**
 ```
-repl-v2a1b2c3-mf5e6f7g-a1b2c3d4
-repl-v2a1b2c3-none-b2c3d4e5
-repl-v2a1b2c3-mf1a2b3c-c3d4e5f6
+repl-v2a1b2c3-9ix-1h2i
+repl-v2a1b2c3-none-2j3k
+repl-v2a1b2c3-3l4m-4n5o
 ```
 
 ### Why This Matters
 
 With total database loss, resource names still enable: control plane identification
-("did I create this?"), partial instance matching, manifest correlation, uniqueness.
+("did I create this?"), instance matching (via slug), manifest correlation, uniqueness.
 
 The control_id (version_tag + random_env persisted to ~/.repl/control.env) uniquely
 identifies a control plane installation.
@@ -68,30 +68,30 @@ identifies a control plane installation.
 ```typescript
 function generateResourceName(
   controlId: string,
-  manifestId: string | null,
-  instanceId: string
+  manifestId: number | null,
+  instanceId: number
 ): string {
-  const shortManifestId = manifestId ? manifestId.substring(0, 8) : 'none';
-  const shortInstanceId = instanceId.substring(0, 8);
+  const manifestSlug = manifestId ? idToSlug(manifestId) : 'none';
+  const instanceSlug = idToSlug(instanceId);
 
-  return `repl-${controlId}-${shortManifestId}-${shortInstanceId}`;
+  return `repl-${controlId}-${manifestSlug}-${instanceSlug}`;
 }
 
 function parseResourceName(name: string): ResourceNameParts | null {
-  const match = name.match(/^repl-([a-z0-9]+)-([a-f0-9]{8}|none)-([a-f0-9]{8})$/);
+  const match = name.match(/^repl-([a-z0-9]+)-([a-z0-9]+|none)-([a-z0-9]+)$/);
   if (!match) return null;
 
   return {
     controlId: match[1],
-    manifestIdPrefix: match[2] === 'none' ? null : match[2],
-    instanceIdPrefix: match[3],
+    manifestIdSlug: match[2] === 'none' ? null : match[2],
+    instanceIdSlug: match[3],
   };
 }
 ```
 
 ### Tailscale Naming
 
-Simpler: `repl-<control_id>-<instance_id>` (provider implicit, manifest tracked in DB).
+Simpler: `repl-<control_id>-<instance_id>` (provider implicit, manifest tracked in DB). The instance_id component uses the full base-36 slug.
 
 ## 12.2 Detection Algorithm
 
@@ -238,7 +238,7 @@ async function detectTailscaleOrphans(): Promise<TailscaleOrphan[]> {
         machineId: machine.id,
         machineName: machine.name,
         tailscaleIp: machine.addresses[0],
-        inferredInstanceIdPrefix: inferredInfo?.instanceIdPrefix ?? null,
+        inferredInstanceIdSlug: inferredInfo?.instanceIdSlug ?? null,
         lastSeen: machine.lastSeen,
         ageMs: Date.now() - machine.created,
       });
@@ -422,18 +422,18 @@ repl orphans list --json
 Orphaned Resources (3 found)
 
 CURRENT SESSION (WARNING):
-  [aws] i-0abc123def456  repl-v2a1b2c3-mf5e6f7g-a1b2c3d4
+  [aws] i-0abc123def456  repl-v2a1b2c3-9ix-1h2i
         Age: 15m | Est. Cost: $1.23/hr | Type: instance
 
 OTHER SESSIONS (INFO):
-  [aws] i-0xyz789abc012  repl-v2a1b2c3-none-b2c3d4e5
+  [aws] i-0xyz789abc012  repl-v2a1b2c3-none-2j3k
         Age: 2d 4h | Est. Cost: $0.45/hr | Type: instance
 
-  [aws] vol-0123456789   repl-v2a1b2c3-mf1a2b3c-c3d4e5f6
+  [aws] vol-0123456789   repl-v2a1b2c3-3l4m-4n5o
         Age: 5d | Est. Cost: $0.02/hr | Type: volume
 
 TAILSCALE:
-  [ts] repl-v2a1b2c3-d4e5f6g7
+  [ts] repl-v2a1b2c3-5p6q
        IP: 100.64.0.15 | Last Seen: 3h ago
 
 Run 'repl orphans inspect <provider_id>' for details.
@@ -453,7 +453,7 @@ Orphan Details: i-0abc123def456
 
 Provider:     aws
 Resource:     EC2 Instance
-Name:         repl-v2a1b2c3-mf5e6f7g-a1b2c3d4
+Name:         repl-v2a1b2c3-9ix-1h2i
 Created:      2024-01-31 14:32:15 UTC (15 minutes ago)
 Status:       running
 Instance Type: g5.xlarge
@@ -462,11 +462,11 @@ Est. Cost:    $1.23/hr ($29.52/day)
 
 Inferred Information:
   Control ID: v2a1b2c3 (matches current installation)
-  Manifest ID prefix: mf5e6f7g
-  Instance ID prefix: a1b2c3d4
+  Manifest ID slug: 9ix
+  Instance ID slug: 1h2i
 
 Possible Matches in DB:
-  inst-a1b2c3d4-... (workflow_state: terminate:complete) - 95% confidence
+  inst-1h2i (workflow_state: terminate:complete) - 95% confidence
 
 Actions:
   repl orphans whitelist i-0abc123def456 --reason "..."
@@ -607,8 +607,8 @@ If database lost but cloud resources remain, names provide recovery hints:
 interface RecoveryHint {
   providerId: string;
   provider: ProviderName;
-  inferredInstanceIdPrefix: string;
-  inferredManifestIdPrefix: string | null;
+  inferredInstanceIdSlug: string;
+  inferredManifestIdSlug: string | null;
   resourceType: OrphanResourceType;
   createdAt: number;
 }
@@ -627,8 +627,8 @@ async function generateRecoveryHints(): Promise<RecoveryHint[]> {
         hints.push({
           providerId: resource.id,
           provider: parsed.provider,
-          inferredInstanceIdPrefix: parsed.instanceIdPrefix,
-          inferredManifestIdPrefix: parsed.manifestIdPrefix,
+          inferredInstanceIdSlug: parsed.instanceIdSlug,
+          inferredManifestIdSlug: parsed.manifestIdSlug,
           resourceType: resource.type,
           createdAt: resource.createdAt,
         });
@@ -641,14 +641,14 @@ async function generateRecoveryHints(): Promise<RecoveryHint[]> {
 ```
 
 `repl orphans recovery-report` lists cloud resources with SkyREPL naming, groups
-by control ID and prefixes, shows potential correlations, offers import option.
+by control ID and slugs, shows potential correlations, offers import option.
 
 ## 12.10 Property Test: Kill at Any Step
 
 Architecture property: "Kill at any step -> no orphans"
 
 **How it works:**
-1. Resource names encode recovery info (provider, instance prefix, manifest prefix)
+1. Resource names encode recovery info (provider, instance slug, manifest slug)
 2. Two-phase spawn + reconciliation handles crashes at any point (see Ch8)
 3. Conservative detection reports but doesn't act; humans decide disposition
 

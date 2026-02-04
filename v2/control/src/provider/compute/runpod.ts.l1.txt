@@ -21,7 +21,7 @@ GPU cloud with container-based instances and spot support.
 - gpuTypeId: from options.spec
 - volumeInGb: from options.spec or default
 - containerDiskInGb: from options.spec or default
-- name: repl-${controlId}-${manifestIdShort}-${instanceIdShort}
+- name: repl-${controlId}-${manifestSlug}-${instanceSlug}
 - env: { SKYREPL_MANIFEST_ID, SKYREPL_RUN_ID, SKYREPL_SPAWN_KEY }
 - Call GraphQL createPod mutation
 - Return RunPodInstance

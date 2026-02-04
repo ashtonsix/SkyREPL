@@ -56,16 +56,49 @@ DB cascade (ON DELETE RESTRICT) can't reach S3, so GC is needed for S3 cleanup.
 ### Merge Duplicates
 - For each duplicate group:
   - Keep oldest blob (MIN(id))
-  - UPDATE objects SET blob_id = keep_id WHERE blob_id IN (duplicate_ids)
-  - DELETE FROM blobs WHERE id IN (duplicate_ids)
+  - In transaction with CAS guard for concurrent modification:
+    ```sql
+    BEGIN TRANSACTION;
+    -- Re-verify the duplicate set hasn't changed (CAS guard)
+    SELECT id FROM blobs
+    WHERE bucket = ? AND checksum = ?
+    FOR UPDATE;
+    -- Only proceed if count matches original query
+    UPDATE objects SET blob_id = keep_id WHERE blob_id IN (duplicate_ids);
+    DELETE FROM blobs WHERE id IN (duplicate_ids) AND id != keep_id;
+    COMMIT;
+    ```
+  - If blob count changed since query: skip this group (another merge in progress)
+  - Log: "Merged ${count} duplicate blobs for checksum ${checksum}"
 - Handles race condition duplicates from concurrent uploads
 - Preserves S3 objects (only updates DB references)
+- CAS guard prevents: concurrent merges corrupting references, objects pointing to deleted blobs
 
 ## Object Expiry (Tertiary Task)
 
 ### Find Expired Objects
 - Query: SELECT id FROM objects WHERE expires_at < NOW LIMIT 500
 - Delete expired objects (blobs cleaned by primary GC task)
+
+## Idempotency Key Expiry (Quaternary Task)
+
+### Purpose
+Clean up expired idempotency keys to prevent unbounded table growth.
+Idempotency keys ensure API requests are processed exactly once, but must be GC'd after expiry.
+
+### Find Expired Keys
+- Query:
+  ```sql
+  SELECT key FROM idempotency_keys
+  WHERE expires_at < NOW
+  LIMIT 500
+  ```
+- Batch size: 500 keys/cycle to prevent lock contention
+
+### Delete Expired Keys
+- DELETE FROM idempotency_keys WHERE key IN (expired_keys)
+- No external dependencies (pure DB cleanup)
+- Metrics: idempotency_keys_deleted
 
 ## Incremental Execution
 

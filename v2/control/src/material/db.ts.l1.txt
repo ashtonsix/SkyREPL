@@ -225,13 +225,16 @@ function runMigrations(): void
 ### Transaction Retry
 
 ```
+# Note: Uses calculateBackoff from ../../../../shared/src/config/timing.ts.l2.txt
+# calculateBackoff provides exponential backoff with ±10% jitter to prevent thundering herd
+
 function transaction<T>(fn: () => T, retries = 1): T
   for attempt in 0..retries:
     try:
       return db.transaction(fn)
     catch (e):
       if (e.code === 'SQLITE_BUSY' && attempt < retries):
-        sleep(100 * (attempt + 1))
+        sleep(calculateBackoff(attempt))  // Jittered exponential backoff
         continue
       throw TRANSACTION_ERROR(e.message)
 ```

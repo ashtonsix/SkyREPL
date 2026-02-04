@@ -106,7 +106,10 @@ Called when manifest expires or workflow requests explicit cleanup.
    - Returns: { resourcesByPriority: Map<number, ManifestResource[]> }
 
 3. **cleanup-allocations** (Priority 90): Clean allocation records
-   - For each allocation: If status != COMPLETE, transition to COMPLETE
+   - For each allocation: Use atomic UPDATE with IN clause for all source statuses
+     - Pattern: UPDATE allocations SET status='COMPLETE', completed_at=NOW, updated_at=NOW
+               WHERE id=? AND status IN ('AVAILABLE', 'CLAIMED', 'ACTIVE')
+     - If 0 rows affected: already COMPLETE or FAILED, skip (idempotent)
    - Does NOT delete records (history preserved)
    - Errors: Log and continue (skip_and_continue policy)
 

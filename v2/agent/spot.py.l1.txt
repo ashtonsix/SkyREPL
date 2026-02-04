@@ -14,14 +14,14 @@ GET token, then GET /latest/meta-data/spot/instance-action
 1. Send SpotInterruptStartMessage (POST /v1/agent/spot-interrupt-start)
    - Include time_remaining_ms (from IMDS response)
    - Signals: Interrupt detected, checkpoint starting
-2. Execute checkpoint script with timeout:
-   - Cap timeout at SPOT_CHECKPOINT_BUDGET_MS (90s)
-   - Overrides user checkpoint_timeout if larger
-   - Leaves 30s for artifact upload and messaging
-3. Upload artifacts (best-effort, 20-30s window)
-4. Send SpotInterruptCompleteMessage (POST /v1/agent/spot-interrupt-complete)
-   - Include checkpoint_exit_code (exit code of checkpoint script, if ran)
-   - Include artifacts_uploaded (count of successfully uploaded artifacts)
+2. Execute checkpoint via shared logic (checkpoint.py):
+   - Call execute_spot_checkpoint(run_id, artifact_urls)
+   - Uses SPOT_CHECKPOINT_BUDGET_MS (90s) timeout
+   - Set SKYREPL_CHECKPOINT_REASON=spot_termination
+   - Handles artifact upload with failover URLs
+3. Send SpotInterruptCompleteMessage (POST /v1/agent/spot-interrupt-complete)
+   - Include checkpoint_exit_code (from checkpoint result)
+   - Include artifacts_uploaded (count from checkpoint result)
    - Signals: Checkpoint done, ready for termination
 
 ## Two-Phase Protocol
@@ -35,3 +35,15 @@ GET token, then GET /latest/meta-data/spot/instance-action
 - Checkpoint: SPOT_CHECKPOINT_BUDGET_MS (90s max)
 - Artifact upload: 20s
 - Messaging overhead: 10s buffer
+
+## Artifact Prioritization
+Spot uses **size ascending** strategy to maximize artifact count in tight 20s window.
+- Smallest files uploaded first
+- If budget exhausted, larger files are skipped
+- Rationale: 10 small checkpoints > 1 large checkpoint when time is critical
+- See checkpoint.py for prioritization implementation
+
+## Shared Logic
+Checkpoint execution shared with heartbeat panic (see checkpoint.py.l2.txt).
+Both paths use execute_checkpoint() with different timeout budgets.
+Different prioritization strategies: spot uses size_asc, panic uses recency_desc.

@@ -1,0 +1,54 @@
+# ssh_proxy.sh - JIT Tailscale SSH Proxy
+
+## Purpose
+Establishes SSH connection via Tailscale with JIT connection setup:
+- Ensures Tailscale is installed on instance
+- Waits for Tailscale device to come online
+- Provides direct SSH connection via Tailscale IP
+
+## Input
+- Instance IP (from SSH config or ssh_fallback.sh)
+- User (from SSH config or ssh_fallback.sh)
+- Hostname/allocation slug (for logging)
+
+## JIT Tailscale Connection
+
+### Step 1: Check Device Status
+- Query control plane: GET /v1/instances/:id/tailscale
+- Response contains:
+  - device_id (if installed)
+  - tailscale_ip
+  - status: 'not_installed', 'installing', 'online', 'offline'
+
+### Step 2: Trigger Installation (if needed)
+- If status = 'not_installed':
+  - POST /v1/instances/:id/tailscale/install
+  - Control plane sends SSE command to agent
+  - Agent installs and authenticates Tailscale
+
+### Step 3: Wait for Online
+- Poll status endpoint with exponential backoff
+- Timeout: 60 seconds
+- Show progress indicator: "Waiting for Tailscale connection..."
+- Exit on timeout with helpful message
+
+### Step 4: Establish SSH Connection
+- Use Tailscale IP from status response
+- Execute: ssh -o ProxyCommand=none user@tailscale_ip
+- Pass through stdin/stdout for SSH protocol
+
+## Error Handling
+- Network errors: Retry with backoff (3 attempts)
+- Timeout: "Tailscale connection timeout. Check instance status with 'repl status'"
+- Auth errors: "Failed to authenticate with control plane"
+- Installation failures: Display agent error message
+
+## Optimization
+- Cache Tailscale status for 30 seconds (avoid redundant API calls)
+- Skip installation check if device was online recently
+- Parallel installation for multiple simultaneous connections
+
+## Integration
+- Called by SSH via ProxyCommand in ~/.repl/ssh_config
+- Also called by ssh_fallback.sh after slug resolution
+- Installed to ~/.repl/bin/ during CLI setup

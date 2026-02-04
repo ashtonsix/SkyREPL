@@ -157,6 +157,7 @@ interface TriggerTailscaleMessage {
 // SSE: heartbeat_ack
 interface HeartbeatAckMessage {
   type: 'heartbeat_ack';
+  control_plane_id: string;  // Unique control plane identifier (agent validates consistency)
 }
 ```
 
@@ -327,7 +328,7 @@ interface CommandDeliveryState {
              ┌─────────────────────────┼─────────────────────────┐
              │                         │                         │
       Heartbeat timeout         Connection lost           SIGTERM/SIGINT
-       (30s no ack)            (10 retries fail)             received
+       (15m no ack)            (10 retries fail)             received
              │                         │                         │
              └─────────────────────────┼─────────────────────────┘
                                        │
@@ -383,6 +384,35 @@ Agent's `shutdown -h now` is LAST RESORT. Normal path: control plane terminates
 via provider API. Backup: agent self-terminates if control plane unreachable
 (crash, network partition, bug). Agent doesn't rely on control plane for
 termination - shuts down after heartbeat timeout regardless.
+
+### Degraded State and Graceful Panic
+
+When control plane becomes unreachable, agent progresses through degraded and
+panic states before self-terminating:
+
+```
+Timeline (from last successful heartbeat ack):
+t=0        Last ack received
+t=2m       Enter DEGRADED state (workflow_state = 'degraded:control_plane_unreachable')
+           - Continue heartbeating (control plane may recover)
+           - Provides early warning visibility to CLI users
+t=15m      Enter PANIC state, initiate graceful shutdown:
+           1. Send HeartbeatPanicStartMessage (best-effort, may fail if CP unreachable)
+           2. Execute checkpoint script (PANIC_CHECKPOINT_BUDGET_MS = 5m)
+           3. Upload artifacts with failover URLs
+           4. Send HeartbeatPanicCompleteMessage (best-effort)
+           5. Initiate shutdown sequence
+t=20m      Expected self-termination complete
+t=25m      Control plane force-terminates (if agent failed to self-term)
+```
+
+If control plane recovers during degraded window (2m-15m), agent receives ack,
+clears degraded state, and resumes normal operation. This prevents unnecessary
+panic checkpoints for transient network issues.
+
+The panic checkpoint path reuses spot interruption logic (see §11.5 Spot Monitor)
+with different timeout budget: 5m for panic vs 90s for spot. Environment variable
+`SKYREPL_CHECKPOINT_REASON` is set to `heartbeat_timeout` (vs `spot_termination`).
 
 ## 11.6 SSE Implementation Details
 
@@ -444,19 +474,27 @@ Reconnects with exponential backoff: 2s initial (REPL_SSE_RECONNECT_BASE_S),
 ### Timing Constants
 
 Configurable via environment variables (cloud-init user data). Constraints:
-HEARTBEAT_INTERVAL < HEARTBEAT_TIMEOUT, TIMEOUT should match control plane
-stale threshold, RECONNECT_BASE < RECONNECT_MAX.
+HEARTBEAT_INTERVAL < HEARTBEAT_DEGRADED < HEARTBEAT_TIMEOUT < STALE_DETECTION
+(control plane, see Ch15). RECONNECT_BASE < RECONNECT_MAX.
 
 | Constant                | Default | Env Variable                  | Purpose                       |
 |-------------------------|---------|-------------------------------|-------------------------------|
 | HEARTBEAT_INTERVAL_MS   | 10000   | REPL_HEARTBEAT_INTERVAL_MS    | Agent -> control heartbeat    |
-| HEARTBEAT_TIMEOUT_MS    | 30000   | REPL_HEARTBEAT_TIMEOUT_MS     | Missing acks before shutdown  |
+| HEARTBEAT_DEGRADED_MS   | 120000  | REPL_HEARTBEAT_DEGRADED_MS    | Degraded state threshold (2m) |
+| HEARTBEAT_TIMEOUT_MS    | 900000  | REPL_HEARTBEAT_TIMEOUT_MS     | Panic/shutdown trigger (15m)  |
+| PANIC_CHECKPOINT_MS     | 300000  | REPL_PANIC_CHECKPOINT_MS      | Checkpoint budget during panic|
 | LOG_FLUSH_INTERVAL_MS   | 100     | REPL_LOG_FLUSH_INTERVAL_MS    | Batched log upload            |
 | SPOT_CHECK_INTERVAL_MS  | 5000    | REPL_SPOT_CHECK_INTERVAL_MS   | AWS metadata polling          |
 | SHUTDOWN_GRACE_PERIOD_S | 5       | REPL_SHUTDOWN_GRACE_PERIOD_S  | Delay before self-termination |
 | SSE_RECONNECT_BASE_S    | 2       | REPL_SSE_RECONNECT_BASE_S     | Initial reconnect delay       |
 | SSE_RECONNECT_MAX_S     | 64      | REPL_SSE_RECONNECT_MAX_S      | Maximum reconnect delay       |
 | SSE_MAX_RETRIES         | 10      | REPL_SSE_MAX_RETRIES          | Reconnects before shutdown    |
+
+**Heartbeat Timeout Constraint:** Agent self-terminates after 15m without heartbeat
+acknowledgment (HEARTBEAT_TIMEOUT_MS = 900000). Control plane force-terminates
+instances after 25m without heartbeat (see Ch15 §15.9 for INSTANCE_STALE_THRESHOLD_MS).
+This 10-minute gap ensures agent-initiated cleanup completes before provider-initiated
+termination, reducing false positives for long-running jobs while maintaining safety.
 
 ### When to Adjust
 
@@ -466,8 +504,10 @@ stale threshold, RECONNECT_BASE < RECONNECT_MAX.
 | Shorter heartbeat (5s)     | High-churn ephemeral     | Higher control plane load      |
 | Longer log flush (500ms-1s)| Heavy logging            | Delayed UI visibility          |
 | Shorter spot check (2-3s)  | Critical spot workloads  | Higher metadata API load       |
-| Longer heartbeat timeout   | High latency networks    | Slower dead instance cleanup   |
-| (60-90s)                   |                          |                                |
+| Shorter heartbeat timeout  | Dev/test, fast failure   | More false positives, less     |
+| (30s-60s)                  | detection needed         | time for graceful checkpoint   |
+| Shorter degraded threshold | Earlier UX warning       | More noise for brief hiccups   |
+| (30s-60s)                  |                          |                                |
 
 ### Example: User Data Configuration
 

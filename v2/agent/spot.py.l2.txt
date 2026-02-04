@@ -1,0 +1,183 @@
+# spot.py - Spot Monitor (L2 Pseudocode)
+
+# Note: Timing constants reference ../../shared/src/config/timing.ts.l2.txt
+# - SPOT_CHECK_INTERVAL_MS (5s)
+# - SPOT_CHECKPOINT_BUDGET_MS (90s)
+
+```python
+import time
+import threading
+from checkpoint import execute_spot_checkpoint, ArtifactUrl
+from typing import Optional, List
+
+
+def spot_monitor_thread():
+    """
+    Monitor EC2 metadata for spot interruption notice.
+    Only runs on interruptible (spot) instances.
+    """
+    if not is_spot_instance():
+        log("INFO", "Not a spot instance, spot monitor disabled")
+        return
+
+    while not shutting_down:
+        time.sleep(SPOT_CHECK_INTERVAL_MS / 1000.0)  # 5s
+        if shutting_down:
+            break
+
+        # Check IMDS for interruption notice
+        interruption = check_spot_interruption()
+        if interruption:
+            handle_spot_interruption(interruption)
+            return  # Thread exits, shutdown initiated
+
+
+def check_spot_interruption() -> Optional[dict]:
+    """
+    Check EC2 IMDS for spot interruption notice.
+    Returns interruption info or None.
+
+    IMDSv2 flow:
+    1. PUT /latest/api/token (get session token)
+    2. GET /latest/meta-data/spot/instance-action (check for interruption)
+    """
+    try:
+        # Get IMDSv2 token
+        token = http_put_imds('/latest/api/token', headers={'X-aws-ec2-metadata-token-ttl-seconds': '21600'})
+        if not token:
+            return None
+
+        # Check for interruption notice
+        response = http_get_imds(
+            '/latest/meta-data/spot/instance-action',
+            headers={'X-aws-ec2-metadata-token': token}
+        )
+
+        if response.status == 404:
+            return None  # No interruption
+
+        if response.status == 200:
+            data = response.json()
+            # Response: {"action": "terminate", "time": "2024-01-15T12:00:00Z"}
+            return {
+                'action': data.get('action'),
+                'termination_time': data.get('time'),
+                'time_remaining_ms': calculate_remaining_ms(data.get('time')),
+            }
+
+    except Exception as e:
+        log("WARN", f"IMDS check failed: {e}")
+
+    return None
+
+
+def handle_spot_interruption(interruption: dict):
+    """Execute spot interruption protocol with checkpoint."""
+    global shutting_down
+    shutting_down = True
+
+    run_id = get_current_run_id()
+    time_remaining_ms = interruption['time_remaining_ms']
+
+    log("WARN", f"Spot interruption detected, {time_remaining_ms}ms remaining")
+
+    # Phase 1: Signal interrupt start
+    send_spot_interrupt_start(run_id, time_remaining_ms)
+
+    # Get artifact URLs (includes failover URLs)
+    artifact_urls = get_artifact_urls()
+
+    # Execute checkpoint via shared logic
+    checkpoint_result = execute_spot_checkpoint(
+        run_id=run_id,
+        artifact_urls=artifact_urls,
+    )
+
+    # Phase 2: Signal interrupt complete
+    send_spot_interrupt_complete(
+        run_id=run_id,
+        checkpoint_exit_code=checkpoint_result.exit_code,
+        artifacts_uploaded=checkpoint_result.artifacts_uploaded,
+    )
+
+    # Initiate shutdown
+    initiate_shutdown()
+
+
+def send_spot_interrupt_start(run_id: int, time_remaining_ms: int):
+    """POST /v1/agent/spot-interrupt-start"""
+    payload = {
+        'type': 'spot_interrupt_start',
+        'run_id': run_id,
+        'time_remaining_ms': time_remaining_ms,
+    }
+    try:
+        http_post('/v1/agent/spot-interrupt-start', payload, timeout=5)
+        log("INFO", "Sent spot_interrupt_start")
+    except Exception as e:
+        log("WARN", f"Failed to send spot_interrupt_start: {e}")
+
+
+def send_spot_interrupt_complete(run_id: int, checkpoint_exit_code: Optional[int], artifacts_uploaded: int):
+    """POST /v1/agent/spot-interrupt-complete"""
+    payload = {
+        'type': 'spot_interrupt_complete',
+        'run_id': run_id,
+        'checkpoint_exit_code': checkpoint_exit_code,
+        'artifacts_uploaded': artifacts_uploaded,
+    }
+    try:
+        http_post('/v1/agent/spot-interrupt-complete', payload, timeout=5)
+        log("INFO", f"Sent spot_interrupt_complete (exit={checkpoint_exit_code}, artifacts={artifacts_uploaded})")
+    except Exception as e:
+        log("WARN", f"Failed to send spot_interrupt_complete: {e}")
+
+
+def get_artifact_urls() -> List[ArtifactUrl]:
+    """
+    Get artifact URLs from StartRunMessage.
+    URLs include failover_url for resilience.
+    """
+    current_run = get_current_run()
+    if not current_run:
+        return []
+
+    return [
+        ArtifactUrl(
+            path=pattern,
+            url=url_info['url'],
+            failover_url=url_info.get('failover_url'),
+        )
+        for pattern, url_info in current_run.artifact_urls.items()
+    ]
+```
+
+## Comparison: Spot vs Heartbeat Panic
+
+| Aspect               | Spot Interruption         | Heartbeat Panic           |
+|----------------------|---------------------------|---------------------------|
+| Trigger              | EC2 IMDS notice           | 15m no heartbeat ack      |
+| Warning window       | 2 minutes                 | 10 minutes (15m→25m)      |
+| Checkpoint budget    | 90 seconds                | 5 minutes                 |
+| Artifact budget      | 20 seconds                | 4 minutes                 |
+| Artifact priority    | Size ascending            | Recency descending        |
+| Start message        | SpotInterruptStartMessage | HeartbeatPanicStartMessage|
+| Complete message     | SpotInterruptCompleteMessage | HeartbeatPanicCompleteMessage |
+| Checkpoint reason    | spot_termination          | heartbeat_timeout         |
+
+### Prioritization Rationale
+
+**Spot (size_asc):** With only 20s for uploads, maximize artifact count. Small files
+upload quickly; if budget exhausts, larger files (often verbose/redundant) are skipped.
+Getting 10 small checkpoints is more valuable than 1 large one.
+
+**Panic (recency_desc):** With 4m budget, prioritize value over count. Newest artifacts
+represent most recent work; older artifacts may be stale or recoverable from earlier
+checkpoints. If budget exhausts, older files are dropped.
+
+Both paths share:
+- execute_checkpoint() function from checkpoint.py
+- Artifact upload with failover URL support
+- Two-phase protocol (start → checkpoint → complete)
+- Shutdown initiation after completion
+- prioritize_artifacts() with strategy determined by reason

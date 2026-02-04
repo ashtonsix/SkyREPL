@@ -3,7 +3,7 @@
 ## Ink Components (React for CLI)
 - `ProgressBar` - Renders progress bar with current/total
 - `WorkflowStatus` - Displays workflow execution state, current node, progress
-- `NodeList` - Lists workflow nodes with status icons (⏳ pending, ⏵ running, ✓ done, ✗ failed)
+- `NodeList` - Lists workflow nodes with status icons (⏳ pending, ⏵ running, ✓ done, ✗ failed, ⚠️ degraded)
 - `FileSyncProgress` - Shows file upload/download progress with transfer rate
 
 ## Formatters

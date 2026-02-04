@@ -814,7 +814,10 @@ debug_hold_until timestamp. Simple bidirectional communication.
 
   TIMING (example defaults, configurable)
   ───────────────────────────────────────
-    Heartbeat interval:     HEARTBEAT_INTERVAL (e.g., 30s)
+    Heartbeat interval:     HEARTBEAT_INTERVAL (e.g., 10s)
+    Degraded threshold:     HEARTBEAT_DEGRADED (e.g., 2m)
+    Agent self-term:        HEARTBEAT_ACK_TIMEOUT (e.g., 15m)
+    Control force-term:     STALE_DETECTION (e.g., 25m)
     SSH extension amount:   SSH_EXTENSION_MS (e.g., 5min per detection)
     Max SSH extension:      MAX_SSH_EXTENSION_MS (e.g., 2h cumulative)
     Absolute max hold:      ABSOLUTE_MAX_HOLD_MS (e.g., 24h)
@@ -822,7 +825,7 @@ debug_hold_until timestamp. Simple bidirectional communication.
   CONSTRAINTS (normative)
   ───────────────────────
     SSH extension < max SSH extension < absolute max hold
-    Heartbeat interval < stale detection threshold
+    Heartbeat: interval < degraded < ack_timeout < stale_detection
 
   DETECTION METHOD
   ────────────────

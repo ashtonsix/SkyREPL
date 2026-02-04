@@ -1,0 +1,275 @@
+# checkpoint.py - Checkpoint Handling (L2 Pseudocode)
+
+# Note: Timing constants reference ../../shared/src/config/timing.ts.l2.txt
+# - SPOT_CHECKPOINT_BUDGET_MS (90s)
+# - PANIC_CHECKPOINT_BUDGET_MS (5m)
+
+```python
+import subprocess
+import os
+import time
+from dataclasses import dataclass
+from typing import Optional, List
+
+
+@dataclass
+class CheckpointResult:
+    exit_code: Optional[int]  # None if not run or timed out
+    artifacts_uploaded: int
+
+
+@dataclass
+class ArtifactUrl:
+    path: str
+    url: str
+    failover_url: Optional[str]
+
+
+def execute_checkpoint(
+    reason: str,
+    timeout_ms: int,
+    run_id: int,
+    artifact_urls: List[ArtifactUrl],
+) -> CheckpointResult:
+    """
+    Shared checkpoint execution for spot interruption and heartbeat panic.
+
+    Args:
+        reason: 'spot_termination' or 'heartbeat_timeout'
+        timeout_ms: Budget for checkpoint script (90s spot, 5m panic)
+        run_id: Current run ID
+        artifact_urls: Pre-generated URLs for artifact upload (includes failover)
+
+    Returns:
+        CheckpointResult with exit code and upload count
+    """
+    checkpoint_script = get_checkpoint_script()
+    if not checkpoint_script:
+        log("INFO", f"No checkpoint script configured, skipping ({reason})")
+        return CheckpointResult(exit_code=None, artifacts_uploaded=0)
+
+    # Set environment variables
+    env = os.environ.copy()
+    env['SKYREPL_CHECKPOINT_REASON'] = reason
+    env['SKYREPL_RUN_ID'] = str(run_id)
+    env['SKYREPL_WORKDIR'] = get_workdir()
+
+    log("INFO", f"Executing checkpoint script for {reason} (timeout: {timeout_ms}ms)")
+    start_time = time.time()
+
+    try:
+        # Execute checkpoint script
+        timeout_sec = timeout_ms / 1000.0
+        proc = subprocess.run(
+            checkpoint_script,
+            shell=True,
+            cwd=get_workdir(),
+            env=env,
+            timeout=timeout_sec,
+            capture_output=True,
+        )
+
+        # Stream output as logs
+        if proc.stdout:
+            log_checkpoint_output(run_id, 'stdout', proc.stdout.decode('utf-8', errors='replace'))
+        if proc.stderr:
+            log_checkpoint_output(run_id, 'stderr', proc.stderr.decode('utf-8', errors='replace'))
+
+        exit_code = proc.returncode
+        log("INFO", f"Checkpoint script completed with exit code {exit_code}")
+
+    except subprocess.TimeoutExpired:
+        log("WARN", f"Checkpoint script timed out after {timeout_ms}ms")
+        exit_code = None
+
+    except Exception as e:
+        log("ERROR", f"Checkpoint script failed: {e}")
+        exit_code = None
+
+    # Calculate remaining time for artifact upload
+    elapsed_ms = (time.time() - start_time) * 1000
+    remaining_ms = max(0, timeout_ms - elapsed_ms)
+
+    # Upload artifacts with remaining budget
+    # Prioritization: spot uses size_asc, panic uses recency_desc
+    artifacts_uploaded = upload_artifacts(
+        artifact_urls,
+        remaining_budget_ms=remaining_ms,
+        reason=reason,
+    )
+
+    return CheckpointResult(
+        exit_code=exit_code,
+        artifacts_uploaded=artifacts_uploaded,
+    )
+
+
+def execute_spot_checkpoint(run_id: int, artifact_urls: List[ArtifactUrl]) -> CheckpointResult:
+    """Spot interruption checkpoint with 90s budget."""
+    return execute_checkpoint(
+        reason='spot_termination',
+        timeout_ms=SPOT_CHECKPOINT_BUDGET_MS,
+        run_id=run_id,
+        artifact_urls=artifact_urls,
+    )
+
+
+def execute_panic_checkpoint(run_id: int, artifact_urls: List[ArtifactUrl]) -> CheckpointResult:
+    """Heartbeat panic checkpoint with 5m budget."""
+    return execute_checkpoint(
+        reason='heartbeat_timeout',
+        timeout_ms=PANIC_CHECKPOINT_BUDGET_MS,
+        run_id=run_id,
+        artifact_urls=artifact_urls,
+    )
+
+
+@dataclass
+class ArtifactWithMetadata:
+    artifact: ArtifactUrl
+    path: str       # Full path to file
+    size: int       # File size in bytes
+    mtime: float    # Modification time (Unix timestamp)
+
+
+def prioritize_artifacts(urls: List[ArtifactUrl], strategy: str) -> List[ArtifactWithMetadata]:
+    """
+    Prioritize artifacts based on strategy.
+
+    Args:
+        urls: Artifact URLs to prioritize
+        strategy: 'size_asc' (spot) or 'recency_desc' (panic)
+
+    Returns:
+        Sorted list of ArtifactWithMetadata (only existing files)
+
+    Strategy rationale:
+    - size_asc: Maximize artifact count in tight spot window (20s)
+    - recency_desc: Prioritize recent work in generous panic window (4m)
+    """
+    artifacts_with_metadata = []
+
+    for artifact in urls:
+        artifact_path = os.path.join(get_workdir(), artifact.path)
+        if not os.path.exists(artifact_path):
+            log("DEBUG", f"Artifact not found, skipping: {artifact.path}")
+            continue
+
+        try:
+            stat = os.stat(artifact_path)
+            artifacts_with_metadata.append(ArtifactWithMetadata(
+                artifact=artifact,
+                path=artifact_path,
+                size=stat.st_size,
+                mtime=stat.st_mtime,
+            ))
+        except OSError as e:
+            log("WARN", f"Failed to stat artifact {artifact.path}: {e}")
+            continue
+
+    # Sort based on strategy
+    if strategy == 'size_asc':
+        # Smallest first - maximize count in tight window
+        artifacts_with_metadata.sort(key=lambda a: a.size)
+        log("INFO", f"Prioritized {len(artifacts_with_metadata)} artifacts by size (smallest first)")
+    elif strategy == 'recency_desc':
+        # Newest first - prioritize recent work
+        artifacts_with_metadata.sort(key=lambda a: a.mtime, reverse=True)
+        log("INFO", f"Prioritized {len(artifacts_with_metadata)} artifacts by recency (newest first)")
+    else:
+        log("WARN", f"Unknown prioritization strategy: {strategy}, using original order")
+
+    return artifacts_with_metadata
+
+
+def upload_artifacts(urls: List[ArtifactUrl], remaining_budget_ms: int, reason: str = 'spot_termination') -> int:
+    """
+    Upload artifacts with prioritization and failover support.
+
+    Args:
+        urls: Artifact URLs with primary and optional failover
+        remaining_budget_ms: Time budget for uploads
+        reason: 'spot_termination' or 'heartbeat_timeout' (determines prioritization)
+
+    Returns:
+        Count of successfully uploaded artifacts
+
+    Prioritization:
+    - spot_termination: size ascending (maximize count in 20s window)
+    - heartbeat_timeout: recency descending (prioritize recent work in 4m window)
+    """
+    # Determine prioritization strategy based on reason
+    if reason == 'spot_termination':
+        strategy = 'size_asc'
+    else:  # heartbeat_timeout or unknown
+        strategy = 'recency_desc'
+
+    # Get prioritized artifacts (filters out non-existent files)
+    prioritized = prioritize_artifacts(urls, strategy)
+
+    uploaded = 0
+    deadline = time.time() + (remaining_budget_ms / 1000.0)
+
+    for item in prioritized:
+        if time.time() >= deadline:
+            remaining = len(prioritized) - uploaded
+            log("WARN", f"Upload budget exhausted, {remaining} artifacts skipped")
+            break
+
+        # Try primary URL first
+        if upload_to_url(item.path, item.artifact.url):
+            uploaded += 1
+            log("INFO", f"Uploaded artifact: {item.artifact.path} ({item.size} bytes)")
+            continue
+
+        # Try failover URL if primary failed
+        if item.artifact.failover_url:
+            log("WARN", f"Primary upload failed, trying failover: {item.artifact.path}")
+            if upload_to_url(item.path, item.artifact.failover_url):
+                uploaded += 1
+                log("INFO", f"Uploaded artifact via failover: {item.artifact.path}")
+                continue
+
+        log("ERROR", f"Failed to upload artifact: {item.artifact.path}")
+
+    return uploaded
+
+
+def upload_to_url(local_path: str, presigned_url: str) -> bool:
+    """Upload file to presigned S3 URL. Returns success."""
+    try:
+        with open(local_path, 'rb') as f:
+            response = http_put(presigned_url, f.read(), timeout=60)
+            return response.status in (200, 204)
+    except Exception as e:
+        log("WARN", f"Upload failed: {e}")
+        return False
+```
+
+## Failover URL Design
+
+URLs are generated at workflow start (StartRunMessage) with 4h TTL:
+- Primary: First presigned URL for the blob
+- Failover: Second presigned URL for same blob (different signature)
+
+Agent upload logic:
+1. Try primary URL
+2. On failure (network, expired, etc.): try failover URL
+3. Log success/failure
+
+This provides resilience against:
+- Transient network issues during control plane outage
+- Presigned URL expiration edge cases
+- S3 endpoint regional failures
+
+## Timing Budgets
+
+Spot Interruption (2m total):
+- Checkpoint: 90s max
+- Artifact upload: 20s
+- Messaging: 10s buffer
+
+Heartbeat Panic (10m total: 15m→25m):
+- Checkpoint: 5m max
+- Artifact upload: 4m
+- Messaging: 1m buffer

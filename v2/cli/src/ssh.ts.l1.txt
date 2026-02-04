@@ -3,20 +3,28 @@
 ## Config Generation
 - Write to ~/.repl/ssh_config
 - Per-allocation routing (not per-instance)
+- Specific Host entries BEFORE catch-all pattern
+- Order matters: SSH matches first occurrence
 
-## Host Entry Format
-- Host: allocation ID (e.g., alloc-abc123)
+## Host Entry Format (Specific Entries)
+- Host: allocation slug (e.g., repl-abc123)
 - HostName: instance IP
 - User: allocation user
 - RemoteCommand: cd to workdir
+- ProxyCommand: ssh_proxy.sh for JIT Tailscale connection
 
-## Tailscale Integration
-- ProxyCommand via ssh_proxy_command.sh
-- JIT Tailscale connection
+## Catch-All Fallback Entry
+- Host: repl-* (matches any repl- prefix)
+- ProxyCommand: ssh_fallback.sh %n
+- Must appear AFTER all specific entries
+- Handles stale config scenarios (allocation terminated, IP changed, etc.)
+- Queries control plane to resolve slug or provide helpful errors
 
 ## Triggers
-- Auto-regenerate on allocation state changes
-- Update on IP changes
+- Auto-regenerate on allocation state changes (CLAIMED → ACTIVE, ACTIVE → COMPLETE)
+- Periodic sync (configurable interval, default: 5 minutes)
+- Manual trigger: `repl ssh-sync` command
+- Update on IP changes detected via control plane
 
 ## Shared Instance Notice
 Before connecting, check if target instance has other active allocations:

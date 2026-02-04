@@ -1,0 +1,248 @@
+================================================================================
+WORKLOG: L2 Foundation (T3, T4, L2.1, L2.5)
+================================================================================
+Status: COMPLETE
+Started: 2026-02-04
+Completed: 2026-02-05
+Archived as: Wl4
+
+================================================================================
+SUMMARY
+================================================================================
+
+This worklog triaged TODO.txt items, discovered many were already implemented,
+and delivered foundational L2 work enabling safe subsequent transitions.
+
+Key outcomes:
+  - T3: SQLITE_BUSY jitter (2-line fix using existing calculateBackoff)
+  - T4: Reservation column in storage layer
+  - L2.1: Atomic state transition pattern + bug fixes
+  - L2.5: Idempotency key GC task added
+
+Demoted to verification (already implemented):
+  - L2.4: Workflow vs node timeout (three-tier hierarchy exists)
+  - L2.8: Backpressure in log streaming (buffer management exists)
+  - L2.9: Two-phase spawn recovery (A13 pattern exists)
+
+================================================================================
+DISCOVERY PHASE
+================================================================================
+
+### User Directives (Captured 2026-02-04)
+
+1. Enhance plan with specific spec + L1/L2 file references
+2. Use explore agent fanout to track down all implicated files
+3. Modify plan based on exploration findings (broad latitude granted)
+4. Curate/refine L2 first steps with additions + compensatory removals
+5. Establish confidence levels in direction
+6. During L2 first steps: maintain BOTH .l1.txt AND .l2.txt files in lockstep
+7. Source of truth: Recent WORKLOG > spec > pseudo-impl
+
+### Exploration Method
+
+10 parallel subagents searched spec + v2/ for all implicated files.
+
+### Key Discoveries
+
+T3 (WAL/SQLITE_BUSY):
+  - WAL mode ALREADY ENABLED at db.ts.l1.txt:24
+  - SQLITE_BUSY retry ALREADY EXISTS at db.ts.l1.txt:228-237
+  - Gap: Deterministic backoff, needs jitter
+  - Resolution: Use timing.ts calculateBackoff() which has ±10% jitter
+
+L2.1 (Atomic transitions):
+  - Specific bugs found in reconciliation.ts, garbage-collection.ts
+  - HIGH PRIORITY fixes identified with line numbers
+  - Pattern: state-transitions.ts has correct CAS pattern to follow
+
+L2.4, L2.5, L2.8, L2.9:
+  - Already implemented or specified
+  - Demoted to verification tasks
+
+### File References (from exploration)
+
+T1: Agent heartbeat control plane ID verification
+    spec/11_AGENT.txt:226-238, 654-712
+    spec/09_API.txt:1589-1625
+    v2/shared/src/api/agent.ts.l1.txt:70-77
+    v2/agent/heartbeat.py.l1.txt:12-13
+    v2/control/src/api/agent/agent.ts.l1.txt:5-10
+    v2/control/src/api/agent/sse-protocol.ts.l1.txt:31
+
+T3: WAL mode + SQLITE_BUSY retry
+    v2/control/src/material/db.ts.l1.txt:24, 228-237
+    v2/shared/src/config/timing.ts.l2.txt:205-212
+
+T4: Reservation column
+    spec/02_MATERIAL.txt:862-878
+    spec/WORKLOG_REVISIONS.txt:39
+    v2/control/src/material/storage.ts.l1.txt:15-19
+
+L2.1: Atomic state transitions
+    HIGH PRIORITY (bugs):
+      v2/control/src/background/reconciliation.ts.l1.txt:26-34, 36-50
+      v2/control/src/background/garbage-collection.ts.l1.txt:59-60
+      v2/control/src/intent/cleanup-manifest.ts.l1.txt:109
+    ALREADY CORRECT:
+      v2/control/src/material/db.ts.l1.txt:63-92
+      v2/control/src/workflow/state-transitions.ts.l1.txt:103-109
+      v2/control/src/workflow/nodes/claim-allocation.ts.l1.txt:10-22
+
+L2.5: Idempotency key cleanup
+    v2/control/src/material/migrations/002_idempotency_keys.sql.l1.txt:15-18
+    v2/control/src/middleware/idempotency.ts.l1.txt:21-22
+    Gap: Background GC task missing from garbage-collection.ts
+
+### Research Results (Opus agents)
+
+L2.1 Pattern Design:
+  - TransitionResult<T> = { success, data } | { success: false, reason, current? }
+  - Reasons: NOT_FOUND, WRONG_STATE, RACE_LOST
+  - Template pseudocode for state-transitions.ts.l2.txt
+  - When to use CAS vs simple status check (idempotent ops)
+  - Special handling: ACTIVE→COMPLETE when already FAILED = treat as success
+
+Verification Results:
+  - L2.4: PASS (5.5/6) - three-tier timeout hierarchy complete
+  - L2.5: PASS with GAP - policy exists, GC task missing
+  - L2.8: PASS (5/5) - all backpressure mechanisms specified
+  - L2.9: PASS (7/7) - A13 pattern fully implemented
+
+================================================================================
+EXECUTION PHASE
+================================================================================
+
+### Phase 2A: Storage Layer (T4)
+
+storage.ts.l1.txt:
+  - Updated lines 16-20 with reservation parameter
+  - generateUploadUrl checks reservation > threshold → S3
+
+storage.ts.l2.txt:
+  - Created (435 lines)
+  - Full implementation with reservation-aware routing
+
+### Phase 2B: Data Layer (T3, L2.1, L2.5)
+
+T3 - SQLITE_BUSY jitter:
+  db.ts.l1.txt:228-239
+    - Updated to use calculateBackoff() from timing.ts
+    - Jitter now applied automatically (±10%)
+
+  db.ts.l2.txt:
+    - Created (1002 lines)
+    - Full transaction semantics with jittered retry
+
+L2.1 - Atomic state transitions:
+  state-transitions.ts.l2.txt:
+    - Created (691 lines)
+    - Canonical CAS pattern documented
+    - TransitionResult type with NOT_FOUND, WRONG_STATE, RACE_LOST
+
+  reconciliation.ts.l1.txt:
+    - Fixed lines 30-31: CLAIMED→FAILED now has WHERE status='CLAIMED'
+    - Fixed lines 45-48: AVAILABLE→FAILED now has WHERE status='AVAILABLE'
+
+  reconciliation.ts.l2.txt:
+    - Created (437 lines)
+
+  garbage-collection.ts.l1.txt:
+    - Fixed lines 59-71: Dedup merger now has CAS guard
+
+  cleanup-manifest.ts.l1.txt:
+    - Fixed lines 109-111: Atomic IN clause for status check
+
+  cleanup-manifest.ts.l2.txt:
+    - Created (653 lines)
+
+L2.5 - Idempotency key GC:
+  garbage-collection.ts.l1.txt:
+    - Added lines 83-101: Fourth GC task for idempotency key expiry
+    - Policy: 24h (2xx), 1h (4xx), immediate (5xx)
+
+  garbage-collection.ts.l2.txt:
+    - Created (391 lines)
+    - Four GC tasks documented
+
+================================================================================
+CONTINUING WORK
+================================================================================
+
+Transferred to WORKLOG_AGENT_RESILIENCE.txt:
+  - L2.6: Spot artifact prioritization (unblocked by Wl5)
+  - T1: Control plane ID verification
+  - L2.3: SSE byte-by-byte handling
+
+Deferred (see TODO.txt):
+  - T2: Tailscale JIT installation timing
+  - L2.7: Materialization depth
+  - L2.10: SSH config host collisions
+
+Verification only (no work needed):
+  - L2.2: In-flight blob dedup - design already exists (eventual consistency)
+
+================================================================================
+DELIVERABLES
+================================================================================
+
+L1 files modified:
+  v2/control/src/material/storage.ts.l1.txt
+  v2/control/src/material/db.ts.l1.txt
+  v2/control/src/background/reconciliation.ts.l1.txt
+  v2/control/src/background/garbage-collection.ts.l1.txt
+  v2/control/src/intent/cleanup-manifest.ts.l1.txt
+
+L2 files created:
+  v2/control/src/material/storage.ts.l2.txt (435 lines)
+  v2/control/src/material/db.ts.l2.txt (1002 lines)
+  v2/control/src/workflow/state-transitions.ts.l2.txt (691 lines)
+  v2/control/src/background/reconciliation.ts.l2.txt (437 lines)
+  v2/control/src/background/garbage-collection.ts.l2.txt (391 lines)
+  v2/control/src/intent/cleanup-manifest.ts.l2.txt (653 lines)
+
+================================================================================
+LOG
+================================================================================
+
+### 2026-02-04 - Worklog Created
+- Read existing worklogs (Wl1, Wl2, Wl3, spec revisions)
+- Created scaffolding with planning step
+- Initial analysis of all TODO items
+
+### 2026-02-04 - Exploration Complete
+- Launched 10 parallel explore agents across spec + v2/
+- Collected detailed file/line references for all items
+- Major discoveries:
+  - T3 (WAL/SQLITE_BUSY): Already implemented, just needs jitter
+  - L2.1: Specific bugs found in reconciliation.ts, garbage-collection.ts
+  - L2.4, L2.5, L2.8, L2.9: Already implemented or specified
+- Revised priority ranking based on findings
+- Curated L2 first steps with additions (L2.1 bugs) and removals
+- Added confidence levels
+- Captured user directives
+
+### 2026-02-04 - Phase 1 Research Complete
+- Parallel research agents returned L2.1 pattern design
+- Verification tasks completed (L2.4, L2.5, L2.8, L2.9)
+- Revised execution scope
+
+### 2026-02-04 - Phase 2 Execution Complete
+- Phase 2A (Storage Layer T4) completed
+- Phase 2B (Data Layer T3, L2.1, L2.5) completed
+- All L1 fixes applied, all L2 files created
+
+### 2026-02-05 - Worklog Archived
+- Verification tasks confirmed complete
+- Continuing work transferred to WORKLOG_AGENT_RESILIENCE.txt
+- Archived as Wl4
+
+================================================================================
+CROSS-REFERENCES
+================================================================================
+
+Spec revisions: specification/WORKLOG_REVISIONS.txt (R0-R9)
+Prior L1 work: worklogs/001_WORKLOG_L1_RESTRUCTURING.txt (Wl1)
+Prior L1 refinement: worklogs/002_WORKLOG_R0X_L1_REFINEMENT.txt (Wl2)
+Timing consolidation: worklogs/003_WORKLOG_TIMINGS.txt (Wl3)
+Heartbeat timing: worklogs/005_WORKLOG_HEARTBEAT_TIMING.txt (Wl5)
+Continuing work: WORKLOG_AGENT_RESILIENCE.txt

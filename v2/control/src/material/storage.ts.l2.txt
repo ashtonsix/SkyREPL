@@ -1,0 +1,434 @@
+# storage.ts - Object Storage (L2 Detailed Pseudocode)
+
+# Note: Timing constants import from ../../../shared/src/config/timing.ts.l2.txt
+# - PRESIGNED_URL_TTL_MS (4h)
+
+## Config
+
+```typescript
+const S3_BUCKET = process.env.S3_BUCKET;
+const INLINE_THRESHOLD = 65536;  // 64KB - see Ch2 for rationale
+const PRESIGNED_URL_TTL = PRESIGNED_URL_TTL_MS;  // 4 hours
+const MULTIPART_URL_TTL = PRESIGNED_URL_TTL_MS;  // 4 hours per part
+const LARGE_FILE_THRESHOLD = 104857600;  // 100MB triggers multipart
+```
+
+## Presigned URLs
+
+### generateUploadUrl
+
+```typescript
+/**
+ * Generate presigned URL for blob upload.
+ *
+ * @param blobId - Target blob identifier
+ * @param sizeBytes - Current/known size of content
+ * @param contentType - Optional MIME type
+ * @param reservation - Pre-declared expected final size (default 0)
+ *
+ * Reservation parameter:
+ * - When reservation > 0, caller is pre-declaring expected object size
+ * - Invariant: reservation >= sizeBytes (enforced by schema)
+ * - Use cases:
+ *   1. Logs expected to grow: set reservation to expected max (e.g., 1MB)
+ *   2. Streaming uploads: reserve space in S3 before content arrives
+ *   3. Avoids migration from inline → S3 when object grows past 64KB
+ *
+ * Why reservation prevents "migration shuffle":
+ * - Without reservation: object starts inline (< 64KB), grows, exceeds threshold,
+ *   triggers migration to S3, wasting write operations
+ * - With reservation: caller knows final size upfront, object goes directly to S3,
+ *   no intermediate inline storage, no migration needed
+ */
+function generateUploadUrl(
+  blobId: number,
+  sizeBytes: number,
+  contentType?: string,
+  reservation: number = 0
+): { url: string; method: string; inline: boolean; multipart?: MultipartInfo } {
+
+  // Check reservation FIRST - if caller pre-declared large size, go to S3
+  // This prevents starting inline then migrating when object grows
+  if (reservation > INLINE_THRESHOLD) {
+    return generateS3Url(blobId, sizeBytes, contentType);
+  }
+
+  // Fall back to current size check for objects without reservation
+  // (reservation=0 means "no pre-declaration, use current size")
+  if (sizeBytes <= INLINE_THRESHOLD) {
+    // Small object: inline storage in DB payload column
+    return {
+      url: `${CONTROL_PLANE_URL}/api/blobs/${blobId}/inline`,
+      method: 'PUT',
+      inline: true
+    };
+  }
+
+  // Large object: S3 storage
+  return generateS3Url(blobId, sizeBytes, contentType);
+}
+
+function generateS3Url(
+  blobId: number,
+  sizeBytes: number,
+  contentType?: string
+): { url: string; method: string; inline: boolean; multipart?: MultipartInfo } {
+
+  if (sizeBytes > LARGE_FILE_THRESHOLD) {
+    // Very large: multipart upload
+    return generateMultipartUploadUrls(blobId, sizeBytes, contentType);
+  }
+
+  // Standard S3 single-part upload
+  const s3Key = `blobs/${blobId}`;
+  const url = s3Client.getSignedUrl('putObject', {
+    Bucket: S3_BUCKET,
+    Key: s3Key,
+    ContentType: contentType,
+    Expires: PRESIGNED_URL_TTL / 1000  // seconds
+  });
+
+  return {
+    url,
+    method: 'PUT',
+    inline: false
+  };
+}
+```
+
+### generateDownloadUrl
+
+```typescript
+/**
+ * Generate presigned URL for blob download.
+ * Determines storage location by checking blob.s3_key field.
+ */
+function generateDownloadUrl(blobId: number): { url: string; inline: boolean } {
+  const blob = db.get('SELECT s3_key, s3_bucket FROM blobs WHERE id = ?', blobId);
+
+  if (!blob) {
+    throw new NotFoundError(`Blob ${blobId} not found`);
+  }
+
+  if (blob.s3_key) {
+    // S3 storage
+    const url = s3Client.getSignedUrl('getObject', {
+      Bucket: blob.s3_bucket || S3_BUCKET,
+      Key: blob.s3_key,
+      Expires: PRESIGNED_URL_TTL / 1000
+    });
+    return { url, inline: false };
+  }
+
+  // Inline storage
+  return {
+    url: `${CONTROL_PLANE_URL}/api/blobs/${blobId}/inline`,
+    inline: true
+  };
+}
+```
+
+## Inline Storage (<=64KB, SBO)
+
+```typescript
+/**
+ * Store small object inline in DB payload column.
+ * Small Blob Optimization (SBO) - avoids S3 latency/cost for tiny objects.
+ */
+function storeInline(blobId: number, data: Buffer): void {
+  db.run(
+    'UPDATE blobs SET payload = ?, size_bytes = ?, updated_at = ? WHERE id = ?',
+    data, data.length, Date.now(), blobId
+  );
+}
+
+function getInline(blobId: number): Buffer | null {
+  const row = db.get('SELECT payload FROM blobs WHERE id = ?', blobId);
+  return row?.payload ?? null;
+}
+```
+
+## S3 Operations (>64KB)
+
+```typescript
+function uploadToS3(blobId: number, data: Buffer, contentType?: string): void {
+  const s3Key = `blobs/${blobId}`;
+
+  await s3Client.putObject({
+    Bucket: S3_BUCKET,
+    Key: s3Key,
+    Body: data,
+    ContentType: contentType
+  });
+
+  db.run(
+    'UPDATE blobs SET s3_key = ?, s3_bucket = ?, size_bytes = ?, payload = NULL, updated_at = ? WHERE id = ?',
+    s3Key, S3_BUCKET, data.length, Date.now(), blobId
+  );
+}
+
+function downloadFromS3(blobId: number): Buffer {
+  const blob = db.get('SELECT s3_key, s3_bucket FROM blobs WHERE id = ?', blobId);
+
+  const result = await s3Client.getObject({
+    Bucket: blob.s3_bucket || S3_BUCKET,
+    Key: blob.s3_key
+  });
+
+  return result.Body as Buffer;
+}
+
+function deleteFromS3(blobId: number): void {
+  const blob = db.get('SELECT s3_key, s3_bucket FROM blobs WHERE id = ?', blobId);
+
+  if (blob?.s3_key) {
+    await s3Client.deleteObject({
+      Bucket: blob.s3_bucket || S3_BUCKET,
+      Key: blob.s3_key
+    });
+  }
+}
+```
+
+## Multipart Uploads (>100MB)
+
+```typescript
+interface MultipartInfo {
+  uploadId: string;
+  parts: { partNumber: number; url: string }[];
+}
+
+/**
+ * Generate multipart upload URLs for large files.
+ * Required for files > 5GB, recommended for files > 100MB.
+ *
+ * Part constraints:
+ * - Part size: min 5MB (except last), max 5GB
+ * - Max parts: 10,000
+ */
+function generateMultipartUploadUrls(
+  blobId: number,
+  totalSize: number,
+  contentType?: string
+): { url: string; method: string; inline: boolean; multipart: MultipartInfo } {
+
+  const s3Key = `blobs/${blobId}`;
+  const partSize = calculatePartSize(totalSize);
+  const partCount = Math.ceil(totalSize / partSize);
+
+  // Initialize multipart upload
+  const { UploadId } = await s3Client.createMultipartUpload({
+    Bucket: S3_BUCKET,
+    Key: s3Key,
+    ContentType: contentType
+  });
+
+  // Generate presigned URL for each part
+  const parts = [];
+  for (let i = 1; i <= partCount; i++) {
+    const url = s3Client.getSignedUrl('uploadPart', {
+      Bucket: S3_BUCKET,
+      Key: s3Key,
+      UploadId,
+      PartNumber: i,
+      Expires: MULTIPART_URL_TTL / 1000
+    });
+    parts.push({ partNumber: i, url });
+  }
+
+  return {
+    url: '',  // No single URL for multipart
+    method: 'PUT',
+    inline: false,
+    multipart: { uploadId: UploadId, parts }
+  };
+}
+
+function completeMultipartUpload(
+  blobId: number,
+  uploadId: string,
+  parts: { partNumber: number; etag: string }[]
+): void {
+  const s3Key = `blobs/${blobId}`;
+
+  await s3Client.completeMultipartUpload({
+    Bucket: S3_BUCKET,
+    Key: s3Key,
+    UploadId: uploadId,
+    MultipartUpload: {
+      Parts: parts.map(p => ({ PartNumber: p.partNumber, ETag: p.etag }))
+    }
+  });
+
+  // Get final size from S3
+  const { ContentLength } = await s3Client.headObject({
+    Bucket: S3_BUCKET,
+    Key: s3Key
+  });
+
+  db.run(
+    'UPDATE blobs SET s3_key = ?, s3_bucket = ?, size_bytes = ?, payload = NULL, updated_at = ? WHERE id = ?',
+    s3Key, S3_BUCKET, ContentLength, Date.now(), blobId
+  );
+}
+
+function abortMultipartUpload(blobId: number, uploadId: string): void {
+  const s3Key = `blobs/${blobId}`;
+
+  await s3Client.abortMultipartUpload({
+    Bucket: S3_BUCKET,
+    Key: s3Key,
+    UploadId: uploadId
+  });
+}
+
+function calculatePartSize(totalSize: number): number {
+  const MIN_PART_SIZE = 5 * 1024 * 1024;      // 5MB
+  const MAX_PART_SIZE = 5 * 1024 * 1024 * 1024; // 5GB
+  const MAX_PARTS = 10000;
+
+  let partSize = Math.ceil(totalSize / MAX_PARTS);
+  partSize = Math.max(partSize, MIN_PART_SIZE);
+  partSize = Math.min(partSize, MAX_PART_SIZE);
+
+  return partSize;
+}
+```
+
+## Blob Deduplication (Opt-In)
+
+```typescript
+/**
+ * Check which blobs already exist by checksum.
+ * Only performs dedup check for dedupable buckets.
+ */
+function checkBlobsExist(
+  bucket: string,
+  checksums: string[]
+): { missing: string[]; existing: Record<string, number> } {
+
+  if (!isDedupableBucket(bucket)) {
+    // Non-dedupable buckets (e.g., 'logs'): all are "missing"
+    return { missing: checksums, existing: {} };
+  }
+
+  const existing: Record<string, number> = {};
+  const missing: string[] = [];
+
+  for (const checksum of checksums) {
+    const blob = db.get(
+      'SELECT id FROM blobs WHERE bucket = ? AND checksum = ? LIMIT 1',
+      bucket, checksum
+    );
+
+    if (blob) {
+      existing[checksum] = blob.id;
+    } else {
+      missing.push(checksum);
+    }
+  }
+
+  return { missing, existing };
+}
+
+function isDedupableBucket(bucket: string): boolean {
+  const DEDUPABLE_BUCKETS = ['run-files', 'artifacts', 'snapshots'];
+  return DEDUPABLE_BUCKETS.includes(bucket);
+}
+
+/**
+ * Create blob with optional deduplication.
+ * For dedupable buckets, reuses existing blob if checksum matches.
+ */
+function createBlobWithDedup(
+  bucket: string,
+  checksum: string,
+  data: Buffer
+): number {
+
+  if (isDedupableBucket(bucket)) {
+    // Check for existing blob
+    const existing = db.get(
+      'SELECT id FROM blobs WHERE bucket = ? AND checksum = ?',
+      bucket, checksum
+    );
+
+    if (existing) {
+      // Update last_referenced_at and return existing
+      db.run(
+        'UPDATE blobs SET last_referenced_at = ? WHERE id = ?',
+        Date.now(), existing.id
+      );
+      return existing.id;
+    }
+  }
+
+  // Create new blob
+  const result = db.run(
+    'INSERT INTO blobs (bucket, checksum, size_bytes, created_at) VALUES (?, ?, ?, ?)',
+    bucket, checksum, data.length, Date.now()
+  );
+
+  const blobId = result.lastInsertRowid;
+
+  // Store content based on size
+  if (data.length <= INLINE_THRESHOLD) {
+    storeInline(blobId, data);
+  } else {
+    uploadToS3(blobId, data);
+  }
+
+  return blobId;
+}
+```
+
+## File Sync Preparation
+
+```typescript
+interface FileInfo {
+  path: string;
+  checksum: string;
+}
+
+interface PreparedFile {
+  path: string;
+  blobId: number;
+  url: string;
+}
+
+/**
+ * Prepare files for agent download.
+ * Creates run_file objects linking run to blobs.
+ */
+function prepareFilesForRun(runId: number, files: FileInfo[]): PreparedFile[] {
+  const checksums = files.map(f => f.checksum);
+  const { existing } = checkBlobsExist('run-files', checksums);
+
+  const result: PreparedFile[] = [];
+
+  for (const file of files) {
+    const blobId = existing[file.checksum];
+
+    if (!blobId) {
+      throw new Error(`Blob not found for checksum: ${file.checksum}`);
+    }
+
+    // Create run_file object linking run to blob
+    db.run(
+      'INSERT INTO objects (manifest_id, type, blob_id, metadata) VALUES (?, ?, ?, ?)',
+      getManifestId(runId), 'run_file', blobId, JSON.stringify({ path: file.path })
+    );
+
+    // Generate download URL
+    const { url } = generateDownloadUrl(blobId);
+
+    result.push({
+      path: file.path,
+      blobId,
+      url
+    });
+  }
+
+  return result;
+}
+```

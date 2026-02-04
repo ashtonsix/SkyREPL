@@ -1,0 +1,524 @@
+# sse.py - SSE Command Stream (L2 Pseudocode)
+
+# Note: Timing constants aligned with ../../shared/src/config/timing.ts.l2.txt
+# - SSE_RECONNECT_BASE_MS (2000ms / 2s)
+# - SSE_RECONNECT_MAX_MS (64000ms / 64s)
+# - SSE_MAX_RETRIES (10)
+# Env vars use milliseconds (consistent with timing.ts); Python converts to seconds internally.
+
+"""
+SSE Implementation for Agent Command Stream
+
+Design rationale:
+- Byte-by-byte reading avoids Python's 8KB buffer deadlock
+- SSE messages are ~150 bytes, infrequent (<1/min typical)
+- Syscall overhead negligible for low-frequency control signaling
+- Agent spends 99.9% of time blocked on read(1)
+
+Message flow:
+  Control Plane ──SSE──> Agent
+  Types: start_run, cancel_run, prepare_snapshot, capture_artifacts,
+         trigger_tailscale, heartbeat_ack
+"""
+
+import json
+import os
+import time
+from dataclasses import dataclass
+from http.client import HTTPConnection, HTTPSConnection
+from typing import Generator, Optional, Any
+from urllib.parse import urlparse
+
+# Configuration from environment (with defaults)
+# Env vars are in milliseconds (consistent with timing.ts); converted to seconds for sleep()
+SSE_RECONNECT_BASE_S = int(os.getenv('REPL_SSE_RECONNECT_BASE', '2000')) / 1000  # 2s
+SSE_RECONNECT_MAX_S = int(os.getenv('REPL_SSE_RECONNECT_MAX', '64000')) / 1000   # 64s
+SSE_MAX_RETRIES = int(os.getenv('REPL_SSE_MAX_RETRIES', '10'))
+CONTROL_PLANE_URL = os.getenv('REPL_CONTROL_PLANE_URL', 'https://api.skyrepl.io')
+INSTANCE_ID = os.getenv('REPL_INSTANCE_ID')  # Required
+
+# Module-level state
+shutting_down = False
+reconnect_count = 0
+last_message_time: Optional[float] = None
+
+
+@dataclass
+class SSEMessage:
+    """Parsed SSE message with event type and data."""
+    event: str  # Event type (e.g., 'start_run', 'cancel_run')
+    data: dict  # Parsed JSON payload
+
+
+def set_shutting_down(value: bool) -> None:
+    """Signal SSE reader to exit gracefully."""
+    global shutting_down
+    shutting_down = value
+
+
+def get_reconnect_count() -> int:
+    """Return total reconnection count for diagnostics."""
+    return reconnect_count
+
+
+def get_last_message_time() -> Optional[float]:
+    """Return timestamp of last received message for diagnostics."""
+    return last_message_time
+
+
+# -----------------------------------------------------------------------------
+# Low-Level Byte Reading
+# -----------------------------------------------------------------------------
+
+def read_line(response) -> Optional[bytes]:
+    """
+    Read a single line from HTTP response, byte-by-byte.
+
+    Why byte-by-byte:
+    - Python's http.client uses 8KB internal buffers
+    - read(n) and readline() block until buffer fills or connection closes
+    - SSE messages are ~150 bytes, sent infrequently
+    - Buffered reads would block forever waiting for 8KB
+    - Byte-by-byte bypasses buffers at negligible syscall cost
+
+    Returns:
+        bytes: Line content (without newline), or None if connection closed
+    """
+    line = b""
+    while not shutting_down:
+        byte = response.read(1)
+
+        # Empty byte indicates socket close
+        if not byte:
+            return None
+
+        # Newline terminates line
+        if byte == b'\n':
+            return line
+
+        line += byte
+
+    # Shutdown requested
+    return None
+
+
+def read_lines(response) -> Generator[str, None, None]:
+    """
+    Generator yielding decoded lines from response.
+
+    Handles:
+    - Byte-by-byte reading to avoid buffer deadlock
+    - UTF-8 decoding with error replacement
+    - Stripping whitespace
+    - Filtering empty lines (for SSE blank line detection, handle at caller)
+
+    Yields:
+        str: Decoded, stripped line content
+    """
+    while not shutting_down:
+        line_bytes = read_line(response)
+
+        # Connection closed
+        if line_bytes is None:
+            return
+
+        # Decode and strip
+        text = line_bytes.decode('utf-8', errors='replace').strip()
+        yield text
+
+
+# -----------------------------------------------------------------------------
+# SSE Event Parsing
+# -----------------------------------------------------------------------------
+
+def parse_sse_events(response) -> Generator[SSEMessage, None, None]:
+    """
+    Parse SSE event stream into structured messages.
+
+    SSE format:
+        event: <type>
+        data: <json>
+
+        (blank line separates events)
+
+    Implementation notes:
+    - Blank line (\n\n) indicates end of event
+    - 'event:' line sets event type (optional, defaults to 'message')
+    - 'data:' line contains JSON payload
+    - Multiple data lines concatenated (per SSE spec)
+    - Comments (lines starting with ':') ignored
+
+    Yields:
+        SSEMessage: Parsed event with type and data
+    """
+    global last_message_time
+
+    current_event: Optional[str] = None
+    current_data: list[str] = []
+
+    for line in read_lines(response):
+        # Blank line = end of event, emit if we have data
+        if not line:
+            if current_data:
+                try:
+                    # Concatenate data lines (SSE spec allows multiple data: lines)
+                    data_str = '\n'.join(current_data)
+                    data = json.loads(data_str)
+
+                    # Default event type is 'message' per SSE spec
+                    event_type = current_event or 'message'
+
+                    # Update last message time for diagnostics
+                    last_message_time = time.time()
+
+                    yield SSEMessage(event=event_type, data=data)
+
+                except json.JSONDecodeError as e:
+                    log("WARN", f"Invalid JSON in SSE data: {e}")
+                    # Skip malformed message, don't crash
+
+            # Reset for next event
+            current_event = None
+            current_data = []
+            continue
+
+        # Comment line (SSE keepalive)
+        if line.startswith(':'):
+            # Could be keepalive, just ignore
+            continue
+
+        # Event type line
+        if line.startswith('event:'):
+            current_event = line[6:].strip()
+            continue
+
+        # Data line
+        if line.startswith('data:'):
+            current_data.append(line[5:].strip())
+            continue
+
+        # Unknown line format - log and ignore
+        log("DEBUG", f"Unknown SSE line format: {line[:50]}")
+
+
+# -----------------------------------------------------------------------------
+# Connection Management
+# -----------------------------------------------------------------------------
+
+def get_connection(url: str):
+    """
+    Create HTTP(S) connection to URL.
+
+    Args:
+        url: Full URL to control plane
+
+    Returns:
+        HTTPConnection or HTTPSConnection instance
+    """
+    parsed = urlparse(url)
+
+    if parsed.scheme == 'https':
+        return HTTPSConnection(parsed.netloc)
+    else:
+        return HTTPConnection(parsed.netloc)
+
+
+def build_agent_url(path: str) -> str:
+    """
+    Build agent API URL with instance_id query parameter.
+
+    Args:
+        path: API path (e.g., '/v1/agent/commands')
+
+    Returns:
+        Full URL path with query string
+    """
+    return f"{path}?instance_id={INSTANCE_ID}"
+
+
+def command_stream_single() -> Generator[SSEMessage, None, None]:
+    """
+    Single connection attempt for SSE command stream.
+
+    Connects to control plane, sets up SSE stream, yields parsed messages.
+    Exits on connection error or stream close.
+
+    Yields:
+        SSEMessage: Parsed command messages
+
+    Raises:
+        Exception: On connection or HTTP errors
+    """
+    conn = None
+    try:
+        conn = get_connection(CONTROL_PLANE_URL)
+
+        # Build request path
+        path = build_agent_url("/v1/agent/commands")
+
+        # Set up SSE request
+        headers = {
+            "Accept": "text/event-stream",
+            "Cache-Control": "no-cache",
+        }
+
+        conn.request("GET", path, headers=headers)
+        resp = conn.getresponse()
+
+        # Check response status
+        if resp.status != 200:
+            log("ERROR", f"Command stream failed: HTTP {resp.status}")
+            raise Exception(f"HTTP {resp.status}: {resp.reason}")
+
+        log("INFO", "SSE command stream connected")
+
+        # Yield parsed events
+        for msg in parse_sse_events(resp):
+            yield msg
+
+        # Stream closed normally
+        log("INFO", "SSE stream closed by server")
+
+    except Exception as e:
+        log("ERROR", f"Command stream error: {e}")
+        raise
+
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+# -----------------------------------------------------------------------------
+# Reconnection with Exponential Backoff
+# -----------------------------------------------------------------------------
+
+def command_stream() -> Generator[SSEMessage, None, None]:
+    """
+    SSE command stream with automatic reconnection.
+
+    Implements exponential backoff:
+    - Base delay: 2 seconds (SSE_RECONNECT_BASE_S)
+    - Max delay: 64 seconds (SSE_RECONNECT_MAX_S)
+    - Max retries: 10 (SSE_MAX_RETRIES)
+
+    Backoff sequence: 2s, 4s, 8s, 16s, 32s, 64s, 64s, 64s, 64s, 64s
+
+    On successful connection, retry count resets to 0.
+    On max retries exhausted, yields None to signal fatal failure.
+
+    Yields:
+        SSEMessage: Parsed command messages
+        None: Signals fatal connection failure (max retries exhausted)
+    """
+    global reconnect_count
+
+    retry_count = 0
+    delay = SSE_RECONNECT_BASE_S
+
+    while not shutting_down:
+        try:
+            # Attempt connection
+            for msg in command_stream_single():
+                # Successful message = connection is healthy
+                # Reset retry state on first message
+                if retry_count > 0:
+                    log("INFO", f"SSE reconnected after {retry_count} retries")
+                    retry_count = 0
+                    delay = SSE_RECONNECT_BASE_S
+
+                yield msg
+
+            # Stream closed normally, reconnect immediately
+            # (server may have recycled connection)
+            if not shutting_down:
+                log("INFO", "SSE stream ended, reconnecting...")
+                reconnect_count += 1
+                # No delay for normal close, but still count as reconnect
+                continue
+
+        except Exception as e:
+            retry_count += 1
+            reconnect_count += 1
+
+            # Check max retries
+            if retry_count > SSE_MAX_RETRIES:
+                log("ERROR", f"SSE max retries ({SSE_MAX_RETRIES}) exhausted")
+                yield None  # Signal fatal failure
+                return
+
+            # Log retry attempt
+            log("WARN", f"SSE connection failed ({retry_count}/{SSE_MAX_RETRIES}), "
+                       f"retrying in {delay}s: {e}")
+
+            # Wait with backoff
+            sleep_with_shutdown_check(delay)
+
+            # Exponential backoff (double delay, cap at max)
+            delay = min(delay * 2, SSE_RECONNECT_MAX_S)
+
+
+def sleep_with_shutdown_check(seconds: float) -> None:
+    """
+    Sleep for specified duration, checking shutdown flag periodically.
+
+    Allows clean exit during reconnect delay.
+
+    Args:
+        seconds: Total sleep duration
+    """
+    end_time = time.time() + seconds
+    while time.time() < end_time and not shutting_down:
+        remaining = end_time - time.time()
+        time.sleep(min(remaining, 0.5))  # Check every 0.5s
+
+
+# -----------------------------------------------------------------------------
+# Message Dispatch Integration
+# -----------------------------------------------------------------------------
+
+def dispatch_message(msg: SSEMessage, executor) -> None:
+    """
+    Dispatch SSE message to appropriate executor handler.
+
+    Message types:
+    - start_run: Begin run with file sync and execution
+    - cancel_run: Terminate running run
+    - prepare_snapshot: Prepare instance for snapshot
+    - capture_artifacts: Collect and upload artifacts (fire-and-forget)
+    - trigger_tailscale: Install/configure Tailscale (fire-and-forget)
+    - heartbeat_ack: Acknowledge agent heartbeat
+
+    Args:
+        msg: Parsed SSE message
+        executor: RunExecutor instance for run operations
+    """
+    msg_type = msg.data.get('type', msg.event)
+
+    log("DEBUG", f"Dispatching SSE message: {msg_type}")
+
+    if msg_type == 'start_run':
+        executor.start_run(msg.data)
+
+    elif msg_type == 'cancel_run':
+        executor.cancel_run(msg.data)
+
+    elif msg_type == 'prepare_snapshot':
+        executor.prepare_snapshot(msg.data)
+
+    elif msg_type == 'capture_artifacts':
+        executor.capture_artifacts(msg.data)
+
+    elif msg_type == 'trigger_tailscale':
+        # Fire-and-forget, handled separately
+        trigger_tailscale(msg.data)
+
+    elif msg_type == 'heartbeat_ack':
+        # Handled by heartbeat module
+        handle_heartbeat_ack(msg.data)
+
+    else:
+        log("WARN", f"Unknown SSE message type: {msg_type}")
+
+
+def handle_heartbeat_ack(data: dict) -> None:
+    """
+    Handle heartbeat acknowledgment from control plane.
+
+    Updates heartbeat state to record successful ack.
+    See heartbeat.py for heartbeat timing logic.
+
+    Args:
+        data: Heartbeat ack payload (may be empty)
+    """
+    # Import here to avoid circular dependency
+    from heartbeat import record_heartbeat_ack
+    record_heartbeat_ack()
+
+
+def trigger_tailscale(data: dict) -> None:
+    """
+    Trigger Tailscale installation/configuration.
+
+    Fire-and-forget command, no acknowledgment required.
+    See tailscale.py for implementation.
+
+    Args:
+        data: Tailscale trigger payload (may be empty)
+    """
+    # Import here to avoid circular dependency
+    from tailscale import install_tailscale
+    # Run in background thread to not block SSE reader
+    import threading
+    thread = threading.Thread(target=install_tailscale, daemon=True)
+    thread.start()
+
+
+# -----------------------------------------------------------------------------
+# Main Loop Integration
+# -----------------------------------------------------------------------------
+
+def run_command_loop(executor) -> str:
+    """
+    Main SSE command loop.
+
+    Reads commands from SSE stream and dispatches to executor.
+    Returns exit reason for shutdown handling.
+
+    Args:
+        executor: RunExecutor instance
+
+    Returns:
+        str: Exit reason ('shutdown_requested', 'sse_fatal', 'unknown')
+    """
+    try:
+        for msg in command_stream():
+            if shutting_down:
+                return 'shutdown_requested'
+
+            if msg is None:
+                # Fatal connection failure (max retries)
+                return 'sse_fatal'
+
+            dispatch_message(msg, executor)
+
+    except Exception as e:
+        log("ERROR", f"Command loop error: {e}")
+        return f"error: {e}"
+
+    return 'unknown'
+
+
+# -----------------------------------------------------------------------------
+# Logging Utility
+# -----------------------------------------------------------------------------
+
+def log(level: str, message: str) -> None:
+    """
+    Log message with level prefix.
+
+    TODO: Replace with proper logging integration.
+
+    Args:
+        level: Log level (DEBUG, INFO, WARN, ERROR)
+        message: Log message
+    """
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{timestamp}] [{level}] [sse] {message}")
+
+
+# -----------------------------------------------------------------------------
+# Exports
+# -----------------------------------------------------------------------------
+
+__all__ = [
+    'SSEMessage',
+    'command_stream',
+    'dispatch_message',
+    'run_command_loop',
+    'set_shutting_down',
+    'get_reconnect_count',
+    'get_last_message_time',
+]

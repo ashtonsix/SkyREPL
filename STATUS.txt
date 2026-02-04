@@ -1,7 +1,7 @@
 ================================================================================
 PROJECT STATUS
 ================================================================================
-Last updated: 2026-02-04
+Last updated: 2026-02-05
 
 ================================================================================
 1. OVERVIEW
@@ -43,11 +43,11 @@ Key design elements:
 3. PSEUDO-IMPLEMENTATION STATUS (v2/)
 ================================================================================
 
-**Current state: L1 complete, L2 transition begun**
+**Current state: L1 complete, L2 transition in progress**
 
 Fidelity levels:
   .l1.txt  - Bullet-point outlines (COMPLETE - 128 files)
-  .l2.txt  - Detailed pseudocode (IN PROGRESS - 1 file)
+  .l2.txt  - Detailed pseudocode (IN PROGRESS - 13 files)
   .l3.txt  - Partial implementation (not started)
   (none)   - Working code (not started)
 
@@ -59,7 +59,18 @@ Structure:
   ├── agent/      Python agent (on instances)
   └── tests/      Tests organized by component
 
-First L2 file: shared/src/config/timing.ts.l2.txt
+L2 files completed:
+  shared/src/config/timing.ts.l2.txt           Timing constants (Wl3)
+  control/src/material/storage.ts.l2.txt       Storage with reservation (Wl4)
+  control/src/material/db.ts.l2.txt            DB with jittered retry (Wl4)
+  control/src/workflow/state-transitions.ts.l2.txt  CAS pattern (Wl4)
+  control/src/background/reconciliation.ts.l2.txt   Atomic guards (Wl4)
+  control/src/background/garbage-collection.ts.l2.txt  4 GC tasks (Wl4)
+  control/src/intent/cleanup-manifest.ts.l2.txt  Atomic cleanup (Wl4)
+  agent/heartbeat.py.l2.txt                    2m/15m/25m timing + ID verify (Wl5, Wl6)
+  agent/checkpoint.py.l2.txt                   Failover URLs + prioritization (Wl5, Wl6)
+  agent/spot.py.l2.txt                         Spot interruption + prioritization (Wl5, Wl6)
+  agent/sse.py.l2.txt                          SSE byte-by-byte + reconnection (Wl6)
 
 ================================================================================
 4. MINIMUM VIABLE KERNEL
@@ -76,10 +87,19 @@ First implementation target:
 5. WORKLOG REFERENCES
 ================================================================================
 
+Hot (active):
+  (none)
+
 Cold (archived):
-  worklogs/001_WORKLOG_L1_RESTRUCTURING.txt  - Structural overhaul
-  worklogs/002_WORKLOG_R0X_L1_REFINEMENT.txt - L1 refinement rounds
-  worklogs/003_WORKLOG_TIMINGS.txt           - Timing consolidation
+  worklogs/001_WORKLOG_L1_RESTRUCTURING.txt  - Structural overhaul (Wl1)
+  worklogs/002_WORKLOG_R0X_L1_REFINEMENT.txt - L1 refinement rounds (Wl2)
+  worklogs/003_WORKLOG_TIMINGS.txt           - Timing consolidation (Wl3)
+  worklogs/004_WORKLOG_L2_FOUNDATION.txt     - T3, T4, L2.1, L2.5 (Wl4)
+  worklogs/005_WORKLOG_HEARTBEAT_TIMING.txt  - T5 heartbeat 15m (Wl5)
+  worklogs/006_WORKLOG_AGENT_RESILIENCE.txt  - L2.6, T1, L2.3 (Wl6)
 
 Spec history:
-  specification/WORKLOG_REVISIONS.txt - Revision history
+  specification/WORKLOG_REVISIONS.txt - Revision history (R0-R9)
+
+Backlog:
+  TODO.txt - Active backlog with status

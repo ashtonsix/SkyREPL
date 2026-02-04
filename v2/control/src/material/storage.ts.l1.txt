@@ -13,10 +13,11 @@
 - Multipart required for files >5GB
 
 ## Presigned URLs
-- `generateUploadUrl(blobId, sizeBytes, contentType?): { url, method, inline, multipart? }`
-  - ≤64KB: Return control plane URL for inline storage (SBO)
-  - 64KB-100MB: Return S3 presigned PUT URL (single-part, PRESIGNED_URL_TTL_MS)
-  - >100MB: Return multipart upload details (see Multipart Uploads, PRESIGNED_URL_TTL_MS per part)
+- `generateUploadUrl(blobId, sizeBytes, contentType?, reservation?): { url, method, inline, multipart? }`
+  - Reservation check FIRST: if reservation > 64KB, go to S3 (skip inline)
+  - Then size check: ≤64KB inline, 64KB-100MB S3 single-part, >100MB multipart
+  - reservation=0 (default): No pre-declaration, use sizeBytes for threshold
+  - Prevents "migration shuffle" when caller knows final size exceeds threshold
 - `generateDownloadUrl(blobId): { url, inline }`
   - Check blob.s3_key field to determine inline vs S3
   - Return appropriate URL with PRESIGNED_URL_TTL_MS
