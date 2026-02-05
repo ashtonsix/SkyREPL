@@ -1,0 +1,23 @@
+# types.ts - Resource Type Definitions (L1 outline; superseded by types.ts.l2.txt)
+
+## Resource Base Interface
+- Common fields: id, workflow_state, workflow_error, current_manifest_id, created_at
+
+## MaterializationOptions
+- ttl: number (default 30,000ms)
+- last_refresh: number (for staleness check)
+
+## ResourceMaterializer<T>
+- materialize(id, options?): Promise<T | null>
+- materializeBatch(ids, options?): Promise<Map<string, T>>
+
+## Workflow State Format
+- Pattern: `<workflow>:<phase>` (e.g., "launch-run:provisioning")
+- Error suffix: `:error` with workflow_error populated
+
+## AllocationStatus Enum
+- AVAILABLE, CLAIMED, ACTIVE, COMPLETE, FAILED
+
+## Helpers
+- isAvailable(resource): boolean - checks workflow_state and manifest ownership
+- validateStateTransition(type, from, to): { valid, error? }

@@ -1,0 +1,392 @@
+# api/resources.ts - API Request/Response Types (L2 Pseudocode)
+
+# Note: Cross-references to other L2 files
+# - Primitives from ../types.ts.l2.txt (ID, TimestampMs, DurationMs, ErrorCategory)
+# - Resource interfaces from ../resources.ts.l2.txt (Instance, Run, Allocation, etc.)
+# - Error types from ../errors.ts.l2.txt
+
+## Request Envelopes
+
+```typescript
+import type { ID, TimestampMs, ErrorCategory } from '../types';
+
+// =============================================================================
+// REQUEST ENVELOPES
+// =============================================================================
+
+/** Standard API request with optional idempotency */
+export interface ApiRequest<T> {
+  data: T;
+  idempotencyKey?: string;
+}
+
+/** Pagination parameters */
+export interface PaginationParams {
+  limit?: number;     // Default 50, max 100
+  offset?: number;    // Default 0
+  cursor?: string;    // Alternative to offset
+}
+
+/** Sort parameters */
+export interface SortParams {
+  sortBy?: string;
+  sortOrder?: 'asc' | 'desc';
+}
+
+/** Filter parameters (resource-specific) */
+export interface FilterParams {
+  status?: string | string[];
+  provider?: string | string[];
+  createdAfter?: TimestampMs;
+  createdBefore?: TimestampMs;
+}
+
+/** List request combining filters, sort, and pagination */
+export interface ListRequest extends PaginationParams, SortParams {
+  filters?: FilterParams;
+}
+```
+
+## Response Envelopes
+
+```typescript
+// =============================================================================
+// RESPONSE ENVELOPES
+// =============================================================================
+
+/** Successful single-resource response */
+export interface ApiResponse<T> {
+  data: T;
+  meta?: ResponseMeta;
+}
+
+/** Successful list response with pagination */
+export interface ListResponse<T> {
+  data: T[];
+  pagination: PaginationMeta;
+  meta?: ResponseMeta;
+}
+
+/** Response metadata */
+export interface ResponseMeta {
+  requestId: string;
+  timestamp: TimestampMs;
+  durationMs: number;
+}
+
+/** Pagination metadata */
+export interface PaginationMeta {
+  total: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+  nextCursor?: string;
+}
+```
+
+## Error Envelope
+
+```typescript
+// =============================================================================
+// ERROR ENVELOPE
+// =============================================================================
+
+/** Standard API error response */
+export interface ApiError {
+  error: {
+    code: string;
+    message: string;
+    category: ErrorCategory;
+    details?: Record<string, unknown>;
+    retryAfterMs?: number;
+  };
+  meta?: ResponseMeta;
+}
+
+/** Create standardized API error */
+export function createApiError(
+  code: ErrorCodeType,
+  message: string,
+  category: ErrorCategory,
+  details?: Record<string, unknown>,
+  retryAfterMs?: number
+): ApiError {
+  return {
+    error: { code, message, category, details, retryAfterMs },
+  };
+}
+```
+
+## Error Codes
+
+```typescript
+// =============================================================================
+// ERROR CODES
+// =============================================================================
+
+/** Error codes by category */
+export const ErrorCode = {
+  // Validation
+  INVALID_INPUT: 'INVALID_INPUT',
+  MISSING_REQUIRED_FIELD: 'MISSING_REQUIRED_FIELD',
+  INVALID_FORMAT: 'INVALID_FORMAT',
+
+  // Auth
+  UNAUTHORIZED: 'UNAUTHORIZED',
+  FORBIDDEN: 'FORBIDDEN',
+
+  // Not Found
+  RESOURCE_NOT_FOUND: 'RESOURCE_NOT_FOUND',
+  INSTANCE_NOT_FOUND: 'INSTANCE_NOT_FOUND',
+  RUN_NOT_FOUND: 'RUN_NOT_FOUND',
+  ALLOCATION_NOT_FOUND: 'ALLOCATION_NOT_FOUND',
+  WORKFLOW_NOT_FOUND: 'WORKFLOW_NOT_FOUND',
+
+  // Conflict
+  IDEMPOTENCY_CONFLICT: 'IDEMPOTENCY_CONFLICT',
+  RESOURCE_ALREADY_EXISTS: 'RESOURCE_ALREADY_EXISTS',
+  OWNERSHIP_CONFLICT: 'OWNERSHIP_CONFLICT',
+  INVALID_STATE_TRANSITION: 'INVALID_STATE_TRANSITION',
+
+  // Rate Limit
+  RATE_LIMITED: 'RATE_LIMITED',
+  BUDGET_EXCEEDED: 'BUDGET_EXCEEDED',
+
+  // Provider
+  PROVIDER_ERROR: 'PROVIDER_ERROR',
+  CAPACITY_UNAVAILABLE: 'CAPACITY_UNAVAILABLE',
+  SPOT_INTERRUPTED: 'SPOT_INTERRUPTED',
+
+  // Timeout
+  REQUEST_TIMEOUT: 'REQUEST_TIMEOUT',
+  OPERATION_TIMEOUT: 'OPERATION_TIMEOUT',
+
+  // Internal
+  INTERNAL_ERROR: 'INTERNAL_ERROR',
+  DATABASE_ERROR: 'DATABASE_ERROR',
+} as const;
+
+export type ErrorCodeType = typeof ErrorCode[keyof typeof ErrorCode];
+```
+
+## Resource CRUD Types
+
+```typescript
+import type {
+  Instance, Run, Allocation, Workflow, Manifest, Snapshot, Artifact,
+  ProviderName, DurationMs,
+} from '../types';
+
+// =============================================================================
+// INSTANCES API
+// =============================================================================
+
+/** GET /v1/instances/:id */
+export type GetInstanceResponse = ApiResponse<Instance>;
+
+/** GET /v1/instances */
+export interface ListInstancesRequest extends ListRequest {
+  filters?: {
+    status?: string | string[];
+    provider?: ProviderName | ProviderName[];
+    spec?: string;
+    isSpot?: boolean;
+    hasManifest?: boolean;
+  };
+}
+export type ListInstancesResponse = ListResponse<Instance>;
+
+/** POST /v1/instances - Direct instance creation (power users) */
+export interface CreateInstanceRequest {
+  provider: ProviderName;
+  spec: string;
+  region?: string;
+  initChecksum?: string;
+  isSpot?: boolean;
+  useTailscale?: boolean;
+}
+export type CreateInstanceResponse = ApiResponse<Instance>;
+
+/** DELETE /v1/instances/:id */
+export interface DeleteInstanceRequest {
+  force?: boolean;  // Skip drain/cleanup
+}
+export type DeleteInstanceResponse = ApiResponse<{ workflowId: ID }>;
+
+// =============================================================================
+// RUNS API
+// =============================================================================
+
+/** GET /v1/runs/:id */
+export interface GetRunRequest {
+  includeFiles?: boolean;
+  includeLogs?: boolean;
+  includeArtifacts?: boolean;
+  logLimit?: number;
+}
+export type GetRunResponse = ApiResponse<Run>;
+
+/** GET /v1/runs */
+export interface ListRunsRequest extends ListRequest {
+  filters?: {
+    status?: string | string[];
+    exitCode?: number;
+    createdAfter?: TimestampMs;
+    createdBefore?: TimestampMs;
+  };
+}
+export type ListRunsResponse = ListResponse<Run>;
+
+/** POST /v1/runs - Direct run creation (starts workflow) */
+export interface CreateRunRequest {
+  command: string;
+  workdir?: string;
+  spec: string;
+  provider?: ProviderName;
+  region?: string;
+  maxDurationMs?: DurationMs;
+  holdDurationMs?: DurationMs;
+  createSnapshot?: boolean;
+  useTailscale?: boolean;
+  files?: FileUploadManifest[];
+}
+
+export interface FileUploadManifest {
+  path: string;
+  checksum: string;
+  sizeBytes: number;
+}
+
+export type CreateRunResponse = ApiResponse<{
+  run: Run;
+  workflowId: ID;
+}>;
+
+/** POST /v1/runs/:id/cancel */
+export interface CancelRunRequest {
+  reason?: string;
+}
+export type CancelRunResponse = ApiResponse<{ cancelled: boolean }>;
+
+// =============================================================================
+// ALLOCATIONS API
+// =============================================================================
+
+/** GET /v1/allocations/:id */
+export type GetAllocationResponse = ApiResponse<Allocation>;
+
+/** GET /v1/allocations */
+export interface ListAllocationsRequest extends ListRequest {
+  filters?: {
+    status?: string | string[];
+    instanceId?: ID;
+    runId?: ID;
+  };
+}
+export type ListAllocationsResponse = ListResponse<Allocation>;
+
+/** POST /v1/allocations/:id/extend */
+export interface ExtendAllocationRequest {
+  durationMs: DurationMs;
+  reason?: string;
+}
+export type ExtendAllocationResponse = ApiResponse<{
+  allocation: Allocation;
+  newHoldUntil: TimestampMs;
+}>;
+
+// =============================================================================
+// WORKFLOWS API
+// =============================================================================
+
+/** GET /v1/workflows/:id */
+export interface GetWorkflowRequest {
+  includeNodes?: boolean;
+}
+export type GetWorkflowResponse = ApiResponse<Workflow>;
+
+/** GET /v1/workflows */
+export interface ListWorkflowsRequest extends ListRequest {
+  filters?: {
+    type?: string | string[];
+    status?: string | string[];
+    parentWorkflowId?: ID;
+  };
+}
+export type ListWorkflowsResponse = ListResponse<Workflow>;
+
+/** POST /v1/workflows/:id/cancel */
+export interface CancelWorkflowRequest {
+  reason?: string;
+}
+export type CancelWorkflowResponse = ApiResponse<{ cancelled: boolean }>;
+
+// =============================================================================
+// MANIFESTS API
+// =============================================================================
+
+/** GET /v1/manifests/:id */
+export interface GetManifestRequest {
+  includeResources?: boolean;
+}
+export type GetManifestResponse = ApiResponse<Manifest>;
+
+/** GET /v1/manifests */
+export interface ListManifestsRequest extends ListRequest {
+  filters?: {
+    status?: string | string[];
+    workflowId?: ID;
+    expiresAfter?: TimestampMs;
+    expiresBefore?: TimestampMs;
+  };
+}
+export type ListManifestsResponse = ListResponse<Manifest>;
+
+// =============================================================================
+// SNAPSHOTS API
+// =============================================================================
+
+/** GET /v1/snapshots/:id */
+export type GetSnapshotResponse = ApiResponse<Snapshot>;
+
+/** GET /v1/snapshots */
+export interface ListSnapshotsRequest extends ListRequest {
+  filters?: {
+    provider?: ProviderName | ProviderName[];
+    spec?: string;
+    initChecksum?: string;
+  };
+}
+export type ListSnapshotsResponse = ListResponse<Snapshot>;
+
+/** DELETE /v1/snapshots/:id */
+export type DeleteSnapshotResponse = ApiResponse<{ deleted: boolean }>;
+
+// =============================================================================
+// ARTIFACTS API
+// =============================================================================
+
+/** GET /v1/artifacts/:id */
+export type GetArtifactResponse = ApiResponse<Artifact>;
+
+/** GET /v1/artifacts/:id/download */
+export type DownloadArtifactResponse = ApiResponse<{
+  presignedUrl: string;
+  expiresAt: TimestampMs;
+}>;
+
+/** GET /v1/runs/:id/artifacts */
+export interface ListRunArtifactsRequest extends ListRequest {
+  filters?: {
+    pathPrefix?: string;
+    keep?: boolean;
+  };
+}
+export type ListRunArtifactsResponse = ListResponse<Artifact>;
+
+/** PUT /v1/artifacts/:id */
+export interface UpdateArtifactRequest {
+  keep?: boolean;
+}
+export type UpdateArtifactResponse = ApiResponse<Artifact>;
+```

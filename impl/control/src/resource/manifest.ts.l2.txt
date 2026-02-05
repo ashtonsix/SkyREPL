@@ -1,0 +1,641 @@
+# manifest.ts - Manifest lifecycle, resource claiming, retention (L2 Pseudocode)
+
+Cross-references:
+- Types: `../../../shared/src/resources.ts.l2.txt` (Manifest, ManifestResource)
+- Shared types: `../../../shared/src/types.ts.l2.txt` (ManifestStatus, ID, TimestampMs)
+- Cleanup workflow: `../intent/cleanup-manifest.ts.l2.txt` (triggered by triggerCleanup)
+- Timing: `../../../shared/src/config/timing.ts.l2.txt` (DEFAULT_MANIFEST_RETENTION_MS)
+- Workflow engine: `../workflow/engine.types.ts.l2.txt` (submitWorkflow)
+- DB: `../material/db.ts.l2.txt` (getDatabase, queryOne, queryMany, transaction)
+
+## Imports
+
+```typescript
+import { getDatabase, queryOne, queryMany, transaction } from '../material/db';
+import { TIMING } from '../../../../shared/src/config/timing';
+import { submitWorkflow } from '../workflow/engine';
+import { logger } from '../logger';
+import type { ID, TimestampMs, ManifestStatus } from '../../../../shared/src/types';
+import type { Manifest, ManifestResource } from '../../../../shared/src/resources';
+```
+
+## Core Schema (DB row shape)
+
+```typescript
+interface ManifestRow {
+  id: number;
+  workflow_id: number;
+  status: 'DRAFT' | 'SEALED';        // EXPIRED is derived, never stored
+  default_cleanup_priority: number;
+  retention_ms: number | null;         // null = indefinite
+  created_at: number;
+  released_at: number | null;
+  expires_at: number | null;
+}
+
+interface ManifestResourceRow {
+  manifest_id: number;
+  resource_type: string;               // 'instance' | 'run' | 'allocation' | 'object'
+  resource_id: string;
+  cleanup_priority: number | null;     // Override manifest default (per-resource)
+  added_at: number;
+  owner_type: string;                  // 'manifest' | 'workflow' | 'policy'
+  owner_id: number | null;            // workflow_id or null (null = manifest owns it)
+}
+```
+
+## Manifest States
+
+```typescript
+// Only two stored states; EXPIRED is derived
+// DRAFT → SEALED (on workflow completion)
+
+const MANIFEST_STATES = ['DRAFT', 'SEALED'] as const;
+
+// EXPIRED is derived:
+//   manifest.status === 'SEALED'
+//   AND manifest.expires_at IS NOT NULL
+//   AND manifest.expires_at < now
+//   AND COUNT(manifest_resources WHERE owner_type = 'manifest') === 0
+```
+
+## §ManifestCreation
+
+```typescript
+/**
+ * Create manifest at workflow submission time (before first node executes).
+ * Ensures every resource has an owner from creation.
+ */
+async function createManifest(
+  workflowId: number,
+  options?: { defaultCleanupPriority?: number; retentionMs?: number | null }
+): Promise<ManifestRow> {
+  const db = getDatabase();
+  const now = Date.now();
+
+  const result = db.prepare(`
+    INSERT INTO manifests (workflow_id, status, default_cleanup_priority, retention_ms, created_at)
+    VALUES (?, 'DRAFT', ?, ?, ?)
+  `).run(
+    workflowId,
+    options?.defaultCleanupPriority ?? 50,
+    options?.retentionMs ?? null,
+    now
+  );
+
+  const manifestId = result.lastInsertRowid as number;
+
+  logger.info('manifest_created', { manifestId, workflowId });
+
+  return queryOne<ManifestRow>(
+    'SELECT * FROM manifests WHERE id = ?',
+    [manifestId]
+  )!;
+}
+
+/**
+ * Add resource to manifest during node execution (via ctx.emitResource).
+ * Resource starts with owner_type='manifest'.
+ */
+async function addManifestResource(
+  manifestId: number,
+  resourceType: string,
+  resourceId: string,
+  cleanupPriority?: number
+): Promise<void> {
+  const db = getDatabase();
+  const now = Date.now();
+
+  db.prepare(`
+    INSERT INTO manifest_resources
+      (manifest_id, resource_type, resource_id, cleanup_priority, added_at, owner_type, owner_id)
+    VALUES (?, ?, ?, ?, ?, 'manifest', NULL)
+  `).run(manifestId, resourceType, resourceId, cleanupPriority ?? null, now);
+
+  logger.debug('manifest_resource_added', { manifestId, resourceType, resourceId });
+}
+```
+
+## §SealManifest
+
+```typescript
+/**
+ * Seal manifest on workflow completion: DRAFT -> SEALED.
+ * Sets retention timer. Detaches resources (clears current_manifest_id on resource rows)
+ * but preserves manifest_resources links for cleanup tracking.
+ */
+async function sealManifest(manifestId: number): Promise<void> {
+  const manifest = queryOne<ManifestRow>(
+    'SELECT * FROM manifests WHERE id = ?',
+    [manifestId]
+  );
+
+  if (!manifest) {
+    throw new Error(`Manifest ${manifestId} not found`);
+  }
+  if (manifest.status !== 'DRAFT') {
+    throw new Error(`Cannot seal manifest in ${manifest.status} state`);
+  }
+
+  const expiresAt = manifest.retention_ms
+    ? Date.now() + manifest.retention_ms
+    : null;
+
+  const db = getDatabase();
+
+  transaction(() => {
+    db.prepare(`
+      UPDATE manifests
+      SET status = 'SEALED', released_at = ?, expires_at = ?
+      WHERE id = ?
+    `).run(Date.now(), expiresAt, manifestId);
+
+    // Detach resources: clear current_manifest_id on each resource row
+    // so they appear "available" for warm pool queries.
+    // manifest_resources links are preserved for cleanup tracking.
+    const resources = queryMany<ManifestResourceRow>(
+      'SELECT * FROM manifest_resources WHERE manifest_id = ?',
+      [manifestId]
+    );
+
+    for (const r of resources) {
+      // Each resource type has its own table with current_manifest_id
+      db.prepare(`
+        UPDATE ${r.resource_type}s SET current_manifest_id = NULL
+        WHERE id = ?
+      `).run(r.resource_id);
+    }
+  });
+
+  logger.info('manifest_sealed', { manifestId, expiresAt });
+}
+
+/**
+ * Seal manifest with workflow-type-specific retention policy.
+ */
+async function sealManifestWithPolicy(
+  manifestId: number,
+  workflowType: string
+): Promise<void> {
+  const policy = DEFAULT_RETENTION_POLICIES[workflowType] ?? {
+    retention_ms: TIMING.DEFAULT_MANIFEST_RETENTION_MS,
+  };
+
+  // Override manifest retention_ms before sealing
+  const db = getDatabase();
+  db.prepare(`
+    UPDATE manifests SET retention_ms = ? WHERE id = ?
+  `).run(policy.retention_ms, manifestId);
+
+  await sealManifest(manifestId);
+}
+```
+
+## §RetentionPolicy
+
+```typescript
+interface RetentionPolicy {
+  retention_ms: number | null;   // Time to keep after SEALED (null = indefinite)
+}
+
+const DEFAULT_RETENTION_POLICIES: Record<string, RetentionPolicy> = {
+  // Warm pool instances: keep for warm_pool_retention_period
+  'launch-run': {
+    retention_ms: 30 * 60 * 1000,         // 30 minutes
+  },
+
+  // Snapshots: keep indefinitely (may stay SEALED for weeks/months)
+  'create-snapshot': {
+    retention_ms: null,
+  },
+
+  // Feature installations: feature_install_retention_period
+  'install-feature': {
+    retention_ms: 60 * 60 * 1000,         // 1 hour
+  },
+};
+
+const CLEANUP_PRIORITY_DEFAULTS: Record<string, number> = {
+  'allocation': 90,     // First: release instance slots
+  'run': 80,            // Then: free file storage
+  'artifact': 70,       // Then: S3 storage
+  'object': 60,         // Then: generic objects
+  'instance': 50,       // Then: provider resources
+  'snapshot': 10,       // Last: may be needed for new runs
+};
+```
+
+## §ExpiryCheck
+
+```typescript
+/**
+ * Check if manifest is expired (derived state).
+ * Expired = SEALED + retention elapsed + no manifest-owned resources.
+ */
+async function isManifestExpired(manifestId: number): Promise<boolean> {
+  const manifest = queryOne<ManifestRow>(
+    'SELECT * FROM manifests WHERE id = ?',
+    [manifestId]
+  );
+
+  if (!manifest) return false;
+  if (manifest.status !== 'SEALED') return false;
+  if (!manifest.expires_at) return false;           // null retention = never expires
+  if (Date.now() < manifest.expires_at) return false;
+
+  // Check if any resources still owned by manifest
+  const ownedCount = queryOne<{ count: number }>(
+    `SELECT COUNT(*) as count FROM manifest_resources
+     WHERE manifest_id = ? AND owner_type = 'manifest'`,
+    [manifestId]
+  );
+
+  return ownedCount!.count === 0;
+}
+
+/**
+ * Trigger cleanup workflow for expired manifest.
+ * Does NOT change manifest status (EXPIRED is derived, never stored).
+ */
+async function triggerCleanup(manifestId: number): Promise<number> {
+  const manifest = queryOne<ManifestRow>(
+    'SELECT * FROM manifests WHERE id = ?',
+    [manifestId]
+  );
+
+  if (!manifest) {
+    throw new Error(`Manifest ${manifestId} not found`);
+  }
+  if (manifest.status !== 'SEALED') {
+    throw new Error(`Cannot cleanup manifest in ${manifest.status} state`);
+  }
+
+  const workflowId = await submitWorkflow('cleanup-manifest', {
+    manifestId: manifest.id,
+  });
+
+  logger.info('cleanup_triggered', { manifestId, workflowId });
+  return workflowId;
+}
+```
+
+## §ExpiryScanner
+
+```typescript
+/**
+ * CRON job (every minute): scan for expired manifests and trigger cleanup.
+ * Non-critical — consecutive failure counter, next run catches up.
+ */
+let consecutiveFailures = 0;
+const MAX_FAILURES_BEFORE_ALERT = 5;
+
+async function scanExpiredManifests(): Promise<void> {
+  try {
+    const now = Date.now();
+
+    // Find SEALED manifests past retention with no manifest-owned resources
+    const candidates = queryMany<{ id: number }>(
+      `SELECT m.id FROM manifests m
+       WHERE m.status = 'SEALED'
+         AND m.expires_at IS NOT NULL
+         AND m.expires_at < ?
+         AND NOT EXISTS (
+           SELECT 1 FROM manifest_resources mr
+           WHERE mr.manifest_id = m.id AND mr.owner_type = 'manifest'
+         )`,
+      [now]
+    );
+
+    for (const manifest of candidates) {
+      // Don't spawn duplicate cleanup workflows
+      const existingCleanup = queryOne<{ id: number }>(
+        `SELECT id FROM workflows
+         WHERE type = 'cleanup-manifest'
+           AND status = 'running'
+           AND json_extract(input_json, '$.manifest_id') = ?`,
+        [manifest.id]
+      );
+
+      if (!existingCleanup) {
+        await triggerCleanup(manifest.id);
+      }
+    }
+
+    consecutiveFailures = 0;
+  } catch (error) {
+    consecutiveFailures++;
+    if (consecutiveFailures >= MAX_FAILURES_BEFORE_ALERT) {
+      logger.error('SCANNER/expiry-scan', { consecutiveFailures, error });
+    }
+    // Don't rethrow — next CRON run will retry
+  }
+}
+```
+
+## §ResourceClaiming
+
+```typescript
+/**
+ * Claim a warm instance from a SEALED manifest.
+ * Transfers ownership: old manifest -> new workflow's manifest.
+ *
+ * Protocol:
+ * 1. Query SEALED manifests for matching available instances
+ * 2. Lock old manifest row (SELECT FOR UPDATE)
+ * 3. Update owner_type/owner_id in old manifest's manifest_resources
+ * 4. Add resource to new manifest's manifest_resources
+ * 5. If old manifest has no manifest-owned resources left, delete it
+ */
+async function claimWarmInstance(
+  ctx: { workflow: { id: number; manifestId: number } },
+  spec: string
+): Promise<{ claimed: boolean; instance_id?: string }> {
+  // Find sealed manifests with available instances matching spec
+  const candidates = queryMany<{
+    manifest_id: number;
+    resource_id: string;
+  }>(
+    `SELECT m.id as manifest_id, mr.resource_id
+     FROM manifests m
+     JOIN manifest_resources mr ON m.id = mr.manifest_id
+     JOIN instances i ON i.id = mr.resource_id
+     WHERE m.status = 'SEALED'
+       AND mr.resource_type = 'instance'
+       AND mr.owner_type = 'manifest'
+       AND i.spec = ?
+       AND i.workflow_state LIKE '%:complete'
+       AND i.current_manifest_id IS NULL
+     LIMIT 1`,
+    [spec]
+  );
+
+  if (candidates.length === 0) {
+    return { claimed: false };
+  }
+
+  const { manifest_id: oldManifestId, resource_id: instanceId } = candidates[0];
+  const db = getDatabase();
+
+  return transaction(() => {
+    // Lock old manifest (CAS-style: re-check status)
+    const manifest = queryOne<ManifestRow>(
+      'SELECT * FROM manifests WHERE id = ?',
+      [oldManifestId]
+    );
+    if (!manifest || manifest.status !== 'SEALED') {
+      return { claimed: false };   // Lost race
+    }
+
+    const now = Date.now();
+
+    // Transfer ownership in old manifest's join table
+    db.prepare(`
+      UPDATE manifest_resources
+      SET owner_type = 'workflow', owner_id = ?
+      WHERE manifest_id = ? AND resource_type = 'instance' AND resource_id = ?
+    `).run(ctx.workflow.id, oldManifestId, instanceId);
+
+    // Add resource to new manifest
+    db.prepare(`
+      INSERT INTO manifest_resources
+        (manifest_id, resource_type, resource_id, cleanup_priority, added_at, owner_type, owner_id)
+      VALUES (?, 'instance', ?, ?, ?, 'manifest', NULL)
+    `).run(ctx.workflow.manifestId, instanceId, CLEANUP_PRIORITY_DEFAULTS['instance'], now);
+
+    // Update instance to point to new manifest
+    db.prepare(`
+      UPDATE instances SET current_manifest_id = ? WHERE id = ?
+    `).run(ctx.workflow.manifestId, instanceId);
+
+    // Check if old manifest has any manifest-owned resources left
+    const remaining = queryOne<{ count: number }>(
+      `SELECT COUNT(*) as count FROM manifest_resources
+       WHERE manifest_id = ? AND owner_type = 'manifest'`,
+      [oldManifestId]
+    );
+
+    if (remaining!.count === 0) {
+      // All resources claimed — delete old manifest immediately
+      db.prepare('DELETE FROM manifest_resources WHERE manifest_id = ?').run(oldManifestId);
+      db.prepare('DELETE FROM manifests WHERE id = ?').run(oldManifestId);
+      logger.info('manifest_fully_claimed_deleted', { manifestId: oldManifestId });
+    }
+
+    return { claimed: true, instance_id: instanceId };
+  });
+}
+```
+
+## §AtomicClaim
+
+```typescript
+/**
+ * Generic atomic resource claim with conflict resolution.
+ * Transaction isolation handles concurrent claims.
+ *
+ * Retry strategy (caller):
+ * 1. Try to claim available resource
+ * 2. If conflict (already claimed), retry with next candidate
+ * 3. If no candidates, fall back to spawn
+ */
+async function claimResourceAtomic(
+  newManifestId: number,
+  resourceType: string,
+  resourceId: string
+): Promise<{ success: boolean; reason?: string }> {
+  const db = getDatabase();
+
+  return transaction(() => {
+    // Check resource is unclaimed (current_manifest_id = null)
+    const resource = queryOne<{ id: string; current_manifest_id: number | null }>(
+      `SELECT id, current_manifest_id FROM ${resourceType}s WHERE id = ?`,
+      [resourceId]
+    );
+
+    if (!resource) {
+      return { success: false, reason: 'Resource not found' };
+    }
+
+    if (resource.current_manifest_id !== null) {
+      return { success: false, reason: 'Resource already claimed' };
+    }
+
+    const now = Date.now();
+
+    // Assign to new manifest
+    db.prepare(
+      `UPDATE ${resourceType}s SET current_manifest_id = ? WHERE id = ?`
+    ).run(newManifestId, resourceId);
+
+    db.prepare(`
+      INSERT INTO manifest_resources
+        (manifest_id, resource_type, resource_id, cleanup_priority, added_at, owner_type, owner_id)
+      VALUES (?, ?, ?, ?, ?, 'manifest', NULL)
+    `).run(
+      newManifestId,
+      resourceType,
+      resourceId,
+      CLEANUP_PRIORITY_DEFAULTS[resourceType] ?? 50,
+      now
+    );
+
+    return { success: true };
+  });
+}
+```
+
+## §SubworkflowManifest
+
+```typescript
+/**
+ * Handle subworkflow completion: always seal independently.
+ * Subworkflows create their own manifests — no hierarchy, no absorption.
+ */
+async function handleSubworkflowComplete(subworkflowId: number): Promise<void> {
+  const subworkflow = queryOne<{ manifest_id: number; type: string }>(
+    'SELECT manifest_id, type FROM workflows WHERE id = ?',
+    [subworkflowId]
+  );
+
+  if (!subworkflow || !subworkflow.manifest_id) return;
+
+  // Always seal — subworkflows are independent
+  await sealManifestWithPolicy(subworkflow.manifest_id, subworkflow.type);
+}
+
+/**
+ * Parent workflow claims a resource from a completed subworkflow's manifest.
+ * Uses the same claim protocol as any warm pool claim.
+ */
+async function parentClaimSubworkflowResource(
+  parentCtx: { workflow: { id: number; manifestId: number } },
+  subworkflowId: number,
+  resourceType: string
+): Promise<string | null> {
+  const subworkflow = queryOne<{ manifest_id: number }>(
+    'SELECT manifest_id FROM workflows WHERE id = ?',
+    [subworkflowId]
+  );
+
+  if (!subworkflow) return null;
+  const childManifestId = subworkflow.manifest_id;
+
+  // Query sealed manifest for unclaimed resource
+  const resources = queryMany<{ resource_id: string }>(
+    `SELECT resource_id FROM manifest_resources
+     WHERE manifest_id = ? AND resource_type = ? AND owner_type = 'manifest'
+     LIMIT 1`,
+    [childManifestId, resourceType]
+  );
+
+  if (resources.length === 0) return null;
+
+  const resourceId = resources[0].resource_id;
+
+  const result = await claimResourceAtomic(
+    parentCtx.workflow.manifestId,
+    resourceType,
+    resourceId
+  );
+
+  return result.success ? resourceId : null;
+}
+```
+
+## §CostAttribution
+
+```typescript
+interface CostBreakdown {
+  compute: number;
+  storage: number;
+  network: number;
+  total?: number;
+  byResource: Array<{ type: string; id: string; cost: number }>;
+}
+
+/**
+ * Aggregate cost for a manifest's resources (billing/analysis).
+ */
+async function getManifestCost(manifestId: number): Promise<CostBreakdown> {
+  const resources = queryMany<ManifestResourceRow>(
+    'SELECT * FROM manifest_resources WHERE manifest_id = ?',
+    [manifestId]
+  );
+
+  const breakdown: CostBreakdown = {
+    compute: 0,
+    storage: 0,
+    network: 0,
+    byResource: [],
+  };
+
+  for (const r of resources) {
+    if (r.resource_type === 'instance') {
+      const usage = queryMany<{ estimated_cost_usd: number | null }>(
+        'SELECT estimated_cost_usd FROM usage_records WHERE instance_id = ?',
+        [r.resource_id]
+      );
+      const instanceCost = usage.reduce(
+        (sum, u) => sum + (u.estimated_cost_usd ?? 0),
+        0
+      );
+      breakdown.compute += instanceCost;
+      breakdown.byResource.push({ type: 'instance', id: r.resource_id, cost: instanceCost });
+    } else if (r.resource_type === 'object') {
+      const blob = queryOne<{ size_bytes: number }>(
+        `SELECT b.size_bytes FROM objects o
+         JOIN blobs b ON o.blob_id = b.id
+         WHERE o.id = ?`,
+        [r.resource_id]
+      );
+      const storageCost = estimateStorageCost(blob?.size_bytes ?? 0);
+      breakdown.storage += storageCost;
+      breakdown.byResource.push({ type: 'object', id: r.resource_id, cost: storageCost });
+    }
+    // Additional resource types as needed
+  }
+
+  breakdown.total = breakdown.compute + breakdown.storage + breakdown.network;
+  return breakdown;
+}
+
+function estimateStorageCost(sizeBytes: number): number {
+  // $0.023 per GB per month (S3 standard), prorated to hourly
+  const gbMonths = sizeBytes / (1024 ** 3);
+  return gbMonths * 0.023;
+}
+```
+
+## Exports
+
+```typescript
+export {
+  // Creation
+  createManifest,
+  addManifestResource,
+
+  // Sealing
+  sealManifest,
+  sealManifestWithPolicy,
+
+  // Expiry
+  isManifestExpired,
+  triggerCleanup,
+  scanExpiredManifests,
+
+  // Claiming
+  claimWarmInstance,
+  claimResourceAtomic,
+
+  // Subworkflows
+  handleSubworkflowComplete,
+  parentClaimSubworkflowResource,
+
+  // Cost
+  getManifestCost,
+
+  // Constants
+  DEFAULT_RETENTION_POLICIES,
+  CLEANUP_PRIORITY_DEFAULTS,
+};
+```

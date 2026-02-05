@@ -1,0 +1,715 @@
+================================================================================
+5. ALLOCATIONS
+================================================================================
+
+## Purpose
+
+Allocations in AVAILABLE state form the warm pool. The warm pool query is just:
+`SELECT * FROM allocations WHERE status='AVAILABLE'`.
+
+The allocation system provides the lifecycle primitive for run execution: an
+explicit state machine tracking run-to-instance bindings from warm pool
+availability, through active execution, to completion. Post-run debugging is
+enabled via debug_hold_until timestamps that block termination without adding
+state complexity.
+
+## 5.1 Core Schema
+
+**Allocation** record:
+- `id` (string): auto-generated primary key
+- `run_id` (string | null): NULL when AVAILABLE
+- `instance_id` (string): hosting instance
+- `status` (AllocationStatus): current state machine position
+- `user` (string): SSH user for this allocation
+- `workdir` (string): isolated workdir path
+- `current_manifest_id` (string | null): associated manifest
+- `debug_hold_until` (number | null): blocks termination if > NOW, enables SSH
+- `created_at`, `updated_at` (number): two timestamps only
+
+PRINCIPLES:
+- Two timestamps (created_at, updated_at)---no per-state timestamps
+- Detailed timeline derived from workflow nodes if needed
+- Allocation is the lifecycle primitive---keep it clean
+
+> See also: impl/control/src/resource/allocation.ts.l2.txt §Core Schema
+
+## 5.2 Allocation State Machine
+
+### State Definitions
+
+```
+AVAILABLE → CLAIMED → ACTIVE → COMPLETE
+                               ↘ FAILED
+```
+
+**AVAILABLE** - Instance advertises empty run slot
+- run_id is NULL
+- instance_id points to ready instance
+- workdir prepared for new run
+- THIS IS THE WARM POOL (query result, not separate concept)
+
+**CLAIMED** - Run assigned, workdir being prepared
+- run_id set to target run
+- Files downloading, environment preparing
+- Short-lived transitional state
+- Agent emits sync_complete log when files ready
+
+**ACTIVE** - Run executing
+- Command running on instance
+- Logs streaming
+- Transition trigger: Control receives sync_complete from agent
+- Transitions to COMPLETE on completion (normal), FAILED on lifecycle error
+
+**COMPLETE** - Allocation finalized (terminal state)
+- Metrics and logs persisted
+- Workdir retained until instance termination (different workdirs per allocation enable post-run debugging)
+- Instance slot available for new allocations (warm pool replenishment happens here)
+- Record kept for historical queries
+- debug_hold_until field may be set to block termination and enable SSH access
+- SSH access allowed if debug_hold_until > NOW
+
+**FAILED** - Lifecycle failure (not run/workload error)
+- Lifecycle error occurred (file sync failed, etc.)
+- Instance may be in bad state, unsuitable for future allocations
+- Triggers instance termination or investigation
+- Distinct from run failure (exit_code != 0), which is normal completion
+
+### State Transition Diagram
+
+```
+                            NORMAL FLOW (happy path)
+    ════════════════════════════════════════════════════════════════════════════
+
+           claim()              sync_complete           run finishes
+    ┌────────────┐         ┌────────────┐         ┌────────────┐
+    │ AVAILABLE  │────────→│  CLAIMED   │────────→│   ACTIVE   │
+    └────────────┘         └─────┬──────┘         └─────┬──────┘
+          ↑                      │                      │
+          │                      │                      │
+          │                      │ sync fails           │ finish (success/fail)
+          │                      │ or timeout           │ - set debug_hold_until
+          │                      ↓                      │   if keep_on_complete
+          │               ┌────────────┐                │ - replenish warm pool
+          │               │   FAILED   │                │   (create AVAILABLE)
+          │               └─────┬──────┘                ↓
+          │                     │                ┌────────────┐
+          │                     │                │  COMPLETE  │
+          │                     │                └─────┬──────┘
+          │                     │                      │
+          │                     │ (terminate           │ (allows new allocs
+          │                     │  instance)           │  + termination)
+          │                     ↓                      │
+          │               ┌─────────────┐              │
+          │               │   (cleanup  │              │
+          │               │    failed   │              │
+          │               │   instance) │              │
+          │               └─────────────┘              │
+          │                                            │
+          │            new allocation created          │
+          │            (warm pool replenishment)       │
+          └────────────────────────────────────────────┘
+
+
+                         FAILURE PATHS (from any active state)
+    ════════════════════════════════════════════════════════════════════════════
+
+    ┌────────────┐         ┌────────────┐
+    │   ACTIVE   │────────→│   FAILED   │────────→ (terminate instance)
+    └────────────┘         └────────────┘
+                  lifecycle
+                   error
+
+    Note: FAILED indicates lifecycle failure (file sync error, agent crash),
+          NOT run/workload failure (exit_code != 0), which is normal completion.
+
+
+                                    LEGEND
+    ════════════════════════════════════════════════════════════════════════════
+
+      ────────→   State transition (labeled with trigger)
+      ↑ ↓         Vertical flow direction
+      ┌──┐ └──┘   State box
+      (...)       Side effect / action taken
+
+    TERMINAL STATES:
+      COMPLETE    Normal end state, allows new allocations + instance termination
+                  (unless debug_hold_until > NOW, which blocks termination)
+      FAILED      Error end state, typically triggers instance termination
+```
+
+KEY SEMANTICS (terminal state behaviors):
+- COMPLETE: allows new allocations AND instance termination
+  - Exception: if debug_hold_until > NOW, termination is blocked
+  - SSH access allowed when COMPLETE with debug_hold_until > NOW
+- FAILED: typically triggers instance termination (instance may be compromised)
+
+### Transition Triggers and Side Effects
+
+```
+AllocationStatus: AVAILABLE | CLAIMED | ACTIVE | COMPLETE | FAILED
+
+VALID_TRANSITIONS:
+  AVAILABLE → [CLAIMED]
+  CLAIMED   → [ACTIVE, FAILED]     (ACTIVE triggered by sync_complete)
+  ACTIVE    → [COMPLETE, FAILED]
+  COMPLETE  → []                    (terminal, eventually archived)
+  FAILED    → []                    (terminal, instance terminated)
+
+TRANSITION_TRIGGERS:
+  AVAILABLE→CLAIMED:  Warm pool allocation claimed by workflow
+  CLAIMED→ACTIVE:     Agent reports sync_complete (files downloaded successfully)
+  CLAIMED→FAILED:     Agent reports sync failure or timeout
+  ACTIVE→COMPLETE:    Run completes (success or failure); sets debug_hold_until
+                      if configured; replenishes warm pool
+  ACTIVE→FAILED:      Lifecycle error during execution (concrete triggers below)
+
+ACTIVE→FAILED concrete triggers:
+  - Agent heartbeat timeout (exceeds stale_detection_threshold, see Ch15 §15.9)
+    Constraint: heartbeat_interval < ack_timeout <= stale_detection_threshold
+  - SSH connection loss to instance (network partition)
+  - Instance termination by provider (spot interruption, maintenance)
+  - Fatal agent error (agent crash, OOM, unrecoverable error)
+```
+
+### State Validation
+
+Implementations MUST enforce transition validity and SSH access rules:
+
+- `validateAllocationTransition(current, new)`: MUST reject transitions not in VALID_TRANSITIONS. MUST return descriptive error on invalid transition.
+- `allowsSSHAccess(allocation)`: MUST return true when status is ACTIVE. MUST return true when status is COMPLETE AND debug_hold_until > NOW. MUST return false otherwise.
+- `isInWarmPool(status)`: Returns true when status is AVAILABLE.
+
+> See also: impl/control/src/resource/allocation.ts.l2.txt §Core Schema
+
+### 5.2.1 Race Condition: ACTIVE→COMPLETE vs ACTIVE→FAILED
+
+**Problem**: Run completion races with infrastructure failure. Agent sends `run_complete`,
+then infrastructure dies (heartbeat timeout, spot interruption). Both attempt to
+transition ACTIVE to different states.
+
+**Resolution**: Optimistic locking with first-write-wins semantics.
+
+Both handlers MUST use: `UPDATE ... WHERE status = 'ACTIVE'`
+Only one succeeds; loser sees changes === 0 and logs warning.
+
+**Key Properties**:
+- `WHERE status = 'ACTIVE'` ensures only one transition succeeds (first write wins)
+- Workflow checks `workflow_events` for `run_complete`; if found, treats as success even if allocation FAILED
+- No false failures: run completion always honored if evidence exists
+
+**Edge Cases**:
+- Agent wins race -> COMPLETE; timeout handler sees COMPLETE, returns
+- Timeout wins race -> FAILED; agent logs warning; workflow finds run_complete event, treats as success
+- Spot interrupt during run_complete -> COMPLETE wins (already transitioned)
+
+## 5.3 Warm Pool Mechanics
+
+No separate table---the warm pool is a query result:
+```sql
+SELECT * FROM allocations WHERE status = 'AVAILABLE' AND <matching criteria>
+```
+
+### Creating AVAILABLE Allocations
+
+Creating an AVAILABLE allocation MUST:
+1. Determine workdir using per-instance counter for isolation (e.g., `/home/<user>/work_<N>`)
+2. Insert allocation record with run_id=NULL, status='AVAILABLE'
+3. Set user to provided value or provider-specific default
+4. Prepare the workdir on the instance
+5. Auto-generate ID via database (INTEGER PRIMARY KEY AUTOINCREMENT)
+
+MUST set current_manifest_id if provided; MUST set debug_hold_until to NULL.
+
+> See also: impl/control/src/resource/allocation.ts.l2.txt §Warm Pool Operations
+
+### Spec/Checksum Matching Algorithm
+
+```
+FUNCTION queryWarmPool(query, limit=10) -> WarmPoolMatch[]
+  -- query fields: provider?, spec?, initChecksum?, region?, excludeInstanceIds?
+
+  SELECT allocations joined with instances WHERE:
+    allocation.status = 'AVAILABLE'
+    AND instance.workflow_state ends with ':complete'
+    AND instance.current_manifest_id IS NULL
+    AND (provider matches if specified)
+    AND (spec matches if specified)
+    AND (init_checksum is NULL or matches if specified)
+    AND instance.last_heartbeat is recent (within HEARTBEAT_TIMEOUT)
+
+  SCORE each candidate:
+    100 = exact init_checksum match (pre-initialized, skip init)
+    50  = vanilla instance (init_checksum IS NULL, needs init)
+    0   = incompatible checksum (EXCLUDED from results)
+
+  ORDER BY checksum_score DESC, created_at ASC
+  LIMIT to requested count
+```
+
+### Atomic Claiming with Optimistic Concurrency
+
+```
+FUNCTION claimWarmPoolAllocation(query, runId, maxRetries=3) -> Result
+
+  FOR attempt IN 0..maxRetries:
+    candidates = queryWarmPool(query, limit=5)
+    IF no candidates: RETURN failure "No warm pool allocations match criteria"
+
+    FOR EACH candidate:
+      BEGIN TRANSACTION:
+        Lock allocation row (SELECT ... FOR UPDATE / equivalent)
+        VERIFY status = 'AVAILABLE' AND run_id IS NULL
+        IF not available: SKIP to next candidate
+
+        UPDATE allocation SET status='CLAIMED', run_id=runId
+        RETURN success with claimed allocation
+      END TRANSACTION
+
+    SLEEP with backoff (50ms * (attempt + 1))
+
+  RETURN failure "Failed to claim after max retries"
+```
+
+Concurrency guarantee: transaction with row-level locking MUST prevent double-claim.
+Backoff between attempts SHOULD use linear scaling.
+
+> See also: impl/control/src/resource/allocation.ts.l2.txt §Warm Pool Operations
+
+## 5.4 SSH Integration
+
+### Per-Allocation SSH Routing
+
+SSH connections are per-allocation, not per-instance. Each allocation gets its
+own SSH host entry, workdir, and user context. Running `ssh <allocation_id>`
+lands you in the correct instance/user/workdir.
+
+Benefits: different workdirs keep old runs accessible; multiple allocations can
+coexist on the same instance; clean separation between concurrent or sequential
+runs.
+
+### Allocation SSH Properties
+
+Each allocation has three SSH-related properties:
+- `instance_id`: which physical instance hosts this allocation
+- `user`: Unix user for SSH (default: platform native like "ubuntu", "runpod", etc.)
+- `workdir`: isolated working directory (e.g., `/home/ubuntu/work_1`, `work_2`, ...)
+
+**Workdir Isolation:**
+Unique workdir per allocation (counter increments per instance). Previous workdirs
+persist until instance termination, enabling SSH to old allocations while new work
+executes. Cleanup timing: instance termination, not allocation completion.
+
+Workdirs provide path isolation only---not process or filesystem isolation.
+Allocations share user home, /tmp, IOPS, CPU, and memory. Pre-claim disk space
+checks are advisory (warnings, not blockers) to preserve warm pool efficiency.
+
+### Per-Allocation SSH Config Generation
+
+SSH config generation MUST produce per-allocation host entries. Each entry MUST include:
+- Host alias: short allocation ID prefix (e.g., first 8 chars)
+- HostName: Tailscale IP (preferred) or public IP
+- User: allocation's user field
+- Port: 22
+- IdentityFile: provider-specific SSH key path
+- RemoteCommand: `cd <workdir> && exec $SHELL -l`
+
+SSH config MUST be stored as an object record keyed by allocation ID.
+
+**Usage:** `ssh <short_allocation_id>` automatically:
+1. Connects to correct instance IP (Tailscale or public)
+2. Authenticates as allocation's user
+3. Changes to allocation's workdir
+4. Starts shell in that context
+
+> See also: impl/cli/src/ssh.ts.l2.txt §SSH Config Generation
+
+### Tailscale JIT Installation via ProxyCommand
+
+Tailscale provides secure mesh networking. Installation happens Just-In-Time on
+first SSH connection via ProxyCommand: zero-latency for batch jobs, instantly
+available when SSH is needed.
+
+SSH config entries include a ProxyCommand that intercepts connection attempts:
+
+```
+Host <allocation-id>
+    HostName <tailscale-ip-or-public-ip>
+    User <allocation-user>
+    Port 22
+    IdentityFile <key-path>
+    ProxyCommand /path/to/ssh_proxy_command.sh %n %h
+    RequestTTY yes
+    RemoteCommand cd <workdir> && exec $SHELL -l
+```
+
+**JIT Installation Flow:**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    TAILSCALE JIT INSTALLATION FLOW                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌──────────────┐                                      ┌──────────────────┐
+  │ SSH CLIENT   │                                      │ CONTROL PLANE    │
+  │ (ProxyCmd)   │                                      │                  │
+  └──────┬───────┘                                      └────────┬─────────┘
+         │                                                       │
+         │  1. POST /instances/{id}/tailscale-ensure             │
+         │══════════════════════════════════════════════════════>│
+         │                                                       │ 2. Check status
+         │                                                       │    If not_installed,
+         │                                                       │    enqueue message
+         │                                                       ↓
+         │                                              ┌────────────────┐
+         │                                              │ MESSAGE QUEUE  │
+         │                                              │ {type:         │
+         │                                              │  "trigger_     │
+         │                                              │   tailscale"}  │
+         │                                              └────────┬───────┘
+         │                                                       │
+         │                                              ┌────────▼───────┐
+         │                                              │ INSTANCE AGENT │
+         │                                              │                │
+         │                                              │ 3. Install TS  │
+         │                                              │ 4. Start daemon│
+         │                                              │ 5. Auth + join │
+         │                                              └────────┬───────┘
+         │                                                       │
+         │  6. Poll: POST /instances/{id}/tailscale-ensure       │
+         │  (every 2s, up to 120s)                               │
+         │══════════════════════════════════════════════════════>│
+         │                                                       │
+         │  7. Response: {"status": "installing"}                │
+         │<══════════════════════════════════════════════════════│
+         │                                                       │
+         │  ... (polling continues) ...                          │
+         │                                                       │
+         │  8. Response: {"status": "ready", "ip": "100.x.x.x"}  │
+         │<══════════════════════════════════════════════════════│
+         │                                                       │
+         │  9. Establish SSH: nc $tailscale_ip 22                │
+         │═══════════════════════════════════════════════════════>
+         │                                              ┌────────────────┐
+         │                                              │ SSH CONNECTION │
+         │<═════════════════════════════════════════════│   ESTABLISHED  │
+         └──────────────────────────────────────────────└────────────────┘
+
+  TIMING
+  ──────
+    Poll interval:        configurable (see Ch15 §15.9)
+    Timeout:              configurable (see Ch15 §15.9)
+    Typical install:      15-30 seconds (varies by network)
+
+  STATUS VALUES
+  ─────────────
+    not_installed → installing → ready | failed
+```
+
+**ProxyCommand Connection Routing:**
+
+```
+FUNCTION ssh_proxy_command(instance_id, target_host):
+  -- Call tailscale-ensure endpoint (queries status, triggers install if needed)
+  response = POST /api/v1/instances/{instance_id}/tailscale-ensure
+
+  IF response.status == "installing":
+    PRINT warning: "Installing Tailscale (first SSH connection). May affect benchmarks."
+    POLL every 2s, up to 120s:
+      response = POST /api/v1/instances/{instance_id}/tailscale-ensure
+      IF response.status == "ready": BREAK
+      IF response.status == "failed": EXIT with error
+    IF timeout exceeded: EXIT with error
+
+  IF response.ip is present:
+    CONNECT via: nc <tailscale_ip> 22
+  ELSE:
+    FALLBACK: nc <target_host> 22    -- public IP fallback
+```
+
+Key routing decisions:
+- MUST poll tailscale-ensure endpoint until ready or failed
+- MUST warn user when installation occurs during active job (CPU/memory impact)
+- MUST fall back to public IP if Tailscale IP unavailable
+- MUST be idempotent (multiple SSH attempts MUST NOT trigger duplicate installations)
+
+> See also: impl/cli/src/ssh.ts.l2.txt §ProxyCommand JIT Installation
+
+**Tailscale Ensure API Endpoint:**
+
+`POST /api/v1/instances/:id/tailscale-ensure` MUST:
+- Return current status and IP if already installing or ready
+- Trigger installation (update status to 'installing', enqueue trigger_tailscale message) if not_installed
+- Return 'failed' status as-is to allow client-side retry decisions
+- Be idempotent: repeated calls during installation MUST NOT duplicate the install
+
+> See also: impl/control/src/resource/allocation.ts.l2.txt (Tailscale section)
+
+**Agent Tailscale Installation Handler:**
+
+On receiving `trigger_tailscale` message, agent MUST:
+1. Download and install Tailscale
+2. Start Tailscale daemon
+3. Authenticate with auth key from environment (TAILSCALE_AUTH_KEY MUST be set)
+4. Wait for IP assignment (100.x.x.x format, up to 30 retries at 1s intervals)
+5. Report status ('ready' with IP, or 'failed') to control plane via PUT
+
+> See also: impl/control/src/resource/allocation.ts.l2.txt (Tailscale section)
+
+**User Experience:**
+
+```bash
+$ ssh a1b2c3d4
+SkyREPL: Tailscale not installed, triggering JIT installation...
+SkyREPL: Warning - Installing Tailscale during first SSH. May affect benchmarks.
+SkyREPL: Waiting for Tailscale installation (max 120s)...
+.........
+SkyREPL: Tailscale ready!
+Welcome to Ubuntu 22.04.3 LTS (GNU/Linux 5.15.0-1234-aws x86_64)
+ubuntu@instance:~/work_1$
+```
+
+**Key Design Points:** Zero overhead for batch jobs (installed only on first SSH).
+Transparent to user. Benchmark warning during active jobs. Falls back to public IP
+on failure. Idempotent (no duplicate installs). Persistent across allocations.
+
+### debug_hold_until Extension via SSH Activity
+
+Agent heartbeat reports allocations with active SSH; control plane extends their
+debug_hold_until timestamp. Simple bidirectional communication.
+
+**Architecture:**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        SSH ACTIVITY EXTENSION FLOW                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────┐                    ┌─────────────────────────┐
+  │      INSTANCE (Agent)   │                    │      CONTROL PLANE      │
+  ├─────────────────────────┤                    ├─────────────────────────┤
+  │                         │                    │                         │
+  │  1. Detect active SSH   │                    │                         │
+  │     sessions per user   │                    │                         │
+  │            │            │                    │                         │
+  │            ↓            │                    │                         │
+  │  2. Build allocation    │   POST /heartbeat  │                         │
+  │     ID list             │═══════════════════>│  3. Receive heartbeat   │
+  │                         │                    │            │            │
+  │                         │    {               │            ↓            │
+  │                         │      instance_id,  │  4. For each ID in      │
+  │                         │      active_ssh:   │     active_allocations: │
+  │                         │        [id1, id2]  │       extend            │
+  │                         │    }               │       debug_hold_until  │
+  │                         │                    │            │            │
+  │                         │                    │            ↓            │
+  │                         │                    │  5. Update allocation   │
+  │                         │                    │     debug_hold_until    │
+  │                         │                    │     timestamp           │
+  │                         │                    │                         │
+  └─────────────────────────┘                    └─────────────────────────┘
+
+  TIMING (example defaults, configurable)
+  ───────────────────────────────────────
+    Heartbeat interval:     HEARTBEAT_INTERVAL (e.g., 10s)
+    Degraded threshold:     HEARTBEAT_DEGRADED (e.g., 2m)
+    Agent self-term:        HEARTBEAT_ACK_TIMEOUT (e.g., 15m)
+    Control force-term:     STALE_DETECTION (e.g., 25m)
+    SSH extension amount:   SSH_EXTENSION_MS (e.g., 5min per detection)
+    Max SSH extension:      MAX_SSH_EXTENSION_MS (e.g., 2h cumulative)
+    Absolute max hold:      ABSOLUTE_MAX_HOLD_MS (e.g., 24h)
+
+  CONSTRAINTS (normative)
+  ───────────────────────
+    SSH extension < max SSH extension < absolute max hold
+    Heartbeat: interval < degraded < ack_timeout < stale_detection
+
+  DETECTION METHOD
+  ────────────────
+    Agent runs: `who | grep -c "<user>"` to count active sessions
+    Returns allocation IDs where session count > 0
+```
+
+**Heartbeat Payload** (HeartbeatRequest):
+`instance_id`, `provider_id`, `status`, `timestamp`, `active_allocations` (string[] of allocation IDs with active SSH).
+
+**Instance-Side Detection:** Agent runs `who | grep -c "<user>"` per allocation
+each heartbeat interval. Allocation IDs with session count > 0 are included in
+the heartbeat's `active_allocations` list.
+
+**Control Plane Processing:** On receiving heartbeat with active_allocations, MUST:
+1. Update instance last_heartbeat
+2. For each allocation ID, extend debug_hold_until (only ACTIVE or COMPLETE with existing hold)
+3. New value = max(current, NOW) + SSH_EXTENSION_MS
+4. MUST NOT exceed max SSH extension cap or absolute max hold (24h)
+
+> See also: impl/control/src/resource/allocation.ts.l2.txt §Debug Hold Extension
+
+### SSH Config Regeneration
+
+SSH config regenerates when allocations change to maintain IDE integration (VSCode
+Remote dropdowns, terminal autocomplete).
+
+**Triggers for regeneration:**
+- Allocation enters ACTIVE state (new SSH target available)
+- Allocation enters COMPLETE with debug_hold_until set (SSH target available for debugging)
+- Allocation debug_hold_until expires (SSH target no longer valid)
+- Instance IP changes (Tailscale ready, public IP assigned)
+- New allocation created on existing instance (additional SSH entry)
+
+Regeneration MUST query all SSH-accessible allocations (ACTIVE, or COMPLETE with active debug_hold_until) joined with non-terminating instances, generate SSH config entries, and write to `~/.ssh/config.d/skyrepl`. This is client-side---control plane exposes current allocation state via API.
+
+When instances have multiple allocations (e.g., COMPLETE with debug_hold + new ACTIVE),
+SSH config includes separate entries---same instance IP, different allocation IDs, different workdirs.
+
+> See also: impl/cli/src/ssh.ts.l2.txt §SSH Config Generation
+
+## 5.5 Background Reconciliation
+
+### 5.5.1 CLAIMED Allocation Timeout
+
+CLAIMED allocations exceeding CLAIMED_TIMEOUT (see Ch15 §15.9) MUST trigger CLAIMED->FAILED transition.
+(Timeout value accommodates slow file downloads while catching stuck claim attempts.)
+
+Implemented as background reconciliation task (see Ch15 §15.9 for interval). The task MUST:
+1. Find allocations WHERE status='CLAIMED' AND updated_at < NOW - CLAIMED_TIMEOUT
+2. Transition each to FAILED with updated timestamp
+3. Log warning with allocation_id and age
+
+> See also: impl/control/src/resource/allocation.ts.l2.txt §CLAIMED Reconciliation
+
+## 5.6 Background Task Intervals
+
+Background task intervals and thresholds: see Ch15 §15.9
+
+- **Hold expiry**: Clear expired debug_hold_until timestamps
+- **Heartbeat stale check**: Mark instances stale when heartbeat exceeds threshold
+- **Orphan scan**: Detect untracked cloud resources
+- **Manifest cleanup**: Process expired manifests
+- **CLAIMED timeout**: Fail stale CLAIMED allocations
+
+## 5.7 Debug Hold Configuration
+
+Debug holds block instance termination after allocation completion for post-run
+investigation. Extension via SSH activity (automatic) or CLI (manual).
+
+### 5.7.1 Configuration Options
+
+```typescript
+interface DebugHoldDurationConfig {
+  defaultDebugHoldMs: number;           // Short hold after normal completion
+  failureDebugHoldMs: number;           // Longer hold after failure (debugging)
+  sshExtensionMs: number;               // Extension per SSH activity detection
+  maxSshExtensionMs: number;            // Cap on cumulative SSH extensions
+  explicitExtensionMs: number;          // Extension per explicit CLI command
+  maxExplicitExtensionMs: number;       // Cap on cumulative explicit extensions
+  absoluteMaxDebugHoldMs: number;       // Hard limit (cost protection)
+}
+
+// Example defaults (non-normative, adjust based on operational experience)
+const EXAMPLE_DEBUG_HOLD_CONFIG: DebugHoldDurationConfig = {
+  defaultDebugHoldMs: 5 * 60 * 1000,           // 5 minutes
+  failureDebugHoldMs: 15 * 60 * 1000,          // 15 minutes
+  sshExtensionMs: 5 * 60 * 1000,               // 5 minutes
+  maxSshExtensionMs: 2 * 60 * 60 * 1000,       // 2 hours
+  explicitExtensionMs: 30 * 60 * 1000,         // 30 minutes
+  maxExplicitExtensionMs: 8 * 60 * 60 * 1000,  // 8 hours
+  absoluteMaxDebugHoldMs: 24 * 60 * 60 * 1000, // 24 hours
+};
+
+// CONSTRAINT: defaultDebugHoldMs <= maxSshExtensionMs <= maxExplicitExtensionMs <= absoluteMaxDebugHoldMs
+```
+
+### 5.7.2 Tiered Extension System
+
+```
+Tier 1: Auto (SSH Active)
+- Trigger: Active SSH connection detected
+- Extension: sshExtensionMs per detection (e.g., 5 minutes)
+- Max: maxSshExtensionMs (e.g., 2 hours)
+
+Tier 2: Explicit Short
+- Trigger: `repl extend` (no duration)
+- Extension: explicitExtensionMs (e.g., 30 minutes)
+- Max: maxExplicitExtensionMs (e.g., 8 hours)
+
+Tier 3: Explicit Long
+- Trigger: `repl extend <duration>`
+- Extension: User-specified
+- Max: 24 hours absolute
+```
+
+### 5.7.3 CLI Command: `repl extend`
+
+`repl extend [allocation-id] [duration]` extends debug_hold_until for an allocation.
+
+Behavior:
+- If no allocation specified, MUST target the most recent ACTIVE or held COMPLETE allocation.
+- If no duration specified, MUST use explicitExtensionMs default.
+- If duration specified, MUST parse and apply user-specified duration.
+- MUST cap at maxExplicitExtensionMs (default) or absoluteMaxDebugHoldMs (with duration).
+- MUST print allocation short ID and new debug_hold_until timestamp.
+
+> See also: impl/cli/src/ssh.ts.l2.txt §Extend Command
+
+### ACTIVE->COMPLETE Transition Details
+
+The ACTIVE->COMPLETE transition is the critical point where debugging holds are set
+and warm pool replenishment occurs.
+
+This transition MUST:
+1. Verify allocation is in ACTIVE state (lock row for update)
+2. Set status to COMPLETE with updated timestamp
+3. If keepOnComplete is configured, set debug_hold_until based on exit code:
+   - Exit code 0: defaultDebugHoldMs
+   - Exit code != 0: failureDebugHoldMs (longer, for debugging)
+4. Check warm pool replenishment eligibility for the instance
+5. If eligible, create new AVAILABLE allocation on same instance
+
+Replenishment eligibility requires:
+- Instance NOT scheduled for termination (workflow_state does not contain 'terminate')
+- Instance heartbeat is recent (within HEARTBEAT_TIMEOUT)
+- Instance is not at capacity (active/claimed count < MAX_ALLOCATIONS_PER_INSTANCE)
+
+**Key behaviors:**
+1. Transition always happens immediately when run finishes (no delay in state machine)
+2. debug_hold_until is set based on exit code and configuration
+3. Warm pool replenishment creates new AVAILABLE allocation on same instance
+4. Termination is blocked if any allocation has debug_hold_until > NOW
+
+> See also: impl/control/src/resource/allocation.ts.l2.txt §Warm Pool Replenishment
+
+### Hold Expiry Background Task
+
+A background task periodically clears expired debug_hold_until timestamps. This
+does NOT transition allocation state---it only clears the timestamp, which unblocks
+termination.
+
+The task MUST:
+1. Find COMPLETE allocations where debug_hold_until IS NOT NULL and <= NOW
+2. Set debug_hold_until to NULL with updated timestamp
+3. Trigger SSH config regeneration (allocation no longer SSH-accessible)
+
+> See also: impl/control/src/resource/allocation.ts.l2.txt §Debug Hold Expiry
+
+### Termination Blocking Semantics
+
+Instance termination MUST be blocked if any allocation on that instance has
+status='COMPLETE' AND debug_hold_until IS NOT NULL AND debug_hold_until > NOW.
+
+If termination is blocked, the system MUST return an error indicating which
+allocations hold debug holds and suggest `repl release <allocation-id>` or
+waiting for expiry.
+
+> See also: impl/control/src/resource/allocation.ts.l2.txt §Termination Blocking
+
+### CLI Command: `repl release`
+
+`repl release [allocation-id | instance-id]` clears debug_hold_until to unblock termination.
+
+Behavior:
+- No argument: release ALL active debug holds across all allocations
+- Allocation ID: release that specific allocation's debug hold
+- Instance ID: release all debug holds on that instance
+- MUST trigger SSH config regeneration after release
+
+> See also: impl/cli/src/ssh.ts.l2.txt §Release Command

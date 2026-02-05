@@ -1,90 +1,59 @@
 # CLAUDE.md
 
-## Project Overview
+## Project
 
-SkyREPL is a cloud compute orchestration platform for lifecycle management and reproducibility. Part of the Sky Computing ecosystem (complementary to SkyPilot).
+SkyREPL: cloud compute orchestration for lifecycle management and reproducibility. Control plane (VPS) + CLI client + Python agent (on instances).
 
-**Target users:** ML researchers and engineers who value reproducibility and cost-efficiency.
+**Current phase:** L2/B completion. Active worklogs: `WORKLOG_L2B_COMPLETION.txt` (action plan), `WORKLOG_SPEC_AUDIT.txt` (reference). Status: `STATUS.txt`.
 
-**The Core Insight:** Cloud orchestration isn't a compute problem—it's a lifecycle chaos problem. Tracking what's running, ensuring cleanup on failure, avoiding cost surprises.
+## Dispatch
 
-**Components:** Control plane (VPS), CLI client, Python agent (on instances).
+You are an orchestrator. Delegate via subagents. Dispatch multiple agents in parallel when possible; use `run_in_background` for long-running ones.
 
-## Subagents
+| Task Profile                | Model   | Effort   |
+| --------------------------- | ------- | -------- |
+| Architectural / ambiguous   | opus    | high/max |
+| Bounded multi-file analysis | opus    | medium   |
+| Mechanical multi-file edits | sonnet  | —        |
+| Single-file lookups         | haiku   | —        |
+| Codebase navigation         | explore | —        |
 
-You are an orchestrator. Delegate work via subagents:
+Effort is global (`/effort`), not per-subagent. Default: opus high. Opus 4.6 overthinks simple tasks — use medium for routine dispatch, reserve high/max for hard problems.
 
-| Type    | Use For                                                                   |
-| ------- | ------------------------------------------------------------------------- |
-| opus    | Default. Complex analysis, architectural decisions, ambiguous tasks       |
-| sonnet  | Bounded multi-file tasks with clear scope (e.g. "check all callers of X") |
-| haiku   | Single-file lookups, simple grep/search, mechanical extraction            |
-| explore | Codebase navigation and discovery (uses subagent_type=Explore)            |
-
-Default to opus. Drop down when confident a lighter model handles the task. Dispatch multiple agents in parallel when possible.
+Agent teams (experimental): multiple independent sessions with shared task lists + messaging. Use only when workers need to discuss/challenge each other (not for parallel independent work — subagents suffice).
 
 ## Specification
 
-~15,000 lines across 15 chapters in `specification/`.
-
-**Don't read spec chapters directly** (except 01_INTRODUCTION.txt). Spawn subagents to extract what you need.
-
-Quick reference:
+~11,500 lines across 15 chapters in `spec/`. **Don't read spec chapters directly** — spawn subagents to extract what you need.
 
 - Ch01-04: Foundation (Introduction, Material, Resources, Manifest)
 - Ch05-07: Execution (Allocations, Workflows, Intents)
 - Ch08-11: Interface (Providers, API, CLI, Agent)
 - Ch12-15: Operations (Orphans, Types, Implementation, Operations)
 
+Spec is mostly normative (MUST/SHOULD/MAY) with some non-normative content flagged for redistribution (see WORKLOG_SPEC_AUDIT.txt D4).
+
 ## Architecture
 
-Three-tier model: **MANIFEST → RESOURCE → MATERIAL**
+Three-tier: **MANIFEST → RESOURCE → MATERIAL**
 
-**Material** (data sources): RECORDS (SQL), OBJECTS (blobs), EXTERNAL (provider APIs)
-
-**Resources** (domain objects): Instance, Run, Allocation, Workflow, Snapshot, Artifact
-
-**Key concepts:**
-
-- **Allocation**: Run-to-instance binding. 5 states: AVAILABLE → CLAIMED → ACTIVE → COMPLETE (+ FAILED)
+- **Material**: RECORDS (SQL), OBJECTS (blobs), EXTERNAL (provider APIs)
+- **Resources**: Instance, Run, Allocation, Workflow, Snapshot, Artifact
+- **Allocation**: Run-to-instance binding. States: AVAILABLE → CLAIMED → ACTIVE → COMPLETE (+ FAILED)
 - **Manifest**: Ownership boundary. States: DRAFT → SEALED
 - **Workflow**: DAG execution with 4 patterns and compensation/rollback
 - **Warm pool**: Allocations WHERE status='AVAILABLE'
 
-## Pseudo-Implementation (v2/)
+## Pseudo-Implementation (impl/)
 
-The `v2/` directory contains pseudo-implementation with fidelity suffixes:
-
-| Level | Suffix    | Content                |
-| ----- | --------- | ---------------------- |
-| 1     | `.l1.txt` | Bullet-point outlines  |
-| 2     | `.l2.txt` | Detailed pseudocode    |
-| 3     | `.l3.txt` | Partial implementation |
-| 4     | (none)    | Working code           |
-
-**Source of truth hierarchy:** Recent WORKLOG > spec > pseudo-impl. (Active worklog may contain changes not yet propagated to spec.)
+Fidelity suffixes: `.l1.txt` (outlines) → `.l2.txt` (pseudocode) → `.l3.txt` (partial impl) → working code (no suffix).
 
 Structure: `control/`, `cli/`, `shared/`, `agent/`, `tests/`
 
+**Source of truth:** Recent WORKLOG > spec > pseudo-impl.
+
 ## Worklogs
 
-For substantial tasks, create `WORKLOG_[TASK].txt` with entries for each step.
+`WORKLOG_*.txt` (root) for active work. `worklogs/NNN_WORKLOG_*.txt` for archived.
 
-**Organization:**
-
-- `WORKLOG_*.txt` (root): Active/hot work
-- `worklogs/NNN_WORKLOG_*.txt`: Archived/cold (numbered by archive order)
-
-Keep 2-3 hot worklogs max. Archive when complete.
-
-**Short IDs for cross-referencing:**
-
-- Questions: Q1, Q2
-- Spec chapters: Ch8, Ch11
-- Revision rounds: R1, R2
-- Issues: R2.Cr1 (critical), R2.Md3 (medium), R2.Lo5 (low)
-- Archived worklogs: Wl1, Wl2, Wl3
-
-## Current Status
-
-See `STATUS.txt` for project status, spec completion, and v2/ progress.
+Short IDs: Ch8 (spec chapter), 007 (archived worklog), R2.Cr1 (issue severity).

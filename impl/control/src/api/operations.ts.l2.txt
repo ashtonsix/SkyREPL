@@ -1,0 +1,344 @@
+# operations.ts - Workflow Operation Endpoints (L2 Pseudocode)
+
+## Imports
+
+```typescript
+import { Elysia } from 'elysia';
+import { idempotencyMiddleware } from './middleware/idempotency';
+import { queryOne, queryMany } from '../material/db';
+import { submitWorkflow, getWorkflowProgress, cancelWorkflow } from '../workflow/engine';
+import { logger } from '../logger';
+import type {
+  WorkflowSubmission, WorkflowSubmissionResult, WorkflowProgress,
+} from '../../../../shared/src/api/workflows';
+import type {
+  LaunchRunInput, TerminateInstanceInput, CreateSnapshotInput,
+  FileManifestEntry,
+} from '../../../../shared/src/api/workflows';
+import { createApiError } from '../../../../shared/src/errors';
+```
+
+## Route Registration
+
+```typescript
+// =============================================================================
+// LAYER 2: WORKFLOW OPERATION ROUTES
+// =============================================================================
+
+export function registerOperationRoutes(app: Elysia): void {
+
+  // All operation endpoints use idempotency middleware
+  app.use(idempotencyMiddleware({ scope: '/v1/workflows' }));
+
+  // ─── Launch Run ──────────────────────────────────────────────────────
+
+  app.post('/v1/workflows/launch-run', async ({ body, set }) => {
+    const input: LaunchRunInput = {
+      runId: body.run_id ?? generateId(),
+      command: body.command,
+      workdir: body.workdir ?? '/home/ubuntu/work',
+      spec: body.spec,
+      provider: body.provider,
+      region: body.region ?? 'us-east-1',
+      initChecksum: body.init_checksum ?? null,
+      useTailscale: body.use_tailscale ?? false,
+      maxDurationMs: body.max_duration_ms ?? 0,
+      holdDurationMs: body.hold_duration_ms ?? 300000,
+      createSnapshot: body.create_snapshot ?? false,
+      files: body.files ?? [],
+      artifactPatterns: body.artifact_patterns ?? [],
+      env: body.env,
+    };
+
+    const result = await submitWorkflow({
+      type: 'launch-run',
+      input,
+      priority: body.priority ?? 'normal',
+    });
+
+    set.status = 202;
+    return {
+      workflow_id: result.workflowId,
+      run_id: input.runId,
+      status: 'pending',
+      status_url: `/v1/workflows/${result.workflowId}/status`,
+      stream_url: `/v1/workflows/${result.workflowId}/stream`,
+      estimated_ready_at: estimateReadyTime(input),
+    };
+  });
+
+  // ─── Terminate Instance ──────────────────────────────────────────────
+
+  app.post('/v1/workflows/terminate-instance', async ({ body, set }) => {
+    // Validate instance exists
+    const instance = await queryOne('SELECT * FROM instances WHERE id = ?', [body.instance_id]);
+    if (!instance) {
+      throw createApiError('INSTANCE_NOT_FOUND', `Instance '${body.instance_id}' not found`, 'not_found');
+    }
+
+    const input: TerminateInstanceInput = {
+      instanceId: body.instance_id,
+      force: body.force ?? false,
+      sshDrainTimeoutMs: body.drain_timeout_ms ?? 60000,
+    };
+
+    const result = await submitWorkflow({
+      type: 'terminate-instance',
+      input,
+    });
+
+    set.status = 202;
+    return {
+      workflow_id: result.workflowId,
+      instance_id: body.instance_id,
+      status: 'pending',
+      status_url: `/v1/workflows/${result.workflowId}/status`,
+    };
+  });
+
+  // ─── Create Snapshot ─────────────────────────────────────────────────
+
+  app.post('/v1/workflows/create-snapshot', async ({ body, set }) => {
+    // Validate instance exists
+    const instance = await queryOne('SELECT * FROM instances WHERE id = ?', [body.instance_id]);
+    if (!instance) {
+      throw createApiError('INSTANCE_NOT_FOUND', `Instance '${body.instance_id}' not found`, 'not_found');
+    }
+
+    const input: CreateSnapshotInput = {
+      instanceId: body.instance_id,
+      runId: body.run_id ?? null,
+      name: body.name,
+      initChecksum: instance.init_checksum,
+    };
+
+    const result = await submitWorkflow({
+      type: 'create-snapshot',
+      input,
+    });
+
+    set.status = 202;
+    return {
+      workflow_id: result.workflowId,
+      instance_id: body.instance_id,
+      snapshot_name: body.name,
+      status: 'pending',
+      status_url: `/v1/workflows/${result.workflowId}/status`,
+      estimated_completion_at: Date.now() + 300_000,  // ~5 min estimate
+    };
+  });
+
+  // ─── Extend Hold ─────────────────────────────────────────────────────
+
+  app.post('/v1/workflows/extend-hold', async ({ body }) => {
+    const alloc = await queryOne('SELECT * FROM allocations WHERE id = ?', [body.allocation_id]);
+    if (!alloc) {
+      throw createApiError('ALLOCATION_NOT_FOUND', `Allocation '${body.allocation_id}' not found', 'not_found`);
+    }
+
+    // Validate allocation is in holdable state (COMPLETE with debug_hold_until)
+    if (alloc.status !== 'COMPLETE' || !alloc.debug_hold_until) {
+      throw createApiError(
+        'INVALID_STATE_TRANSITION',
+        'Allocation is not in a holdable state',
+        'validation'
+      );
+    }
+
+    // Calculate new hold time
+    const previousHoldUntil = alloc.debug_hold_until;
+    const newHoldUntil = Math.max(previousHoldUntil, Date.now()) + body.extension_ms;
+
+    // Cap at maximum hold duration (e.g., 24 hours from now)
+    const MAX_HOLD_MS = 24 * 60 * 60 * 1000;
+    const maxHoldUntil = Date.now() + MAX_HOLD_MS;
+    const cappedHoldUntil = Math.min(newHoldUntil, maxHoldUntil);
+
+    await queryOne(
+      'UPDATE allocations SET debug_hold_until = ?, updated_at = ? WHERE id = ?',
+      [cappedHoldUntil, Date.now(), body.allocation_id]
+    );
+
+    return {
+      allocation_id: body.allocation_id,
+      previous_hold_until: previousHoldUntil,
+      new_hold_until: cappedHoldUntil,
+      max_hold_until: maxHoldUntil,
+    };
+  });
+
+  // ─── Cancel Workflow ─────────────────────────────────────────────────
+
+  app.post('/v1/workflows/cancel', async ({ body }) => {
+    const workflow = await queryOne('SELECT * FROM workflows WHERE id = ?', [body.workflow_id]);
+    if (!workflow) {
+      throw createApiError('WORKFLOW_NOT_FOUND', `Workflow '${body.workflow_id}' not found`, 'not_found');
+    }
+
+    if (workflow.status === 'completed' || workflow.status === 'cancelled' || workflow.status === 'failed') {
+      return {
+        workflow_id: body.workflow_id,
+        status: workflow.status,
+        compensation_status: 'not_needed',
+      };
+    }
+
+    const cancellation = await cancelWorkflow(body.workflow_id, {
+      reason: body.reason ?? 'user_requested',
+      skipCompensation: body.skip_compensation ?? false,
+    });
+
+    return {
+      workflow_id: body.workflow_id,
+      status: 'cancelled',
+      compensation_status: cancellation.compensationStatus,
+      compensated_node: cancellation.compensatedNode,
+    };
+  });
+
+  // ─── Workflow Status (Polling) ───────────────────────────────────────
+
+  app.get('/v1/workflows/:id/status', async ({ params }) => {
+    const workflow = await queryOne('SELECT * FROM workflows WHERE id = ?', [params.id]);
+    if (!workflow) {
+      throw createApiError('WORKFLOW_NOT_FOUND', `Workflow '${params.id}' not found`, 'not_found');
+    }
+
+    const nodes = await queryMany(
+      'SELECT * FROM workflow_nodes WHERE workflow_id = ?', [params.id]
+    );
+
+    const completedNodes = nodes.filter(n => n.status === 'completed').length;
+    const totalNodes = nodes.length || estimateTotalNodes(workflow.type);
+
+    const result: any = {
+      workflow_id: params.id,
+      type: workflow.type,
+      status: workflow.status,
+      current_node: workflow.current_node,
+      progress: {
+        completed_nodes: completedNodes,
+        total_nodes: totalNodes,
+        percentage: totalNodes > 0 ? Math.round((completedNodes / totalNodes) * 100) : 0,
+      },
+      created_at: workflow.created_at,
+      started_at: workflow.started_at,
+      finished_at: workflow.finished_at,
+    };
+
+    if (workflow.output_json) {
+      result.output = JSON.parse(workflow.output_json);
+    }
+    if (workflow.status === 'failed') {
+      const failedNode = nodes.find(n => n.status === 'failed');
+      result.error = {
+        code: failedNode?.error_code ?? 'INTERNAL_ERROR',
+        message: failedNode?.error_message ?? 'Workflow failed',
+        node_id: failedNode?.node_id,
+      };
+    }
+
+    return result;
+  });
+
+  // ─── Preflight ───────────────────────────────────────────────────────
+
+  app.get('/v1/preflight', async ({ query }) => {
+    const warnings: PreflightWarning[] = [];
+    const errors: PreflightError[] = [];
+
+    // Check for orphaned resources
+    const orphanedInstances = await queryMany(
+      "SELECT i.* FROM instances i LEFT JOIN manifest_resources mr ON mr.resource_id = i.id AND mr.resource_type = 'instance' WHERE mr.id IS NULL AND i.workflow_state NOT LIKE '%terminated%'"
+    );
+    if (orphanedInstances.length > 0) {
+      warnings.push({
+        type: 'orphaned_resources',
+        message: `${orphanedInstances.length} orphaned instances detected`,
+        severity: 'warning',
+        details: {
+          count: orphanedInstances.length,
+          instances: orphanedInstances.slice(0, 5).map(i => ({
+            id: i.id, provider: i.provider, spec: i.spec,
+          })),
+        },
+      });
+    }
+
+    // Check budget limits
+    const budgetCheck = await checkBudgetLimits(query.spec, query.provider);
+    if (budgetCheck.warning) {
+      warnings.push(budgetCheck.warning);
+    }
+    if (budgetCheck.error) {
+      errors.push(budgetCheck.error);
+    }
+
+    // Check stale allocations
+    const staleAllocs = await queryMany(
+      "SELECT * FROM allocations WHERE status = 'AVAILABLE' AND updated_at < ?",
+      [Date.now() - 24 * 60 * 60 * 1000]
+    );
+    if (staleAllocs.length > 0) {
+      warnings.push({
+        type: 'stale_allocations',
+        message: `${staleAllocs.length} stale warm pool allocations detected`,
+        severity: 'info',
+        details: { count: staleAllocs.length },
+      });
+    }
+
+    return {
+      ok: errors.length === 0,
+      warnings,
+      errors: errors.length > 0 ? errors : undefined,
+    };
+  });
+}
+```
+
+## Helper Functions
+
+```typescript
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+
+interface PreflightWarning {
+  type: string;
+  message: string;
+  severity: 'info' | 'warning' | 'critical';
+  details?: Record<string, unknown>;
+}
+
+interface PreflightError {
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+function estimateReadyTime(input: LaunchRunInput): number {
+  // Warm pool hit: ~10s; cold start: ~120s
+  const baseEstimate = 120_000;
+  return Date.now() + baseEstimate;
+}
+
+function estimateTotalNodes(workflowType: string): number {
+  const estimates: Record<string, number> = {
+    'launch-run': 10,
+    'terminate-instance': 5,
+    'create-snapshot': 4,
+    'cleanup-manifest': 6,
+  };
+  return estimates[workflowType] ?? 5;
+}
+
+function generateId(): number {
+  return Date.now();  // Placeholder
+}
+
+async function checkBudgetLimits(spec?: string, provider?: string) {
+  // Query budget tracking table, return warning/error if near/over limit
+  return { warning: null as PreflightWarning | null, error: null as PreflightError | null };
+}
+```

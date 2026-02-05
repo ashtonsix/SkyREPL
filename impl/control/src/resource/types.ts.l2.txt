@@ -1,0 +1,574 @@
+# types.ts - Resource materialization, reconciliation, query builders (L2 Pseudocode)
+
+Cross-references:
+- Resource interfaces: `../../../shared/src/resources.ts.l2.txt` (Instance, Run, Allocation, Snapshot, etc.)
+- Primitive types: `../../../shared/src/types.ts.l2.txt` (ID, TimestampMs, WorkflowState, AllocationStatus)
+- Timing constants: `../../../shared/src/config/timing.ts.l2.txt` (RESOURCE_CACHE_TTL, SNAPSHOT_CACHE_TTL)
+- Allocation operations: `./allocation.ts.l2.txt` (warm pool, state machine)
+- Provider interface: `../provider/provider.ts.l2.txt` (getProvider, provider.get, provider.getSnapshotByName)
+- DB access: `../material/db.ts.l2.txt` (getDatabase, queryOne, queryMany)
+
+## Imports
+
+```typescript
+import type {
+  ID, TimestampMs, WorkflowState, AllocationStatus,
+} from '../../../../shared/src/types';
+import type {
+  Instance, Run, Allocation, Snapshot,
+  FeatureInstallation, TailscaleMachine,
+  RunFile, RunLogEntry, Artifact,
+} from '../../../../shared/src/resources';
+import { getDatabase, queryOne, queryMany } from '../material/db';
+import { getProvider } from '../provider/provider';
+import { TIMING } from '../../../../shared/src/config/timing';
+import { logger } from '../logger';
+```
+
+## MaterializationOptions
+
+```typescript
+interface MaterializationOptions {
+  /**
+   * TTL duration in milliseconds for external state caching.
+   * Default: TIMING.RESOURCE_CACHE_TTL (see Ch15 S15.9).
+   * Set to 0 to force fresh fetch.
+   */
+  ttl?: number;
+
+  /**
+   * When was the last refresh? If (last_refresh + ttl) > now, use cached.
+   * If not provided, always fetches fresh.
+   */
+  last_refresh?: number;
+}
+```
+
+## ResourceMaterializer Interface
+
+```typescript
+interface ResourceMaterializer<T> {
+  /**
+   * Materialize resource from materials.
+   * @param id - Resource identifier
+   * @param options - Materialization options (TTL-based caching)
+   * @returns Materialized resource or null if not found
+   */
+  materialize(
+    id: string,
+    options?: MaterializationOptions
+  ): Promise<T | null>;
+
+  /**
+   * Materialize multiple resources efficiently (batch operation).
+   */
+  materializeBatch(
+    ids: string[],
+    options?: MaterializationOptions
+  ): Promise<Map<string, T>>;
+}
+```
+
+## In-Memory Cache
+
+```typescript
+// Simple in-memory cache with TTL. See Ch2 S2.4 for caching approach.
+//
+// Cache keys:
+//   instance:{id}:external  - External provider state
+//   snapshot:{id}:external  - External provider state
+//
+// Cache invalidation:
+//   On resource mutation: invalidate cache entry
+//   On workflow state change: invalidate all resources in manifest
+//   On reconciliation: clear entire cache for provider
+//
+// Pure control plane state (DB records) is NOT cached here (already in SQLite).
+
+const cache = new Map<string, { value: any; timestamp: number }>();
+
+function cacheGet(key: string): any | null {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  return entry.value;
+}
+
+function cacheSet(key: string, value: any, timestamp: number): void {
+  cache.set(key, { value, timestamp });
+}
+
+function cacheInvalidate(key: string): void {
+  cache.delete(key);
+}
+
+function cacheInvalidatePrefix(prefix: string): void {
+  for (const key of cache.keys()) {
+    if (key.startsWith(prefix)) cache.delete(key);
+  }
+}
+```
+
+## Instance Materialization
+
+Instances are the most complex resource to materialize: base record + object-backed
+relationships (features, tailscale) + external provider state with TTL caching.
+
+```typescript
+async function materializeInstance(
+  id: string,
+  options: MaterializationOptions = {}
+): Promise<Instance | null> {
+  const ttl = options.ttl ?? TIMING.RESOURCE_CACHE_TTL;
+  const now = Date.now();
+
+  // 1. Get base record
+  const record = await queryOne(
+    'SELECT * FROM instances WHERE id = ?', [id]
+  );
+  if (!record) return null;
+
+  // 2. Get feature installations (object-backed)
+  const featureObjects = await queryMany(
+    `SELECT o.* FROM objects o
+     JOIN object_tags ot ON o.id = ot.object_id
+     WHERE o.type = 'feature_installation'
+       AND ot.tag = 'instance_id:' || ?`,
+    [id]
+  );
+
+  // 3. Get Tailscale machine (object-backed, 1:1)
+  const tailscaleObject = await queryOne(
+    `SELECT o.* FROM objects o
+     JOIN object_tags ot ON o.id = ot.object_id
+     WHERE o.type = 'tailscale_machine'
+       AND ot.tag = 'instance_id:' || ?`,
+    [id]
+  );
+
+  // 4. Get external state if stale or missing
+  let externalState = null;
+  const cacheKey = `instance:${id}:external`;
+  const cached = cacheGet(cacheKey);
+
+  const isStale = !options.last_refresh ||
+                  (now - options.last_refresh) > ttl;
+
+  if (isStale || !cached) {
+    const provider = getProvider(record.provider);
+    externalState = await provider.get(record.provider_id);
+
+    if (externalState) {
+      cacheSet(cacheKey, externalState, now);
+    }
+  } else {
+    externalState = cached;
+  }
+
+  // 5. Combine into materialized Instance
+  const instance: Instance = {
+    id: record.id,
+    provider: record.provider,
+    providerId: record.provider_id,
+    spec: record.spec,
+    region: record.region,
+    ip: externalState?.ip ?? record.ip,  // Prefer external (fresh)
+    workflowState: record.workflow_state,
+    workflowError: record.workflow_error,
+    isSpot: record.is_spot === 1,
+    spotRequestId: record.spot_request_id,
+    initChecksum: record.init_checksum,
+    spawnIdempotencyKey: record.spawn_idempotency_key,
+    createdAt: record.created_at,
+    lastHeartbeat: record.last_heartbeat,
+    currentManifestId: record.current_manifest_id,
+
+    // Relationships
+    features: featureObjects.map(f => parseFeatureInstallation(f)),
+    tailscaleMachine: tailscaleObject ? parseTailscaleMachine(tailscaleObject) : null,
+
+    // External state
+    externalStatus: externalState?.status,
+    externalIp: externalState?.ip,
+  };
+
+  return instance;
+}
+```
+
+## Run Materialization
+
+Runs combine record data with related files, logs, artifacts, and allocation.
+
+```typescript
+async function materializeRun(
+  id: string,
+  options: MaterializationOptions = {}
+): Promise<Run | null> {
+  // 1. Get base record
+  const record = await queryOne(
+    'SELECT * FROM runs WHERE id = ?', [id]
+  );
+  if (!record) return null;
+
+  // 2. Get file manifest (object-backed, run_file type) — join blob for size/checksum
+  const fileObjects = await queryMany(
+    `SELECT o.*, b.size_bytes, b.checksum FROM objects o
+     JOIN blobs b ON o.blob_id = b.id
+     JOIN object_tags ot ON o.id = ot.object_id
+     WHERE o.type = 'run_file'
+       AND ot.tag = 'run_id:' || ?`,
+    [id]
+  );
+
+  // 3. Get recent logs (limit to avoid huge payloads)
+  const logObjects = await queryMany(
+    `SELECT o.* FROM objects o
+     JOIN object_tags ot ON o.id = ot.object_id
+     WHERE o.type = 'log'
+       AND ot.tag = 'run_id:' || ?
+     ORDER BY o.created_at DESC
+     LIMIT 1000`,
+    [id]
+  );
+
+  // 4. Get artifacts (object-backed) — join blob for size_bytes
+  const artifactObjects = await queryMany(
+    `SELECT o.*, b.size_bytes FROM objects o
+     JOIN blobs b ON o.blob_id = b.id
+     JOIN object_tags ot ON o.id = ot.object_id
+     WHERE o.type = 'artifact'
+       AND ot.tag = 'run_id:' || ?`,
+    [id]
+  );
+
+  // 5. Get allocation (1:1 relationship during execution)
+  const allocationRecord = await queryOne(
+    'SELECT * FROM allocations WHERE run_id = ?', [id]
+  );
+
+  // 6. Combine into materialized Run
+  const run: Run = {
+    id: record.id,
+    command: record.command,
+    workdir: record.workdir,
+    maxDurationMs: record.max_duration_ms,
+    workflowState: record.workflow_state,
+    workflowError: record.workflow_error,
+    exitCode: record.exit_code,
+    createSnapshot: record.create_snapshot === 1,
+    initChecksum: record.init_checksum,
+    spotInterrupted: record.spot_interrupted === 1,
+    createdAt: record.created_at,
+    startedAt: record.started_at,
+    finishedAt: record.finished_at,
+    currentManifestId: record.current_manifest_id,
+
+    // Relationships
+    files: fileObjects.map(f => {
+      const meta = JSON.parse(f.metadata_json ?? '{}');
+      return {
+        path: meta.path,
+        checksum: f.checksum,       // From blob join
+        sizeBytes: f.size_bytes,    // From blob join
+      };
+    }),
+    logs: logObjects.map(l => ({
+      stream: l.stream,
+      data: l.data,
+      timestamp: l.timestamp,
+    })),
+    artifacts: artifactObjects.map(a => parseArtifact(a)),
+    allocation: allocationRecord ?? undefined,
+  };
+
+  return run;
+}
+```
+
+## Snapshot Materialization
+
+Simple object-backed resources unwrap from objects table with optional external state.
+
+```typescript
+async function materializeSnapshot(
+  id: string,
+  options: MaterializationOptions = {}
+): Promise<Snapshot | null> {
+  // 1. Get object
+  const obj = await queryOne(
+    'SELECT * FROM objects WHERE id = ?', [id]
+  );
+  if (!obj || obj.type !== 'snapshot') return null;
+
+  // 2. Parse metadata
+  const metadata = JSON.parse(obj.metadata_json ?? '{}');
+
+  // 3. Optionally get external state (check if snapshot still exists)
+  const ttl = options.ttl ?? TIMING.SNAPSHOT_CACHE_TTL;
+  const now = Date.now();
+  const isStale = !options.last_refresh ||
+                  (now - options.last_refresh) > ttl;
+
+  let externalExists = null;
+  if (isStale) {
+    const provider = getProvider(metadata.provider);
+    const external = await provider.getSnapshotByName(metadata.name);
+    externalExists = external !== null;
+  }
+
+  // 4. Combine into materialized Snapshot
+  const snapshot: Snapshot = {
+    id: obj.id,
+    provider: metadata.provider,
+    providerId: metadata.provider_id,
+    spec: metadata.spec,
+    initChecksum: metadata.init_checksum,
+    name: metadata.name,
+    createdAt: metadata.created_at,
+    lastUsedAt: metadata.last_used_at,
+    useCount: metadata.use_count,
+
+    // External state
+    externalExists: externalExists,
+  };
+
+  return snapshot;
+}
+```
+
+## Object Parsers
+
+Helper functions to parse object records into typed resources.
+
+```typescript
+function parseFeatureInstallation(obj: any): FeatureInstallation {
+  const metadata = JSON.parse(obj.metadata_json ?? '{}');
+  return {
+    id: obj.id,
+    instanceId: metadata.instance_id,
+    featureName: metadata.feature_name,
+    version: metadata.version,
+    status: metadata.status,
+    port: metadata.port ?? null,
+    url: metadata.url ?? null,
+    installedAt: metadata.installed_at,
+  };
+}
+
+function parseTailscaleMachine(obj: any): TailscaleMachine {
+  const metadata = JSON.parse(obj.metadata_json ?? '{}');
+  return {
+    id: obj.id,
+    instanceId: metadata.instance_id,
+    tailscaleIp: metadata.tailscale_ip,
+    hostname: metadata.hostname,
+    authKeyUsed: metadata.auth_key_used,
+    createdAt: metadata.created_at,
+  };
+}
+
+function parseArtifact(obj: any): Artifact {
+  const metadata = JSON.parse(obj.metadata_json ?? '{}');
+  return {
+    id: obj.id,
+    runId: metadata.run_id,
+    path: metadata.path,
+    sizeBytes: obj.size_bytes ?? metadata.size_bytes ?? 0,  // Prefer blob join, fall back to metadata
+    keep: metadata.keep,
+    createdAt: obj.created_at,
+  };
+}
+```
+
+## Instance Reconciliation
+
+Reconciliation ensures control plane state matches external provider state.
+Fetch both, compare, decide action. Standalone function, not method on materializers.
+
+```typescript
+interface ReconciliationResult {
+  action: 'none' | 'update' | 'mark_terminated' | 'abort';
+  reason: string;
+  updates?: Record<string, any>;
+}
+
+async function reconcileInstance(id: string): Promise<ReconciliationResult> {
+  // 1. Get our record
+  const record = await queryOne(
+    'SELECT * FROM instances WHERE id = ?', [id]
+  );
+  if (!record) {
+    return { action: 'none', reason: 'instance not found in DB' };
+  }
+
+  // 2. Get fresh external state (bypass cache)
+  const provider = getProvider(record.provider);
+  const external = await provider.get(record.provider_id);
+
+  // 3. Compare and decide action
+  if (!external) {
+    // Instance deleted externally
+    return {
+      action: 'mark_terminated',
+      reason: 'instance deleted externally',
+      updates: { workflow_state: 'terminate:finished' },
+    };
+  }
+
+  const updates: Record<string, any> = {};
+  let needsUpdate = false;
+
+  // Check IP drift
+  if (external.ip && external.ip !== record.ip) {
+    updates.ip = external.ip;
+    needsUpdate = true;
+  }
+
+  // Check status (only if significantly different)
+  const externalMapped = mapProviderStatus(external.status);
+  const recordMapped = mapProviderStatus(record.workflow_state);
+  if (externalMapped !== recordMapped) {
+    // Don't overwrite workflow status unless critical
+    if (externalMapped === 'terminated') {
+      updates.workflow_state = 'terminate:finished';
+      needsUpdate = true;
+    }
+  }
+
+  if (needsUpdate) {
+    return { action: 'update', reason: 'state drift detected', updates };
+  }
+
+  return { action: 'none', reason: 'state matches' };
+}
+
+// Maps provider-specific status strings to normalized status.
+// Implementation varies per provider (see provider.ts.l2.txt).
+function mapProviderStatus(status: string): string {
+  // Normalize to: 'running' | 'stopped' | 'terminated' | 'pending' | 'unknown'
+  if (status.includes('terminate') || status.includes('terminated')) return 'terminated';
+  if (status.includes('complete') || status.includes('running')) return 'running';
+  if (status.includes('pending') || status.includes('provisioning')) return 'pending';
+  if (status.includes('stopped')) return 'stopped';
+  return 'unknown';
+}
+```
+
+## Resource Availability Helper
+
+```typescript
+/**
+ * Check if a resource is available (workflow complete + not owned by manifest).
+ * No explicit "available" state stored. Inferred from workflow_state + ownership.
+ */
+function isAvailable(resource: { workflowState?: string; currentManifestId?: number | null }): boolean {
+  return (resource.workflowState?.endsWith(':complete') ?? false) &&
+         resource.currentManifestId === null;
+}
+```
+
+## State Transition Validation
+
+```typescript
+// Valid instance workflow_state transitions (workflow:phase format)
+const INSTANCE_TRANSITIONS: Record<string, string[]> = {
+  'spawn:pending':                  ['launch-run:provisioning'],
+  'launch-run:provisioning':        ['launch-run:bootstrapping', 'launch-run:error'],
+  'launch-run:bootstrapping':       ['launch-run:installing_features', 'launch-run:complete', 'launch-run:error'],
+  'launch-run:installing_features': ['launch-run:complete', 'launch-run:error'],
+  'launch-run:complete':            ['terminate:draining', 'create-snapshot:preparing'],
+  'launch-run:error':               ['terminate:draining'],
+  'terminate:draining':             ['terminate:complete'],
+  'terminate:complete':             [],
+  'create-snapshot:preparing':      ['create-snapshot:snapshotting', 'create-snapshot:complete'],
+  'create-snapshot:snapshotting':   ['create-snapshot:complete'],
+  'create-snapshot:complete':       ['terminate:draining'],
+};
+
+// Valid run workflow_state transitions
+const RUN_TRANSITIONS: Record<string, string[]> = {
+  'launch-run:pending':   ['launch-run:preparing', 'launch-run:cancelled'],
+  'launch-run:preparing': ['launch-run:running', 'launch-run:error'],
+  'launch-run:running':   ['launch-run:complete', 'launch-run:error', 'launch-run:cancelled', 'launch-run:timeout'],
+  'launch-run:complete':  [],
+  'launch-run:error':     [],
+  'launch-run:cancelled': [],
+  'launch-run:timeout':   [],
+};
+
+type ResourceType = 'instance' | 'run' | 'allocation';
+
+function validateStateTransition(
+  resourceType: ResourceType,
+  from: string,
+  to: string
+): { valid: boolean; error?: string } {
+  let transitions: Record<string, string[]>;
+
+  switch (resourceType) {
+    case 'instance':
+      transitions = INSTANCE_TRANSITIONS;
+      break;
+    case 'run':
+      transitions = RUN_TRANSITIONS;
+      break;
+    case 'allocation':
+      // Allocation transitions handled in allocation.ts.l2.txt
+      // (uses AllocationStatus enum, not workflow_state format)
+      return { valid: true }; // Delegate to allocation module
+    default:
+      return { valid: false, error: `Unknown resource type: ${resourceType}` };
+  }
+
+  const allowed = transitions[from];
+  if (!allowed) {
+    return { valid: false, error: `Unknown state: ${from} for ${resourceType}` };
+  }
+
+  if (!allowed.includes(to)) {
+    return {
+      valid: false,
+      error: `Invalid ${resourceType} transition: ${from} -> ${to}. Allowed: [${allowed.join(', ')}]`,
+    };
+  }
+
+  return { valid: true };
+}
+```
+
+## Exports
+
+```typescript
+export {
+  // Types
+  MaterializationOptions,
+  ResourceMaterializer,
+  ReconciliationResult,
+
+  // Materialization functions
+  materializeInstance,
+  materializeRun,
+  materializeSnapshot,
+
+  // Object parsers
+  parseFeatureInstallation,
+  parseTailscaleMachine,
+  parseArtifact,
+
+  // Reconciliation
+  reconcileInstance,
+  mapProviderStatus,
+
+  // Helpers
+  isAvailable,
+  validateStateTransition,
+
+  // Cache utilities
+  cacheInvalidate,
+  cacheInvalidatePrefix,
+
+  // Transition maps (for testing)
+  INSTANCE_TRANSITIONS,
+  RUN_TRANSITIONS,
+};
+```

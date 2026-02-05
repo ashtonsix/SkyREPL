@@ -1,0 +1,724 @@
+# engine.ts - Workflow Execution Engine (L2 Pseudocode)
+
+## Imports
+
+```typescript
+import { getDatabase, queryOne, queryMany, transaction } from '../material/db';
+import { TIMING } from '../../../../shared/src/config/timing';
+import {
+  startWorkflow, completeWorkflow as completeWorkflowTransition,
+  failWorkflow, cancelWorkflow as cancelWorkflowTransition,
+  startNode, completeNode, failNode, resetNodeForRetry, skipNode,
+} from './state-transitions';
+import { compensateFailedNode, compensateWithRetry } from './compensation';
+import {
+  applyInsertAndReconverge, applyConditionalBranch,
+  applyParallelFanOut, applyRetryWithAlternative,
+} from './patterns';
+import type {
+  WorkflowEngine, WorkflowSubmission, WorkflowSubmissionResult,
+  WorkflowBlueprint, NodeExecutor, NodeContext, CompensationContext,
+  WorkflowType, WorkflowProgress, WorkflowEvent, SubworkflowHandle,
+} from '../../../../shared/src/api/workflows';
+```
+
+## Constants
+
+```typescript
+// From Ch6 spec
+const MAX_SUBWORKFLOW_DEPTH = 3;
+const MAX_PARALLEL_BRANCHES = 16;
+
+// Timing constants imported from timing.ts:
+// - TIMING.DEFAULT_WORKFLOW_TIMEOUT_MS (60 minutes)
+// - TIMING.DEFAULT_NODE_TIMEOUT_MS (5 minutes)
+// - TIMING.PENDING_WORKFLOW_TIMEOUT_MS (30 minutes)
+// - TIMING.RETRY_BASE_DELAY_MS (2000)
+// - TIMING.RETRY_MAX_DELAY_MS (60000)
+```
+
+## WorkflowEngine Interface
+
+```typescript
+interface WorkflowEngine {
+  submit(request: WorkflowSubmission): Promise<WorkflowSubmissionResult>;
+  get(workflowId: string): Promise<Workflow | null>;
+  cancel(workflowId: string, reason: string): Promise<void>;
+  pause(workflowId: string): Promise<void>;
+  resume(workflowId: string): Promise<void>;
+  retry(workflowId: string): Promise<string>;  // Returns NEW workflow ID
+}
+```
+
+## §SingleStepHelper
+
+Single-step workflows use shared infrastructure but skip orchestration overhead.
+
+```typescript
+/**
+ * Helper for single-step workflows that skip DAG/compensation overhead.
+ *
+ * SingleStepContext provides: emitResource, claimResource, log
+ * SingleStepContext lacks: applyPattern, spawnSubworkflow, compensate
+ */
+async function runSingleStep<TInput, TOutput>(
+  type: string,
+  input: TInput,
+  handler: (ctx: SingleStepContext) => Promise<TOutput>
+): Promise<TOutput> {
+  // Create workflow record (pending → running → completed/failed)
+  // Create manifest
+  // Execute handler with SingleStepContext
+  // Seal manifest on completion
+  // No DAG, no compensation logic
+}
+```
+
+## §Submit
+
+```typescript
+/**
+ * Submit a new workflow for execution.
+ *
+ * 1. Check idempotency key — return existing if found
+ * 2. Create DRAFT manifest
+ * 3. Create workflow record (status='pending')
+ * 4. Set timeout_at = now + (request.timeout ?? DEFAULT_WORKFLOW_TIMEOUT_MS)
+ * 5. Create workflow_nodes from blueprint
+ * 6. Start execution loop (async, non-blocking)
+ * 7. Return immediately
+ */
+async function submit(request: WorkflowSubmission): Promise<WorkflowSubmissionResult> {
+  const db = getDatabase();
+
+  // Idempotency check
+  if (request.idempotencyKey) {
+    const existing = queryOne(
+      'SELECT * FROM workflows WHERE idempotency_key = ?',
+      [request.idempotencyKey]
+    );
+    if (existing) {
+      return { workflowId: existing.id, status: 'deduplicated', existingWorkflowId: existing.id };
+    }
+  }
+
+  // Create DRAFT manifest for resource tracking
+  const manifest = db.prepare(`
+    INSERT INTO manifests (status, created_at, updated_at)
+    VALUES ('DRAFT', ?, ?)
+  `).run(Date.now(), Date.now());
+
+  // Create workflow record
+  const now = Date.now();
+  const timeoutAt = now + (request.timeout ?? TIMING.DEFAULT_WORKFLOW_TIMEOUT_MS);
+
+  const result = db.prepare(`
+    INSERT INTO workflows (
+      type, status, input_json, manifest_id, idempotency_key,
+      parent_workflow_id, priority, timeout_ms, timeout_at,
+      created_at, updated_at
+    ) VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    request.type,
+    JSON.stringify(request.input),
+    manifest.lastInsertRowid,
+    request.idempotencyKey ?? null,
+    request.parentWorkflowId ?? null,
+    request.priority ?? 'normal',
+    request.timeout ?? TIMING.DEFAULT_WORKFLOW_TIMEOUT_MS,
+    timeoutAt,
+    now, now
+  );
+
+  const workflowId = result.lastInsertRowid;
+
+  // Create nodes from blueprint definition
+  const blueprint = getBlueprint(request.type);
+  for (const [nodeId, nodeDef] of Object.entries(blueprint.nodes)) {
+    db.prepare(`
+      INSERT INTO workflow_nodes (
+        workflow_id, node_id, node_type, status, dependencies_json,
+        input_json, attempt, created_at
+      ) VALUES (?, ?, ?, 'pending', ?, ?, 0, ?)
+    `).run(
+      workflowId, nodeId, nodeDef.type,
+      JSON.stringify(nodeDef.dependencies ?? []),
+      JSON.stringify(nodeDef.inputSchema ?? {}),
+      now
+    );
+  }
+
+  // Start execution loop (fire-and-forget)
+  executeLoop(workflowId).catch(err =>
+    logger.error('executeLoop_unhandled', { workflowId, error: err })
+  );
+
+  return { workflowId, status: 'created' };
+}
+```
+
+## §Retry
+
+```typescript
+/**
+ * Retry a failed workflow by creating a NEW workflow with same inputs.
+ *
+ * IMPORTANT: Does NOT transition failed→running (invalid per state machine).
+ * Creates a NEW workflow with a new idempotency key for clean retry.
+ * Original workflow preserved for audit trail.
+ */
+async function retry(workflowId: string): Promise<string> {
+  const originalWorkflow = await db.getWorkflow(workflowId);
+
+  if (originalWorkflow.status !== 'failed') {
+    throw new Error('Can only retry failed workflows');
+  }
+
+  // Create NEW workflow with same inputs (different idempotency key)
+  const newWorkflowId = await submit({
+    type: originalWorkflow.type,
+    input: JSON.parse(originalWorkflow.input_json),
+    // NEW idempotency key — allows retry of same logical operation
+    idempotencyKey: `${originalWorkflow.idempotency_key}:retry:${Date.now()}`,
+    parentWorkflowId: originalWorkflow.parent_workflow_id,
+    priority: originalWorkflow.priority,
+    timeout: originalWorkflow.timeout_ms,
+  });
+
+  // Link for audit trail
+  await db.execute(`
+    UPDATE workflows SET retry_of_workflow_id = ? WHERE id = ?
+  `, [workflowId, newWorkflowId]);
+
+  return newWorkflowId;
+}
+```
+
+## §ExecuteLoop
+
+```typescript
+/**
+ * Core execution loop — continuously evaluates which nodes are ready to execute.
+ *
+ * Persistence strategy (crash recovery):
+ * - Node marked 'running' BEFORE execution begins
+ * - Node marked 'completed' AFTER execution succeeds
+ * - Pattern applications persisted before DAG modification
+ */
+private async function executeLoop(workflowId: string): Promise<void> {
+  await db.updateWorkflow(workflowId, { status: 'running', started_at: Date.now() });
+
+  while (true) {
+    const workflow = await db.getWorkflow(workflowId);
+
+    // Check cancellation
+    if (workflow.status === 'cancelled') {
+      await handleCancellation(workflowId);
+      break;
+    }
+
+    // Check workflow-level timeout (Ch6 §6.6.3)
+    if (workflow.timeout_at && Date.now() > workflow.timeout_at) {
+      await handleWorkflowTimeout(workflowId);
+      break;
+    }
+
+    const nodes = await db.getWorkflowNodes(workflowId);
+    const readyNodes = findReadyNodes(nodes);
+
+    if (readyNodes.length === 0) {
+      const pending = nodes.filter(n => n.status === 'pending').length;
+      const running = nodes.filter(n => n.status === 'running').length;
+      const failed = nodes.filter(n => n.status === 'failed').length;
+
+      if (running > 0) {
+        // Wait for currently executing nodes to finish
+        await waitForNodeCompletion(workflowId);
+        continue;
+      }
+      if (pending === 0 && failed === 0) {
+        // All nodes completed successfully
+        await completeWorkflow(workflowId, nodes);
+        break;
+      }
+      if (failed > 0) {
+        // Unrecoverable failure — workflow fails
+        await handleWorkflowFailure(workflowId, nodes);
+        break;
+      }
+    }
+
+    // Concurrent node execution — why workflow_nodes is a separate table
+    // (separate rows prevent read-modify-write races on concurrent updates)
+    await Promise.all(readyNodes.map(node => executeNode(workflowId, node)));
+  }
+}
+
+/**
+ * Find nodes ready to execute: status='pending' with all dependencies satisfied.
+ * Skipped nodes count as "satisfied" for dependency resolution (Ch6 §B5).
+ */
+function findReadyNodes(nodes: WorkflowNode[]): WorkflowNode[] {
+  const completedOrSkipped = new Set(
+    nodes
+      .filter(n => n.status === 'completed' || n.status === 'skipped')
+      .map(n => n.node_id)
+  );
+
+  return nodes.filter(n => {
+    if (n.status !== 'pending') return false;
+    const deps = JSON.parse(n.dependencies_json) as string[];
+    return deps.every(depId => completedOrSkipped.has(depId));
+  });
+}
+```
+
+## §ExecuteNode
+
+```typescript
+/**
+ * Execute a single workflow node with retry and compensation support.
+ *
+ * Node timeout hierarchy (Ch6 §6.6.5):
+ * 1. Node-level timeout: DEFAULT_NODE_TIMEOUT_MS (5min) — applies to execute()
+ * 2. Wait operations: explicit per-operation timeout — exempt from node timeout
+ * 3. Workflow-level timeout: checked in executeLoop before each iteration
+ */
+async function executeNode(workflowId: string, node: WorkflowNode): Promise<void> {
+  // Mark node running BEFORE execution (crash recovery semantics)
+  await startNode(node.id);
+
+  const executor = nodeExecutors.get(node.node_type);
+  if (!executor) {
+    await failNode(node.id, JSON.stringify({ code: 'UNKNOWN_NODE_TYPE' }));
+    return;
+  }
+
+  // Build NodeContext
+  const ctx = buildNodeContext(workflowId, node);
+
+  try {
+    // Execute with node-level timeout
+    const output = await Promise.race([
+      executor.execute(ctx),
+      timeout(node.timeout ?? TIMING.DEFAULT_NODE_TIMEOUT_MS),
+    ]);
+
+    // Mark node completed AFTER success
+    await completeNode(node.id, output);
+
+  } catch (error) {
+    // Determine retry strategy
+    const decision = determineRetryStrategy(error, node.attempt);
+
+    if (decision.shouldRetry) {
+      await handleRetry(workflowId, node, error, decision);
+    } else {
+      // No retry — fail the node
+      await failNode(node.id, JSON.stringify(error));
+
+      // Compensate the single failed node (Ch6 §6.5)
+      if (executor.compensate) {
+        await compensateFailedNode(workflowId, node.node_id);
+      }
+    }
+  }
+}
+```
+
+## §RetryStrategy
+
+```typescript
+/**
+ * Error → Retry decision mapping.
+ *
+ * Standardized error handling determines whether errors trigger retry,
+ * fallback, or immediate failure.
+ */
+interface RetryDecision {
+  shouldRetry: boolean;
+  strategy: 'same_params' | 'alternative' | 'fallback' | null;
+  delayMs: number;
+  maxAttempts: number;
+}
+
+const ERROR_RETRY_MAPPING: Record<string, {
+  retryable: boolean;
+  strategy: 'exponential_backoff' | 'alternative' | 'fallback';
+  maxRetries: number;
+}> = {
+  CAPACITY_UNAVAILABLE:    { retryable: true,  strategy: 'alternative',        maxRetries: 3 },
+  PROVIDER_API_ERROR:      { retryable: true,  strategy: 'exponential_backoff', maxRetries: 3 },
+  RATE_LIMITED:            { retryable: true,  strategy: 'exponential_backoff', maxRetries: 5 },
+  SPOT_INTERRUPTED:        { retryable: true,  strategy: 'fallback',           maxRetries: 1 },
+  OPERATION_TIMEOUT:       { retryable: true,  strategy: 'exponential_backoff', maxRetries: 2 },
+  VALIDATION_ERROR:        { retryable: false, strategy: 'exponential_backoff', maxRetries: 0 },
+  INVALID_STATE_TRANSITION:{ retryable: false, strategy: 'exponential_backoff', maxRetries: 0 },
+  DATABASE_ERROR:          { retryable: false, strategy: 'exponential_backoff', maxRetries: 0 },
+  INSUFFICIENT_PERMISSIONS:{ retryable: false, strategy: 'exponential_backoff', maxRetries: 0 },
+};
+
+function determineRetryStrategy(error: NodeError, attempt: number): RetryDecision {
+  const mapping = ERROR_RETRY_MAPPING[error.code];
+
+  if (!mapping || !mapping.retryable) {
+    return { shouldRetry: false, strategy: null, delayMs: 0, maxAttempts: 0 };
+  }
+
+  if (attempt >= mapping.maxRetries) {
+    return { shouldRetry: false, strategy: null, delayMs: 0, maxAttempts: mapping.maxRetries };
+  }
+
+  // Exponential backoff: min(2^attempt * base, max)
+  // Respects retry_after_ms from error response if present (RATE_LIMITED)
+  const delayMs = mapping.strategy === 'exponential_backoff'
+    ? Math.min(
+        Math.pow(2, attempt) * TIMING.RETRY_BASE_DELAY_MS,
+        TIMING.RETRY_MAX_DELAY_MS
+      )
+    : error.details?.retry_after_ms ?? 0;
+
+  return {
+    shouldRetry: true,
+    strategy: mapping.strategy === 'exponential_backoff' ? 'same_params'
+            : mapping.strategy === 'alternative' ? 'alternative'
+            : 'fallback',
+    delayMs,
+    maxAttempts: mapping.maxRetries,
+  };
+}
+
+/**
+ * Handle retry based on strategy decision.
+ *
+ * - same_params: Reset node to pending, increment attempt, delay
+ * - alternative: Apply retry-with-alternative pattern (different region)
+ * - fallback: Apply conditional-branch pattern (spot→on-demand)
+ */
+async function handleRetry(
+  workflowId: string,
+  node: WorkflowNode,
+  error: NodeError,
+  decision: RetryDecision
+): Promise<void> {
+  if (decision.delayMs > 0) {
+    await sleep(decision.delayMs);
+  }
+
+  switch (decision.strategy) {
+    case 'same_params':
+      // Simple retry: reset node to pending with incremented attempt
+      await resetNodeForRetry(node.id, `retry_${error.code}`);
+      break;
+
+    case 'alternative':
+      // Compensate failed node, then apply retry-with-alternative pattern
+      await compensateFailedNode(workflowId, node.node_id);
+      const alternativeRegion = error.details?.alternative_regions?.[0];
+      if (alternativeRegion) {
+        applyRetryWithAlternative(workflowId, node.node_id, {
+          id: `${node.node_id}-alt-${node.attempt + 1}`,
+          type: node.node_type,
+          input: { ...JSON.parse(node.input_json), region: alternativeRegion },
+        });
+      }
+      break;
+
+    case 'fallback':
+      // Spot interrupted: retry spot once, then fallback to on-demand
+      if (node.attempt === 0) {
+        await resetNodeForRetry(node.id, 'spot_retry');
+      } else {
+        await compensateFailedNode(workflowId, node.node_id);
+        applyConditionalBranch(workflowId, node.node_id, {
+          triggerOnError: true,
+          option1: node,
+          option2: { ...node, input: { ...JSON.parse(node.input_json), onDemand: true } },
+        });
+      }
+      break;
+  }
+}
+```
+
+## §WorkflowTimeout
+
+```typescript
+/**
+ * Handle workflow timeout (Ch6 §6.6.3).
+ *
+ * Prevents workflows from running indefinitely due to stuck nodes
+ * or slow provider APIs.
+ *
+ * On timeout:
+ * 1. Mark running nodes as failed with WORKFLOW_TIMEOUT
+ * 2. Compensate running nodes
+ * 3. Seal manifest
+ * 4. Set workflow status='failed'
+ */
+async function handleWorkflowTimeout(workflowId: string): Promise<void> {
+  const nodes = await db.getWorkflowNodes(workflowId);
+  const runningNodes = nodes.filter(n => n.status === 'running');
+
+  for (const node of runningNodes) {
+    await failNode(node.id, JSON.stringify({ code: 'WORKFLOW_TIMEOUT' }));
+    await compensateFailedNode(workflowId, node.node_id);
+  }
+
+  await sealManifest(workflowId);
+  await failWorkflow(workflowId, JSON.stringify({
+    code: 'WORKFLOW_TIMEOUT',
+    message: 'Workflow exceeded timeout',
+  }));
+}
+```
+
+## §Cancellation
+
+```typescript
+/**
+ * Cancel a running workflow (Ch6 §6.7).
+ *
+ * Uses fire-and-forget CancelRunMessage via SSE.
+ * Heartbeat timeout handles unresponsive agents.
+ *
+ * Agent alive: receives cancel -> stops run -> emits run_complete
+ * Agent dead: heartbeat timeout -> ACTIVE->FAILED
+ */
+async function cancelWorkflow(workflowId: string, reason: string): Promise<void> {
+  const workflow = await db.getWorkflow(workflowId);
+
+  // Send cancel message to agent (fire-and-forget via SSE)
+  const allocation = await findActiveAllocation(workflow);
+  if (allocation) {
+    await enqueueInstanceMessage(allocation.instance_id, {
+      type: 'cancel_run',
+      run_id: workflow.run_id,
+    });
+  }
+
+  // Mark workflow as cancelling
+  await db.updateWorkflow(workflowId, {
+    status: 'cancelling',
+    cancel_reason: reason,
+  });
+
+  // If agent alive: receives cancel -> stops run -> emits run_complete -> workflow completes
+  // If agent dead: heartbeat timeout -> ACTIVE->FAILED -> workflow fails
+}
+
+/**
+ * Handle cancellation in execution loop.
+ * Mark pending nodes as skipped, seal manifest.
+ */
+async function handleCancellation(workflowId: string): Promise<void> {
+  const nodes = await db.getWorkflowNodes(workflowId);
+
+  for (const node of nodes) {
+    if (node.status === 'pending') {
+      await skipNode(node.id);
+    }
+  }
+
+  await sealManifest(workflowId);
+  await cancelWorkflowTransition(workflowId);
+}
+```
+
+## §CrashRecovery
+
+```typescript
+/**
+ * Recover workflows after crash/restart (Ch6 §6.2).
+ *
+ * On startup:
+ * 1. Find workflows with status='running' or 'pending'
+ * 2. Pending workflows exceeding PENDING_WORKFLOW_TIMEOUT -> failed
+ * 3. Running workflows: reset interrupted nodes, resume executeLoop
+ *
+ * Persistence strategy ensures:
+ * - Node marked 'running' BEFORE execution -> on crash, node is 'running'
+ * - Idempotent nodes: safe to retry (reset to pending)
+ * - Non-idempotent nodes: mark failed (unsafe to retry)
+ */
+async function recoverWorkflows(): Promise<void> {
+  const db = getDatabase();
+
+  // Handle stale pending workflows (Ch6 §6.6.6)
+  const stalePending = queryMany(`
+    SELECT id FROM workflows
+    WHERE status = 'pending'
+      AND updated_at < ?
+  `, [Date.now() - TIMING.PENDING_WORKFLOW_TIMEOUT_MS]);
+
+  for (const workflow of stalePending) {
+    await failWorkflow(workflow.id, JSON.stringify({ code: 'PENDING_TIMEOUT' }));
+    await sealManifest(workflow.id);
+    logger.warn('pending_workflow_timeout', { workflowId: workflow.id });
+  }
+
+  // Resume running workflows
+  const runningWorkflows = queryMany(
+    `SELECT id FROM workflows WHERE status = 'running'`
+  );
+
+  for (const workflow of runningWorkflows) {
+    const nodes = await db.getWorkflowNodes(workflow.id);
+    const runningNodes = nodes.filter(n => n.status === 'running');
+
+    for (const node of runningNodes) {
+      if (isIdempotent(node.node_type)) {
+        // Safe to retry — reset to pending
+        await db.updateWorkflowNode(node.id, {
+          status: 'pending',
+          attempt: node.attempt + 1,
+          retry_reason: 'crash_recovery',
+        });
+      } else {
+        // Not safe to retry — mark failed
+        await db.updateWorkflowNode(node.id, {
+          status: 'failed',
+          error_json: JSON.stringify({ code: 'CRASH_RECOVERY' }),
+        });
+      }
+    }
+
+    // Resume execution loop
+    executeLoop(workflow.id).catch(err =>
+      logger.error('recovery_executeLoop_failed', { workflowId: workflow.id, error: err })
+    );
+  }
+}
+
+/**
+ * Check if a node type is idempotent (safe to retry after crash).
+ * Consults the registered NodeExecutor.idempotent flag.
+ */
+function isIdempotent(nodeType: string): boolean {
+  const executor = nodeExecutors.get(nodeType);
+  return executor?.idempotent ?? false;
+}
+```
+
+## §ErrorMapping
+
+```typescript
+/**
+ * Workflow node failure -> API HTTP status mapping (Ch6 §6.6.2).
+ *
+ * Error propagation flow:
+ * Node fails -> NodeError { code, message, category, details }
+ *   -> Retry logic (if retryable)
+ *   -> (if exhausted) Workflow fails with workflow.error = NodeError
+ *   -> API endpoint returns ErrorResponse with HTTP status
+ */
+function mapErrorToHttpStatus(error: WorkflowError): number {
+  switch (error.category) {
+    case 'validation': return 400;
+    case 'auth':       return error.code === 'UNAUTHORIZED' ? 401 : 403;
+    case 'not_found':  return 404;
+    case 'conflict':   return 409;
+    case 'rate_limit': return 429;
+    case 'timeout':    return 504;
+    case 'provider':   return 502;
+    case 'internal':   return 500;
+    default:           return 500;
+  }
+}
+
+/**
+ * Handle workflow submission in API handler.
+ * Waits for completion and maps errors to HTTP responses.
+ */
+async function handleWorkflowSubmission(req: Request): Promise<Response> {
+  const workflowId = await engine.submit(req.body);
+
+  // Wait for workflow completion (or poll/stream)
+  const workflow = await engine.waitForCompletion(workflowId);
+
+  if (workflow.status === 'failed') {
+    const httpStatus = mapErrorToHttpStatus(workflow.error);
+    return new Response(JSON.stringify({ error: workflow.error }), {
+      status: httpStatus,
+    });
+  }
+
+  return new Response(JSON.stringify({ data: workflow.output }), { status: 200 });
+}
+```
+
+## §Subworkflows
+
+```typescript
+/**
+ * Subworkflow contract (Ch6 §6.4).
+ *
+ * Parent sees: status, output, resource summary (black box)
+ * Child sees: input, parent manifest ID (read-only)
+ *
+ * Manifest independence: subworkflows release their own manifests on
+ * completion. Parents claim resources by querying SEALED manifests.
+ *
+ * MAX_SUBWORKFLOW_DEPTH = 3:
+ * Root (0) -> Child (1) -> Grandchild (2) -> Great-grandchild (3) [MAX]
+ */
+async function handleSubworkflowComplete(childWorkflowId: string): Promise<void> {
+  const childWorkflow = await db.getWorkflow(childWorkflowId);
+  await releaseManifest(childWorkflow.manifest_id);
+}
+
+async function parentClaimSubworkflowResource(
+  parentCtx: NodeContext,
+  childWorkflowId: string,
+  resourceType: string
+): Promise<string | null> {
+  const childWorkflow = await db.getWorkflow(childWorkflowId);
+
+  const resources = await db.query(`
+    SELECT resource_id FROM manifest_resources
+    WHERE manifest_id = ? AND resource_type = ?
+    LIMIT 1
+  `, [childWorkflow.manifest_id, resourceType]);
+
+  if (resources.length === 0) return null;
+
+  // Claim resource atomically
+  const result = await claimResourceAtomic(
+    parentCtx.manifestId,
+    resourceType,
+    resources[0].resource_id
+  );
+
+  return result.success ? resources[0].resource_id : null;
+}
+```
+
+## §Observability
+
+```typescript
+/**
+ * Topology signatures (Ch6 §6.9.1) — observability extension.
+ *
+ * Computed on-demand or by observability sidecar, NOT stored in workflows table.
+ * Emitted as OTel span attribute on workflow completion.
+ *
+ * Use cases (via Grafana/Loki queries):
+ * - "Show all workflows with same topology"
+ * - "Which topology has highest failure rate?"
+ */
+function calculateTopologySignature(workflowId: string): string {
+  const nodes = await db.getWorkflowNodes(workflowId);
+
+  const structure = {
+    nodes: nodes
+      .filter(n => n.status !== 'skipped')
+      .map(n => ({ type: n.node_type, deps: getDeps(n).sort() }))
+      .sort((a, b) => a.type.localeCompare(b.type)),
+  };
+
+  return crypto.createHash('sha256')
+    .update(JSON.stringify(structure))
+    .digest('hex')
+    .slice(0, 16);  // Short hash sufficient for grouping
+}
+```

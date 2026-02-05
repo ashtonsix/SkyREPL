@@ -1,0 +1,841 @@
+================================================================================
+13. TYPES
+================================================================================
+
+## Purpose
+
+Type definitions for all SkyREPL entities, organized by layer to avoid circular
+dependencies. Three distinct type categories:
+
+- **Record types** (db.types.ts): Raw database rows, snake_case, primitive types
+- **Materialized types** (types.ts): Rich domain objects, camelCase, with relationships
+- **API types** (api/*.types.ts): HTTP request/response shapes
+
+Goals: No `any` types, clear separation between layers, proper use of generics.
+
+## 13.1 File Organization
+
+### 13.1.1 Directory Structure
+
+Types are organized by component (control/cli/shared/agent) with a paired
+file pattern. The control plane uses layered directories internally.
+
+```
+impl/
+├── control/                              # Control plane (VPS deployment)
+│   └── src/
+│       ├── main.ts + main.types.ts       # Entry point
+│       ├── network.ts                    # Network utilities
+│       │
+│       ├── material/                     # Layer 1: Data sources
+│       │   ├── db.ts + db.types.ts       # Database operations
+│       │   ├── storage.ts                # Object storage
+│       │   └── external.ts               # Provider API caching
+│       │
+│       ├── resource/                     # Layer 2: Domain objects
+│       │   ├── types.ts                  # Shared resource types
+│       │   ├── instance.ts               # Instance materialization
+│       │   ├── run.ts                    # Run materialization
+│       │   └── allocation.ts             # Allocation materialization
+│       │
+│       ├── provider/                     # Layer 3: Cloud abstraction
+│       │   ├── types.ts                  # Provider interface
+│       │   ├── registry.ts               # Provider discovery
+│       │   ├── compute/                  # Compute providers
+│       │   │   ├── aws.ts
+│       │   │   ├── lambda.ts
+│       │   │   ├── runpod.ts
+│       │   │   └── orbstack.ts
+│       │   └── feature/                  # Feature providers
+│       │       └── tailscale.ts
+│       │
+│       ├── workflow/                     # Layer 4: Execution engine
+│       │   ├── engine.ts + engine.types.ts
+│       │   ├── patterns.ts
+│       │   ├── compensation.ts
+│       │   └── nodes/                    # Reusable workflow nodes
+│       │       ├── spawn-instance.ts
+│       │       ├── sync-files.ts
+│       │       └── ...
+│       │
+│       ├── intent/                       # Layer 5: Workflow compositions
+│       │   ├── launch-run.ts + launch-run.types.ts
+│       │   ├── terminate.ts + terminate.types.ts
+│       │   ├── snapshot.ts + snapshot.types.ts
+│       │   └── cleanup.ts + cleanup.types.ts
+│       │
+│       ├── orphan/                       # Layer 5: Orphan management
+│       │   ├── scanner.ts                # Provider scanning
+│       │   ├── classifier.ts             # Orphan classification
+│       │   └── nodes/                    # Orphan workflow nodes
+│       │
+│       ├── api/                          # Layer 6: HTTP interface
+│       │   ├── routes.ts                 # Route registration
+│       │   ├── resources/                # Layer 1 API (CRUD)
+│       │   ├── operations/               # Layer 2 API (workflows)
+│       │   ├── agent/                    # Agent communication
+│       │   └── middleware/               # Auth, errors, idempotency
+│       │
+│       └── background/                   # Periodic tasks
+│           ├── reconciliation.ts
+│           └── garbage-collection.ts
+│
+├── cli/                                  # CLI client (user machine)
+│   └── src/
+│       ├── main.ts + config.ts           # Entry, configuration
+│       ├── client.ts                     # HTTP client to control plane
+│       ├── ui/                           # Output formatting
+│       │   ├── formatters.ts
+│       │   ├── progress.ts
+│       │   └── prompts.ts
+│       └── commands/                     # One file per command
+│           ├── run.ts
+│           ├── logs.ts
+│           ├── list.ts
+│           └── ...
+│
+├── shared/                               # Types shared between control + CLI
+│   └── src/
+│       ├── types.ts                      # Cross-cutting primitives
+│       ├── resources.ts                  # Resource type definitions
+│       ├── errors.ts                     # Error types
+│       └── api/                          # API contract types
+│           ├── resources.ts              # Layer 1 request/response
+│           ├── workflows.ts              # Layer 2 request/response
+│           └── agent.ts                  # Agent protocol
+│
+└── agent/                                # Python agent (on instances)
+    ├── agent.py
+    ├── executor.py
+    └── ...
+```
+
+**Dependency Rules:**
+- control/ imports from shared/ only (never cli/)
+- cli/ imports from shared/ only (never control/)
+- shared/ has zero runtime dependencies
+- Within control/: material/ <- resource/ <- provider/ <- workflow/ <- intent/
+
+### 13.1.2 Paired Files Pattern
+
+Each implementation file (foo.ts) has a corresponding type file (foo.types.ts).
+
+WHAT GOES IN foo.types.ts:
+- Interfaces and types used ONLY by foo.ts
+- Request/response types for APIs defined in foo.ts
+- Internal state types for foo.ts
+- Type guards and validation schemas for foo.ts
+
+WHAT DOESN'T GO IN foo.types.ts:
+- Types shared across multiple files (use types.ts)
+- Database record types (use control/src/material/db.types.ts)
+- API contract types (use shared/src/api/)
+
+### 13.1.3 Control/Shared Type Split
+
+Types split between control/ and shared/ based on consumer:
+
+**shared/src/api/*.ts** - HTTP contract types (request/response shapes)
+- Used by CLI to construct requests and parse responses
+- Used by control plane to validate and respond
+- Example: LaunchRunRequest, LaunchRunResponse
+
+**control/src/intent/*.types.ts** - Internal workflow types
+- Used only within control plane workflow execution
+- Not exposed to CLI
+- Example: LaunchRunInput (workflow engine input), LaunchRunOutput
+
+This separation ensures CLI never imports from control/ - it communicates
+via shared API contract types over HTTP.
+
+### 13.1.4 Cross-Cutting Types (types.ts)
+
+The types.ts file contains ONLY types that are:
+1. Used by 3+ files across codebase
+2. Fundamental primitives (IDs, timestamps, enums)
+3. Core domain objects (materialized resources)
+
+> See also: impl/shared/src/types.ts.l2.txt §Primitives
+
+**Primitives:**
+
+- `ID` — INTEGER PRIMARY KEY, displayed as base-36 slug (e.g., ID 12345 -> "9ix")
+- `TimestampMs` — Unix timestamp in milliseconds
+- `DurationMs` — Duration in milliseconds
+- `Checksum` — SHA256 hash as hex string
+- `ProviderName` — 'aws' | 'lambda' | 'runpod' | 'orbstack'
+- `FeatureProviderName` — 'tailscale' | extensible string
+
+**Status enums:**
+
+- `WorkflowState` — "<workflow>:<phase>" format string (e.g. 'spawn:pending')
+- `AllocationStatus` — AVAILABLE | CLAIMED | ACTIVE | COMPLETE | FAILED
+- `WorkflowExecutionStatus` — pending | running | completed | failed | cancelled | rolling_back
+- `ManifestStatus` — DRAFT | SEALED (EXPIRED is derived, not stored)
+- `NodeStatus` — pending | running | completed | failed | skipped
+- `TailscaleStatus` — not_installed | installing | ready | failed
+
+**Core materialized resources** (optional relationship fields indicate
+materialization depth — presence means the data was fetched):
+
+**Instance** — Materialized compute resource
+- id, provider, providerId, spec, region, ip
+- workflowState, workflowError, isSpot, spotRequestId
+- initChecksum, spawnIdempotencyKey (format: ${workflow_id}:${node_id})
+- createdAt, lastHeartbeat, currentManifestId
+- Optional: features (FeatureInstallation[]), tailscaleMachine, externalStatus, externalIp
+
+**Run** — Materialized execution resource
+- id, command, workdir, maxDurationMs
+- workflowState, workflowError, exitCode
+- createSnapshot, initChecksum, spotInterrupted
+- createdAt, startedAt, finishedAt, currentManifestId
+- Optional: files (RunFile[]), logs (RunLogEntry[]), artifacts (Artifact[]), allocation
+
+**Allocation** — Run-to-instance binding
+- id, runId, instanceId, user, workdir, status
+- debugHoldUntil (blocks termination if > NOW, enables SSH when COMPLETE)
+- createdAt, updatedAt, currentManifestId
+- Optional: instance, run
+
+**Workflow** — DAG execution record
+- id, type, parentWorkflowId, depth, status, currentNode
+- input, output, error (WorkflowError), manifestId
+- traceId, idempotencyKey, createdAt, startedAt, finishedAt
+- Optional: nodes (WorkflowNode[]), manifest
+
+**Manifest** — Ownership boundary
+- id, workflowId, status, defaultCleanupPriority
+- retentionMs, createdAt, releasedAt, expiresAt
+- Optional: resources (ManifestResource[])
+
+**Mechanical types** (name + purpose only):
+- `Snapshot` — Provider-side machine image (object-backed)
+- `Artifact` — Run output file (object-backed)
+- `FeatureInstallation` — Feature install record on instance (object-backed)
+- `TailscaleMachine` — Tailscale VPN state for instance (object-backed)
+- `RunFile` — File manifest entry (path, checksum, sizeBytes)
+- `RunLogEntry` — Log line (stream: stdout|stderr, data, timestamp)
+- `UsageRecord` — Materialized billing data
+- `WorkflowNode` — Node execution state within workflow
+- `ManifestResource` — Link between manifest and owned resource (ownerType: manifest|workflow|policy)
+
+**Error types:**
+
+- `WorkflowError` — code, message, category (ErrorCategory), nodeId?, details?
+  Stored JSON-serialized in workflow_error DB column.
+- `NodeError` — Same as WorkflowError plus retryable flag for retry logic.
+- `ErrorCategory` — validation | auth | not_found | conflict | rate_limit | provider | timeout | internal
+- `PatternType` — insert-and-reconverge | conditional-branch | parallel-fan-out | retry-with-alternative
+
+### 13.1.5 Type Placement Decision Tree
+
+Follow this decision tree when adding a new type:
+
+```
+Is this type a database row representation?
+  YES --> db.types.ts
+  NO  |
+      v
+Is this type an API request/response shape?
+  YES --> api/{resource}.types.ts or api/workflows.types.ts
+  NO  |
+      v
+Is this type provider-specific?
+  YES --> providers/provider.types.ts
+  NO  |
+      v
+Is this type workflow engine internals?
+  YES --> workflows/engine.types.ts
+  NO  |
+      v
+Is this type specific to a single module (foo.ts)?
+  YES --> foo.types.ts (create if doesn't exist)
+  NO  |
+      v
+Is this type used by 3+ files across src/?
+  YES --> types.ts
+  NO  --> types.ts (cross-cutting by elimination)
+```
+
+## 13.2 Core Types
+
+Core type definitions appear in Section 13.1.4 (types.ts). This section provides
+additional utilities and semantic context.
+
+### 13.2.1 ID Utilities
+
+Semantic ID type aliases distinguish internal IDs from provider identifiers:
+
+- `InstanceId`, `RunId`, `AllocationId`, `WorkflowId`, `ManifestId`, `ObjectId`, `NodeRecordId` — all INTEGER PRIMARY KEY, semantically distinct
+- `ProviderId` — string, provider-specific format (i-xxxxx, pod-xxxxx)
+- `ProviderSnapshotId` — string, provider-specific (ami-xxxxx, snap-xxxxx)
+
+### 13.2.2 Timestamp and Duration Utilities
+
+```
+Timestamp utilities:
+  now()                  -> current time as TimestampMs
+  fromDate(date)         -> date to TimestampMs
+  toDate(ts)             -> TimestampMs to date
+  addMs(ts, duration)    -> ts + duration
+  isExpired(expiresAt)   -> true if expiresAt is non-null AND now > expiresAt
+
+Duration constants:
+  SECOND = 1000, MINUTE = 60_000, HOUR = 3_600_000, DAY = 86_400_000
+
+Duration utilities:
+  seconds(n), minutes(n), hours(n), days(n) -> DurationMs
+  format(ms)  -> human-readable string ("5m", "2.3h")
+  parse(str)  -> DurationMs from "5m", "2h", "30s", "1d" format
+```
+
+### 13.2.3 Status Enums (Workflow-Aware)
+
+Status uses "<workflow>:<state>" format for active resources, or terminal states
+for completed/detached resources.
+
+**parseStatus(status)** MUST split on first ':'. If no colon, returns
+{workflow: null, state: status}. If colon present, returns {workflow, state}.
+
+**buildWorkflowState(workflow, phase)** MUST return `${workflow}:${phase}`.
+
+**isActiveStatus(status)** returns true if status contains ':'.
+**isTerminalStatus(status)** returns true if status does NOT contain ':'.
+
+**Pre-defined state builders:**
+
+- `InstanceWorkflowState` — spawn:{pending,complete,error}, launch-run:{provisioning,bootstrapping,installing_features,complete,error}, terminate:{draining,complete}, create-snapshot:{preparing,snapshotting,complete}
+- `RunWorkflowState` — launch-run:{pending,preparing,running,complete,error,cancelled,timeout}
+
+**isAvailable(resource)** — Availability is INFERRED from workflow_state and
+ownership, not stored. Returns true when workflowState ends with ':complete'
+AND currentManifestId is null.
+
+> See also: impl/shared/src/types.ts.l2.txt §Status Enums
+
+### 13.2.4 API Envelopes
+
+Standard request/response wrappers for API consistency.
+
+**ApiRequest<T>** — { data: T, idempotencyKey?: string }
+
+**PaginationParams** — limit (default 50, max 100), offset (default 0), cursor (alternative to offset)
+**SortParams** — sortBy?, sortOrder ('asc' | 'desc')
+**FilterParams** — status, provider, createdAfter, createdBefore
+**ListRequest** — extends PaginationParams + SortParams + optional filters
+
+**ApiResponse<T>** — { data: T, meta?: ResponseMeta }
+**ListResponse<T>** — { data: T[], pagination: PaginationMeta, meta?: ResponseMeta }
+**ResponseMeta** — requestId, timestamp, durationMs
+**PaginationMeta** — total, limit, offset, hasMore, nextCursor?
+
+**ApiError** — { error: { code, message, category (ErrorCategory), details?, retryAfterMs? }, meta? }
+
+**ErrorCode categories:**
+- Validation: INVALID_INPUT, MISSING_REQUIRED_FIELD, INVALID_FORMAT
+- Auth: UNAUTHORIZED, FORBIDDEN
+- Not Found: RESOURCE_NOT_FOUND, INSTANCE_NOT_FOUND, RUN_NOT_FOUND, ALLOCATION_NOT_FOUND, WORKFLOW_NOT_FOUND
+- Conflict: IDEMPOTENCY_CONFLICT, RESOURCE_ALREADY_EXISTS, OWNERSHIP_CONFLICT, INVALID_STATE_TRANSITION
+- Rate Limit: RATE_LIMITED, BUDGET_EXCEEDED
+- Provider: PROVIDER_ERROR, CAPACITY_UNAVAILABLE, SPOT_INTERRUPTED
+- Timeout: REQUEST_TIMEOUT, OPERATION_TIMEOUT
+- Internal: INTERNAL_ERROR, DATABASE_ERROR
+
+> See also: impl/shared/src/errors.ts.l2.txt §Error Codes by Category
+> See also: impl/shared/src/api/resources.ts.l2.txt §Request Envelopes
+
+## 13.3 Resource Types
+
+### 13.3.1 Database Row Types (Records)
+
+12 Record types mirror the SQL schema. Records use snake_case field names matching
+SQL columns, number for SQLite booleans (0 or 1), and string for JSON columns.
+
+Record types: InstanceRecord, RunRecord, AllocationRecord, WorkflowRecord,
+WorkflowNodeRecord, ManifestRecord, ManifestResourceRecord, ObjectRecord,
+BlobRecord, RunFileRecord, ProviderStateRecord, UsageRecordDb.
+
+### 13.3.2 Materialized Types (Domain Objects)
+
+Converters MUST map between Record and Materialized types preserving all fields.
+Conversion rules:
+- snake_case Record fields MUST map to camelCase Materialized fields
+- SQLite boolean (number 0|1) MUST map to TypeScript boolean
+- JSON string columns (input_json, output_json, error_json, tags_json) MUST be
+  parsed to structured objects
+- Provider string fields MUST be cast to ProviderName union
+- Relationship fields (features, logs, etc.) are NOT populated by converters;
+  they are populated separately based on materialization depth
+
+Converter functions: recordToInstance(), instanceToRecord(), recordToRun(),
+recordToAllocation(), recordToWorkflow(), recordToSnapshot(), recordToArtifact(),
+recordToFeatureInstallation().
+
+> See also: impl/control/src/material/db.types.ts.l2.txt §Record <-> Materialized Converters
+
+### 13.3.3 API Request/Response Types
+
+API types define HTTP request and response body shapes. Key semantic fields:
+
+**GetRunRequest** — materialization depth flags:
+- includeFiles?: boolean — populate run.files
+- includeLogs?: boolean — populate run.logs
+- includeArtifacts?: boolean — populate run.artifacts
+- logLimit?: number — cap log entries returned
+
+**CreateRunRequest** — command, workdir?, spec, provider?, region?,
+maxDurationMs?, holdDurationMs?, createSnapshot?, useTailscale?, files?
+
+**GetWorkflowRequest** — includeNodes?: boolean
+**GetManifestRequest** — includeResources?: boolean
+
+Other request/response types follow CRUD patterns per resource. Full shapes
+for Instances, Runs, Allocations, Workflows, Manifests, Snapshots, and
+Artifacts APIs.
+
+> See also: impl/shared/src/api/resources.ts.l2.txt §API Request/Response Types
+
+### 13.3.4 Distinction: Record vs Materialized vs API Types
+
+```
++-----------------------------------------------------------------------------+
+|                        TYPE LAYER ARCHITECTURE                               |
++-----------------------------------------------------------------------------+
+|                                                                             |
+|  +-----------------------------------------------------------------------+  |
+|  |                         API TYPES                                     |  |
+|  |  (api/*.types.ts)                                                     |  |
+|  |                                                                       |  |
+|  |  - HTTP request/response shapes                                       |  |
+|  |  - Pagination, filtering, sorting                                     |  |
+|  |  - Error envelopes                                                    |  |
+|  |  - May omit internal fields                                           |  |
+|  |  - May flatten relationships                                          |  |
+|  |                                                                       |  |
+|  |  Example: CreateRunRequest, ListInstancesResponse                     |  |
+|  +------------------------------------+----------------------------------+  |
+|                                       | serialize/deserialize               |
+|                                       v                                     |
+|  +-----------------------------------------------------------------------+  |
+|  |                     MATERIALIZED TYPES                                |  |
+|  |  (types.ts)                                                           |  |
+|  |                                                                       |  |
+|  |  - Rich domain objects                                                |  |
+|  |  - camelCase properties                                               |  |
+|  |  - TypeScript types (boolean, enum unions)                            |  |
+|  |  - Optional relationships (depth-controlled)                          |  |
+|  |  - Business logic operates on these                                   |  |
+|  |                                                                       |  |
+|  |  Example: Instance, Run, Allocation, Workflow                         |  |
+|  +------------------------------------+----------------------------------+  |
+|                                       | materialize/toRecord                |
+|                                       v                                     |
+|  +-----------------------------------------------------------------------+  |
+|  |                       RECORD TYPES                                    |  |
+|  |  (db.types.ts)                                                        |  |
+|  |                                                                       |  |
+|  |  - Raw database row shapes                                            |  |
+|  |  - snake_case properties (match SQL columns)                          |  |
+|  |  - Primitive types (number for booleans, string for JSON)             |  |
+|  |  - No relationships (just foreign key IDs)                            |  |
+|  |  - DB layer operates on these                                         |  |
+|  |                                                                       |  |
+|  |  Example: InstanceRecord, RunRecord, AllocationRecord                 |  |
+|  +-----------------------------------------------------------------------+  |
+|                                                                             |
++-----------------------------------------------------------------------------+
+
+DATA FLOW:
+
+  HTTP Request                  API Handler                    DB Layer
+       |                             |                             |
+       | CreateRunRequest            |                             |
+       +---------------------------->|                             |
+       |                             | validate & construct        |
+       |                             | Run (materialized)          |
+       |                             |                             |
+       |                             | runToRecord(run)            |
+       |                             +---------------------------->|
+       |                             |                             | INSERT INTO runs
+       |                             |                             |
+       |                             |<----------------------------+
+       |                             | RunRecord                   |
+       |                             |                             |
+       |                             | recordToRun(record)         |
+       |                             | + relationships             |
+       |                             |                             |
+       | CreateRunResponse           |                             |
+       |<----------------------------+                             |
+       | { data: Run }               |                             |
+```
+
+## 13.4 Workflow Types
+
+### 13.4.1 Definition Types (Blueprints)
+
+Blueprint types define static workflow structure.
+
+**WorkflowBlueprint** — type (WorkflowType), version, description, inputSchema,
+outputSchema, nodes (Record<string, NodeDefinition>), entryNode, patterns? (AllowedPattern[])
+
+**NodeDefinition** — type, description?, inputSchema?, outputSchema?,
+next (string|null, null = terminal), dependencies? (nodes that MUST complete first),
+timeout?, retryPolicy?, compensation? (compensation node type)
+
+**RetryPolicy** — maxAttempts, backoffMs, backoffMultiplier, maxBackoffMs, retryableErrors[]
+
+**AllowedPattern** — Patterns MUST be explicitly allowlisted per blueprint:
+- pattern: PatternType
+- atNodes: string[] — which nodes MAY apply this pattern
+- constraints?: PatternConstraints
+
+**PatternConstraints** — normative limits:
+- maxBranches? — for parallel-fan-out
+- maxRetries? — for retry-with-alternative
+
+> See also: impl/shared/src/api/workflows.ts.l2.txt §Workflow Definition (Blueprints)
+
+### 13.4.2 Instance Types (Runtime State)
+
+Runtime types represent workflow execution state.
+
+**WorkflowSubmission** — type, input, idempotencyKey?, parentWorkflowId?, priority? (low|normal|high), timeout?
+**WorkflowSubmissionResult** — workflowId, status ('created'|'deduplicated'), existingWorkflowId?
+
+**WorkflowProgress** — real-time status for UI: workflowId, type, status,
+currentNode, nodesTotal, nodesCompleted, nodesFailed, startedAt, estimatedRemainingMs,
+recentEvents (WorkflowEvent[])
+
+**WorkflowEvent** — timestamp, type (WorkflowEventType), nodeId?, message, details?
+
+WorkflowEventType union:
+  workflow_started | workflow_completed | workflow_failed | workflow_cancelled |
+  node_started | node_completed | node_failed | node_retrying |
+  pattern_applied | subworkflow_started | subworkflow_completed |
+  resource_emitted | resource_claimed
+
+> See also: impl/shared/src/api/workflows.ts.l2.txt §Workflow Instance (Runtime)
+
+### 13.4.3 NodeContext Interface
+
+NodeContext is the primary interface for node execution. This carries normative
+semantics for resource emission, claiming, manifest tracking, and pattern application.
+
+**NodeContext<TInput>:**
+
+Identity (readonly): workflowId, nodeId, nodeType, attempt
+Input (readonly): input (TInput)
+Manifest (readonly): manifestId
+Hierarchy (readonly): depth, parentWorkflowId
+
+Resource management:
+- emitResource(type, id, priority?) — Register a resource with the workflow's
+  manifest. The resource MUST be tracked for cleanup.
+- claimResource(fromNodeId, type) — Claim a resource emitted by another node.
+  MUST fail if the resource was not emitted or was already claimed.
+- listEmittedResources() — List all resources emitted by this workflow.
+
+Pattern application:
+- applyPattern(pattern, config) — Apply a DAG pattern. The pattern MUST be in
+  the blueprint's AllowedPattern list. Config is a discriminated union by PatternType.
+- appliedPatterns (readonly) — List of patterns applied so far.
+
+Subworkflow:
+- spawnSubworkflow(type, input, options?) — Launch child workflow at depth+1.
+  Returns SubworkflowHandle with wait() and cancel().
+
+Node communication:
+- getNodeOutput(nodeId) — Get output from a completed node. MAY return null if
+  node has not completed.
+- waitForNode(nodeId, timeoutMs?) — Block until node completes.
+
+Logging: log(), debug(), info(), warn(), error()
+Utilities: sleep(ms), checkCancellation() (throws if workflow cancelled)
+
+**SingleStepContext** — Simplified context for atomic operations that do not
+need full workflow orchestration (DAG, patterns, compensation). Provides
+resource tracking and logging only.
+
+> See also: impl/control/src/workflow/engine.ts.l2.txt §NodeContext Interface
+
+### 13.4.4 Pattern Types and WorkflowEngine
+
+**PatternConfig<P>** — Discriminated union by PatternType:
+- `insert-and-reconverge` -> { insertedNode: InlineNodeDef, beforeNode: string }
+- `conditional-branch` -> { condition: boolean, option1: InlineNodeDef, option2: InlineNodeDef, joinNode: string }
+- `parallel-fan-out` -> { branches: InlineNodeDef[], joinNode: string }
+- `retry-with-alternative` -> { failedNodeId: string, alternativeNode: InlineNodeDef, reason: string }
+
+**InlineNodeDef** — id, type, input, timeout?
+
+**NodeExecutor<TInput, TOutput>:**
+- execute(ctx: NodeContext<TInput>) -> TOutput
+- compensate?(ctx: CompensationContext<TOutput>) -> void
+- validate?(input) -> ValidationResult
+- idempotent (readonly boolean) — MUST be true if safe to retry after crash
+
+**WorkflowEngine interface:**
+- submit(request: WorkflowSubmission) -> WorkflowSubmissionResult
+- get(workflowId) -> Workflow | null
+- getProgress(workflowId) -> WorkflowProgress | null
+- cancel(workflowId, reason) -> void
+- pause(workflowId) -> void
+- resume(workflowId) -> void
+- retry(workflowId) -> void (retry from failure point)
+- registerExecutor(nodeType, executor) -> void
+- registerBlueprint(blueprint) -> void
+- subscribe(workflowId, callback) -> unsubscribe function
+
+> See also: impl/control/src/workflow/patterns.ts.l2.txt §PatternTypes
+> See also: impl/control/src/workflow/engine.ts.l2.txt §WorkflowEngine Interface
+
+### 13.4.5 Intent-Specific Input/Output Types
+
+Intent types are internal to control plane (in control/src/intent/). CLI uses
+API contract types in shared/src/api/workflows.ts instead.
+
+- **LaunchRunInput** — runId, command, workdir, spec, provider, region, initChecksum, useTailscale, maxDurationMs, holdDurationMs, createSnapshot, files (FileManifestEntry[]), artifactPatterns, env?
+- **LaunchRunOutput** — runId, instanceId, allocationId, exitCode, snapshotId?, spotInterrupted
+- **TerminateInstanceInput** — instanceId, force, sshDrainTimeoutMs
+- **TerminateInstanceOutput** — instanceId, terminatedAt, forcedSshDisconnects, tailscaleDeregistered
+- **CreateSnapshotInput** — instanceId, runId?, name, initChecksum
+- **CreateSnapshotOutput** — snapshotId, providerSnapshotId, sizeBytes
+- **CleanupManifestInput** — manifestId
+- **CleanupManifestOutput** — resourcesDeleted, s3ObjectsDeleted, instancesTerminated, errors (CleanupError[])
+
+> See also: impl/shared/src/api/workflows.ts.l2.txt §Intent-Specific Input/Output Types
+
+## 13.5 Type Relationship Diagram
+
+```
++=============================================================================+
+|                         TYPE RELATIONSHIP DIAGRAM                           |
++=============================================================================+
+
+LAYER 1: PRIMITIVES (types.ts)
++-----------------------------------------------------------------------------+
+|  ID    TimestampMs    DurationMs    Checksum    ProviderName                |
+|  FeatureProviderName                                                        |
++-----------------------------------------------------------------------------+
+                                    |
+                                    v
+LAYER 2: STATUS ENUMS (types.ts)
++-----------------------------------------------------------------------------+
+|  WorkflowState          AllocationStatus       WorkflowExecutionStatus      |
+|  ManifestStatus         NodeStatus             TailscaleStatus              |
++-----------------------------------------------------------------------------+
+                                    |
+                                    v
+LAYER 3: MATERIALIZED RESOURCES (types.ts)
++-----------------------------------------------------------------------------+
+|                                                                             |
+|  PRIMARY RESOURCES:                                                         |
+|                                                                             |
+|    +-----------+        +-------------+        +-----------+                |
+|    | Instance  |------->| Allocation  |<-------+    Run    |                |
+|    +-----------+        +-------------+        +-----------+                |
+|         |                      |                     |                      |
+|         v                      v                     v                      |
+|  +---------------+       +-----------+        +------------+                |
+|  |FeatureInstall |       | Manifest  |        |  Artifact  |                |
+|  +---------------+       +-----------+        +------------+                |
+|                                |                                            |
+|                                v                                            |
+|                         +-----------+        +---------------+              |
+|                         | Workflow  |------->| WorkflowNode  |              |
+|                         +-----------+        +---------------+              |
+|                                                                             |
+|  SIMPLE RESOURCES: Snapshot, TailscaleMachine, Blob, RunFile                |
+|                                                                             |
++-----------------------------------------------------------------------------+
+                                    |
+            +-----------------------+-----------------------+
+            |                       |                       |
+            v                       v                       v
+LAYER 4A: RECORDS           LAYER 4B: API TYPES      LAYER 4C: WORKFLOW TYPES
+(db.types.ts)               (api/*.types.ts)         (engine.types.ts)
++-------------------+       +-------------------+    +-------------------+
+| InstanceRecord    |       | CreateRunRequest  |    | WorkflowBlueprint |
+| RunRecord         |       | ListInstancesResp |    | NodeContext       |
+| AllocationRecord  |       | ApiError          |    | PatternConfig     |
+| WorkflowRecord    |       | PaginationMeta    |    | WorkflowSubmission|
+| ManifestRecord    |       |                   |    | NodeExecutor      |
+| ObjectRecord      |       |                   |    |                   |
++-------------------+       +-------------------+    +-------------------+
+
+LAYER 4D: PROVIDER TYPES (providers/provider.types.ts)
++-----------------------------------------------------------------------------+
+| Provider<T>     ProviderCapabilities    SpawnOptions    BootstrapConfig     |
+| FeatureProvider<TConfig,TState>         HeartbeatExpectations/Receipts      |
+| TailscaleConfig/State                   ReconcileResult                     |
++-----------------------------------------------------------------------------+
+
+
+OWNERSHIP RELATIONSHIPS
+=======================
+
+  Workflow --creates--> Manifest --contains--> ManifestResource
+      |                     |                        |
+      |                     |                        v
+      |                     |             Instance / Run / Allocation / Object
+      |                     |                        |
+      |                     +-- current_manifest_id <+
+      |
+      +--spawns--> Subworkflow (depth + 1)
+
+(See Section 13.3.4 for detailed data flow between type layers)
+```
+
+## 13.6 Guidance: Where to Put New Types
+
+### Adding a New Resource Type
+
+1. Define the materialized type in `types.ts`:
+   ```typescript
+   export interface NewResource {
+     id: ID;
+     // ... fields
+   }
+   ```
+
+2. Define the record type in `db.types.ts`:
+   ```typescript
+   export interface NewResourceRecord {
+     id: ID;
+     // ... snake_case fields
+   }
+   ```
+
+3. Add converters in `db.types.ts`:
+   ```typescript
+   export function recordToNewResource(record: NewResourceRecord): NewResource;
+   export function newResourceToRecord(resource: NewResource): NewResourceRecord;
+   ```
+
+4. Add API types in `api/resources.types.ts`:
+   ```typescript
+   export interface CreateNewResourceRequest { ... }
+   export type GetNewResourceResponse = ApiResponse<NewResource>;
+   ```
+
+### Adding a New Workflow Type
+
+1. Create `workflows/workflow-{name}.types.ts`:
+   ```typescript
+   export interface {Name}WorkflowInput { ... }
+   export interface {Name}WorkflowOutput { ... }
+   ```
+
+2. Add to `WorkflowType` union in `engine.types.ts`:
+   ```typescript
+   export type WorkflowType =
+     | 'launch-run'
+     | 'new-workflow'  // Add here
+     | string;
+   ```
+
+3. Define blueprint in `workflows/workflow-{name}.ts`
+
+### Adding Provider-Specific Types
+
+Provider-specific types live in `providers/provider.types.ts`. Core provider
+types like SpawnOptions are defined there and referenced by workflow types.
+
+**SpawnOptions** — key fields with semantic constraints:
+- spec: string — Instance type (g5.xlarge, A100x1, etc). MUST match provider catalog.
+- region?: string — Target region/zone
+- spot?: boolean — Use spot/preemptible pricing
+- maxSpotPrice?: number — Maximum spot price ($/hour)
+- initChecksum?: string — Init script checksum for warm pool matching
+- tags?: Record<string, string>
+- bootstrap: BootstrapConfig — Bootstrap configuration. MUST be provided.
+- snapshotId?: string — Spawn from snapshot
+- clientRequestId?: string — Client-provided request ID for idempotency
+
+**Adding custom provider types:**
+
+1. Add to `providers/provider.types.ts`:
+   ```typescript
+   export interface AWSInstanceExtension {
+     availabilityZone: string;
+     spotRequestId: string | null;
+   }
+   ```
+
+2. Use type intersection for provider-specific resources:
+   ```typescript
+   type AWSInstance = Instance & AWSInstanceExtension;
+   ```
+
+### Adding Pattern/Feature/Heartbeat Types
+
+All live in `providers/provider.types.ts`:
+
+- **New pattern**: Add to `PatternType` union, define config interface, add to `PatternConfig` discriminated union
+- **New feature provider**: Define config/state types, implement `FeatureProvider<TConfig, TState>`, add to `FeatureProviderName` union
+- **New heartbeat task**: Add to `HeartbeatTask.type` union, use `TaskReceipt` for completions
+
+**Note:** Remote agent communication types (Ch11) live in `api/agent.types.ts`.
+Don't confuse provider heartbeats with agent heartbeats.
+
+## 13.7 Feature Provider Types
+
+Feature providers enable cross-provider capabilities like Tailscale VPN integration.
+
+**FeatureProvider<TConfig, TState>** interface:
+- name, capabilities (FeatureCapabilities)
+- attach(instanceId, config) -> TState
+- detach(instanceId) -> void
+- status(instanceId) -> TState | null
+- reconcile?(context) -> ReconcileResult
+- onInstanceHeartbeat?(instanceId) -> void
+
+**FeatureCapabilities** (normative):
+- requiresBootstrap: boolean — Feature MUST be installed during bootstrap if true
+- supportsHotAttach: boolean — Feature MAY be attached to running instance if true
+- supportsDetach: boolean — Feature MAY be removed without terminating instance
+- crossProvider: boolean — Feature works across multiple compute providers
+
+Tailscale types: TailscaleConfig, TailscaleState (implementation-specific)
+
+> See also: impl/control/src/provider/types.ts.l2.txt §Feature Provider Types
+
+## 13.8 Provider Heartbeat Types
+
+Types for heartbeat expectations model between control plane and providers.
+
+**HeartbeatExpectations** — tasks (HeartbeatTask[]), deadline
+**HeartbeatTask** — type union: 'reconcile' | 'health_check' | 'cache_refresh' | 'pool_maintenance'. Priority: high | normal | low. Optional: lastRun, params.
+
+**HeartbeatReceipts** — receipts (TaskReceipt[]), providerTasks?, workflowsLaunched?, nextHeartbeat? (preferredInterval)
+**TaskReceipt** — type, status (completed | skipped | deferred | failed), result?, reason?
+
+**WorkflowLaunchReport** — workflowId, workflowType, trigger union:
+  spot_interruption | budget_threshold | drift_detected | provider_event.
+  Optional context.
+
+> See also: impl/control/src/provider/types.ts.l2.txt §Provider Heartbeat Types
+
+## 13.9 Type Naming Conventions and Anti-Patterns
+
+| Type Category     | Naming Pattern              | Example                    |
+|-------------------|-----------------------------|----------------------------|
+| Materialized      | `{Resource}`                | `Instance`, `Run`          |
+| Database record   | `{Resource}Record`          | `InstanceRecord`           |
+| API request       | `{Action}{Resource}Request` | `CreateRunRequest`         |
+| API response      | `{Action}{Resource}Response`| `ListInstancesResponse`    |
+| Workflow input    | `{Workflow}Input`           | `LaunchRunInput`           |
+| Workflow output   | `{Workflow}Output`          | `LaunchRunOutput`          |
+| Status enum       | `{Resource}Status`          | `AllocationStatus`         |
+| Config type       | `{Feature}Config`           | `HoldDurationConfig`       |
+| Options type      | `{Feature}Options`          | `MaterializationOptions`   |
+
+### Anti-Patterns to Avoid
+
+1. **Mixed concern types** - Don't put API shapes in db.types.ts
+2. **any usage** - Use generics or unknown with type guards
+3. **Inline complex types** - Extract to named interfaces
+4. **Circular imports** - Use type-only imports: `import type { X } from`
+5. **Overly generic types** - Prefer specific types with discriminated unions
+6. **String enums for status** - Use union types with const assertions

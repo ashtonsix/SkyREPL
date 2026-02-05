@@ -1,0 +1,238 @@
+# tailscale.py - JIT Tailscale Installation (L2 Pseudocode)
+
+# Note: Message types reference ../../shared/src/api/agent.ts.l2.txt (TriggerTailscaleMessage)
+
+"""
+JIT Tailscale Installation
+
+Installed on-demand when SSH requested or instance enters warm pool.
+Uses static binary (faster than apt, cross-distro, no lock contention).
+
+Benefits:
+- Faster startup (no bootstrap install)
+- Only pay overhead when SSH needed
+- Auth key injected at install time (no baked secrets)
+
+Status lifecycle: not_installed -> installing -> ready | failed
+"""
+
+```python
+import os
+import subprocess
+import time
+from typing import Optional
+
+# Module-level state
+tailscale_ip: Optional[str] = None
+tailscale_status: str = 'not_installed'  # not_installed | installing | ready | failed
+
+
+# =============================================================================
+# IP Detection (called during agent startup)
+# =============================================================================
+
+def detect_tailscale_ip() -> Optional[str]:
+    """
+    Detect existing Tailscale IP (if already installed).
+
+    Checks:
+    1. tailscale0 network interface
+    2. tailscale CLI status
+
+    Called during agent startup (before threads).
+    Sets module-level tailscale_ip and tailscale_status if found.
+
+    Returns:
+        Tailscale IP string or None
+    """
+    global tailscale_ip, tailscale_status
+
+    # Check tailscale0 interface
+    try:
+        import socket
+        import struct
+        # Try reading from /sys/class/net/tailscale0
+        if os.path.exists('/sys/class/net/tailscale0'):
+            result = subprocess.run(
+                ['ip', '-4', 'addr', 'show', 'tailscale0'],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and 'inet ' in result.stdout:
+                # Parse IP from output like "inet 100.x.y.z/32"
+                for line in result.stdout.split('\n'):
+                    line = line.strip()
+                    if line.startswith('inet '):
+                        ip = line.split()[1].split('/')[0]
+                        tailscale_ip = ip
+                        tailscale_status = 'ready'
+                        return ip
+    except Exception:
+        pass
+
+    # Check tailscale CLI
+    try:
+        result = subprocess.run(
+            ['tailscale', 'ip', '-4'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            ip = result.stdout.strip()
+            tailscale_ip = ip
+            tailscale_status = 'ready'
+            return ip
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    return None
+
+
+# =============================================================================
+# JIT Installation (triggered via SSE command)
+# =============================================================================
+
+def install_tailscale_jit() -> bool:
+    """
+    JIT Tailscale installation. Triggered by trigger_tailscale SSE command.
+
+    Sequence:
+    1. Check if already installed/installing
+    2. Download static binary
+    3. Start tailscaled daemon
+    4. Authenticate with auth key
+
+    Returns:
+        True if installation succeeded, False otherwise
+    """
+    global tailscale_ip, tailscale_status
+
+    # Already installed or in progress
+    if tailscale_status in ("ready", "installing"):
+        return tailscale_status == "ready"
+
+    # Check if already present (e.g., from snapshot)
+    existing_ip = detect_tailscale_ip()
+    if existing_ip:
+        return True
+
+    tailscale_status = "installing"
+    log("INFO", "Starting JIT Tailscale installation")
+
+    try:
+        # Download static binary (faster than apt, cross-distro)
+        download_url = os.getenv('REPL_TAILSCALE_URL',
+                                  'https://pkgs.tailscale.com/stable/tailscale_latest_amd64.tgz')
+        download_and_install_binary(download_url)
+
+        # Start tailscaled daemon
+        subprocess.run(
+            ['tailscaled', '--state=/var/lib/tailscale/tailscaled.state', '--socket=/var/run/tailscale/tailscaled.sock'],
+            timeout=10,
+            check=True,
+        )
+
+        # Authenticate with auth key
+        auth_key = os.getenv('REPL_TAILSCALE_AUTH_KEY')
+        if not auth_key:
+            log("ERROR", "REPL_TAILSCALE_AUTH_KEY not set")
+            tailscale_status = "failed"
+            return False
+
+        result = subprocess.run(
+            ['tailscale', 'up', '--authkey', auth_key, '--hostname', f'skyrepl-{os.getenv("REPL_INSTANCE_ID", "unknown")}'],
+            capture_output=True, text=True, timeout=30,
+        )
+
+        if result.returncode != 0:
+            log("ERROR", f"Tailscale auth failed: {result.stderr}")
+            tailscale_status = "failed"
+            return False
+
+        # Get IP
+        ip = detect_tailscale_ip()
+        if ip:
+            tailscale_status = "ready"
+            log("INFO", f"Tailscale installed, IP: {ip}")
+            return True
+        else:
+            tailscale_status = "failed"
+            log("ERROR", "Tailscale installed but no IP detected")
+            return False
+
+    except Exception as e:
+        log("ERROR", f"Tailscale installation failed: {e}")
+        tailscale_status = "failed"
+        return False
+
+
+def download_and_install_binary(url: str):
+    """Download and extract Tailscale static binary."""
+    import urllib.request
+    import tarfile
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tgz_path = os.path.join(tmpdir, 'tailscale.tgz')
+
+        # Download
+        urllib.request.urlretrieve(url, tgz_path)
+
+        # Extract
+        with tarfile.open(tgz_path) as tar:
+            tar.extractall(tmpdir)
+
+        # Find and install binaries
+        for root, dirs, files in os.walk(tmpdir):
+            for fname in files:
+                if fname in ('tailscale', 'tailscaled'):
+                    src = os.path.join(root, fname)
+                    dst = os.path.join('/usr/local/bin', fname)
+                    subprocess.run(['cp', src, dst], check=True)
+                    os.chmod(dst, 0o755)
+
+
+# =============================================================================
+# Shutdown (called during agent shutdown)
+# =============================================================================
+
+def tailscale_logout():
+    """
+    Logout from Tailscale (removes device from tailnet).
+    Called during agent shutdown sequence.
+    """
+    if tailscale_status != 'ready':
+        return
+
+    try:
+        subprocess.run(['tailscale', 'logout'], timeout=10, capture_output=True)
+        log("INFO", "Tailscale logout completed")
+    except Exception as e:
+        log("WARN", f"Tailscale logout failed: {e}")
+
+
+# =============================================================================
+# State Accessors (for heartbeat)
+# =============================================================================
+
+def get_tailscale_ip() -> Optional[str]:
+    """Return current Tailscale IP (for HeartbeatMessage)."""
+    return tailscale_ip
+
+
+def get_tailscale_status() -> str:
+    """Return current Tailscale status (for HeartbeatMessage)."""
+    return tailscale_status
+
+
+# Alias used by sse.py dispatch
+install_tailscale = install_tailscale_jit
+
+
+# =============================================================================
+# Logging Utility
+# =============================================================================
+
+def log(level: str, message: str) -> None:
+    """Internal logging."""
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{timestamp}] [{level}] [tailscale] {message}")
+```

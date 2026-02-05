@@ -1,0 +1,759 @@
+# types.ts - Provider Interface & Type Definitions (L2 Pseudocode)
+
+# Cross-references:
+# - Primitives: ../../../../shared/src/types.ts.l2.txt (ID, TimestampMs, ProviderName, Checksum)
+# - Resources: ../../../../shared/src/resources.ts.l2.txt (Instance, Allocation)
+# - Errors: ./errors.ts.l2.txt (ProviderError, error classes)
+# - Registry: ./registry.ts.l2.txt (getProvider, providerRegistry)
+# - Contracts: ./contracts.ts.l2.txt (ProviderWorkflowContract)
+# - Extensions: ./extensions.ts.l2.txt (ProviderLifecycleHooks, HeartbeatExpectations)
+
+## Imports
+
+```typescript
+import type { ProviderName, Checksum, TimestampMs } from '../../../../shared/src/types';
+```
+
+## Provider Interface
+
+```typescript
+/**
+ * Provider interface defines the contract all providers must implement.
+ * Core methods are required; optional capabilities are gated by flags.
+ *
+ * CONTRACTS: Provider contracts are enforced via TypeScript types + unit tests.
+ * Every provider MUST pass interface compliance tests that verify correct behavior
+ * (spawn returns required fields, terminate handles non-existent instances, etc.).
+ * This is not runtime contract checking in production, just good tests that ensure
+ * providers satisfy the logical contract.
+ */
+interface Provider<
+  TInstance extends ProviderInstance = ProviderInstance,
+  TSnapshot extends ProviderSnapshot = ProviderSnapshot
+> {
+  /** Provider identifier (aws, lambda, runpod, orbstack) */
+  readonly name: ProviderName;
+
+  /** Capability flags for optional features */
+  readonly capabilities: ProviderCapabilities;
+
+  // ============================================================
+  // CORE METHODS (Required)
+  // ============================================================
+
+  /**
+   * Spawn a new instance with the given configuration.
+   * @returns Provider-specific instance with at minimum { id, status }
+   */
+  spawn(options: SpawnOptions): Promise<TInstance>;
+
+  /**
+   * Terminate an instance.
+   * @param providerId - Provider's instance ID (i-xxx, etc.)
+   * @throws ProviderError if instance not found or already terminated
+   */
+  terminate(providerId: string): Promise<void>;
+
+  /**
+   * List instances, optionally filtered by status.
+   * Used for reconciliation and drift detection.
+   */
+  list(filter?: ListFilter): Promise<TInstance[]>;
+
+  /**
+   * Get a single instance by provider ID.
+   * @returns Instance or null if not found
+   */
+  get(providerId: string): Promise<TInstance | null>;
+
+  /**
+   * Generate cloud-init/bootstrap script for instance initialization.
+   * Encapsulates all provider-specific boot configuration.
+   */
+  generateBootstrap(config: BootstrapConfig): BootstrapScript;
+
+  // ============================================================
+  // OPTIONAL METHODS (Gated by capabilities)
+  // ============================================================
+
+  /**
+   * Create a snapshot of an instance.
+   * Only available if capabilities.snapshots === true
+   */
+  createSnapshot?(
+    providerId: string,
+    options: CreateSnapshotOptions
+  ): Promise<SnapshotRequest>;
+
+  /**
+   * Get snapshot creation status.
+   * Only available if capabilities.snapshots === true
+   */
+  getSnapshotStatus?(requestId: string): Promise<SnapshotStatus>;
+
+  /**
+   * Delete a snapshot.
+   * Only available if capabilities.snapshots === true
+   */
+  deleteSnapshot?(providerSnapshotId: string): Promise<void>;
+
+  /**
+   * Get snapshot by name.
+   * Only available if capabilities.snapshots === true
+   */
+  getSnapshotByName?(name: string): Promise<TSnapshot | null>;
+
+  /**
+   * Request spot instance.
+   * Only available if capabilities.spot === true
+   */
+  requestSpotInstance?(options: SpotOptions): Promise<SpotRequest>;
+
+  /**
+   * Cancel spot request.
+   * Only available if capabilities.spot === true
+   */
+  cancelSpotRequest?(requestId: string): Promise<void>;
+
+  /**
+   * Get current spot prices.
+   * Only available if capabilities.spot === true
+   */
+  getSpotPrices?(spec: string, regions?: string[]): Promise<SpotPriceInfo[]>;
+}
+
+// Provider names as const union
+type ProviderName = 'aws' | 'lambda' | 'runpod' | 'orbstack';
+```
+
+## Capability Flags
+
+```typescript
+interface ProviderCapabilities {
+  // === PRIORITY CAPABILITIES ===
+  /** Provider supports snapshot creation/restoration */
+  snapshots: boolean;
+
+  /** Provider supports spot/preemptible instances */
+  spot: boolean;
+
+  /** Provider supports GPU instances */
+  gpu: boolean;
+
+  /** Provider supports multi-region deployment */
+  multiRegion: boolean;
+
+  /** Provider supports EBS-style persistent volumes */
+  persistentVolumes: boolean;
+
+  // === SPECIAL CAPABILITIES ===
+  /** Provider supports warm volume attachment */
+  warmVolumes: boolean;
+
+  /** Provider supports instance hibernation */
+  hibernation: boolean;
+
+  /** Provider supports detailed billing/cost data */
+  costExplorer: boolean;
+
+  /** Provider supports Tailscale native integration */
+  tailscaleNative: boolean;
+
+  /** Provider supports idempotent spawn via clientRequestId */
+  idempotentSpawn: boolean;
+
+  /** Provider supports custom VPC/networking configuration */
+  customNetworking: boolean;
+}
+
+// Capability profiles for each provider
+const PROVIDER_CAPABILITIES: Record<ProviderName, ProviderCapabilities> = {
+  aws: {
+    snapshots: true,
+    spot: true,
+    customNetworking: true,
+    persistentVolumes: true,
+    warmVolumes: true,
+    multiRegion: true,
+    hibernation: true,
+    costExplorer: true,
+    gpu: true,
+    tailscaleNative: false,
+    idempotentSpawn: true,  // AWS supports clientRequestId
+  },
+  lambda: {
+    snapshots: false,
+    spot: false,
+    customNetworking: false,
+    persistentVolumes: false,
+    warmVolumes: false,
+    multiRegion: true,
+    hibernation: false,
+    costExplorer: false,
+    gpu: true,
+    tailscaleNative: false,
+    idempotentSpawn: false,  // Lambda Labs uses manual reconciliation
+  },
+  runpod: {
+    snapshots: true,
+    spot: true,  // "Community cloud" pricing
+    customNetworking: false,
+    persistentVolumes: true,
+    warmVolumes: false,
+    multiRegion: true,
+    hibernation: false,
+    costExplorer: false,
+    gpu: true,
+    tailscaleNative: false,
+    idempotentSpawn: false,  // RunPod uses manual reconciliation
+  },
+  orbstack: {
+    snapshots: true,
+    spot: false,
+    customNetworking: false,
+    persistentVolumes: false,
+    warmVolumes: false,
+    multiRegion: false,
+    hibernation: false,
+    costExplorer: false,
+    gpu: false,
+    tailscaleNative: true,
+    idempotentSpawn: true,  // OrbStack local operations are idempotent
+  },
+};
+```
+
+## Core Method Types
+
+```typescript
+// ============================================================
+// SPAWN OPTIONS & RESULT
+// ============================================================
+
+interface SpawnOptions {
+  /** Instance specification (g5.xlarge, A100x1, etc.) */
+  spec: string;
+
+  /** Target region/zone */
+  region?: string;
+
+  /** Use spot/preemptible pricing (requires capabilities.spot) */
+  spot?: boolean;
+
+  /** Maximum spot price ($/hour) */
+  maxSpotPrice?: number;
+
+  /** Init script checksum for warm pool matching */
+  initChecksum?: string;
+
+  /** Tags to apply to instance */
+  tags?: Record<string, string>;
+
+  /** Bootstrap configuration */
+  bootstrap: BootstrapConfig;
+
+  /** Spawn from snapshot (requires capabilities.snapshots) */
+  snapshotId?: string;
+
+  /** Attach existing volume (requires capabilities.warmVolumes) */
+  volumeId?: string;
+
+  /** Subnet/network configuration (requires capabilities.customNetworking) */
+  networkConfig?: NetworkConfig;
+
+  /** Client-provided request ID for idempotency */
+  clientRequestId?: string;
+}
+
+interface ProviderInstance {
+  /** Provider's instance ID (i-xxx, vm-xxx, etc.) */
+  id: string;
+
+  /** Current status in provider's system */
+  status: ProviderInstanceStatus;
+
+  /** Instance specification */
+  spec: string;
+
+  /** Region/zone */
+  region?: string;
+
+  /** Public IP address (null if not assigned yet) */
+  ip?: string | null;
+
+  /** Private IP address */
+  privateIp?: string | null;
+
+  /** Creation timestamp */
+  createdAt: number;
+
+  /** Is this a spot/preemptible instance */
+  isSpot: boolean;
+
+  /** Spot request ID (if spot instance) */
+  spotRequestId?: string;
+
+  /** Provider-specific metadata (extended by concrete types) */
+  metadata?: Record<string, unknown>;
+}
+
+type ProviderInstanceStatus =
+  | 'pending'      // Request accepted, not yet running
+  | 'starting'     // Instance booting
+  | 'running'      // Instance running and accessible
+  | 'stopping'     // Instance stopping
+  | 'stopped'      // Instance stopped (hibernated)
+  | 'terminating'  // Instance being terminated
+  | 'terminated'   // Instance terminated
+  | 'error';       // Instance in error state
+```
+
+## List Filter
+
+```typescript
+interface ListFilter {
+  /** Filter by status */
+  status?: ProviderInstanceStatus[];
+
+  /** Filter by spec */
+  spec?: string;
+
+  /** Filter by region */
+  region?: string;
+
+  /** Filter by tags */
+  tags?: Record<string, string>;
+
+  /** Maximum results */
+  limit?: number;
+
+  /** Include terminated instances (default: false) */
+  includeTerminated?: boolean;
+}
+```
+
+## Bootstrap Configuration
+
+```typescript
+interface BootstrapConfig {
+  /** Agent download URL */
+  agentUrl: string;
+
+  /** Control plane URL for agent connection */
+  controlPlaneUrl: string;
+
+  /** Instance registration token */
+  registrationToken: string;
+
+  /** User-provided init script (shell) */
+  initScript?: string;
+
+  /** Init script checksum for caching */
+  initChecksum?: string;
+
+  /** Features to install during boot */
+  features?: BootstrapFeature[];
+
+  /** Environment variables to set */
+  environment?: Record<string, string>;
+}
+
+interface BootstrapFeature {
+  name: 'tailscale' | 'nvidia-driver' | 'cuda' | 'docker';
+  version?: string;
+  config?: Record<string, unknown>;
+}
+
+interface BootstrapScript {
+  /** Script content (typically cloud-init YAML or shell) */
+  content: string;
+
+  /** Script format */
+  format: 'cloud-init' | 'shell' | 'ignition';
+
+  /** Checksum for caching */
+  checksum: string;
+}
+```
+
+## Snapshot Types
+
+```typescript
+interface CreateSnapshotOptions {
+  /** Human-readable name */
+  name: string;
+
+  /** Description */
+  description?: string;
+
+  /** Tags */
+  tags?: Record<string, string>;
+
+  /** Include instance memory (requires capabilities.hibernation) */
+  includeMemory?: boolean;
+}
+
+interface SnapshotRequest {
+  /** Request ID for polling status */
+  requestId: string;
+
+  /** Initial status */
+  status: SnapshotStatus;
+
+  /** Estimated completion time */
+  estimatedCompletionAt?: number;
+}
+
+interface SnapshotStatus {
+  /** Current status */
+  status: 'pending' | 'creating' | 'available' | 'failed' | 'deleting';
+
+  /** Progress percentage (0-100) */
+  progress?: number;
+
+  /** Provider's snapshot ID (available when status='available') */
+  providerSnapshotId?: string;
+
+  /** Error message (if status='failed') */
+  error?: string;
+
+  /** Snapshot size in bytes */
+  sizeBytes?: number;
+}
+
+interface ProviderSnapshot {
+  /** Provider's snapshot ID */
+  id: string;
+
+  /** Human-readable name */
+  name: string;
+
+  /** Status */
+  status: 'available' | 'pending' | 'failed';
+
+  /** Creation timestamp */
+  createdAt: number;
+
+  /** Size in bytes */
+  sizeBytes?: number;
+
+  /** Source instance spec */
+  spec?: string;
+}
+```
+
+## Spot Types
+
+```typescript
+interface SpotOptions extends SpawnOptions {
+  /** Maximum price per hour (required for spot) */
+  maxSpotPrice: number;
+
+  /** Interruption behavior */
+  interruptionBehavior?: 'terminate' | 'stop' | 'hibernate';
+
+  /** Spot request type */
+  requestType?: 'one-time' | 'persistent';
+}
+
+interface SpotRequest {
+  /** Spot request ID */
+  requestId: string;
+
+  /** Current status */
+  status: 'pending' | 'active' | 'fulfilled' | 'cancelled' | 'failed';
+
+  /** Instance ID (if fulfilled) */
+  instanceId?: string;
+
+  /** Actual spot price */
+  spotPrice?: number;
+}
+
+interface SpotPriceInfo {
+  /** Instance spec */
+  spec: string;
+
+  /** Region/AZ */
+  region: string;
+
+  /** Availability zone */
+  availabilityZone?: string;
+
+  /** Current spot price ($/hour) */
+  price: number;
+
+  /** Price timestamp */
+  timestamp: number;
+
+  /** Savings percentage vs on-demand */
+  savingsPercent?: number;
+}
+```
+
+## Provider-Specific Enhanced Types
+
+```typescript
+// ============================================================
+// AWS-SPECIFIC TYPES
+// ============================================================
+
+/**
+ * AWS-specific instance with additional EC2 metadata.
+ */
+interface AWSInstance extends ProviderInstance {
+  availabilityZone: string;
+  subnetId: string;
+  vpcId: string;
+  securityGroupIds: string[];
+  iamInstanceProfile?: string;
+  ebsOptimized: boolean;
+
+  /** Spot-specific */
+  spotInstanceRequestId?: string;
+  spotFleetRequestId?: string;
+
+  /** EBS volumes */
+  volumes: AWSVolume[];
+
+  /** Network interfaces */
+  networkInterfaces: AWSNetworkInterface[];
+
+  /** Placement group */
+  placementGroup?: string;
+
+  /** Metadata */
+  metadata: {
+    launchTemplateId?: string;
+    launchTemplateVersion?: string;
+    capacityReservationId?: string;
+  };
+}
+
+interface AWSVolume {
+  volumeId: string;
+  deviceName: string;
+  sizeGb: number;
+  volumeType: 'gp3' | 'io2' | 'st1' | 'sc1';
+  iops?: number;
+  throughput?: number;
+  encrypted: boolean;
+  snapshotId?: string;
+  deleteOnTermination: boolean;
+}
+
+interface AWSNetworkInterface {
+  networkInterfaceId: string;
+  subnetId: string;
+  privateIp: string;
+  publicIp?: string;
+  securityGroupIds: string[];
+}
+
+interface AWSSnapshot extends ProviderSnapshot {
+  amiId: string;
+  rootDeviceName: string;
+  rootVolumeSize: number;
+  architecture: 'x86_64' | 'arm64';
+  virtualizationType: 'hvm' | 'paravirtual';
+  blockDeviceMappings: AWSBlockDeviceMapping[];
+
+  /** Source instance info */
+  sourceInstanceId?: string;
+  sourceRegion: string;
+
+  /** State */
+  state: 'pending' | 'available' | 'invalid' | 'deregistered' | 'transient' | 'failed' | 'error';
+
+  /** Permissions */
+  public: boolean;
+  launchPermissions?: string[];
+}
+
+interface AWSBlockDeviceMapping {
+  deviceName: string;
+  ebs?: {
+    snapshotId: string;
+    volumeSize: number;
+    volumeType: string;
+    encrypted: boolean;
+    deleteOnTermination: boolean;
+  };
+  virtualName?: string;
+}
+
+// ============================================================
+// RUNPOD-SPECIFIC TYPES
+// ============================================================
+
+interface RunPodInstance extends ProviderInstance {
+  podId: string;
+  gpuType: string;
+  gpuCount: number;
+  vcpuCount: number;
+  memoryGb: number;
+  diskGb: number;
+
+  /** Container config */
+  imageName: string;
+  dockerArgs?: string;
+  ports?: string;
+  volumeInGb?: number;
+  containerDiskInGb?: number;
+
+  /** Network */
+  sshPort?: number;
+  jupyterPort?: number;
+
+  /** Community vs Secure cloud */
+  isSecureCloud: boolean;
+
+  /** GPU utilization */
+  gpuUtilization?: number;
+}
+
+// ============================================================
+// LAMBDA LABS-SPECIFIC TYPES
+// ============================================================
+
+interface LambdaInstance extends ProviderInstance {
+  instanceTypeId: string;
+  hostname: string;
+  jupyterUrl?: string;
+  sshKeyNames: string[];
+
+  /** GPU info */
+  gpuType: string;
+  gpuCount: number;
+}
+
+// ============================================================
+// ORBSTACK-SPECIFIC TYPES
+// ============================================================
+
+interface OrbStackInstance extends ProviderInstance {
+  vmName: string;
+  arch: 'amd64' | 'arm64';
+  distro: string;
+  distroVersion: string;
+
+  /** Resource allocation */
+  cpuCores: number;
+  memoryMb: number;
+  diskGb: number;
+
+  /** Host integration */
+  hostMountPath?: string;
+  useRosetta?: boolean;
+}
+```
+
+## Feature Provider Interface
+
+```typescript
+/**
+ * Feature providers attach to existing instances rather than creating compute.
+ * They enable cross-cutting concerns like networking, logging, and development tools.
+ */
+interface FeatureProvider<TConfig, TState> {
+  /** Feature provider name (tailscale, wandb, vscode-server) */
+  name: string;
+
+  /** Feature capabilities */
+  capabilities: FeatureCapabilities;
+
+  /**
+   * Attach feature to an instance.
+   * Called during instance spawn or hot-attach after running.
+   */
+  attach(instanceId: string, config: TConfig): Promise<TState>;
+
+  /**
+   * Detach feature from instance.
+   * Called during instance termination or feature removal.
+   */
+  detach(instanceId: string): Promise<void>;
+
+  /**
+   * Get current feature state for an instance.
+   * Returns null if feature not attached or state unavailable.
+   */
+  status(instanceId: string): Promise<TState | null>;
+
+  /**
+   * Optional: Reconcile feature state during orphan detection.
+   * Called during orphan detection cycle to find feature-specific orphans.
+   */
+  reconcile?(context: FeatureReconcileContext): Promise<ReconcileResult>;
+
+  /**
+   * Optional: Called on instance heartbeat for feature maintenance.
+   */
+  onInstanceHeartbeat?(instanceId: string): Promise<void>;
+}
+
+interface FeatureCapabilities {
+  /** Feature requires bootstrap script injection */
+  requiresBootstrap: boolean;
+
+  /** Feature can attach after instance already running */
+  supportsHotAttach: boolean;
+
+  /** Feature can detach without terminating instance */
+  supportsDetach: boolean;
+
+  /** Feature works with all compute providers */
+  crossProvider: boolean;
+}
+
+interface FeatureReconcileContext {
+  /** Instances that should have this feature attached */
+  expectedAttachments: Array<{
+    instanceId: string;
+    config: unknown;
+  }>;
+
+  /** Current feature state from provider */
+  actualState: Map<string, unknown>;
+}
+```
+
+## Feature Lifecycle Integration
+
+```typescript
+// SpawnOptions includes feature configuration
+// (augments SpawnOptions defined above)
+interface SpawnFeatureConfig {
+  provider: FeatureProviderName;
+  config: unknown;
+}
+
+// Bootstrap generation includes feature setup
+function generateBootstrap(config: BootstrapConfig, features?: BootstrapFeature[]): BootstrapScript {
+  const commands: string[] = [
+    // Core agent setup ...
+  ];
+
+  // Feature-specific setup
+  for (const feature of features ?? []) {
+    const fp = getFeatureProvider(feature.name);
+    if (fp.capabilities.requiresBootstrap) {
+      commands.push(...fp.generateBootstrapCommands(feature.config));
+    }
+  }
+  // ...
+}
+
+// Instance termination includes feature cleanup
+async function terminateInstance(instance: Instance): Promise<void> {
+  // Cleanup features before terminating compute
+  for (const feature of instance.attachedFeatures) {
+    const fp = getFeatureProvider(feature.provider);
+    await fp.detach(instance.id);
+  }
+
+  // Terminate compute resource
+  const provider = getProvider(instance.provider);
+  await provider.terminate(instance.providerId);
+}
+```

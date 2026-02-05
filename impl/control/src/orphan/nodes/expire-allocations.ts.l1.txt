@@ -1,0 +1,29 @@
+# expire-allocations.ts - DEPRECATED
+
+## Status: DEPRECATED
+
+This node has been removed. Debug hold expiry is now handled by the hold-expiry background task.
+
+## Previous Behavior
+
+Previously, this node expired HELD allocations and transitioned them to COMPLETE.
+
+## Current Behavior
+
+The hold-expiry background task now:
+- Queries COMPLETE allocations WHERE debug_hold_until IS NOT NULL AND debug_hold_until < NOW
+- Clears debug_hold_until field (sets to NULL)
+- Does NOT transition state - allocations remain COMPLETE
+- No warm pool replenishment here (happens at ACTIVE→COMPLETE)
+
+## Migration Notes
+
+If you see references to expire-allocations in workflow definitions:
+- Remove the node - functionality is now automatic
+- Background task runs every 60 seconds
+- No workflow action needed
+
+## See Also
+
+- /home/ashtonsix/SkyREPL/impl/control/src/background/hold-expiry.ts.l1.txt
+- /home/ashtonsix/SkyREPL/impl/control/src/workflow/state-transitions.ts.l1.txt (ACTIVE→COMPLETE)

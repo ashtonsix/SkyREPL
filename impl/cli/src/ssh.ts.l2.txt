@@ -1,0 +1,326 @@
+# ssh.ts - SSH config generation, extend/release commands (L2 Pseudocode)
+
+Cross-references:
+- Allocation: `../../control/src/resource/allocation.ts.l2.txt` (allowsSSHAccess, extendAllocationDebugHold)
+- Types: `../../shared/src/types.ts.l2.txt` (AllocationStatus, TailscaleStatus)
+- Timing: `../../shared/src/config/timing.ts.l2.txt` (TIMING hold chain constants)
+- ProxyCommand: `./ssh_proxy.sh.l1.txt` (JIT Tailscale connection)
+- Fallback: `./ssh_fallback.sh.l1.txt` (catch-all slug resolution)
+
+## Per-Allocation SSH Entry
+
+```typescript
+interface AllocationSSHEntry {
+  allocationId: string;
+  instanceId: string;
+  ip: string;
+  port: number;
+  user: string;
+  workdir: string;
+  identityFile?: string;
+}
+```
+
+## SSH Config Generation
+
+```typescript
+async function generateAllocationSSHConfig(allocation: Allocation): Promise<void> {
+  const instance = await materializeInstance(allocation.instanceId, { includeExternal: true });
+  const ip = instance.tailscaleIp ?? instance.ip;
+
+  const entry: AllocationSSHEntry = {
+    allocationId: allocation.id,
+    instanceId: instance.id,
+    ip: ip,
+    port: 22,
+    user: allocation.user,
+    workdir: allocation.workdir,
+    identityFile: getSSHKeyPath(instance.provider),
+  };
+
+  const now = Date.now();
+  const payloadBuf = Buffer.from(JSON.stringify(entry));
+
+  // Create/reuse inline blob for the SSH config payload
+  const blobId = await db.createInlineBlob({
+    bucket: 'ssh-configs',
+    payload: payloadBuf,
+    size_bytes: payloadBuf.length,
+    created_at: now,
+    last_referenced_at: now,
+  });
+
+  await db.upsertObject({
+    id: `ssh-config:${allocation.id}`,
+    type: 'ssh_config',
+    blob_id: blobId,
+    metadata_json: JSON.stringify({ allocation_id: allocation.id, content_type: 'application/json' }),
+    created_at: now,
+    accessed_at: null,
+  });
+}
+
+function generateSSHConfigEntry(entry: AllocationSSHEntry): string {
+  const shortId = entry.allocationId.substring(0, 8);
+  return `Host ${shortId}
+    HostName ${entry.ip}
+    User ${entry.user}
+    Port ${entry.port}
+    IdentityFile ${entry.identityFile}
+    RequestTTY yes
+    RemoteCommand cd ${entry.workdir} && exec $SHELL -l`;
+}
+```
+
+## Full SSH Config Regeneration
+
+Triggered by allocation state changes, IP changes, or periodic sync.
+
+```typescript
+async function regenerateSSHConfig(): Promise<void> {
+  // Query all allocations with active SSH access
+  const activeAllocations = await db.query(`
+    SELECT a.*, i.ip, i.tailscale_ip, i.provider
+    FROM allocations a
+    JOIN instances i ON a.instance_id = i.id
+    WHERE (
+        a.status = 'ACTIVE'
+        OR (a.status = 'COMPLETE' AND a.debug_hold_until > ?)
+      )
+      AND i.workflow_state NOT LIKE 'terminate:%'
+    ORDER BY a.created_at ASC
+  `, [Date.now()]);
+
+  // Generate SSH config entries
+  const entries = activeAllocations.map(alloc => {
+    const ip = alloc.tailscale_ip ?? alloc.ip;
+    return generateSSHConfigEntry({
+      allocationId: alloc.id,
+      instanceId: alloc.instance_id,
+      ip: ip,
+      port: 22,
+      user: alloc.user,
+      workdir: alloc.workdir,
+      identityFile: getSSHKeyPath(alloc.provider),
+    });
+  });
+
+  // Write to SSH config file
+  const configPath = path.join(os.homedir(), '.ssh', 'config.d', 'skyrepl');
+  await fs.promises.writeFile(configPath, entries.join('\n\n'));
+}
+```
+
+## CLI Command: `repl extend`
+
+```typescript
+async function cliExtendCommand(allocationIdOrDuration?: string, durationArg?: string): Promise<void> {
+  let allocationId: string | undefined;
+  let durationStr: string | undefined;
+
+  if (allocationIdOrDuration && isDuration(allocationIdOrDuration)) {
+    durationStr = allocationIdOrDuration;
+  } else {
+    allocationId = allocationIdOrDuration;
+    durationStr = durationArg;
+  }
+
+  // Find target allocation
+  let allocation: Allocation;
+  if (allocationId) {
+    const config = await getSSHConfig(allocationId);
+    allocation = await materializeAllocation(config.allocationId);
+  } else {
+    const recent = await db.query(`
+      SELECT id FROM allocations
+      WHERE (status = 'ACTIVE' OR (status = 'COMPLETE' AND debug_hold_until > ?))
+      ORDER BY updated_at DESC LIMIT 1
+    `, [Date.now()]);
+    allocation = await materializeAllocation(recent[0].id);
+  }
+
+  const extensionMs = durationStr ? parseDuration(durationStr) : TIMING.DEFAULT_EXPLICIT_EXTENSION_MS;
+  const result = await extendAllocationDebugHold(allocation.id, {
+    extensionMs,
+    maxExtensionMs: durationStr ? TIMING.ABSOLUTE_MAX_HOLD_MS : TIMING.MAX_EXPLICIT_EXTENSION_MS,
+  });
+
+  console.log(`Extended allocation ${allocation.id.substring(0, 8)}`);
+  console.log(`  Debug hold until: ${new Date(result.newDebugHoldUntil).toLocaleString()}`);
+}
+```
+
+## CLI Command: `repl release`
+
+Manually clear debug_hold_until to unblock termination.
+
+```typescript
+async function cliReleaseCommand(allocationIdOrInstance?: string): Promise<void> {
+  const now = Date.now();
+
+  if (!allocationIdOrInstance) {
+    // Release all active holds across all allocations
+    const result = await db.execute(`
+      UPDATE allocations
+      SET debug_hold_until = NULL, updated_at = ?
+      WHERE status = 'COMPLETE'
+        AND debug_hold_until IS NOT NULL
+        AND debug_hold_until > ?
+    `, [now, now]);
+
+    console.log(`Released ${result.changes} active debug holds`);
+    await triggerSSHConfigRegeneration();
+    return;
+  }
+
+  // Check if input is allocation ID or instance ID
+  const allocation = await findAllocation(allocationIdOrInstance);
+
+  if (allocation) {
+    // Release specific allocation
+    await db.updateAllocation(allocation.id, {
+      debug_hold_until: null,
+      updated_at: now,
+    });
+
+    console.log(`Released debug hold for allocation ${allocation.id.substring(0, 8)}`);
+    await triggerSSHConfigRegeneration();
+  } else {
+    // Treat as instance ID, release all allocations on instance
+    const result = await db.execute(`
+      UPDATE allocations
+      SET debug_hold_until = NULL, updated_at = ?
+      WHERE instance_id = ?
+        AND status = 'COMPLETE'
+        AND debug_hold_until IS NOT NULL
+        AND debug_hold_until > ?
+    `, [now, allocationIdOrInstance, now]);
+
+    console.log(`Released ${result.changes} debug holds on instance ${allocationIdOrInstance.substring(0, 8)}`);
+    await triggerSSHConfigRegeneration();
+  }
+}
+```
+
+## Agent-Side SSH Detection
+
+Runs on instance agent every heartbeat. Reports allocation IDs with active SSH sessions.
+See `../../agent/heartbeat.py.l2.txt` for heartbeat thread integration.
+
+```typescript
+// Heartbeat payload includes active_allocations list
+interface HeartbeatRequest {
+  instance_id: string;
+  provider_id: string;
+  status: string;
+  timestamp: number;
+  active_allocations: string[];  // List of allocation IDs with active SSH
+}
+
+// Agent detection (runs every heartbeat interval)
+async function detectActiveAllocations(): Promise<string[]> {
+  const allocations = await readLocalAllocations();  // From local state file
+  const activeAllocationIds: string[] = [];
+
+  for (const alloc of allocations) {
+    const hasActiveSSH = await checkActiveSSHConnection(alloc.user);
+    if (hasActiveSSH) {
+      activeAllocationIds.push(alloc.id);
+    }
+  }
+
+  return activeAllocationIds;
+}
+
+async function checkActiveSSHConnection(user: string): Promise<boolean> {
+  try {
+    // Simple check: look for active SSH sessions for this user
+    const result = await exec(`who | grep -c "${user}" || echo 0`);
+    const sessionCount = parseInt(result.stdout.trim(), 10);
+    return sessionCount > 0;
+  } catch (error) {
+    return false;
+  }
+}
+```
+
+## ProxyCommand Script (shell)
+
+See `./ssh_proxy.sh.l1.txt` for the full ProxyCommand implementation.
+
+SSH config entries include ProxyCommand that intercepts connection attempts:
+
+```bash
+Host <allocation-id>
+    HostName <tailscale-ip-or-public-ip>
+    User <allocation-user>
+    Port 22
+    IdentityFile <key-path>
+    ProxyCommand /path/to/ssh_proxy_command.sh %n %h
+    RequestTTY yes
+    RemoteCommand cd <workdir> && exec $SHELL -l
+```
+
+The script handles:
+1. Tailscale status checking via `POST /api/v1/instances/:id/tailscale-ensure`
+2. JIT installation triggering + polling (2s interval, 120s timeout)
+3. Connection establishment via `nc $tailscale_ip 22` (or public IP fallback)
+
+## Agent Tailscale Handler
+
+Handles `trigger_tailscale` message from control plane.
+
+```typescript
+interface TriggerTailscaleMessage {
+  type: 'trigger_tailscale';
+  timestamp: number;
+}
+
+async function handleTriggerTailscale(message: TriggerTailscaleMessage): Promise<void> {
+  debug('TAILSCALE/install-triggered', { timestamp: message.timestamp });
+
+  try {
+    // Download Tailscale binary
+    await exec('curl -fsSL https://tailscale.com/install.sh | sh');
+
+    // Start Tailscale daemon
+    await exec('sudo tailscaled --state=/var/lib/tailscale/tailscaled.state &');
+
+    // Authenticate with auth key from environment
+    const authKey = process.env.TAILSCALE_AUTH_KEY;
+    if (!authKey) throw new Error('TAILSCALE_AUTH_KEY not set');
+
+    await exec(`sudo tailscale up --authkey=${authKey} --ssh`);
+
+    // Wait for IP assignment
+    let tailscaleIp: string | null = null;
+    for (let i = 0; i < 30; i++) {
+      const result = await exec('tailscale ip -4');
+      const ip = result.stdout.trim();
+      if (ip && ip.startsWith('100.')) {
+        tailscaleIp = ip;
+        break;
+      }
+      await sleep(1000);
+    }
+
+    if (!tailscaleIp) throw new Error('Failed to get Tailscale IP');
+
+    // Report success to control plane
+    await reportTailscaleStatus('ready', tailscaleIp);
+    debug('TAILSCALE/install-complete', { ip: tailscaleIp });
+
+  } catch (error) {
+    debug('TAILSCALE/install-failed', { error: error.message });
+    await reportTailscaleStatus('failed', null);
+  }
+}
+
+async function reportTailscaleStatus(status: string, ip: string | null): Promise<void> {
+  await fetch(`${CONTROL_PLANE_URL}/api/v1/instances/${INSTANCE_ID}/tailscale-status`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status, ip }),
+  });
+}
+```

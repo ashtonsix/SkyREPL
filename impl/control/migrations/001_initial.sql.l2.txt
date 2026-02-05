@@ -1,0 +1,484 @@
+-- =============================================================================
+-- 001_initial.sql.l2.txt
+-- =============================================================================
+-- Initial schema for SkyREPL control plane database.
+-- All DDL statements copied verbatim from spec chapters.
+-- Source: spec/02_MATERIAL.txt, spec/09_API.txt, spec/12_ORPHANS.txt
+
+-- =============================================================================
+-- Core Resources
+-- =============================================================================
+
+-- instances Table
+CREATE TABLE instances (
+    -- Identity
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,                 -- aws, lambda, runpod, orbstack
+    provider_id TEXT NOT NULL DEFAULT '',   -- Provider's instance ID (i-xxx, etc) - empty during spawn:pending
+
+    -- Specification
+    spec TEXT NOT NULL,                     -- Instance type (g6.xlarge, etc)
+    region TEXT NOT NULL DEFAULT 'local',   -- Provider region (use 'local' for local instances)
+
+    -- Network
+    ip TEXT,                                -- Public IP (may be null during boot)
+
+    -- Status & Lifecycle
+    workflow_state TEXT NOT NULL,           -- Format: <workflow>:<phase> (e.g., 'launch-run:provisioning', 'spawn:pending')
+    workflow_error TEXT,                    -- Error details if workflow_state ends in ':error'
+    current_manifest_id INTEGER,            -- Current owning manifest (null if detached)
+
+    -- Spawn Idempotency (Two-Phase Spawn)
+    spawn_idempotency_key TEXT,            -- Format: ${workflow_id}:${node_id}
+
+    -- Spot Instance Support
+    is_spot INTEGER NOT NULL DEFAULT 0,     -- Boolean: using spot pricing
+    spot_request_id TEXT,                   -- Provider spot request ID
+
+    -- Init Configuration
+    init_checksum TEXT,                     -- SHA256 of init script (for warm pool matching)
+
+    -- Timestamps
+    created_at INTEGER NOT NULL,            -- Unix timestamp ms
+    last_heartbeat INTEGER NOT NULL,        -- Unix timestamp ms
+
+    -- Foreign Keys
+    FOREIGN KEY (current_manifest_id) REFERENCES manifests(id)
+);
+
+-- Indexes
+CREATE INDEX idx_instances_workflow_state ON instances(workflow_state);
+CREATE INDEX idx_instances_provider ON instances(provider, workflow_state);
+CREATE INDEX idx_instances_manifest ON instances(current_manifest_id);
+CREATE INDEX idx_instances_heartbeat ON instances(last_heartbeat)
+    WHERE workflow_state NOT LIKE 'terminate:%';
+
+-- Spawn idempotency: find stale spawn:pending records for reconciliation
+CREATE INDEX idx_instances_spawn_pending ON instances(workflow_state, created_at)
+    WHERE workflow_state = 'spawn:pending';
+
+-- Unique constraint on provider instance ID (allow empty for spawn:pending)
+CREATE UNIQUE INDEX idx_instances_provider_id ON instances(provider, provider_id)
+    WHERE provider_id != '';
+
+-- Unique constraint on spawn idempotency key (one spawn per workflow node)
+CREATE UNIQUE INDEX idx_instances_spawn_key ON instances(spawn_idempotency_key)
+    WHERE spawn_idempotency_key IS NOT NULL;
+
+-- runs Table
+CREATE TABLE runs (
+    -- Identity
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    -- Command Specification
+    command TEXT NOT NULL,                  -- Shell command to execute
+    workdir TEXT NOT NULL DEFAULT '/home/ubuntu/work', -- Working directory
+
+    -- Execution Constraints
+    max_duration_ms INTEGER NOT NULL,       -- Timeout (0 = unlimited)
+
+    -- Status & Lifecycle
+    workflow_state TEXT NOT NULL DEFAULT 'launch-run:pending', -- Format: <workflow>:<phase>
+    workflow_error TEXT,                    -- Error details if workflow_state ends in ':error'
+    current_manifest_id INTEGER,            -- Current owning manifest
+
+    -- Results
+    exit_code INTEGER,                      -- Process exit code (null if not finished)
+
+    -- Init Configuration (for snapshot creation)
+    init_checksum TEXT,                     -- SHA256 of init script used
+
+    -- Flags
+    create_snapshot INTEGER NOT NULL DEFAULT 0, -- Boolean: create snapshot after success
+    spot_interrupted INTEGER NOT NULL DEFAULT 0, -- Boolean: was spot interrupted
+
+    -- Timestamps
+    created_at INTEGER NOT NULL,            -- Unix timestamp ms
+    started_at INTEGER,                     -- Unix timestamp ms (null if not started)
+    finished_at INTEGER,                    -- Unix timestamp ms (null if not finished)
+
+    -- Foreign Keys
+    FOREIGN KEY (current_manifest_id) REFERENCES manifests(id)
+);
+
+-- Indexes
+CREATE INDEX idx_runs_workflow_state ON runs(workflow_state);
+CREATE INDEX idx_runs_manifest ON runs(current_manifest_id);
+CREATE INDEX idx_runs_created ON runs(created_at DESC);
+CREATE INDEX idx_runs_duration ON runs(started_at, finished_at);
+
+-- allocations Table
+CREATE TABLE allocations (
+    -- Identity
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    -- Binding
+    run_id INTEGER,                         -- Run being executed (null for AVAILABLE state)
+    instance_id INTEGER NOT NULL,           -- Instance hosting this allocation
+
+    -- Status
+    status TEXT NOT NULL,                   -- AVAILABLE, CLAIMED, ACTIVE, COMPLETE, FAILED
+    current_manifest_id INTEGER,            -- Owning manifest
+
+    -- Execution Context
+    user TEXT NOT NULL DEFAULT 'ubuntu',    -- Unix user (platform-dependent)
+    workdir TEXT NOT NULL,                  -- Working directory path
+
+    -- Debug Hold Mechanism (replaces grace_period)
+    debug_hold_until INTEGER,               -- Unix timestamp ms (null if no hold)
+                                            -- Blocks termination if > NOW, enables SSH when COMPLETE
+
+    -- Timestamps
+    created_at INTEGER NOT NULL,            -- Unix timestamp ms
+    updated_at INTEGER NOT NULL,            -- Unix timestamp ms
+    completed_at INTEGER,                   -- Unix timestamp ms (set when status transitions to COMPLETE or FAILED)
+
+    -- Foreign Keys
+    FOREIGN KEY (run_id) REFERENCES runs(id),
+    FOREIGN KEY (instance_id) REFERENCES instances(id),
+    FOREIGN KEY (current_manifest_id) REFERENCES manifests(id)
+);
+
+-- Indexes
+CREATE INDEX idx_allocations_status ON allocations(status);
+CREATE INDEX idx_allocations_instance ON allocations(instance_id, status);
+CREATE INDEX idx_allocations_run ON allocations(run_id);
+CREATE INDEX idx_allocations_manifest ON allocations(current_manifest_id);
+CREATE INDEX idx_allocations_debug_hold ON allocations(debug_hold_until)
+    WHERE debug_hold_until IS NOT NULL;
+
+-- Warm pool query optimization
+CREATE INDEX idx_allocations_available ON allocations(instance_id, status, workdir)
+    WHERE status = 'AVAILABLE';
+
+-- =============================================================================
+-- Workflow Execution
+-- =============================================================================
+
+-- workflows Table
+CREATE TABLE workflows (
+    -- Identity
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,                     -- launch-run, terminate, create-snapshot, cleanup, etc
+
+    -- Hierarchy
+    parent_workflow_id INTEGER,             -- Parent if this is a subworkflow
+    depth INTEGER NOT NULL DEFAULT 0,       -- Subworkflow nesting depth (max 3)
+
+    -- Status
+    status TEXT NOT NULL,                   -- pending, running, completed, failed, cancelled, rolling_back
+    current_node TEXT,                      -- Current executing node ID
+
+    -- Input/Output
+    input_json TEXT NOT NULL,               -- Workflow input parameters (JSON)
+    output_json TEXT,                       -- Workflow output/results (JSON)
+    error_json TEXT,                        -- Error details if failed (JSON)
+
+    -- Manifest
+    manifest_id INTEGER,                    -- Created manifest (if workflow creates resources)
+
+    -- Tracing
+    trace_id TEXT,                          -- OpenTelemetry trace ID
+
+    -- Idempotency
+    idempotency_key TEXT,                   -- Client-provided idempotency key
+
+    -- Timeout
+    timeout_ms INTEGER,                     -- Workflow timeout in milliseconds (null = no timeout)
+    timeout_at INTEGER,                     -- Computed: started_at + timeout_ms (null if no timeout or not started)
+
+    -- Timestamps
+    created_at INTEGER NOT NULL,            -- Unix timestamp ms
+    started_at INTEGER,                     -- Unix timestamp ms
+    finished_at INTEGER,                    -- Unix timestamp ms
+
+    -- Foreign Keys
+    FOREIGN KEY (parent_workflow_id) REFERENCES workflows(id),
+    FOREIGN KEY (manifest_id) REFERENCES manifests(id)
+);
+
+-- Indexes
+CREATE INDEX idx_workflows_status ON workflows(status, created_at DESC);
+CREATE INDEX idx_workflows_type ON workflows(type, status);
+CREATE INDEX idx_workflows_parent ON workflows(parent_workflow_id);
+CREATE INDEX idx_workflows_manifest ON workflows(manifest_id);
+CREATE INDEX idx_workflows_trace ON workflows(trace_id);
+CREATE UNIQUE INDEX idx_workflows_idempotency ON workflows(idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+
+-- workflow_nodes Table
+CREATE TABLE workflow_nodes (
+    -- Identity
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id INTEGER NOT NULL,           -- Parent workflow
+    node_id TEXT NOT NULL,                  -- Node identifier within workflow (e.g., 'spawn', 'prepare')
+
+    -- Node Definition
+    node_type TEXT NOT NULL,                -- Node handler type (spawn-instance, prepare-workdir, etc)
+
+    -- Status
+    status TEXT NOT NULL,                   -- pending, running, completed, failed, skipped
+
+    -- Input/Output
+    input_json TEXT NOT NULL,               -- Node input (JSON)
+    output_json TEXT,                       -- Node output (JSON)
+    error_json TEXT,                        -- Error details if failed (JSON)
+
+    -- Execution
+    attempt INTEGER NOT NULL DEFAULT 1,     -- Retry attempt number
+    retry_reason TEXT,                      -- Reason for retry (if attempt > 1)
+
+    -- Timestamps
+    created_at INTEGER NOT NULL,            -- Unix timestamp ms
+    started_at INTEGER,                     -- Unix timestamp ms
+    finished_at INTEGER,                    -- Unix timestamp ms
+
+    -- Foreign Keys
+    FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
+
+    -- Unique constraint: one node_id per workflow
+    UNIQUE(workflow_id, node_id)
+);
+
+-- Indexes
+CREATE INDEX idx_workflow_nodes_workflow ON workflow_nodes(workflow_id, created_at);
+CREATE INDEX idx_workflow_nodes_status ON workflow_nodes(workflow_id, status);
+CREATE INDEX idx_workflow_nodes_type ON workflow_nodes(node_type, status);
+
+-- =============================================================================
+-- Object Storage
+-- =============================================================================
+
+-- objects Table
+CREATE TABLE objects (
+    -- Identity
+    id INTEGER PRIMARY KEY AUTOINCREMENT,   -- Integer ID for multi-tenant support
+    type TEXT NOT NULL,                     -- snapshot, artifact, log, run_file (NOT blob)
+
+    -- Blob reference (all payload storage delegated to blobs table)
+    blob_id INTEGER NOT NULL,               -- References blobs.id
+
+    -- Provider Context
+    provider TEXT,                          -- Provider that created this (null for generic)
+    provider_object_id TEXT,                -- Provider's ID for this object (e.g., snap-xxx)
+
+    -- Metadata (type-specific, stored as JSON)
+    metadata_json TEXT,                     -- Type-specific metadata (path, content-type, etc.)
+
+    -- Lifecycle
+    expires_at INTEGER,                     -- Unix timestamp ms (null = never expires)
+    current_manifest_id INTEGER,            -- Owning manifest (null if detached)
+
+    -- Timestamps
+    created_at INTEGER NOT NULL,            -- Unix timestamp ms
+    accessed_at INTEGER,                    -- Last access timestamp
+
+    -- Foreign Keys
+    FOREIGN KEY (blob_id) REFERENCES blobs(id) ON DELETE RESTRICT,
+    FOREIGN KEY (current_manifest_id) REFERENCES manifests(id)
+);
+
+-- Indexes
+CREATE INDEX idx_objects_type ON objects(type, created_at DESC);
+CREATE INDEX idx_objects_blob ON objects(blob_id);
+CREATE INDEX idx_objects_provider ON objects(provider, type);
+CREATE INDEX idx_objects_manifest ON objects(current_manifest_id);
+CREATE INDEX idx_objects_expires ON objects(expires_at)
+    WHERE expires_at IS NOT NULL;
+
+-- object_tags Table
+CREATE TABLE object_tags (
+    object_id INTEGER NOT NULL,             -- References objects.id (INTEGER)
+    tag TEXT NOT NULL,                      -- format: "<key>:<value>"
+    PRIMARY KEY (object_id, tag),
+    FOREIGN KEY (object_id) REFERENCES objects(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_object_tags_tag ON object_tags(tag);
+
+-- blobs Table
+CREATE TABLE blobs (
+    -- Identity
+    id INTEGER PRIMARY KEY AUTOINCREMENT,   -- Integer ID (NOT checksum)
+
+    -- Bucket scoping (multi-tenant isolation)
+    bucket TEXT NOT NULL,                   -- Tenant bucket identifier
+
+    -- Content hash
+    checksum TEXT NOT NULL,                 -- SHA-256 hash (NOT unique - same checksum can exist multiple times)
+    checksum_bytes INTEGER,                 -- Bytes covered by checksum (null when checksum null)
+                                            -- When checksum_bytes == size_bytes, checksum is current
+                                            -- When checksum_bytes < size_bytes, checksum is stale (after append)
+
+    -- Storage location (SBO: Small Buffer Optimization)
+    s3_key TEXT,                            -- S3 key if >64KB (null if inline)
+    s3_bucket TEXT,                         -- S3 bucket if >64KB (null if inline)
+    payload BLOB,                           -- Inline data if ≤64KB (null if S3)
+
+    -- Metadata
+    size_bytes INTEGER NOT NULL,            -- Total size in bytes
+
+    -- Timestamps
+    created_at INTEGER NOT NULL,            -- Unix timestamp ms
+    last_referenced_at INTEGER NOT NULL     -- Unix timestamp ms (updated on ref)
+);
+
+-- Indexes
+CREATE INDEX idx_blobs_dedup ON blobs(bucket, checksum); -- Optimization for dedup lookups, NOT constraint
+CREATE INDEX idx_blobs_last_ref ON blobs(last_referenced_at);
+CREATE INDEX idx_blobs_s3 ON blobs(s3_bucket, s3_key)
+    WHERE s3_key IS NOT NULL;
+
+-- =============================================================================
+-- Manifest Management
+-- =============================================================================
+
+-- manifests Table
+CREATE TABLE manifests (
+    -- Identity
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id INTEGER NOT NULL,           -- Workflow that created this manifest
+
+    -- Status
+    status TEXT NOT NULL,                   -- DRAFT, SEALED (EXPIRED is derived)
+
+    -- Policy
+    default_cleanup_priority INTEGER NOT NULL DEFAULT 50, -- 0-100, higher = clean sooner
+    retention_ms INTEGER,                   -- Time to keep after SEALED (null = indefinite)
+
+    -- Timestamps
+    created_at INTEGER NOT NULL,            -- Unix timestamp ms
+    released_at INTEGER,                    -- When workflow released ownership
+    expires_at INTEGER,                     -- When eligible for cleanup
+
+    -- Foreign Keys
+    FOREIGN KEY (workflow_id) REFERENCES workflows(id)
+);
+
+-- Indexes
+CREATE INDEX idx_manifests_status ON manifests(status, expires_at);
+CREATE INDEX idx_manifests_workflow ON manifests(workflow_id);
+CREATE INDEX idx_manifests_expires ON manifests(expires_at)
+    WHERE status = 'SEALED' AND expires_at IS NOT NULL;
+
+-- manifest_resources Table
+CREATE TABLE manifest_resources (
+    manifest_id INTEGER NOT NULL,           -- Owning manifest
+    resource_type TEXT NOT NULL,            -- 'instance', 'run', 'allocation', 'object'
+    resource_id TEXT NOT NULL,              -- Resource ID (TEXT for objects, INTEGER for others)
+
+    -- Per-resource policy override
+    cleanup_priority INTEGER,               -- Override manifest default (null = use default)
+
+    -- Timestamps
+    added_at INTEGER NOT NULL,              -- Unix timestamp ms
+
+    -- Foreign Keys
+    FOREIGN KEY (manifest_id) REFERENCES manifests(id) ON DELETE CASCADE,
+
+    -- Prevent duplicate resource in same manifest
+    PRIMARY KEY (manifest_id, resource_type, resource_id)
+);
+
+-- Indexes
+CREATE INDEX idx_manifest_resources_lookup ON manifest_resources(resource_type, resource_id);
+CREATE INDEX idx_manifest_resources_priority ON manifest_resources(manifest_id, cleanup_priority);
+
+-- =============================================================================
+-- Usage Tracking
+-- =============================================================================
+
+-- usage_records Table
+CREATE TABLE usage_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id INTEGER NOT NULL,           -- Instance
+    allocation_id INTEGER,                  -- Allocation (null for instance-level usage)
+    run_id INTEGER,                         -- Run (null if allocation was AVAILABLE)
+
+    provider TEXT NOT NULL,                 -- Provider
+    spec TEXT NOT NULL,                     -- Instance type
+    region TEXT,                            -- Region
+    is_spot INTEGER NOT NULL DEFAULT 0,     -- Boolean
+
+    started_at INTEGER NOT NULL,            -- Unix timestamp ms
+    finished_at INTEGER,                    -- Unix timestamp ms (null if still running)
+    duration_ms INTEGER,                    -- Computed duration
+
+    estimated_cost_usd REAL,                -- Estimated cost
+
+    -- Foreign Keys
+    FOREIGN KEY (instance_id) REFERENCES instances(id),
+    FOREIGN KEY (allocation_id) REFERENCES allocations(id),
+    FOREIGN KEY (run_id) REFERENCES runs(id)
+);
+
+-- Indexes
+CREATE INDEX idx_usage_records_instance ON usage_records(instance_id);
+CREATE INDEX idx_usage_records_allocation ON usage_records(allocation_id);
+CREATE INDEX idx_usage_records_run ON usage_records(run_id);
+CREATE INDEX idx_usage_records_time ON usage_records(started_at, finished_at);
+CREATE INDEX idx_usage_records_cost ON usage_records(estimated_cost_usd DESC);
+
+-- =============================================================================
+-- Supporting Tables
+-- =============================================================================
+
+-- instance_panic_logs Table (from spec/09_API.txt)
+CREATE TABLE instance_panic_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instance_id INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    last_state_json TEXT NOT NULL,
+    diagnostics_json TEXT NOT NULL,
+    error_logs_json TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+
+    FOREIGN KEY (instance_id) REFERENCES instances(id)
+);
+
+CREATE INDEX idx_panic_instance ON instance_panic_logs(instance_id);
+CREATE INDEX idx_panic_timestamp ON instance_panic_logs(timestamp);
+
+-- idempotency_keys Table (from spec/09_API.txt)
+CREATE TABLE idempotency_keys (
+    key TEXT PRIMARY KEY,
+    endpoint TEXT NOT NULL,
+    params_hash TEXT NOT NULL,
+    response_status INTEGER NOT NULL,
+    response_body TEXT NOT NULL,
+    workflow_id INTEGER,  -- References workflows(id) which is INTEGER
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+
+    FOREIGN KEY (workflow_id) REFERENCES workflows(id)
+);
+
+CREATE INDEX idx_idempotency_expires ON idempotency_keys(expires_at);
+
+-- orphan_whitelist Table (from spec/12_ORPHANS.txt)
+CREATE TABLE orphan_whitelist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    resource_type TEXT NOT NULL,
+    resource_name TEXT,
+
+    -- Why this orphan is being kept
+    reason TEXT NOT NULL,
+
+    -- Who made the decision
+    acknowledged_by TEXT NOT NULL,
+    acknowledged_at INTEGER NOT NULL,
+
+    -- Optional expiry (re-evaluate after this time)
+    expires_at INTEGER,
+
+    -- Additional context
+    notes TEXT,
+
+    UNIQUE(provider, provider_id)
+);
+
+CREATE INDEX idx_whitelist_expires ON orphan_whitelist(expires_at);
+CREATE INDEX idx_whitelist_provider ON orphan_whitelist(provider, resource_type);

@@ -1,0 +1,1025 @@
+================================================================================
+8. PROVIDERS
+================================================================================
+
+## Purpose
+
+The provider system abstracts cloud infrastructure operations (spawn, terminate,
+snapshot) across platforms while allowing platform-specific optimizations.
+Providers must satisfy logical contracts (intents) defining required
+outputs, but have significant implementation freedom.
+
+**Key principles:**
+- Providers are NOT uniform. Complex platforms (AWS, GCP, Azure) benefit from
+  deep integration; simpler providers use fixed, minimal workflows.
+- The control plane cares about outcomes ("I need an instance"), not
+  implementation details.
+- 80% of functionality works across providers through the common interface.
+  The remaining 20% can be platform-specific where justified.
+- Testing against OrbStack (with fault injection) validates contract-compliant
+  behavior; providers following the same contracts inherit that validation.
+
+## 8.1 Provider Interface
+
+### 8.1.1 Spawn Idempotency Protocol
+
+Instance spawning uses a two-phase protocol to guarantee idempotency and prevent
+resource orphaning, even with crashes or network failures.
+
+**Design Principles:**
+1. DB record created BEFORE cloud API call
+2. Instance added to manifest BEFORE cloud API call
+3. Reconciliation handles orphaned spawn:pending records
+4. Property test satisfied: "Kill at any step -> no orphans"
+
+**Phase 1: Reserve in DB**
+
+```
+FUNCTION reserveInstance(ctx, options):
+  idempotencyKey = ctx.workflowId + ":" + ctx.nodeId
+
+  INSERT INTO instances (
+    provider, provider_id, spec, region, workflow_state,
+    spawn_idempotency_key, current_manifest_id, created_at, last_heartbeat
+  ) VALUES (
+    options.provider, "",  -- provider_id not yet assigned
+    options.spec, options.region, "spawn:pending",
+    idempotencyKey, ctx.manifestId, NOW, NOW
+  )
+
+  instanceId = lastInsertRowid
+
+  -- Add to manifest BEFORE calling provider
+  ctx.emitResource("instance", instanceId)
+
+  RETURN instance with workflow_state="spawn:pending"
+```
+
+**Phase 2: Execute Spawn**
+
+```
+FUNCTION executeSpawn(ctx, instance, options):
+  provider = getProvider(options.provider)
+
+  -- Pass clientRequestId if provider supports idempotent spawn
+  IF provider.capabilities.idempotentSpawn:
+    providerOptions.clientRequestId = instance.spawn_idempotency_key
+
+  TRY:
+    providerInstance = provider.spawn(providerOptions)
+
+    UPDATE instances
+    SET provider_id = providerInstance.id,
+        workflow_state = mapProviderStatus(providerInstance.status),
+        ip = providerInstance.ip,
+        last_heartbeat = NOW
+    WHERE id = instance.id
+      AND workflow_state = "spawn:pending"
+
+    RETURN instance with workflow_state="launch-run:provisioning"
+
+  CATCH error:
+    UPDATE instances SET workflow_state = "spawn:error", last_heartbeat = NOW
+    WHERE id = instance.id AND workflow_state = "spawn:pending"
+    RETHROW error
+```
+
+**Retry Protocol**
+
+```
+FUNCTION retrySpawn(ctx, failedInstanceId):
+  instance = SELECT * FROM instances WHERE id = failedInstanceId
+
+  IF instance.workflow_state = "spawn:pending":
+    reconciled = reconcilePendingSpawn(instance)
+    IF reconciled: RETURN reconciled   -- Found in provider, no retry needed
+
+  -- Clean up failed attempt
+  UPDATE instances SET workflow_state = "spawn:error" WHERE id = failedInstanceId
+
+  -- Create new attempt (Phase 1 again)
+  newInstance = reserveInstance(ctx, instance)
+  RETURN executeSpawn(ctx, newInstance, instance)
+```
+
+**Orphan Reconciliation**
+
+```
+FUNCTION reconcilePendingSpawn(instance):
+  provider = getProvider(instance.provider)
+
+  IF provider.capabilities.idempotentSpawn:
+    providerInstances = provider.list(
+      tags: { "skyrepl:spawn_key": instance.spawn_idempotency_key }
+    )
+    IF providerInstances.length > 0:
+      UPDATE instances SET provider_id, workflow_state, ip, last_heartbeat
+      WHERE id = instance.id
+      RETURN updated instance
+
+  RETURN NULL   -- Instance not found in provider, truly failed
+
+FUNCTION reconcileStalePendingSpawns():
+  staleInstances = SELECT * FROM instances
+    WHERE workflow_state = "spawn:pending"
+      AND created_at < NOW - PENDING_SPAWN_STALE_THRESHOLD_MS
+
+  FOR EACH instance IN staleInstances:
+    reconciled = reconcilePendingSpawn(instance)
+    IF NOT reconciled:
+      UPDATE instances SET workflow_state = "spawn:error" WHERE id = instance.id
+```
+
+**Compensation (Single-Node Cleanup)**
+
+The compensation handler MUST:
+- If provider_id exists (Phase 2 reached): call provider.terminate(), tolerating NOT_FOUND
+- If provider_id is null (Phase 1 only): skip provider.terminate() since no cloud resource exists;
+  tag-based orphan recovery (Ch12) is the primary cleanup mechanism
+- Mark instance as terminate:complete in DB
+
+**Kill-at-any-step Analysis:**
+- **Kill before Phase 1**: Nothing created, transaction not committed
+- **Kill during Phase 1**: If transaction commits, we have DB record with spawn:pending
+  but no cloud resource. Reconciliation detects and marks as failed.
+- **Kill after Phase 1, before Phase 2**: DB has spawn:pending, no cloud resource.
+  Reconciliation marks as failed.
+- **Kill during Phase 2**: Two sub-cases:
+  - Provider call succeeds but UPDATE fails: Reconciliation finds instance by
+    clientRequestId (if supported) or via periodic list() sweep, updates DB record
+  - Provider call fails: No cloud resource created, DB record remains spawn:pending,
+    reconciliation marks as failed
+- **Kill after Phase 2**: Normal completion, no orphans
+
+For providers that don't support clientRequestId (Lambda Labs, RunPod), reconciliation
+relies on periodic list() operations and matching by tags/timestamps. Less efficient
+but still prevents orphans.
+
+> See also: impl/control/src/provider/compute/aws.ts.l2.txt §Spawn Idempotency Protocol
+
+### 8.1.2 Core Interface Definition
+
+**Provider<TInstance, TSnapshot>** -- Generic interface all providers MUST implement.
+
+Provider contracts are enforced via TypeScript types + unit tests. Every provider
+MUST pass interface compliance tests that verify correct behavior (spawn returns
+required fields, terminate handles non-existent instances, etc.).
+
+| Field / Method           | Kind       | Constraint                                               |
+|--------------------------|------------|----------------------------------------------------------|
+| name                     | readonly   | MUST be one of: aws, lambda, runpod, orbstack            |
+| capabilities             | readonly   | ProviderCapabilities flags                               |
+| spawn(options)           | required   | MUST return { id, status } at minimum                    |
+| terminate(providerId)    | required   | MUST throw ProviderError if not found                    |
+| list(filter?)            | required   | Used for reconciliation/drift detection                  |
+| get(providerId)          | required   | MUST return instance or null                             |
+| generateBootstrap(cfg)   | required   | MUST return { content, format, checksum }                |
+| createSnapshot?()        | optional   | Gated by capabilities.snapshots                          |
+| getSnapshotStatus?()     | optional   | Gated by capabilities.snapshots                          |
+| deleteSnapshot?()        | optional   | Gated by capabilities.snapshots                          |
+| getSnapshotByName?()     | optional   | Gated by capabilities.snapshots                          |
+| requestSpotInstance?()   | optional   | Gated by capabilities.spot                               |
+| cancelSpotRequest?()     | optional   | Gated by capabilities.spot                               |
+| getSpotPrices?()         | optional   | Gated by capabilities.spot                               |
+
+Contract compliance tests MUST verify:
+- spawn returns required fields (id, status matching pending|starting|running)
+- terminate throws NotFoundError for non-existent instances
+- list filters by region correctly
+- generateBootstrap returns valid script with content, format, and SHA-256 checksum
+
+> See also: impl/control/src/provider/types.ts.l2.txt §Provider Interface
+
+### 8.1.3 Capability Flags
+
+Capabilities describe what optional features a provider supports. The control
+plane uses these to gate optional method calls.
+
+**Capability groups:**
+
+| Group    | Capabilities                                                    |
+|----------|-----------------------------------------------------------------|
+| COMMON   | spawn, terminate, list, get, generateBootstrap (all required)   |
+| PRIORITY | snapshots, spot, gpu, multiRegion, persistentVolumes            |
+| SPECIAL  | warmVolumes, hibernation, costExplorer, tailscaleNative,        |
+|          | idempotentSpawn, customNetworking                               |
+
+Note: Lines blur between tiers at higher capability levels. A provider may
+implement special capabilities without implementing all priority ones.
+
+```typescript
+interface ProviderCapabilities {
+  // === PRIORITY CAPABILITIES ===
+  /** Provider supports snapshot creation/restoration */
+  snapshots: boolean;
+
+  /** Provider supports spot/preemptible instances */
+  spot: boolean;
+
+  /** Provider supports GPU instances */
+  gpu: boolean;
+
+  /** Provider supports multi-region deployment */
+  multiRegion: boolean;
+
+  /** Provider supports EBS-style persistent volumes */
+  persistentVolumes: boolean;
+
+  // === SPECIAL CAPABILITIES ===
+  /** Provider supports warm volume attachment */
+  warmVolumes: boolean;
+
+  /** Provider supports instance hibernation */
+  hibernation: boolean;
+
+  /** Provider supports detailed billing/cost data */
+  costExplorer: boolean;
+
+  /** Provider supports Tailscale native integration */
+  tailscaleNative: boolean;
+
+  /** Provider supports idempotent spawn via clientRequestId */
+  idempotentSpawn: boolean;
+
+  /** Provider supports custom VPC/networking configuration */
+  customNetworking: boolean;
+}
+
+// Capability profiles for each provider
+const PROVIDER_CAPABILITIES: Record<ProviderName, ProviderCapabilities> = {
+  aws: {
+    snapshots: true,
+    spot: true,
+    customNetworking: true,
+    persistentVolumes: true,
+    warmVolumes: true,
+    multiRegion: true,
+    hibernation: true,
+    costExplorer: true,
+    gpu: true,
+    tailscaleNative: false,
+    idempotentSpawn: true,  // AWS supports clientRequestId
+  },
+  lambda: {
+    snapshots: false,
+    spot: false,
+    customNetworking: false,
+    persistentVolumes: false,
+    warmVolumes: false,
+    multiRegion: true,
+    hibernation: false,
+    costExplorer: false,
+    gpu: true,
+    tailscaleNative: false,
+    idempotentSpawn: false,  // Lambda Labs uses manual reconciliation
+  },
+  runpod: {
+    snapshots: true,
+    spot: true,  // "Community cloud" pricing
+    customNetworking: false,
+    persistentVolumes: true,
+    warmVolumes: false,
+    multiRegion: true,
+    hibernation: false,
+    costExplorer: false,
+    gpu: true,
+    tailscaleNative: false,
+    idempotentSpawn: false,  // RunPod uses manual reconciliation
+  },
+  orbstack: {
+    snapshots: true,
+    spot: false,
+    customNetworking: false,
+    persistentVolumes: false,
+    warmVolumes: false,
+    multiRegion: false,
+    hibernation: false,
+    costExplorer: false,
+    gpu: false,
+    tailscaleNative: true,
+    idempotentSpawn: true,  // OrbStack local operations are idempotent
+  },
+};
+```
+> See also: impl/control/src/provider/types.ts.l2.txt §Capability Flags
+
+### 8.1.4 Core Method Types
+
+**SpawnOptions** -- Configuration for instance creation.
+
+| Field            | Type                   | Constraint                                        |
+|------------------|------------------------|---------------------------------------------------|
+| spec             | string                 | MUST be valid instance spec (g5.xlarge, A100x1)   |
+| region           | string?                | Target region/zone                                |
+| spot             | boolean?               | Requires capabilities.spot                        |
+| maxSpotPrice     | number?                | $/hour ceiling for spot                           |
+| initChecksum     | string?                | For warm pool matching                            |
+| tags             | Record<string,string>? | Applied to provider instance                      |
+| bootstrap        | BootstrapConfig        | MUST be provided                                  |
+| snapshotId       | string?                | Requires capabilities.snapshots                   |
+| volumeId         | string?                | Requires capabilities.warmVolumes                 |
+| networkConfig    | NetworkConfig?         | Requires capabilities.customNetworking            |
+| clientRequestId  | string?                | For idempotency                                   |
+
+**ProviderInstance** -- Minimum return type from spawn/list/get.
+
+| Field         | Type                   | Constraint                                     |
+|---------------|------------------------|------------------------------------------------|
+| id            | string                 | Provider's instance ID (i-xxx, vm-xxx)         |
+| status        | ProviderInstanceStatus | MUST be one of the defined status values       |
+| spec          | string                 | Instance specification                         |
+| region        | string?                | Region/zone                                    |
+| ip            | string or null?        | Public IP (null if not yet assigned)           |
+| privateIp     | string or null?        | Private IP                                     |
+| createdAt     | number                 | Creation timestamp                             |
+| isSpot        | boolean                | Whether spot/preemptible                       |
+| spotRequestId | string?                | Spot request ID if applicable                  |
+| metadata      | Record?                | Provider-specific extensions                   |
+
+**ProviderInstanceStatus** values: pending, starting, running, stopping,
+stopped, terminating, terminated, error.
+
+**ListFilter** -- key fields: status[] (filter by status), spec, region,
+tags (Record), limit, includeTerminated (default false).
+
+**BootstrapConfig** -- key fields: agentUrl (MUST), controlPlaneUrl (MUST),
+registrationToken (MUST), initScript?, initChecksum?, features[] (BootstrapFeature),
+environment? (Record). BootstrapFeature: name (tailscale|nvidia-driver|cuda|docker),
+version?, config?.
+
+**BootstrapScript** -- MUST contain: content (string), format (cloud-init|shell|ignition),
+checksum (SHA-256 hex string, 64 chars).
+
+**Snapshot types:** CreateSnapshotOptions (name MUST, description?, tags?,
+includeMemory? gated by hibernation). SnapshotRequest (requestId, status, estimatedCompletionAt?).
+SnapshotStatus (status: pending|creating|available|failed|deleting, progress?, providerSnapshotId?,
+error?, sizeBytes?). ProviderSnapshot (id, name, status, createdAt, sizeBytes?, spec?).
+
+**Spot types:** SpotOptions extends SpawnOptions with maxSpotPrice (MUST),
+interruptionBehavior? (terminate|stop|hibernate), requestType? (one-time|persistent).
+SpotRequest (requestId, status, instanceId?, spotPrice?).
+SpotPriceInfo (spec, region, availabilityZone?, price, timestamp, savingsPercent?).
+
+> See also: impl/control/src/provider/types.ts.l2.txt §Core Method Types
+
+### 8.1.5 Error Taxonomy
+
+**ProviderError** -- Abstract base for all provider errors.
+
+Every ProviderError MUST carry: code (ProviderErrorCode), category (ProviderErrorCategory),
+retryable (boolean), provider (ProviderName). MAY carry: retryAfterMs, details record.
+
+**Error codes:** CAPACITY_ERROR, AUTH_ERROR, RATE_LIMIT_ERROR, SPOT_INTERRUPTED,
+QUOTA_EXCEEDED, INVALID_SPEC, REGION_UNAVAILABLE, NETWORK_ERROR, TIMEOUT_ERROR,
+NOT_FOUND, ALREADY_EXISTS, INVALID_STATE, PROVIDER_INTERNAL, UNSUPPORTED_OPERATION.
+
+**Error categories:** capacity (resource availability), auth (authentication/authorization),
+rate_limit (throttling), validation (invalid input), not_found (resource missing),
+conflict (state conflict), internal (provider internal).
+
+**Specific error classes and their key properties:**
+
+| Error Class       | Code              | Category   | Retryable | Extra Fields                              |
+|-------------------|-------------------|------------|-----------|-------------------------------------------|
+| CapacityError     | CAPACITY_ERROR    | capacity   | true      | spec, region, alternativeRegions/Specs?   |
+| AuthError         | AUTH_ERROR        | auth       | false     | reason (invalid|expired|insufficient)     |
+| RateLimitError    | RATE_LIMIT_ERROR  | rate_limit | true      | retryAfterMs, limitType? (api|resource)   |
+| SpotInterrupted   | SPOT_INTERRUPTED  | capacity   | true      | instanceId, interruptionTime, warningMs?  |
+| QuotaExceededError| QUOTA_EXCEEDED    | capacity   | false     | quotaType, currentUsage, limit            |
+| InvalidSpecError  | INVALID_SPEC      | validation | false     | spec, validSpecs?                         |
+| NotFoundError     | NOT_FOUND         | not_found  | false     | resourceType, resourceId                  |
+
+**Decision functions:**
+
+- shouldRetryWithAlternative(error): MUST return true when code is CAPACITY_ERROR,
+  SPOT_INTERRUPTED, or REGION_UNAVAILABLE. Triggers the retry-with-alternative
+  workflow pattern.
+- shouldRetry(error): MUST return true when error.retryable is true AND
+  category is not auth.
+- mapProviderError(provider, error): Maps provider-specific errors to the taxonomy.
+  If already a ProviderError, return as-is. Otherwise wrap as PROVIDER_INTERNAL.
+
+> See also: impl/control/src/provider/errors.ts.l2.txt §ProviderError Base Class
+> See also: impl/control/src/provider/errors.ts.l2.txt §Specific Error Classes
+> See also: impl/control/src/provider/errors.ts.l2.txt §Error Handling Helpers
+
+### 8.1.6 Bootstrap Generation
+
+Each provider MUST implement generateBootstrap(config: BootstrapConfig): BootstrapScript
+that produces a provider-appropriate initialization script. The script MUST:
+
+1. Write agent configuration (controlPlaneUrl, registrationToken) to the instance
+2. Download and install the SkyREPL agent from config.agentUrl
+3. Execute feature installation commands for each requested BootstrapFeature
+4. Run the user-provided initScript (if any)
+5. Start the agent process
+6. Compute a SHA-256 checksum of the full script content
+
+The format varies by provider: AWS uses cloud-init YAML, OrbStack uses shell scripts,
+other providers use whichever format their platform supports. The checksum enables
+warm pool matching -- instances with identical bootstrap checksums are interchangeable.
+
+> See also: impl/control/src/provider/compute/aws.ts.l2.txt §Bootstrap Generation
+> See also: impl/control/src/provider/compute/orbstack.ts.l2.txt §OrbStack Bootstrap Generation
+
+## 8.2 Type Enhancement Pattern
+
+Providers MAY define enhanced types extending generic resource types.
+This enables provider-specific functionality while maintaining a clean generic
+interface for the control plane.
+
+### 8.2.1 Generic vs Provider-Specific Types
+
+**Generic Instance** -- The control plane operates on this type.
+
+| Field             | Type              | Note                                    |
+|-------------------|-------------------|-----------------------------------------|
+| id                | string            | Internal DB ID                          |
+| provider          | ProviderName      | Which provider owns this instance       |
+| providerId        | string            | Provider's instance ID                  |
+| spec              | string            | Instance specification                  |
+| region            | string?           | Region/zone                             |
+| ip                | string or null?   | Public IP                               |
+| tailscaleIp       | string or null?   | Tailscale IP                            |
+| status            | string            | Workflow-aware status                   |
+| isSpot            | boolean           | Spot/preemptible                        |
+| initChecksum      | string?           | For warm pool matching                  |
+| createdAt         | number            | Creation timestamp                      |
+| lastHeartbeat     | number            | Last heartbeat timestamp                |
+| currentManifestId | string or null?   | Ownership boundary                      |
+
+**Generic Snapshot** -- key fields: id, provider, providerId, spec, initChecksum?,
+name, createdAt, lastUsedAt?, useCount.
+
+**Provider-specific enhanced types** extend ProviderInstance/ProviderSnapshot with
+platform-specific fields. Key examples:
+
+- **AWSInstance**: adds availabilityZone, subnetId, vpcId, securityGroupIds,
+  iamInstanceProfile?, ebsOptimized, volumes (AWSVolume[]), networkInterfaces
+  (AWSNetworkInterface[]), placementGroup?, metadata (launchTemplate, capacityReservation).
+- **AWSSnapshot**: adds amiId, rootDeviceName, rootVolumeSize, architecture,
+  virtualizationType, blockDeviceMappings, sourceInstanceId?, sourceRegion, state, permissions.
+- **RunPodInstance**: adds podId, gpuType, gpuCount, vcpuCount, memoryGb, diskGb,
+  container config, network ports, isSecureCloud, gpuUtilization?.
+- **LambdaInstance**: adds instanceTypeId, hostname, jupyterUrl?, sshKeyNames, gpu info.
+- **OrbStackInstance**: adds vmName, arch, distro, distroVersion, resource allocation,
+  host integration.
+
+> See also: impl/control/src/provider/types.ts.l2.txt §Provider-Specific Enhanced Types
+
+### 8.2.2 Materialization Pattern (Generic -> Provider-Specific)
+
+When a workflow enters a provider-specific context, the system MUST materialize
+the generic Instance into the provider's enhanced type by fetching current state
+from the provider API.
+
+```
+FUNCTION materialize(genericInstance) -> ProviderSpecificInstance:
+  PRECONDITION: genericInstance.provider matches target provider
+
+  1. Query provider API for current instance state using genericInstance.providerId
+  2. IF not found: THROW NotFoundError
+  3. Build enhanced instance combining:
+     - Base provider fields (id, status, spec, region, ip, createdAt, isSpot)
+     - Provider-specific fields from API response
+  4. RETURN enhanced instance
+
+  Status mapping (e.g., AWS):
+    EC2 "pending" -> "pending"
+    EC2 "running" -> "running"
+    EC2 "stopping" -> "stopping"
+    EC2 "stopped" -> "stopped"
+    EC2 "shutting-down" -> "terminating"
+    EC2 "terminated" -> "terminated"
+    unknown -> "error"
+```
+
+> See also: impl/control/src/provider/compute/aws.ts.l2.txt §Materialization (Generic -> AWS-Specific)
+
+### 8.2.3 Projection Pattern (Provider-Specific -> Generic)
+
+When a workflow exits provider context, the provider-specific instance MUST be
+projected back to the generic type for control plane consumption.
+
+```
+FUNCTION projectToGenericInstance(providerInstance, existingRecord?) -> Instance:
+  PRECONDITION: existingRecord MUST exist (projection requires a DB record)
+
+  1. Map identity fields: id from existingRecord, provider, providerId
+  2. Map spec/location: spec, region (strip AZ suffix if needed)
+  3. Map network: ip from provider, preserve tailscaleIp from existingRecord
+  4. Map workflow_state: preserve from existingRecord, or derive from provider status
+  5. Map spot fields: isSpot, spotRequestId
+  6. Preserve: initChecksum, lastHeartbeat, currentManifestId from existingRecord
+  7. RETURN generic Instance
+
+  Provider status -> workflow_state mapping:
+    pending|starting -> "launch-run:provisioning"
+    running -> "launch-run:complete"
+    stopping|stopped -> "terminate:draining"
+    terminating|terminated -> "terminate:complete"
+    other -> "spawn:error"
+```
+
+Snapshot projection MUST NOT generate IDs -- the caller MUST insert the snapshot
+record first to obtain an auto-generated database ID.
+
+> See also: impl/control/src/provider/compute/aws.ts.l2.txt §Projection (AWS-Specific -> Generic)
+
+### 8.2.4 Workflow Boundary Usage
+
+At workflow boundaries, the materialize/project pattern works as follows:
+
+1. **ENTER provider context**: materialize generic Instance to provider-specific type
+2. **OPERATE**: perform provider-specific operations using enhanced type fields
+3. **EXIT provider context**: project back to generic Instance, emitResource to manifest
+
+The control plane MUST NOT access provider-specific fields directly. All
+provider-specific operations happen within provider workflow boundaries.
+
+> See also: impl/control/src/provider/compute/aws.ts.l2.txt §Workflow Boundary Example
+
+## 8.3 Provider Workflows
+
+Providers MAY define workflow types to encapsulate complex provider-specific logic.
+Provider workflows MUST satisfy abstract contracts for uniform control plane interaction.
+
+### 8.3.1 Constraints on Provider-Defined Workflows
+
+Every provider workflow MUST declare:
+
+| Constraint             | Type          | Purpose                                      |
+|------------------------|---------------|----------------------------------------------|
+| maxDurationMs          | number        | Timeout ceiling                              |
+| requiredOutputFields   | string[]      | Fields the output MUST contain               |
+| inputSchema            | JSONSchema    | Validated before workflow submission          |
+| emittableResources     | ResourceType[]| Which resource types the workflow MAY emit    |
+| canSpawnSubworkflows   | boolean       | Whether subworkflows are permitted            |
+| maxSubworkflowDepth    | number        | Nesting limit                                |
+
+Provider workflows MUST also declare:
+- type: workflow type identifier
+- provider: which provider this belongs to
+- validateInput(): called before submission, MUST return ValidationResult
+- compensate(): single-node cleanup on failure
+
+Provider workflows are registered via a global registry. Registration MUST fail
+if a workflow with the same provider:type key already exists.
+
+> See also: impl/control/src/provider/contracts.ts.l2.txt §Provider Workflow Constraints
+
+### 8.3.2 Abstract Contracts
+
+Three standard contracts define provider-agnostic behavior:
+
+**spawn-instance contract:**
+- maxDuration: SPAWN_MAX_DURATION_MS
+- requiredOutput: instanceId, providerId, ip
+- emittable: instance
+- canSpawnSubworkflows: false
+- Input MUST include: spec, bootstrap config
+- Output MUST include: instanceId (internal), providerId (provider's), ip (nullable), status
+
+**terminate-instance contract:**
+- maxDuration: TERMINATE_MAX_DURATION_MS
+- requiredOutput: terminated
+- emittable: none
+- canSpawnSubworkflows: false
+- Input MUST include: providerId, gracePeriodMs?
+- Output MUST include: terminated (boolean), finalStatus
+
+**create-snapshot contract:**
+- maxDuration: SNAPSHOT_MAX_DURATION_MS
+- requiredOutput: snapshotId, providerSnapshotId
+- emittable: object (snapshot object)
+- canSpawnSubworkflows: false
+- Input MUST include: providerId, name, spec, initChecksum?
+- Output MUST include: snapshotId (internal), providerSnapshotId, sizeBytes?
+
+> See also: impl/control/src/provider/contracts.ts.l2.txt §Abstract Contracts
+
+### 8.3.3 Provider Workflow Extensibility
+
+Providers MAY implement optional optimization workflows beyond the standard
+contracts (e.g., warm volume pool management, spot fleet orchestration). These
+are NOT required for initial implementation. The workflow and contract system
+supports this extensibility pattern: a provider registers additional workflow
+blueprints and contracts during provider registration, and the control plane
+can conditionally invoke them when the provider's capabilities indicate support.
+
+> See also: impl/control/src/provider/compute/aws.ts.l2.txt §AWS Warm-Volume-Pool Workflow (Hypothetical)
+
+### 8.3.4 Control Plane Perspective
+
+From the control plane's perspective, provider workflows are opaque. The control
+plane MUST:
+
+1. Check provider capabilities to decide which workflow type to submit
+2. Submit the workflow with appropriate input
+3. Wait for workflow completion
+4. Consume the output, which MUST satisfy the relevant contract
+
+The control plane MUST NOT inspect or depend on provider-internal workflow steps.
+All provider-specific complexity is encapsulated within the workflow boundary.
+
+> See also: impl/control/src/provider/compute/aws.ts.l2.txt §Control Plane Perspective
+
+## 8.4 Feature Providers
+
+Feature providers attach cross-cutting concerns to existing instances. Unlike
+compute providers (AWS, Lambda, RunPod, OrbStack) creating and destroying compute,
+feature providers enhance instances with capabilities:
+networking (Tailscale), logging (WandB), remote development (VS Code Server).
+
+### 8.4.1 FeatureProvider Interface
+
+**FeatureProvider<TConfig, TState>** -- Contract for feature providers.
+
+| Field / Method            | Kind       | Constraint                                        |
+|---------------------------|------------|---------------------------------------------------|
+| name                      | readonly   | Feature identifier (tailscale, wandb, etc.)       |
+| capabilities              | readonly   | FeatureCapabilities flags                         |
+| attach(instanceId, config)| required   | MUST return feature state on success              |
+| detach(instanceId)        | required   | MUST clean up feature resources                   |
+| status(instanceId)        | required   | MUST return state or null                         |
+| reconcile?(context)       | optional   | For orphan detection of feature resources         |
+| onInstanceHeartbeat?(id)  | optional   | For feature maintenance                           |
+
+**FeatureCapabilities:**
+- requiresBootstrap: boolean -- feature needs bootstrap script injection
+- supportsHotAttach: boolean -- feature can attach after instance is running
+- supportsDetach: boolean -- feature can detach without terminating instance
+- crossProvider: boolean -- feature works with all compute providers
+
+During instance spawn, features listed in SpawnOptions MUST be processed: features
+requiring bootstrap MUST have their commands included in the bootstrap script.
+During termination, all attached features MUST be detached before compute termination.
+
+> See also: impl/control/src/provider/types.ts.l2.txt §Feature Provider Interface
+> See also: impl/control/src/provider/types.ts.l2.txt §Feature Lifecycle Integration
+
+### 8.4.2 Feature vs Compute Providers
+
+```
+COMPUTE PROVIDERS              FEATURE PROVIDERS
+----------------------------------------------------------------------
+Create/destroy compute         Attach to existing instances
+Instance lifecycle primary     Instance lifecycle secondary
+Direct cloud API interaction   Often API + agent coordination
+One per instance               Multiple per instance
+Examples: AWS, Lambda, RunPod  Examples: Tailscale, WandB, VS Code
+```
+
+### 8.4.3 Cleanup Priority Order
+
+Feature cleanup occurs before instance termination to ensure proper teardown:
+
+```
+Priority Order (highest to lowest):
+  90: Allocations
+  80: Runs
+  70: Artifacts
+  65: Features (Tailscale machines, WandB runs, VS Code servers)
+  60: Other Objects
+  50: Instances
+  10: Snapshots
+```
+
+### 8.4.4 Tailscale Feature Provider
+
+The Tailscale feature provider MUST implement FeatureProvider<TailscaleConfig, TailscaleState>
+with the following contract:
+
+- capabilities: requiresBootstrap=true, supportsHotAttach=true, supportsDetach=true,
+  crossProvider=true
+- attach(): MUST install Tailscale (via SSH if hot-attach, or bootstrap if during spawn),
+  wait for machine to appear in tailnet, and return { machineId, tailscaleIp, online, lastSeen }
+- detach(): MUST remove machine from Tailscale network and clean up feature state in DB
+- status(): MUST refresh online status from Tailscale API before returning
+
+> See also: impl/control/src/provider/feature/tailscale.ts.l2.txt §TailscaleFeatureProvider
+
+## 8.5 Extension Framework
+
+The extension framework provides hooks and storage for provider-specific
+behavior without polluting core control plane code.
+
+### 8.5.1 Provider State (In-Memory Cache)
+
+Providers MUST cache ephemeral data (spot prices, capacity info) in memory with TTL.
+This data is NOT persisted -- it is re-fetched on control plane restart. No database
+table is needed. Implementations SHOULD use a simple get-or-fetch pattern with
+TTL-based expiration.
+
+> See also: impl/control/src/provider/extensions.ts.l2.txt §In-Memory Cache
+
+### 8.5.2 Lifecycle Hooks: Heartbeat Expectations Model
+
+Provider lifecycle hooks use an expectations-based model where the control plane
+explicitly communicates what it needs and providers respond with receipts.
+
+**ProviderLifecycleHooks:**
+
+| Hook           | When Called           | Purpose                                  |
+|----------------|-----------------------|------------------------------------------|
+| onStartup?()   | Control plane starts  | Init, cache warming, health checks       |
+| onShutdown?()  | Graceful shutdown     | Cleanup, state persistence               |
+| onHeartbeat?() | Periodic heartbeat    | Task execution via expectations model    |
+
+**HeartbeatExpectations** -- sent by core to provider:
+- tasks: HeartbeatTask[] -- each with type (reconcile|health_check|cache_refresh|pool_maintenance),
+  priority (high|normal|low), lastRun?, params?
+- deadline: timestamp by which tasks SHOULD complete
+
+**HeartbeatReceipts** -- returned by provider:
+- receipts: TaskReceipt[] -- each with type, status (completed|skipped|deferred|failed),
+  result?, reason?
+- providerTasks?: ProviderTaskReport[] -- provider-initiated work not requested by core
+- workflowsLaunched?: WorkflowLaunchReport[] -- workflows triggered by events
+  (spot interruptions, budget thresholds, drift). Trigger types: spot_interruption,
+  budget_threshold, drift_detected, provider_event.
+- nextHeartbeat?: { preferredInterval } -- timing negotiation
+
+> See also: impl/control/src/provider/extensions.ts.l2.txt §Lifecycle Hooks Interface
+> See also: impl/control/src/provider/extensions.ts.l2.txt §Heartbeat Expectations Model
+
+### 8.5.3 Heartbeat Flow Example
+
+```typescript
+// Core sends expectations
+const expectations: HeartbeatExpectations = {
+  tasks: [
+    { type: 'health_check', priority: 'high' },
+    { type: 'reconcile', priority: 'normal', lastRun: 1706900000000 },
+    { type: 'cache_refresh', priority: 'low' },
+  ],
+  deadline: Date.now() + 5000,
+};
+
+const receipts = await provider.onHeartbeat(expectations);
+
+// Provider returns receipts
+{
+  receipts: [
+    {
+      type: 'health_check',
+      status: 'completed',
+      result: { healthy: true, latency: 45 }
+    },
+    {
+      type: 'reconcile',
+      status: 'completed',
+      result: {
+        actions: [
+          { type: 'update', instanceId: 'i-123', reason: 'IP changed' }
+        ]
+      }
+    },
+    {
+      type: 'cache_refresh',
+      status: 'skipped',
+      reason: 'cache_valid'
+    }
+  ],
+  providerTasks: [
+    {
+      type: 'volume_cleanup',
+      status: 'completed',
+      result: { count: 2 }
+    }
+  ],
+  nextHeartbeat: { preferredInterval: 30000 }
+}
+```
+> See also: impl/control/src/provider/extensions.ts.l2.txt §Heartbeat Expectations Model
+
+### 8.5.4 Benefits of Expectations Model
+
+- **Explicit communication**: Core states what it needs, not implicit timing
+- **Transparent acknowledgment**: Provider can acknowledge, skip, or defer
+- **Health check as first-class**: Health becomes an explicit task
+- **Natural reconciliation**: Reconciliation is just another heartbeat task
+- **Provider autonomy**: Provider can report its own maintenance work
+- **Timing negotiation**: Provider can request preferred heartbeat interval
+- **Async fulfillment**: Events requiring workflows (spot interruptions, budget
+  thresholds) are reported via `workflowsLaunched` rather than handled inline
+
+### 8.5.5 AWS Lifecycle Hooks
+
+The AWS provider MUST implement lifecycle hooks as follows:
+
+- **onStartup**: MUST verify AWS credentials (STS GetCallerIdentity), warm spot price
+  cache for active regions, and ensure required security groups and IAM roles exist.
+- **onShutdown**: MUST flush any buffered metrics.
+- **onHeartbeat**: MUST dispatch each task by type (health_check, reconcile,
+  cache_refresh, pool_maintenance), returning receipts. Unknown task types
+  SHOULD be skipped with reason. Provider MAY report autonomous maintenance
+  (e.g., stale volume cleanup) via providerTasks.
+
+> See also: impl/control/src/provider/compute/aws.ts.l2.txt §AWS Lifecycle Hooks
+
+### 8.5.6 Heartbeat Task Handlers
+
+Providers implementing heartbeat tasks MUST satisfy these behavioral requirements:
+
+- **health_check**: MUST verify API connectivity (e.g., STS call for AWS). MUST
+  return latency measurement. MUST report failed status with error reason on failure.
+- **reconcile**: MUST compare internal DB records against provider API state.
+  MUST detect orphans (provider instances not in DB) and log them. MUST mark
+  instances terminated in DB if deleted externally. MUST detect drift (IP changes,
+  status mismatches) and update DB records accordingly.
+- **cache_refresh**: SHOULD skip if cache was refreshed within CACHE_REFRESH_MIN_INTERVAL.
+  MUST refresh spot prices for active regions. SHOULD clean up expired provider state.
+- **pool_maintenance**: MUST check warm volume pool levels and report status.
+
+> See also: impl/control/src/provider/compute/aws.ts.l2.txt §Heartbeat Task Handlers
+
+### 8.5.7 Event-Driven Hooks
+
+Event-driven hooks bridge external events to workflow submission:
+
+- **onSpotInterruption**: On spot interruption notice, the provider MUST mark the
+  affected run as spot-interrupted. If warning time exceeds 30 seconds, it MUST
+  submit an emergency-checkpoint workflow. It MUST submit a resume-interrupted-run
+  workflow (preferring on-demand) for the affected run.
+- **onBudgetThreshold**: On warning threshold, the provider SHOULD log a warning.
+  On critical threshold, it MUST terminate non-essential instances (warm pool
+  instances with no manifest assignment) via terminate-instance workflows.
+
+> See also: impl/control/src/provider/compute/aws.ts.l2.txt §Event-Driven Hooks
+
+### 8.5.8 TTL Patterns
+
+Providers SHOULD define TTL configurations for cached state categories:
+
+| Key Prefix         | TTL         | Rationale                          |
+|--------------------|-------------|------------------------------------|
+| spot_prices:       | 5 min       | Prices change frequently           |
+| capacity:          | 1 min       | Capacity is volatile               |
+| instance:          | 30 sec      | Instance state changes rapidly     |
+| warm_volume_pool:  | no TTL      | Explicitly managed by pool logic   |
+| cost:              | 1 hour      | Billing data updates slowly        |
+| api_calls:         | 1 min       | Rolling window for rate tracking   |
+
+Default TTL SHOULD be 5 minutes. Maximum TTL MUST NOT exceed 1 hour.
+
+> See also: impl/control/src/provider/extensions.ts.l2.txt §TTL Configuration
+
+### 8.5.9 Hooks vs Workflows Distinction
+
+```
+HOOKS                                  WORKFLOWS
+----------------------------------------------------------------------
+Event-driven                           Task-driven
+Synchronous response expected          Asynchronous execution
+Lightweight (< 1 second)               May be long-running (minutes)
+Cannot spawn subworkflows              Can spawn subworkflows
+No manifest/resource ownership         Owns manifest with resources
+Called by control plane lifecycle      Submitted via workflow engine
+Cannot use pattern library             Uses pattern library
+Returns data to caller                 Writes output to workflow record
+
+WHEN TO USE HOOKS:
+- Quick state updates (onInstanceHeartbeat)
+- Cache warming (onStartup)
+- Triggering workflows (onSpotInterruption -> submit workflow)
+- Lightweight maintenance (onHeartbeat)
+
+WHEN TO USE WORKFLOWS:
+- Multi-step operations (spawn, terminate)
+- Operations that create resources
+- Operations that need compensation capability
+- Operations with timeout/retry requirements
+```
+> See also: impl/control/src/provider/compute/aws.ts.l2.txt §Spot Interruption Workflow
+
+### 8.5.10 Provider Registration
+
+Provider registration bundles the provider implementation, lifecycle hooks,
+workflows, and contracts into a single registration call.
+
+A ProviderRegistration MUST include:
+- provider: Provider implementation
+- hooks: ProviderLifecycleHooks
+
+A ProviderRegistration MAY include:
+- workflows: WorkflowBlueprint[] (provider-specific workflows)
+- contracts: ProviderWorkflowContract[] (workflow contracts)
+
+Complex providers (AWS) register multiple workflows and contracts. Simpler
+providers (Lambda, RunPod) MAY register with empty workflow/contract lists.
+
+> See also: impl/control/src/provider/registry.ts.l2.txt §Dynamic Provider Registration
+> See also: impl/control/src/provider/extensions.ts.l2.txt §Hook Registry
+> See also: impl/control/src/provider/compute/aws.ts.l2.txt §Full AWS Registration
+
+### 8.5.11 Contract Testing Pattern
+
+Contract compliance MUST be verified through parametric tests that run the same
+test suite against all providers. The provider registry serves both runtime and
+test-time provider discovery.
+
+Tests MUST verify:
+- **SpawnInstanceContract**: spawn returns required fields; idempotent when
+  capability declared (same clientRequestId -> same instance ID); tags are emitted
+- **TerminateInstanceContract**: non-existent instance throws NotFoundError;
+  terminate is idempotent (second call MUST NOT throw)
+- **ListFilter**: filters by region and status correctly
+- **BootstrapScript**: generates valid script with content, format, and SHA-256 checksum;
+  includes agent download URL
+- **Snapshot capability** (gated): creates snapshot when supported
+- **Spot capability** (gated): requests spot instance when supported
+
+Capability-gated tests MUST skip gracefully for providers without the feature.
+
+> See also: impl/control/src/provider/registry.ts.l2.txt §Compute Provider Registry
+> See also: impl/control/src/provider/registry.ts.l2.txt §Runtime Access
+> See also: impl/control/src/provider/registry.ts.l2.txt §Test Utilities
+> See also: impl/control/src/provider/registry.ts.l2.txt §Contract Testing Pattern (Vitest)
+
+### 8.5.12 Provider Implementation Spectrum
+
+```
+TESTING & CHAOS PROVIDER (OrbStack)
+-----------------------------------
+OrbStack is the foundation of contract-based testing.
+
+Intent contracts (SpawnInstanceContract, TerminateInstanceContract, etc.) define
+provider-agnostic behavior. OrbStack implements these contracts identically to
+cloud providers, plus chaos injection for failure scenarios.
+
+Key insight: We're not testing "OrbStack works therefore AWS works." We're testing
+"the control plane handles intent contracts correctly, and any provider implementing
+those contracts gets the same behavior."
+
+Chaos capabilities:
+- Fault injection (network timeouts, API errors, spot interruptions)
+- Resource constraints (capacity errors, quota limits)
+- Drift simulation (instances disappearing, IPs changing)
+- Contract compliance verification under failure conditions
+
+Requirements: Provider interface core methods, chaos/fault injection hooks,
+controlled failure scenarios, error taxonomy mapping.
+
+Example Implementation Size: ~600 lines (including chaos features)
+
+
+ADDITIONAL PROVIDERS (Lambda, RunPod, future: SLURM, GCP, CoreWeave)
+---------------------------------------------------------------------
+Requirements:
+- Implement Provider interface core methods
+- Implement basic lifecycle hooks (onStartup, onShutdown, onHeartbeat)
+- Handle 'health_check' and 'reconcile' heartbeat task types
+- Map provider errors to error taxonomy
+
+Optional:
+- Implement optional interface methods (snapshots, spot) based on capabilities
+- Use in-memory caching
+
+Not Needed:
+- Custom workflows
+- Custom workflow contracts
+- Complex hooks (onSpotInterruption, etc.)
+
+Example Implementation Size: ~500 lines
+
+Note: Simpler providers aren't forced into complex cloud platform integration.
+Each provider implements the capabilities that make sense for its platform.
+
+
+REFERENCE IMPLEMENTATION (AWS - first detailed integration)
+------------------------------------------------------------
+Requirements:
+- Everything from Additional Providers
+
+Plus:
+- Enhanced types (AWSInstance, AWSSnapshot)
+- Materialization/projection functions
+- Custom workflows for optimization:
+  - Warm volume pool management
+  - Spot fleet orchestration
+  - Multi-AZ capacity probing
+- Full lifecycle hooks:
+  - Full heartbeat expectations handling (all task types)
+  - Workflow launch reporting (spot interruptions, budget thresholds)
+  - Sophisticated reconciliation with drift detection
+- Provider-specific workflow contracts
+
+Advanced:
+- Cost Explorer integration
+- Capacity Advisor integration
+- Reserved instance utilization tracking
+
+Example Implementation Size: ~3000 lines
+
+AWS happened to be the first provider with deep integration. When SLURM,
+GCP, or CoreWeave are added, they will receive the same depth of integration
+where appropriate. AWS is not inherently superior - it's just the reference
+implementation that established patterns for advanced provider features.
+
+
+The key difference: Advanced providers use the extension framework to
+implement optimizations that are invisible to the control plane. The
+control plane submits workflows and receives generic outputs. All
+provider-specific complexity is encapsulated.
+```

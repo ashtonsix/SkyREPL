@@ -1,0 +1,342 @@
+# compensation.ts - Compensation Framework and Two-Phase Spawn (L2 Pseudocode)
+
+## Imports
+
+```typescript
+import { getDatabase, queryOne, queryMany, transaction } from '../material/db';
+import { TIMING } from '../../../../shared/src/config/timing';
+import type {
+  NodeExecutor, CompensationContext, NodeContext,
+} from '../../../../shared/src/api/workflows';
+```
+
+## Constants
+
+```typescript
+// From Ch6 spec and timing.ts
+const MAX_COMPENSATION_RETRIES = 3;
+// TIMING.COMPENSATION_TIMEOUT_MS (5 minutes, from timing.ts)
+// Retryable compensation errors
+const RETRYABLE_COMPENSATION_ERRORS = ['RATE_LIMITED', 'NETWORK_ERROR', 'PROVIDER_API_ERROR'];
+```
+
+## §CompensateFailedNode
+
+```typescript
+/**
+ * Compensate a single failed node (Ch6 §6.5).
+ *
+ * Core principle: compensate ONE node only — the failed node.
+ * NO cascade through completed nodes. Manifest policies handle broader cleanup.
+ *
+ * COMPENSATION vs TEARDOWN:
+ * - COMPENSATION: error correction DURING workflow (single node)
+ * - TEARDOWN: scheduled cleanup AFTER workflow (manifest expiry)
+ */
+export interface CompensationResult {
+  success: boolean;
+  error?: Error;
+  skippedReason?: 'no_handler' | 'resource_transferred' | 'already_compensated';
+}
+
+async function compensateFailedNode(
+  workflowId: string,
+  failedNodeId: string
+): Promise<CompensationResult> {
+  const node = await db.getWorkflowNode(failedNodeId);
+
+  if (node.status !== 'failed') {
+    return { success: true, skippedReason: 'already_compensated' };
+  }
+
+  // Skip if resource transferred to another workflow
+  if (!shouldCompensate(workflowId, node)) {
+    return { success: true, skippedReason: 'resource_transferred' };
+  }
+
+  // Compensate only this single failed node
+  const executor = nodeExecutors.get(node.node_type);
+  if (!executor?.compensate) {
+    return { success: true, skippedReason: 'no_handler' };
+  }
+
+  const ctx: CompensationContext = {
+    nodeId: node.node_id,
+    output: JSON.parse(node.output_json),
+  };
+
+  // Execute compensation with timeout and retry (Ch6 §6.8)
+  const result = await compensateWithRetry(
+    () => executor.compensate!(ctx),
+    MAX_COMPENSATION_RETRIES
+  );
+
+  if (result.success) {
+    await db.updateWorkflowNode(node.id, { compensated: true });
+  }
+
+  return result;
+
+  // NOTE: No cascade to other completed nodes.
+  // Manifest policies handle broader resource cleanup.
+}
+
+/**
+ * Check if node's resources should be compensated.
+ * Skip if resource has been transferred to another workflow's manifest.
+ */
+function shouldCompensate(workflowId: string, node: WorkflowNode): boolean {
+  // Check if any emitted resources have been claimed by other workflows
+  const output = JSON.parse(node.output_json ?? '{}');
+  if (!output.instanceId && !output.resourceId) return true;
+
+  const resourceId = output.instanceId ?? output.resourceId;
+  const transferred = queryOne(`
+    SELECT 1 FROM manifest_resources mr
+    JOIN workflows w ON w.manifest_id = mr.manifest_id
+    WHERE mr.resource_id = ? AND w.id != ?
+  `, [resourceId, workflowId]);
+
+  return !transferred;
+}
+```
+
+## §CompensateWithRetry
+
+```typescript
+/**
+ * Execute compensation with timeout and retry (Ch6 §6.8.1, §6.8.2).
+ *
+ * Timeout: COMPENSATION_TIMEOUT_MS (5 minutes) per handler
+ * On timeout: log error, allow orphan scan to catch remaining resources
+ *
+ * Retry:
+ * - Retryable errors (RATE_LIMITED, NETWORK_ERROR, PROVIDER_API_ERROR): up to 3 attempts
+ * - Non-retryable errors: fail immediately
+ * - Backoff schedule: 1s, 2s, 4s (exponential)
+ */
+async function compensateWithRetry(
+  compensateFn: () => Promise<void>,
+  maxRetries: number = MAX_COMPENSATION_RETRIES
+): Promise<CompensationResult> {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      await Promise.race([
+        compensateFn(),
+        timeout(TIMING.COMPENSATION_TIMEOUT_MS),  // 5 minutes
+      ]);
+      return { success: true };  // Success
+
+    } catch (error) {
+      const isRetryable = RETRYABLE_COMPENSATION_ERRORS.includes(error.code);
+      const isLastAttempt = attempt === maxRetries - 1;
+
+      if (!isRetryable || isLastAttempt) {
+        // Log error, orphan scan will catch remaining resources
+        logger.error('compensation_failed', { error, attempt });
+        if (error.message === 'COMPENSATION_TIMEOUT') {
+          logger.error('compensation_timeout', {
+            message: 'Orphan scan will handle cleanup',
+          });
+        }
+        return { success: false, error };
+      }
+
+      // Exponential backoff: 1s, 2s, 4s
+      await sleep(Math.pow(2, attempt) * 1000);
+    }
+  }
+
+  return { success: false, error: new Error('Max retries exhausted') };
+}
+```
+
+## §TwoPhaseSpawn
+
+```typescript
+/**
+ * Two-phase spawn node executor (Ch6 §6.2).
+ *
+ * Instance spawning uses a two-phase protocol to prevent orphaned resources:
+ *
+ * Phase 1: Create DB record + manifest entry BEFORE cloud API call
+ * Phase 2: Execute cloud API call, update DB with provider_id
+ *
+ * Key properties:
+ * - DB record + manifest entry created before cloud API call
+ * - Idempotency key prevents duplicate spawns on retry
+ * - Reconciliation finds instances if DB update fails after cloud call
+ * - Compensation handles both phases (DB only or DB + cloud)
+ * - Kill at any step guarantees no orphans
+ */
+async function executeSpawnNode(ctx: NodeContext): Promise<NodeOutput> {
+  const options = ctx.input as SpawnOptions;
+
+  // Phase 1: Create DB record with spawn:pending workflow_state BEFORE cloud call
+  // Note: id is auto-generated by database (INTEGER PRIMARY KEY AUTOINCREMENT)
+  const idempotencyKey = `${ctx.workflowId}:${ctx.nodeId}`;
+
+  const result = await db.execute(`
+    INSERT INTO instances (
+      provider, provider_id, spec, region, workflow_state,
+      spawn_idempotency_key, current_manifest_id, created_at, last_heartbeat
+    ) VALUES (?, '', ?, ?, 'spawn:pending', ?, ?, ?, ?)
+  `, [
+    options.provider,
+    options.spec,
+    options.region,
+    idempotencyKey,
+    ctx.manifestId,
+    Date.now(),
+    Date.now(),
+  ]);
+
+  const instanceId = result.lastInsertRowid;
+
+  // Add to manifest BEFORE cloud call
+  await ctx.emitResource('instance', instanceId);
+
+  // Phase 2: Execute cloud API call
+  const provider = getProvider(options.provider);
+  const providerOptions = {
+    ...options,
+    clientRequestId: provider.capabilities.idempotentSpawn
+      ? idempotencyKey
+      : undefined,
+  };
+
+  try {
+    const providerInstance = await provider.spawn(providerOptions);
+
+    // Update with provider_id and transition to provisioning
+    await db.execute(`
+      UPDATE instances
+      SET provider_id = ?,
+          workflow_state = 'launch-run:provisioning',
+          ip = ?,
+          last_heartbeat = ?
+      WHERE id = ? AND workflow_state = 'spawn:pending'
+    `, [
+      providerInstance.id,
+      providerInstance.ip,
+      Date.now(),
+      instanceId,
+    ]);
+
+    return {
+      instanceId,
+      providerId: providerInstance.id,
+      ip: providerInstance.ip,
+      workflow_state: 'launch-run:provisioning',
+    };
+  } catch (error) {
+    // Mark as failed but keep record for reconciliation
+    await db.execute(`
+      UPDATE instances SET workflow_state = 'spawn:error', last_heartbeat = ?
+      WHERE id = ? AND workflow_state = 'spawn:pending'
+    `, [Date.now(), instanceId]);
+    throw error;
+  }
+}
+```
+
+## §RetrySpawnNode
+
+```typescript
+/**
+ * Retry-aware spawn node execution (Ch6 §6.2).
+ *
+ * On retry, checks for existing spawn attempt via idempotency key:
+ * - spawn:pending → attempt reconciliation with provider
+ * - viable state (not error) → return existing instance
+ * - error state → create new spawn attempt
+ */
+async function retrySpawnNode(ctx: NodeContext): Promise<NodeOutput> {
+  const idempotencyKey = `${ctx.workflowId}:${ctx.nodeId}`;
+
+  // Check for existing spawn attempt
+  const existingInstance = await db.queryOne(`
+    SELECT * FROM instances WHERE spawn_idempotency_key = ?
+  `, [idempotencyKey]);
+
+  if (existingInstance) {
+    if (existingInstance.workflow_state === 'spawn:pending') {
+      // Attempt reconciliation with provider
+      const reconciled = await reconcilePendingSpawn(existingInstance);
+      if (reconciled) {
+        // Found in provider, return existing instance
+        return {
+          instanceId: reconciled.id,
+          providerId: reconciled.provider_id,
+          ip: reconciled.ip,
+          workflow_state: reconciled.workflow_state,
+        };
+      }
+      // Not found, mark as failed and create new attempt
+      await db.execute(`
+        UPDATE instances SET workflow_state = 'spawn:error' WHERE id = ?
+      `, [existingInstance.id]);
+    } else if (!existingInstance.workflow_state?.endsWith(':error')) {
+      // Existing instance is viable, return it
+      return {
+        instanceId: existingInstance.id,
+        providerId: existingInstance.provider_id,
+        ip: existingInstance.ip,
+        workflow_state: existingInstance.workflow_state,
+      };
+    }
+  }
+
+  // No viable existing instance, execute new spawn
+  return await executeSpawnNode(ctx);
+}
+```
+
+## §CompensateSpawnNode
+
+```typescript
+/**
+ * Compensation handler for spawn nodes (Ch6 §6.5).
+ *
+ * Handles both phases of two-phase spawn:
+ * - Phase 1 only (DB record, no provider resource): just update DB
+ * - Phase 1+2 (DB + provider resource): terminate in provider, then update DB
+ */
+async function compensateSpawnNode(ctx: CompensationContext): Promise<void> {
+  const output = ctx.output as SpawnNodeOutput;
+
+  // If we have provider_id, terminate in provider
+  if (output.providerId) {
+    const provider = getProvider(output.provider);
+    try {
+      await provider.terminate(output.providerId);
+    } catch (error) {
+      if (error.code !== 'NOT_FOUND') throw error;
+      // NOT_FOUND means already terminated — that's fine
+    }
+  }
+
+  // Mark as terminated in DB
+  await db.execute(`
+    UPDATE instances SET workflow_state = 'terminate:complete'
+    WHERE id = ?
+  `, [output.instanceId]);
+}
+```
+
+## §NodeExecutorRegistry
+
+```typescript
+/**
+ * Registry for node executors, used by engine to look up compensation handlers.
+ */
+const nodeExecutors = new Map<string, NodeExecutor>();
+
+export function registerNodeExecutor(nodeType: string, executor: NodeExecutor): void {
+  nodeExecutors.set(nodeType, executor);
+}
+
+export function getNodeExecutor(nodeType: string): NodeExecutor | undefined {
+  return nodeExecutors.get(nodeType);
+}
+```

@@ -1,0 +1,1053 @@
+# aws.ts - AWS Provider Implementation (L2 Pseudocode)
+
+# Cross-references:
+# - Provider types: ../types.ts.l2.txt (Provider, AWSInstance, AWSSnapshot, SpawnOptions, BootstrapConfig)
+# - Errors: ../errors.ts.l2.txt (ProviderError, CapacityError, NotFoundError, etc.)
+# - Extensions: ../extensions.ts.l2.txt (ProviderLifecycleHooks, HeartbeatExpectations)
+# - Contracts: ../contracts.ts.l2.txt (ProviderWorkflowContract)
+# - Registry: ../registry.ts.l2.txt (registerProvider)
+# - Shared types: ../../../../../shared/src/types.ts.l2.txt (ProviderName)
+# - Timing: ../../../../../shared/src/config/timing.ts.l2.txt
+
+## Imports
+
+```typescript
+import { EC2Client, RunInstancesCommand, TerminateInstancesCommand,
+         DescribeInstancesCommand, CreateImageCommand, DescribeImagesCommand,
+         DeregisterImageCommand, DescribeSpotPriceHistoryCommand,
+         CreateVolumeCommand, DeleteVolumeCommand } from '@aws-sdk/client-ec2';
+import { STSClient, GetCallerIdentityCommand } from '@aws-sdk/client-sts';
+import * as crypto from 'crypto';
+import * as YAML from 'yaml';
+import type { Provider, AWSInstance, AWSSnapshot, SpawnOptions,
+              BootstrapConfig, BootstrapScript, BootstrapFeature,
+              ProviderInstanceStatus } from '../types';
+import { NotFoundError } from '../errors';
+import type { ProviderLifecycleHooks, HeartbeatExpectations,
+              HeartbeatReceipts, TaskReceipt, ProviderTaskReport } from '../extensions';
+import * as timing from '../../../../../shared/src/config/timing';
+```
+
+## Spawn Idempotency Protocol
+
+```typescript
+/**
+ * Two-phase spawn protocol guaranteeing idempotency and preventing orphans.
+ *
+ * Design Principles:
+ * 1. DB record created BEFORE cloud API call
+ * 2. Instance added to manifest BEFORE cloud API call
+ * 3. Reconciliation handles orphaned spawn:pending records
+ * 4. Property test satisfied: "Kill at any step -> no orphans"
+ */
+
+// Phase 1: Reserve in DB
+async function reserveInstance(ctx: NodeContext, options: SpawnOptions): Promise<Instance> {
+  const idempotencyKey = `${ctx.workflowId}:${ctx.nodeId}`;
+
+  // Create instance record with spawn:pending BEFORE calling provider
+  const result = await db.execute(`
+    INSERT INTO instances (
+      provider, provider_id, spec, region, workflow_state,
+      spawn_idempotency_key, current_manifest_id, created_at, last_heartbeat
+    ) VALUES (?, ?, ?, ?, 'spawn:pending', ?, ?, ?, ?)
+  `, [
+    options.provider,
+    '', // provider_id not yet assigned
+    options.spec,
+    options.region,
+    idempotencyKey,
+    ctx.manifestId,
+    Date.now(),
+    Date.now()
+  ]);
+
+  const instanceId = result.lastInsertRowid;
+
+  // Add to manifest BEFORE calling provider
+  await ctx.emitResource('instance', instanceId);
+
+  return { id: instanceId, ...options, workflow_state: 'spawn:pending' };
+}
+
+// Phase 2: Execute Spawn
+async function executeSpawn(
+  ctx: NodeContext,
+  instance: Instance,
+  options: SpawnOptions
+): Promise<Instance> {
+  const provider = getProvider(options.provider);
+
+  // Call provider.spawn() with clientRequestId if supported
+  const providerOptions = {
+    ...options,
+    clientRequestId: provider.capabilities.idempotentSpawn
+      ? instance.spawn_idempotency_key
+      : undefined
+  };
+
+  try {
+    const providerInstance = await provider.spawn(providerOptions);
+
+    // Update DB with provider_id and transition to provisioning
+    await db.execute(`
+      UPDATE instances
+      SET provider_id = ?,
+          workflow_state = ?,
+          ip = ?,
+          last_heartbeat = ?
+      WHERE id = ?
+        AND workflow_state = 'spawn:pending'
+    `, [
+      providerInstance.id,
+      mapProviderStatus(providerInstance.status),
+      providerInstance.ip,
+      Date.now(),
+      instance.id
+    ]);
+
+    return { ...instance, provider_id: providerInstance.id, workflow_state: 'launch-run:provisioning' };
+  } catch (error) {
+    // On error, mark as failed but keep record for retry/reconciliation
+    await db.execute(`
+      UPDATE instances SET workflow_state = 'spawn:error', last_heartbeat = ?
+      WHERE id = ? AND workflow_state = 'spawn:pending'
+    `, [Date.now(), instance.id]);
+    throw error;
+  }
+}
+```
+
+## Retry & Reconciliation
+
+```typescript
+async function retrySpawn(ctx: NodeContext, failedInstanceId: string): Promise<Instance> {
+  const instance = await db.queryOne(`
+    SELECT * FROM instances WHERE id = ?
+  `, [failedInstanceId]);
+
+  if (instance.workflow_state === 'spawn:pending') {
+    // Check with provider if instance was actually created
+    const reconciled = await reconcilePendingSpawn(instance);
+    if (reconciled) {
+      return reconciled; // Found the instance in provider, no retry needed
+    }
+  }
+
+  // Clean up failed attempt
+  await db.execute(`
+    UPDATE instances SET workflow_state = 'spawn:error' WHERE id = ?
+  `, [failedInstanceId]);
+
+  // Create new attempt (Phase 1 again)
+  const newInstance = await reserveInstance(ctx, instance);
+  return await executeSpawn(ctx, newInstance, instance);
+}
+
+async function reconcilePendingSpawn(instance: Instance): Promise<Instance | null> {
+  const provider = getProvider(instance.provider);
+
+  // For providers that support clientRequestId, query by tag
+  if (provider.capabilities.idempotentSpawn) {
+    const providerInstances = await provider.list({
+      tags: { 'skyrepl:spawn_key': instance.spawn_idempotency_key }
+    });
+
+    if (providerInstances.length > 0) {
+      const providerInstance = providerInstances[0];
+      await db.execute(`
+        UPDATE instances
+        SET provider_id = ?, workflow_state = ?, ip = ?, last_heartbeat = ?
+        WHERE id = ?
+      `, [
+        providerInstance.id,
+        mapProviderStatus(providerInstance.status),
+        providerInstance.ip,
+        Date.now(),
+        instance.id
+      ]);
+      return { ...instance, provider_id: providerInstance.id };
+    }
+  }
+
+  // Instance not found in provider - truly failed
+  return null;
+}
+
+// Periodic reconciliation finds stale spawn:pending records
+async function reconcileStalePendingSpawns(): Promise<void> {
+  const staleThresholdMs = timing.PENDING_SPAWN_STALE_THRESHOLD_MS;
+  const staleInstances = await db.query(`
+    SELECT * FROM instances
+    WHERE workflow_state = 'spawn:pending'
+      AND created_at < ?
+  `, [Date.now() - staleThresholdMs]);
+
+  for (const instance of staleInstances) {
+    const reconciled = await reconcilePendingSpawn(instance);
+    if (!reconciled) {
+      await db.execute(`
+        UPDATE instances SET workflow_state = 'spawn:error' WHERE id = ?
+      `, [instance.id]);
+    }
+  }
+}
+```
+
+## Compensation
+
+```typescript
+async function compensateSpawn(ctx: CompensationContext): Promise<void> {
+  const instance = ctx.output as Instance;
+
+  // If we made it to Phase 2 (have provider_id), terminate in provider
+  if (instance.provider_id) {
+    const provider = getProvider(instance.provider);
+    try {
+      await provider.terminate(instance.provider_id);
+    } catch (error) {
+      // Instance may already be terminated, that's OK
+      if (error.code !== 'NOT_FOUND') throw error;
+    }
+  }
+  // If provider_id is null, Phase 1 completed but Phase 2 crashed.
+  // Skip provider.terminate() since no cloud resource exists.
+  // Tag-based orphan recovery (Ch12) is the primary cleanup mechanism.
+
+  // Mark as terminated in DB
+  await db.execute(`
+    UPDATE instances SET workflow_state = 'terminate:complete' WHERE id = ?
+  `, [instance.id]);
+}
+```
+
+## Bootstrap Generation
+
+```typescript
+class AWSProvider implements Provider<AWSInstance, AWSSnapshot> {
+  generateBootstrap(config: BootstrapConfig): BootstrapScript {
+    const cloudInit = {
+      write_files: [
+        {
+          path: '/etc/skyrepl/config.json',
+          content: JSON.stringify({
+            controlPlaneUrl: config.controlPlaneUrl,
+            registrationToken: config.registrationToken,
+          }),
+        },
+      ],
+      runcmd: [
+        // Download and install agent
+        `curl -fsSL ${config.agentUrl} -o /usr/local/bin/skyrepl-agent`,
+        'chmod +x /usr/local/bin/skyrepl-agent',
+
+        // Feature installations
+        ...this.generateFeatureCommands(config.features),
+
+        // User init script
+        ...(config.initScript ? [config.initScript] : []),
+
+        // Start agent
+        '/usr/local/bin/skyrepl-agent start',
+      ],
+    };
+
+    const content = `#cloud-config\n${YAML.stringify(cloudInit)}`;
+    const checksum = crypto.createHash('sha256').update(content).digest('hex');
+
+    return {
+      content,
+      format: 'cloud-init',
+      checksum,
+    };
+  }
+
+  private generateFeatureCommands(features?: BootstrapFeature[]): string[] {
+    if (!features) return [];
+
+    const commands: string[] = [];
+    for (const feature of features) {
+      switch (feature.name) {
+        case 'nvidia-driver':
+          commands.push(
+            'apt-get update',
+            'apt-get install -y nvidia-driver-535'
+          );
+          break;
+        case 'cuda':
+          commands.push(
+            'wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb',
+            'dpkg -i cuda-keyring_1.1-1_all.deb',
+            `apt-get install -y cuda-${feature.version ?? '12.2'}`
+          );
+          break;
+        case 'tailscale':
+          commands.push(
+            'curl -fsSL https://tailscale.com/install.sh | sh',
+            `tailscale up --authkey=${feature.config?.authKey ?? '$TAILSCALE_AUTHKEY'}`
+          );
+          break;
+        case 'docker':
+          commands.push(
+            'curl -fsSL https://get.docker.com | sh',
+            'usermod -aG docker ubuntu'
+          );
+          break;
+      }
+    }
+    return commands;
+  }
+}
+```
+
+## Materialization (Generic -> AWS-Specific)
+
+```typescript
+/**
+ * MATERIALIZATION: When workflow enters provider context,
+ * generic Instance is enhanced to provider-specific type.
+ * Happens at provider-specific workflow/subworkflow boundaries.
+ */
+
+async function materializeAWSInstance(
+  genericInstance: Instance
+): Promise<AWSInstance> {
+  if (genericInstance.provider !== 'aws') {
+    throw new Error(`Cannot materialize non-AWS instance as AWSInstance`);
+  }
+
+  const ec2 = new EC2Client({});
+  const describeResult = await ec2.send(new DescribeInstancesCommand({
+    InstanceIds: [genericInstance.providerId],
+  }));
+
+  const ec2Instance = describeResult.Reservations?.[0]?.Instances?.[0];
+  if (!ec2Instance) {
+    throw new NotFoundError('aws', 'instance', genericInstance.providerId);
+  }
+
+  const awsInstance: AWSInstance = {
+    // Base provider fields
+    id: genericInstance.providerId,
+    status: mapEC2Status(ec2Instance.State?.Name),
+    spec: ec2Instance.InstanceType ?? genericInstance.spec,
+    region: genericInstance.region,
+    ip: ec2Instance.PublicIpAddress ?? null,
+    privateIp: ec2Instance.PrivateIpAddress ?? null,
+    createdAt: ec2Instance.LaunchTime?.getTime() ?? genericInstance.createdAt,
+    isSpot: ec2Instance.InstanceLifecycle === 'spot',
+    spotRequestId: ec2Instance.SpotInstanceRequestId,
+
+    // AWS-specific fields
+    availabilityZone: ec2Instance.Placement?.AvailabilityZone ?? '',
+    subnetId: ec2Instance.SubnetId ?? '',
+    vpcId: ec2Instance.VpcId ?? '',
+    securityGroupIds: ec2Instance.SecurityGroups?.map(sg => sg.GroupId!) ?? [],
+    iamInstanceProfile: ec2Instance.IamInstanceProfile?.Arn,
+    ebsOptimized: ec2Instance.EbsOptimized ?? false,
+
+    volumes: ec2Instance.BlockDeviceMappings?.map(bdm => ({
+      volumeId: bdm.Ebs?.VolumeId ?? '',
+      deviceName: bdm.DeviceName ?? '',
+      sizeGb: 0,  // Would need separate DescribeVolumes call
+      volumeType: 'gp3',
+      encrypted: false,
+      deleteOnTermination: bdm.Ebs?.DeleteOnTermination ?? true,
+    })) ?? [],
+
+    networkInterfaces: ec2Instance.NetworkInterfaces?.map(ni => ({
+      networkInterfaceId: ni.NetworkInterfaceId ?? '',
+      subnetId: ni.SubnetId ?? '',
+      privateIp: ni.PrivateIpAddress ?? '',
+      publicIp: ni.Association?.PublicIp,
+      securityGroupIds: ni.Groups?.map(g => g.GroupId!) ?? [],
+    })) ?? [],
+
+    placementGroup: ec2Instance.Placement?.GroupName,
+
+    metadata: {
+      launchTemplateId: ec2Instance.LaunchTemplate?.LaunchTemplateId,
+      launchTemplateVersion: ec2Instance.LaunchTemplate?.Version,
+      capacityReservationId: ec2Instance.CapacityReservationId,
+    },
+  };
+
+  return awsInstance;
+}
+
+// EC2 status -> ProviderInstanceStatus mapping
+function mapEC2Status(state?: string): ProviderInstanceStatus {
+  switch (state) {
+    case 'pending': return 'pending';
+    case 'running': return 'running';
+    case 'stopping': return 'stopping';
+    case 'stopped': return 'stopped';
+    case 'shutting-down': return 'terminating';
+    case 'terminated': return 'terminated';
+    default: return 'error';
+  }
+}
+```
+
+## Projection (AWS-Specific -> Generic)
+
+```typescript
+/**
+ * PROJECTION: When workflow exits provider context,
+ * provider-specific instance projects back to generic type.
+ */
+
+function projectToGenericInstance(
+  awsInstance: AWSInstance,
+  existingRecord?: Instance
+): Instance {
+  return {
+    id: existingRecord?.id ?? (() => { throw new Error('Cannot project instance without existing DB record'); })(),
+    provider: 'aws',
+    providerId: awsInstance.id,
+
+    spec: awsInstance.spec,
+    region: awsInstance.availabilityZone?.slice(0, -1),  // us-east-1a -> us-east-1
+
+    ip: awsInstance.ip,
+    tailscaleIp: existingRecord?.tailscaleIp,
+
+    workflow_state: existingRecord?.workflow_state ?? mapStatusToWorkflowState(awsInstance.status),
+
+    isSpot: awsInstance.isSpot,
+    spotRequestId: awsInstance.spotInstanceRequestId,
+
+    initChecksum: existingRecord?.initChecksum,
+
+    createdAt: awsInstance.createdAt,
+    lastHeartbeat: existingRecord?.lastHeartbeat ?? Date.now(),
+
+    currentManifestId: existingRecord?.currentManifestId,
+  };
+}
+
+async function projectToGenericSnapshot(awsSnapshot: AWSSnapshot): Promise<Snapshot> {
+  // Snapshot IDs are auto-generated by database when the snapshot record is created.
+  // This projection function should only be called AFTER inserting the snapshot into the DB.
+  throw new Error('projectToGenericSnapshot should not generate IDs - insert snapshot record first to get auto-generated ID');
+}
+
+// Utility for workflow_state mapping from provider status
+function mapStatusToWorkflowState(providerStatus: ProviderInstanceStatus): string {
+  switch (providerStatus) {
+    case 'pending':
+    case 'starting':
+      return 'launch-run:provisioning';
+    case 'running':
+      return 'launch-run:complete';
+    case 'stopping':
+    case 'stopped':
+      return 'terminate:draining';
+    case 'terminating':
+    case 'terminated':
+      return 'terminate:complete';
+    default:
+      return 'spawn:error';
+  }
+}
+```
+
+## Workflow Boundary Example
+
+```typescript
+/**
+ * Example: AWS warm-volume-pool workflow uses enhanced types internally,
+ * projects to generic on completion.
+ */
+
+async function awsWarmVolumePoolWorkflow(ctx: NodeContext): Promise<WorkflowOutput> {
+  // ENTER: Materialize to AWS-specific type
+  const awsInstance = await materializeAWSInstance(ctx.input.instance);
+
+  // Internal AWS-specific operations using enhanced type
+  const volume = await createWarmVolume({
+    availabilityZone: awsInstance.availabilityZone,
+    snapshotId: ctx.input.snapshotId,
+    volumeType: 'gp3',
+    iops: 10000,
+    throughput: 250,
+  });
+
+  await attachVolume({
+    instanceId: awsInstance.id,
+    volumeId: volume.volumeId,
+    device: '/dev/sdf',
+  });
+
+  awsInstance.volumes.push(volume);
+
+  // EXIT: Project back to generic for control plane
+  const genericInstance = projectToGenericInstance(awsInstance, ctx.input.instance);
+
+  ctx.emitResource('instance', genericInstance.id);
+
+  return {
+    instance: genericInstance,
+    volumeId: volume.volumeId,
+  };
+}
+```
+
+## AWS Warm-Volume-Pool Workflow (Hypothetical)
+
+```typescript
+/**
+ * AWS-specific workflow for warm volume pool management.
+ * (Hypothetical optimization - not in initial implementation)
+ */
+
+const AWS_WARM_VOLUME_POOL_CONTRACT: ProviderWorkflowContract = {
+  type: 'warm-volume-pool',
+  provider: 'aws',
+  description: 'Manages pre-created EBS volumes for fast instance startup',
+
+  constraints: {
+    maxDurationMs: 300_000,
+    requiredOutputFields: ['volumeId', 'availabilityZone', 'snapshotId'],
+    inputSchema: warmVolumePoolInputSchema,
+    emittableResources: ['object'],
+    canSpawnSubworkflows: true,
+    maxSubworkflowDepth: 1,
+  },
+
+  validateInput(input: unknown): ValidationResult {
+    return ajv.validate(warmVolumePoolInputSchema, input)
+      ? { valid: true }
+      : { valid: false, errors: ajv.errors };
+  },
+
+  async compensate(context: CompensationContext): Promise<void> {
+    const output = context.output as WarmVolumePoolOutput;
+    if (output?.volumeId) {
+      const ec2 = new EC2Client({});
+      await ec2.send(new DeleteVolumeCommand({
+        VolumeId: output.volumeId,
+      }));
+    }
+  },
+};
+
+registerProviderWorkflow(AWS_WARM_VOLUME_POOL_CONTRACT);
+
+const AWS_WARM_VOLUME_POOL_WORKFLOW: WorkflowBlueprint = {
+  type: 'aws:warm-volume-pool',
+  nodes: {
+    'check-pool-capacity': {
+      handler: 'aws/checkWarmVolumePoolCapacity',
+      next: 'decide-action',
+    },
+    'decide-action': {
+      handler: 'aws/decideWarmVolumeAction',
+      pattern: 'conditional-branch',
+      branches: {
+        'needs-more': 'create-volumes',
+        'has-excess': 'cleanup-volumes',
+        'balanced': 'noop',
+      },
+    },
+    'create-volumes': {
+      handler: 'aws/createWarmVolumes',
+      pattern: 'parallel-fan-out',
+      next: 'register-volumes',
+    },
+    'cleanup-volumes': {
+      handler: 'aws/cleanupExcessVolumes',
+      next: 'finalize',
+    },
+    'register-volumes': {
+      handler: 'aws/registerWarmVolumes',
+      next: 'finalize',
+    },
+    'noop': {
+      handler: 'noop',
+      next: 'finalize',
+    },
+    'finalize': {
+      handler: 'aws/finalizeWarmVolumePool',
+      next: null,
+    },
+  },
+};
+
+/**
+ * Node handlers for warm-volume-pool workflow.
+ */
+
+async function checkWarmVolumePoolCapacity(
+  ctx: NodeContext
+): Promise<{ currentCount: number; targetCount: number; availabilityZone: string }> {
+  const { availabilityZone, snapshotId, targetCount } = ctx.input;
+
+  const existing = await db.query(`
+    SELECT COUNT(*) as count FROM objects
+    WHERE type = 'warm_volume'
+      AND json_extract(metadata_json, '$.availability_zone') = ?
+      AND json_extract(metadata_json, '$.snapshot_id') = ?
+      AND json_extract(metadata_json, '$.status') = 'available'
+  `, [availabilityZone, snapshotId]);
+
+  return {
+    currentCount: existing[0].count,
+    targetCount: targetCount ?? 3,
+    availabilityZone,
+  };
+}
+
+async function createWarmVolumes(ctx: NodeContext): Promise<{ volumes: WarmVolume[] }> {
+  const { count, availabilityZone, snapshotId, volumeSpec } = ctx.input;
+
+  const ec2 = new EC2Client({});
+  const volumes: WarmVolume[] = [];
+
+  for (let i = 0; i < count; i++) {
+    const result = await ec2.send(new CreateVolumeCommand({
+      AvailabilityZone: availabilityZone,
+      SnapshotId: snapshotId,
+      VolumeType: volumeSpec?.type ?? 'gp3',
+      Iops: volumeSpec?.iops ?? 3000,
+      Throughput: volumeSpec?.throughput ?? 125,
+      TagSpecifications: [{
+        ResourceType: 'volume',
+        Tags: [
+          { Key: 'skyrepl:warm-volume', Value: 'true' },
+          { Key: 'skyrepl:snapshot-id', Value: snapshotId },
+        ],
+      }],
+    }));
+
+    volumes.push({
+      volumeId: result.VolumeId!,
+      availabilityZone,
+      snapshotId,
+      status: 'creating',
+      createdAt: Date.now(),
+    });
+  }
+
+  return { volumes };
+}
+
+async function registerWarmVolumes(ctx: NodeContext): Promise<{ registered: number }> {
+  const { volumes } = ctx.input as { volumes: WarmVolume[] };
+
+  for (const volume of volumes) {
+    await waitForVolumeAvailable(volume.volumeId);
+
+    const now = Date.now();
+    const result = await db.query(`
+      INSERT INTO objects (type, blob_id, provider, provider_object_id, metadata_json, created_at, accessed_at)
+      VALUES ('warm_volume', 0, 'aws', ?, ?, ?, NULL)
+    `, [
+      volume.volumeId,
+      JSON.stringify({
+        availability_zone: volume.availabilityZone,
+        snapshot_id: volume.snapshotId,
+        status: 'available',
+      }),
+      now,
+    ]);
+
+    const objectId = result.lastInsertRowid;
+    ctx.emitResource('object', objectId);
+  }
+
+  return { registered: volumes.length };
+}
+```
+
+## Control Plane Perspective
+
+```typescript
+/**
+ * Control plane submits provider workflow, receives standard output.
+ * Does not need to understand provider-specific internals.
+ */
+
+async function launchRunWithProviderWorkflow(
+  runInput: LaunchRunInput
+): Promise<Workflow> {
+  const provider = getProvider(runInput.provider);
+
+  if (provider.capabilities.warmVolumes && hasWarmVolumePool(runInput)) {
+    const subworkflow = await submitWorkflow({
+      type: `${runInput.provider}:spawn-with-warm-volume`,
+      input: {
+        spec: runInput.spec,
+        region: runInput.region,
+        bootstrap: runInput.bootstrap,
+        snapshotId: runInput.snapshotId,
+      },
+    });
+
+    const result = await waitForWorkflow(subworkflow.id);
+    return result.output as SpawnInstanceOutput;
+  } else {
+    const instance = await provider.spawn(runInput);
+    return projectToGenericInstance(instance);
+  }
+}
+```
+
+## AWS Lifecycle Hooks
+
+```typescript
+const awsLifecycleHooks: ProviderLifecycleHooks = {
+  async onStartup(): Promise<void> {
+    debug('AWS/onStartup', { status: 'initializing' });
+
+    const sts = new STSClient({});
+    const identity = await sts.send(new GetCallerIdentityCommand({}));
+    debug('AWS/onStartup', { accountId: identity.Account });
+
+    await warmSpotPriceCache(['us-east-1', 'us-west-2']);
+    await ensureSecurityGroups();
+    await ensureIAMRoles();
+
+    debug('AWS/onStartup', { status: 'ready' });
+  },
+
+  async onShutdown(): Promise<void> {
+    debug('AWS/onShutdown', { status: 'shutting_down' });
+    await flushMetricsBuffer();
+    debug('AWS/onShutdown', { status: 'complete' });
+  },
+
+  async onHeartbeat(expectations: HeartbeatExpectations): Promise<HeartbeatReceipts> {
+    const receipts: TaskReceipt[] = [];
+    const providerTasks: ProviderTaskReport[] = [];
+
+    for (const task of expectations.tasks) {
+      switch (task.type) {
+        case 'health_check':
+          receipts.push(await performHealthCheck());
+          break;
+        case 'reconcile':
+          receipts.push(await performReconciliation(task));
+          break;
+        case 'cache_refresh':
+          receipts.push(await refreshCaches(task));
+          break;
+        case 'pool_maintenance':
+          receipts.push(await maintainWarmPools(task));
+          break;
+        default:
+          receipts.push({
+            type: task.type,
+            status: 'skipped',
+            reason: 'unknown_task_type',
+          });
+      }
+    }
+
+    // Provider-initiated maintenance
+    const volumeCleanup = await cleanupStaleVolumes();
+    if (volumeCleanup.count > 0) {
+      providerTasks.push({
+        type: 'volume_cleanup',
+        status: 'completed',
+        result: { count: volumeCleanup.count },
+      });
+    }
+
+    return {
+      receipts,
+      providerTasks: providerTasks.length > 0 ? providerTasks : undefined,
+      nextHeartbeat: { preferredInterval: 30000 },
+    };
+  },
+};
+```
+
+## Heartbeat Task Handlers
+
+```typescript
+async function performHealthCheck(): Promise<TaskReceipt> {
+  const start = Date.now();
+  try {
+    const sts = new STSClient({});
+    await sts.send(new GetCallerIdentityCommand({}));
+    const latency = Date.now() - start;
+
+    return {
+      type: 'health_check',
+      status: 'completed',
+      result: { healthy: true, latency, timestamp: Date.now() },
+    };
+  } catch (error) {
+    return {
+      type: 'health_check',
+      status: 'failed',
+      reason: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
+async function performReconciliation(task: HeartbeatTask): Promise<TaskReceipt> {
+  try {
+    const instances = await db.query(`
+      SELECT * FROM instances WHERE provider = 'aws'
+    `);
+
+    const ec2 = new EC2Client({});
+    const describeResult = await ec2.send(new DescribeInstancesCommand({}));
+    const externalInstances = extractInstancesFromResponse(describeResult);
+
+    const externalById = new Map(externalInstances.map(i => [i.id, i]));
+    const ourByProviderId = new Map(instances.map(i => [i.providerId, i]));
+
+    const actions = [];
+
+    // Check for orphans (report only, don't terminate)
+    for (const external of externalInstances) {
+      if (!ourByProviderId.has(external.id)) {
+        debug('RECONCILE/orphan-detected', {
+          providerId: external.id,
+          provider: 'aws',
+          createdAt: external.createdAt,
+          ageMs: Date.now() - external.createdAt,
+        });
+      }
+    }
+
+    // Check for missing instances (deleted externally)
+    for (const ourInstance of instances) {
+      if (!externalById.has(ourInstance.providerId)) {
+        await db.query('UPDATE instances SET workflow_state = ? WHERE id = ?', [
+          'terminate:complete',
+          ourInstance.id,
+        ]);
+        actions.push({
+          type: 'mark_terminated',
+          instanceId: ourInstance.id,
+          reason: 'Instance deleted externally',
+        });
+      }
+    }
+
+    // Check for drift (IP changes, status differences)
+    for (const ourInstance of instances) {
+      const external = externalById.get(ourInstance.providerId);
+      if (!external) continue;
+
+      const changes: Record<string, any> = {};
+
+      if (external.ip && external.ip !== ourInstance.ip) {
+        changes.ip = external.ip;
+      }
+
+      const externalMapped = mapProviderStatus(external.status);
+      if (externalMapped === 'terminated' && !ourInstance.workflow_state.includes('terminate')) {
+        changes.workflow_state = 'terminate:complete';
+      }
+
+      if (Object.keys(changes).length > 0) {
+        const updates = Object.entries(changes)
+          .map(([k, v]) => `${k} = ?`)
+          .join(', ');
+        await db.query(
+          `UPDATE instances SET ${updates} WHERE id = ?`,
+          [...Object.values(changes), ourInstance.id]
+        );
+        actions.push({
+          type: 'update',
+          instanceId: ourInstance.id,
+          reason: 'State drift detected',
+          changes,
+        });
+      }
+    }
+
+    return { type: 'reconcile', status: 'completed', result: { actions } };
+  } catch (error) {
+    return {
+      type: 'reconcile',
+      status: 'failed',
+      reason: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
+async function refreshCaches(task: HeartbeatTask): Promise<TaskReceipt> {
+  const timeSinceLastRun = task.lastRun ? Date.now() - task.lastRun : Infinity;
+
+  if (timeSinceLastRun < timing.CACHE_REFRESH_MIN_INTERVAL) {
+    return { type: 'cache_refresh', status: 'skipped', reason: 'cache_valid' };
+  }
+
+  try {
+    const regions = await getActiveRegions();
+    for (const region of regions) {
+      await refreshSpotPrices(region);
+    }
+    await providerState.cleanupExpired();
+
+    return { type: 'cache_refresh', status: 'completed', result: { regions: regions.length } };
+  } catch (error) {
+    return {
+      type: 'cache_refresh',
+      status: 'failed',
+      reason: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
+async function maintainWarmPools(task: HeartbeatTask): Promise<TaskReceipt> {
+  try {
+    const poolStatus = await checkWarmVolumePools();
+    return { type: 'pool_maintenance', status: 'completed', result: poolStatus };
+  } catch (error) {
+    return {
+      type: 'pool_maintenance',
+      status: 'failed',
+      reason: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+```
+
+## Event-Driven Hooks
+
+```typescript
+async function onSpotInterruption(notice: SpotInterruptionNotice): Promise<void> {
+  debug('AWS/onSpotInterruption', {
+    instanceId: notice.instanceId,
+    interruptionTime: notice.interruptionTime,
+  });
+
+  const instance = await db.queryOne(`
+    SELECT i.id, a.id as allocation_id, a.run_id
+    FROM instances i
+    LEFT JOIN allocations a ON a.instance_id = i.id AND a.status = 'ACTIVE'
+    WHERE i.provider_id = ?
+  `, [notice.instanceId]);
+
+  if (!instance) return;
+
+  if (instance.run_id) {
+    await db.query(`UPDATE runs SET spot_interrupted = 1 WHERE id = ?`, [instance.run_id]);
+  }
+
+  // If we have warning time, try to save state
+  if (notice.warningTimeMs && notice.warningTimeMs > 30_000) {
+    await submitWorkflow({
+      type: 'emergency-checkpoint',
+      input: {
+        instanceId: instance.id,
+        allocationId: instance.allocation_id,
+        timeRemainingMs: notice.warningTimeMs,
+      },
+      priority: 'high',
+    });
+  }
+
+  // Submit retry-with-alternative workflow for the run
+  if (instance.run_id) {
+    await submitWorkflow({
+      type: 'resume-interrupted-run',
+      input: {
+        runId: instance.run_id,
+        interruptedInstanceId: instance.id,
+        preferOnDemand: true,
+      },
+    });
+  }
+}
+
+async function onBudgetThreshold(threshold: BudgetThreshold): Promise<void> {
+  debug('AWS/onBudgetThreshold', {
+    thresholdType: threshold.type,
+    currentAmount: threshold.currentAmount,
+    limitAmount: threshold.limitAmount,
+  });
+
+  if (threshold.type === 'warning') {
+    console.warn(`AWS budget warning: $${threshold.currentAmount}/$${threshold.limitAmount}`);
+  } else if (threshold.type === 'critical') {
+    const nonEssential = await db.query(`
+      SELECT id FROM instances
+      WHERE provider = 'aws'
+        AND workflow_state LIKE '%:complete'
+        AND current_manifest_id IS NULL
+    `);
+
+    for (const instance of nonEssential) {
+      await submitWorkflow({
+        type: 'terminate-instance',
+        input: { instanceId: instance.id, reason: 'budget_limit' },
+      });
+    }
+  }
+}
+
+registerProviderHooks('aws', awsLifecycleHooks);
+```
+
+## Spot Interruption Workflow
+
+```typescript
+/**
+ * Hook triggers workflow for spot interruption handling.
+ */
+const HANDLE_SPOT_INTERRUPTION_WORKFLOW: WorkflowBlueprint = {
+  type: 'handle-spot-interruption',
+  nodes: {
+    'save-run-state': {
+      handler: 'saveRunCheckpoint',
+      next: 'upload-artifacts',
+    },
+    'upload-artifacts': {
+      handler: 'uploadInProgressArtifacts',
+      next: 'mark-interrupted',
+    },
+    'mark-interrupted': {
+      handler: 'markRunSpotInterrupted',
+      next: 'decide-retry',
+    },
+    'decide-retry': {
+      handler: 'decideSpotRetry',
+      pattern: 'conditional-branch',
+      branches: {
+        'retry': 'spawn-replacement',
+        'no-retry': 'finalize',
+      },
+    },
+    'spawn-replacement': {
+      handler: 'spawnReplacementInstance',
+      pattern: 'retry-with-alternative',
+      next: 'resume-run',
+    },
+    'resume-run': {
+      handler: 'resumeRunFromCheckpoint',
+      next: 'finalize',
+    },
+    'finalize': {
+      handler: 'finalizeInterruptionHandling',
+      next: null,
+    },
+  },
+};
+```
+
+## Full AWS Registration
+
+```typescript
+registerProvider({
+  provider: new AWSProvider(),
+  hooks: awsLifecycleHooks,
+  workflows: [
+    AWS_WARM_VOLUME_POOL_WORKFLOW,
+    AWS_SPAWN_WITH_WARM_VOLUME_WORKFLOW,
+    AWS_SPOT_FLEET_WORKFLOW,
+  ],
+  contracts: [
+    AWS_WARM_VOLUME_POOL_CONTRACT,
+    AWS_SPAWN_WITH_WARM_VOLUME_CONTRACT,
+    AWS_SPOT_FLEET_CONTRACT,
+  ],
+});
+```

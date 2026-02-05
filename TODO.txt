@@ -1,0 +1,57 @@
+# TODO: Project Constitution Shift (L2/A → L2/B)
+
+## Objective: The L2/B Transition
+
+We have just reached the end of L2/A (~15% of L2 complete). The goal of new phase L2/B is to reach ~60% completion by migrating the spec from a developmental "brain dump" into a formal system architecture.
+
+## Mechanical Cleanup (L2/A Maintenance)
+
+- Rename References: Dispatch Haiku to mechanically and retroactively rename all "L2.x" references to "L2/A.x".
+
+## Spec Extraction & Redistribution
+
+The specification currently mixes normative requirements, advisory guidelines, example usage, and covers concerns as far-flung as commercialisation strategy. L2/B focuses on distributing this content into appropriate homes:
+
+- Pseudo-code Extraction: Move all pseudo-implementation from the `.txt` spec chapters into corresponding `impl//*.l2.txt` pseudo-implementation files, creating new files as-appropiate.
+- Focused Specification: Distill the core spec to normative requirements (~70%) advisory guidelines (~20%) and other supporting text (remaining), with clear MUST / SHOULD / ETC delineation.
+- Documentation Distribution: Move non-core content (UX logic, billing, commercial planning) into specialized documentation (reference, user, etc).
+- Inventorying: Use exploration agents to itemise and catalog all "out-of-scope" items / categories currently residing in the spec.
+
+## Project Meta-Ontology (Restructuring)
+
+The current "impl vs. spec" split has reached its limit. I propose a new top-level structure:
+
+- `impl/` (formerly `v2/`): Contains all L1, L2, and L3 pseudo-implementation files, and eventually, the implementation itself.
+- `docs/`: Contains the formal core specification and all supporting documentation, including reference docs, usage docs, and other kinds of docs.
+- `workshop/`: A dedicated space for non-technical planning, including product scope, UX design, commercial strategy, branding, release plans, and social outreach.
+
+Take this proposal as a starting point only: dispatch an Opus agent, tasking it with proposing something better (once you have gathered enough context to provide it with working material).
+
+## Exorcising SkyREPL-Legacy
+
+L2/B marks the definitive break from the `SkyREPL-legacy` prototype.
+
+### Solution Mining
+
+Ensure all "sharp edge" point solutions are captured as-appropiate. Examples include 1) Workarounds for missing/limited `cloud-init` support (OrbStack, requires `orb run` after launch to emulate cloud-init) and 2) The byte-by-byte reading strategy in the Python Agent that prevents deadlocks caused by SSE streams failing to flush due to buffer size constraints. These are just two examples, this task involves dispatching a batch of explore agents to identify all "sharp edge point solutions" in SkyREPL-legacy, and confirming SkyREPL either obviated the edge or has its own solution for it (if none exist, take from legacy).
+
+### Ghost Remnants Removal
+
+Fully excise all references to the legacy version (the legacy version will never become public, so readers would find it impossible to follow the references):
+
+- Terminology Cleanup: Remove notes regarding "Rename jobs to runs" or "Rename grace_period to hold_period." The current terminology is now the only terminology.
+- Re-appropriation Check: Resolve term reuse, such as "grace period," which although no longer used for holding allocations during SSH debugging sessions (legacy terminology), is used in current contexts such as orphan-detection minimum age.
+- Folder Names: The transition of the `v2/` folder to `impl/` is now complete (legacy was once called "v1").
+
+## Fidelity Reduction
+
+As development moves to the L2 frontier, the L1 layer (bullet-point pseudo-code) should be reduced to its original purpose: a coarse outline of file responsibilities.
+
+- Crystallization: Remove excessive detail from L1 files that have since been superseded by L2 pseudo-code or the spec itself.
+- Spec Hardening: Post-L2/B, reduce exposition fidelity in the spec text to favor concise technical requirements: other for-purpose documents will provide the explanatory exposition.
+
+## Way of Working: Operational Adjustments
+
+L2/B coincides with the transition from Claude Opus 4.5 to Opus 4.6. All L2/A work (Wl1–Wl6, spec R0–R9) was conducted under Opus 4.5; L2/B onwards uses Opus 4.6. The project scaffolding (CLAUDE.md subagent table, worklog conventions, fidelity ladder) is model-version-agnostic by design, but the empirical patterns — dispatch ratios (e.g. "2 opus, 1 sonnet" from Wl6), verification strategies (e.g. "4 haiku" sweeps), and the worklog structure itself — were all tuned under 4.5 behaviour. Whether these patterns hold, improve, or need adjustment under 4.6 is an open question that should be evaluated early in L2/B rather than discovered mid-stream.
+
+To handle multiple, interconnected, high-velocity "hot" worklogs/streams in parallel, we will need to update `CLAUDE.md` and the various work orchestration/planning scaffholds with new operational guidance/sructure. It's still far too early for the overhead of git branching or a planner like Linear/Jira, but some incremental adjustment is needed. I don't know how or what this looks like exactly, or how to delineate the worklogs/streams for L2/B through L3: dispatch an Opus agent to propose a Way of Working adjustment.

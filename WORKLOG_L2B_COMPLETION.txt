@@ -1,0 +1,119 @@
+================================================================================
+WORKLOG: L2/B Completion
+================================================================================
+Status: PENDING
+Started: 2026-02-06
+Previous: worklogs/009_WORKLOG_SPEC_HARDENING.txt
+Audit ref: WORKLOG_SPEC_AUDIT.txt
+
+================================================================================
+CONTEXT
+================================================================================
+
+L2/B entry restructuring is complete (007). Spec extraction (008) and hardening
+(009) delivered 53 L2 files and a 35% spec reduction (17,627 → 11,466 lines).
+The spec audit (WORKLOG_SPEC_AUDIT.txt) identified actionable findings. This
+worklog tracks the remaining work to finish L2/B.
+
+================================================================================
+DELIVERABLES
+================================================================================
+
+1. Cross-Ref Normalization
+
+   Fix 36 broken spec→impl cross-reference stubs identified in the spec audit.
+   - 30 mechanical: rename §SectionName in spec stubs to match actual L2 headings
+   - 6 structural: add missing L2 sections or redirect stubs to correct files
+   Do BEFORE fidelity reduction — otherwise headings change again and drift doubles.
+   Detail: WORKLOG_SPEC_AUDIT.txt D2
+
+2. Cross-Ref Integrity Invariant
+
+   Establish ongoing validation so cross-ref drift doesn't re-accumulate.
+   - Define canonical anchor format for L2 headings
+   - Script/test that extracts `> See also:` stubs and verifies targets
+   - Allow redirect headings as compatibility valve
+   Treat broken cross-refs like compilation errors, not warnings.
+
+3. Behavioral Gap Fixes
+
+   Address 6 minor gaps from the D1 behavioral audit.
+   All LOW severity — defensive behaviors and extension points.
+   Detail: WORKLOG_SPEC_AUDIT.txt D1
+
+4. Fidelity Reduction
+
+   Trim L1 files to coarse outlines (~20-50 lines each).
+   L1 should contain: file responsibility, key invariants, "see L2 for behavior."
+   Blocked until cross-ref normalization complete.
+   Source: TODO.txt (WS5)
+
+5. Out-of-Scope Redistribution
+
+   Move ~2,600 lines of non-normative content from spec to docs/ and workshop/.
+   Top movers: Ch10 CLI commands (918 lines), Ch15.9 timing config (272 lines),
+   Ch14 implementation phases (257 lines).
+   Policy after move: new UX/commercial/rationale content goes ONLY to docs/ or
+   workshop/. Spec gets a one-line pointer, not the content.
+   Detail: WORKLOG_SPEC_AUDIT.txt D4
+
+6. Way of Working: Multi-Stream Guidance
+
+   CLAUDE.md still needs guidance for parallel hot worklogs/streams.
+   Source: TODO.txt (WS6 remainder)
+
+7. Mechanical Completeness Plan
+
+   Track the L1→L2 gap from D5 inventory. Not all gaps need L2 before L2/B
+   closure, but a tracked plan should exist. Priority order if targeting
+   end-to-end viability:
+     a. Workflow nodes (10 files — execution-critical, closes the engine loop)
+     b. CLI commands (10 files — user surface, forces integration seams)
+     c. Background jobs (3 files — GC, reconciliation, expiry)
+     d. Resource modules (4 files — may be thin wrappers)
+     e. Tests (11 files — start with invariants: idempotency, orphan safety,
+        warm pool atomicity)
+   Detail: WORKLOG_SPEC_AUDIT.txt D5
+
+================================================================================
+FOOD FOR THOUGHT (unvalidated, lossy capture — needs investigation)
+================================================================================
+
+From an external review of the WS2 outputs. Not taken as-is; included as
+candidate insights to mine when scoping deliverables above.
+
+Healthy signals observed:
+  - Fork model + "no deletions" constraint prevented spec-becomes-link-pile
+  - Treatment taxonomy (KEEP/CONDENSE/REWRITE/REPLACE) is a repeatable,
+    auditable "spec compiler"
+  - "Code-shaped specification" correctly identified and kept (SQL DDL, JSON
+    contracts, CLI UX annotated with MUST/SHOULD)
+  - Audits that admit PARTIAL — not claiming false completeness
+
+Risks flagged:
+  - Cross-ref drift accumulates unless "typechecked." Already 36 broken in D2.
+    Fix before fidelity reduction or drift compounds.
+  - Mechanical surface area debt: core logic is L2 but long tail of leaf modules
+    (CLI, workflow nodes, background jobs, tests) is L1-only. Project will feel
+    80% done but remain operationally incomplete. Upside: this debt is mechanical
+    and parallelizable.
+
+Suggested "L2/B done" definition (to validate):
+  - Cross-ref integrity green (0 broken or all have redirects)
+  - Spec composition stable (no large pseudo-code without explicit KEEP reason)
+  - L1 trimmed to coarse outlines
+  - Mechanical long tail has a tracked plan (even if not yet completed)
+
+Suggested sequencing (to validate):
+  1. Cross-ref fixes (before fidelity reduction — avoids double drift)
+  2. Fidelity reduction (make L1 boring)
+  3. Mechanical completeness: CLI → workflow nodes → background → tests
+  4. Out-of-scope redistribution (then enforce no-regrowth policy)
+
+================================================================================
+CROSS-REFERENCES
+================================================================================
+
+Spec audit findings: WORKLOG_SPEC_AUDIT.txt
+Preceding: 007 (entry), 008 (extraction), 009 (hardening)
+Source tasks: TODO.txt (WS5, WS6 remainder)

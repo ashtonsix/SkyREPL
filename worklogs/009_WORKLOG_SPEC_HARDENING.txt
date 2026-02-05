@@ -1,0 +1,546 @@
+================================================================================
+WORKLOG: Spec Hardening — Normative Transformation
+================================================================================
+Status: COMPLETE (archived)
+Date: 2026-02-06
+Previous: worklogs/008_WORKLOG_IMPL_EXTRACTION.txt
+
+================================================================================
+CONTEXT
+================================================================================
+
+Transforms spec pseudo-code into specification language in-place. Spec and impl
+evolve as FORKS: content was COPIED to impl/ in Pass 1 (see 008), then
+TRANSFORMED in spec — never deleted. Substance is preserved; only the FORM changes.
+
+================================================================================
+PHASE C: SPEC TRANSFORMATION
+================================================================================
+
+Principle: SUBSTANCE PRESERVATION. Pseudo-code duplicated verbatim in impl/ L2
+files serves no unique purpose in the spec. Replace with normative requirements
++ cross-ref. That's not deletion — it's the spec evolving toward specification.
+
+Treatment by content category:
+
+  REPLACE with normative requirements + cross-ref:
+    Function implementations already duplicated in impl/ L2 files.
+    The bulk transformation target. Each function block becomes a behavioral
+    contract: what the system MUST/SHOULD do, stated independently of the
+    code. The cross-ref (already placed by Phase B) points readers to the
+    reference implementation.
+
+  CONDENSE to key fields + constraints + cross-ref:
+    Type/interface definitions already duplicated in impl/ L2 files.
+    Keep the interface name, key fields, and any field-level MUST/SHOULD
+    constraints. Remove the full verbatim TypeScript interface body.
+
+  KEEP AS-IS (already specification-grade):
+    SQL DDL (data model), SQL example queries (illustrative),
+    JSON request/response (API contract), CLI command definitions (UX spec),
+    ASCII diagrams + blueprints (architectural), configuration tables,
+    normative prose already using MUST/SHOULD.
+
+  REWRITE TO SPEC PSEUDOCODE:
+    Pseudo-code that serves a specification purpose beyond implementation
+    reference (defines an algorithm, illustrates a constraint, documents a
+    protocol). Rewrite from TypeScript/Python into expressive, language-
+    agnostic pseudocode suitable for a specification. Preserve substance;
+    change form.
+
+Expected outcome:
+  Spec: ~17,400 → ~9,500-11,500 lines.
+  Ch08: 3,308 → ~1,000-1,300  |  Ch13: 2,459 → ~700-900
+  Ch05+06: 2,370 → ~1,000-1,300  |  Ch04+12: 1,414 → ~600-800
+  Ch02: 1,144 → ~1,050-1,100  |  Ch03: 867 → ~550-650
+  Ch07: 648 → ~400-500  |  Ch09: 2,671 → ~2,500-2,600
+  Ch10: 1,071 → ~1,071 (unchanged)  |  Ch11: 765 → ~530-600
+  Ch15: 504 → ~504 (unchanged)
+  Replaced content lives in impl/ L2 files.
+  Every replacement includes a cross-ref to the L2 home.
+  Substance preserved: every behavioral requirement, constraint, invariant,
+  and protocol stated in normative language or spec pseudocode.
+
+--- Phase C Dispatch Plan ---
+
+  C1: Ch08 Providers (3,308 lines → ~1,000-1,300)
+      Dispatch: opus agent.
+
+      KEEP AS-IS:
+        - §8.1.3 capability flags CONFIG TABLE + PROVIDER_CAPABILITIES profiles (~112 lines)
+        - §8.4.2 feature vs compute ASCII comparison table (~26 lines)
+        - §8.4.3 cleanup priority order (~14 lines normative)
+        - §8.5.3 heartbeat flow JSON example (~49 lines)
+        - §8.5.4 benefits of expectations model (~11 lines normative)
+        - §8.5.9 hooks vs workflows distinction + ASCII table (~26 lines)
+
+      CONDENSE to key fields + constraints + cross-ref:
+        - §8.1.2 Provider<TInstance,TSnapshot> interface (~142 lines → ~40)
+        - §8.1.4 core method types: SpawnOptions, ProviderInstance, ListFilter,
+          BootstrapConfig, snapshot types, spot types (~268 lines → ~80)
+        - §8.1.5 error taxonomy: ProviderError classes + error categories
+          (~253 lines → ~60, keep decision functions shouldRetry/shouldRetryWithAlternative)
+        - §8.2.1 generic vs provider-specific types: generic Instance/Snapshot
+          interfaces, AWSInstance/AWSSnapshot (~191 lines → ~60)
+        - §8.3.1-8.3.2 workflow constraints + abstract contracts (~161 lines → ~50)
+        - §8.4.1 FeatureProvider interface + capabilities (~72 lines → ~30)
+        - §8.5.2 heartbeat types: ProviderLifecycleHooks, HeartbeatExpectations,
+          HeartbeatTask (~126 lines → ~40)
+        - §8.5.8 TTL types (~60 lines → ~20)
+
+      REWRITE TO SPEC PSEUDOCODE:
+        - §8.1.1 spawn idempotency protocol (~225 lines TS → ~80 lines):
+          Two-phase spawn (reserve-in-DB, execute), retry protocol, orphan
+          reconciliation, kill-at-any-step analysis. This is THE foundational
+          idempotency algorithm — must be preserved as spec pseudocode.
+        - §8.2.2-8.2.4 materialization/projection pattern (~219 lines TS → ~60):
+          Materialize generic→provider-specific, operate, project back. The
+          pattern is the specification; the AWS-specific field mappings are impl.
+        - §8.3.4 control plane perspective (~43 lines → ~20):
+          How control plane abstracts over provider workflow internals.
+
+      REPLACE with normative requirements + cross-ref:
+        - §8.1.6 generateBootstrap() AWS + OrbStack (~122 lines → ~15):
+          State the requirement (provider MUST generate bootstrap script), not
+          the concrete cloud-init YAML / shell script.
+        - §8.3.3 warm-volume-pool workflow (~181 lines → ~20):
+          Labeled "hypothetical, not in initial implementation." Condense to a
+          paragraph illustrating extensibility, not a full blueprint.
+        - §8.4.4 Tailscale feature provider class (~100 lines → ~15):
+          Concrete implementation example. State the contract, cross-ref impl/.
+        - §8.5.1 in-memory cache getWithCache() (~31 lines → ~5)
+        - §8.5.5 AWS lifecycle hooks implementation (~87 lines → ~15)
+        - §8.5.6 heartbeat task handlers (~184 lines → ~20):
+          performHealthCheck, performReconciliation, refreshCaches,
+          maintainWarmPools. State behavioral requirements, not impl.
+        - §8.5.7 event-driven hooks (~86 lines → ~10):
+          onSpotInterruption, onBudgetThreshold. Normative one-liners.
+
+  C2: Ch13 Types (2,459 lines → ~700-900)
+      Dispatch: opus agent.
+
+      KEEP AS-IS:
+        - §13.1.1 directory structure ASCII diagram (~94 lines)
+        - §13.1.5 type placement decision tree flowchart (~29 lines)
+        - §13.5 type relationship + ownership diagram (~80 lines)
+        - §13.9 naming conventions table + anti-patterns (~20 lines)
+        - §13.1.2-13.1.3 paired files pattern + control/shared split (~32 lines)
+        - §13.6.1-13.6.4 "where to put new types" guidance (~97 lines)
+
+      CONDENSE to key fields + constraints + cross-ref:
+        - §13.1.4 cross-cutting types (~405 lines → ~100):
+          Keep Instance, Run, Allocation, Workflow, Manifest type shapes
+          (these carry relationship semantics: optional fields = materialization
+          depth). Mechanical types (Snapshot, Artifact, FeatureInstallation,
+          TailscaleMachine, RunFile, RunLogEntry, UsageRecord, WorkflowNode,
+          ManifestResource) → name + one-line purpose only.
+        - §13.2.1 ID utilities (~19 lines → ~10): keep semantic aliases list
+        - §13.2.3 status enums (~91 lines → ~30):
+          Keep parseStatus() contract, state builder names (InstanceWorkflowState,
+          RunWorkflowState), isAvailable() invariant ("availability is INFERRED
+          from workflow_state and ownership, not stored"). Drop TS bodies.
+        - §13.2.4 API envelopes (~151 lines → ~40):
+          Keep ApiRequest/ApiResponse/ApiError shapes, ErrorCode categories.
+        - §13.3.1 database row types (~195 lines → ~20):
+          Purely mechanical field lists already in db.types.ts.l2.txt. Reduce
+          to: "12 Record types mirror SQL schema. See impl/...". List names only.
+        - §13.3.3 API request/response types (~226 lines → ~40):
+          Keep materialization depth flags (includeFiles, includeLogs,
+          includeArtifacts on GetRunRequest). Other request/response shapes
+          are mechanical.
+        - §13.4.1 workflow blueprint types (~80 lines → ~30):
+          Keep AllowedPattern, PatternConstraints (normative).
+        - §13.4.2 workflow instance types (~84 lines → ~25):
+          Keep WorkflowEvent type union.
+        - §13.4.3 NodeContext interface (~125 lines → ~40):
+          THIS IS SPEC. Resource emission/claiming semantics, manifest tracking,
+          pattern application tracking. Keep as condensed interface with
+          normative annotations.
+        - §13.4.4 pattern types + WorkflowEngine (~141 lines → ~40):
+          Keep PatternConfig discriminated union, NodeExecutor.idempotent flag,
+          WorkflowEngine interface method signatures.
+        - §13.4.5 intent input/output types (~104 lines → ~25):
+          Mechanical shapes. Keep names + key semantic fields.
+        - §13.6.3 SpawnOptions example (~41 lines → ~15):
+          Keep field semantics (spot pricing, bootstrap, idempotency).
+        - §13.7 feature provider types (~68 lines → ~20):
+          Keep FeatureCapabilities (normative). Tailscale types → name only.
+        - §13.8 heartbeat types (~61 lines → ~20):
+          Keep HeartbeatTask.type union, WorkflowLaunchReport.trigger union.
+
+      REWRITE TO SPEC PSEUDOCODE:
+        - §13.2.2 timestamp/duration utilities (~23 lines → ~10):
+          Spec pseudocode for now(), isExpired(), duration constants.
+
+      REPLACE with normative requirements + cross-ref:
+        - §13.3.2 materializer converter functions (~180 lines → ~15):
+          recordToInstance(), instanceToRecord(), etc. State: "Converters MUST
+          map between Record and Materialized types preserving all fields."
+          Cross-ref to db.types.ts.l2.txt.
+        - §13.3.4 layer distinction diagrams: KEEP (~73 lines, already spec-grade)
+
+  C3a: Ch05 Allocations + Ch06 Workflows (2,370 lines → ~1,000-1,300)
+       Dispatch: opus agent.
+
+       Ch05 Allocations (1,390 lines):
+
+         KEEP AS-IS:
+           - §5.2 allocation state machine ASCII diagram (~62 lines)
+           - §5.2 VALID_TRANSITIONS + TRANSITION_TRIGGERS tables (~14 lines)
+           - §5.2.1 race condition resolution prose (~22 lines)
+           - §5.3 warm pool one-liner definition (~5 lines)
+           - §5.4 Tailscale JIT installation flow diagram + timing table (~60 lines)
+           - §5.4 SSH activity extension flow diagram + constraints table (~49 lines)
+           - §5.4 CLI terminal output example (~14 lines)
+           - §5.6 background task intervals (~10 lines)
+           - §5.7 debug hold config + tiered extension system (~45 lines)
+
+         CONDENSE to key fields + constraints + cross-ref:
+           - §5.1 core schema interface (~14 lines → ~8)
+           - §5.4 HeartbeatRequest interface (~9 lines → ~5)
+
+         REWRITE TO SPEC PSEUDOCODE:
+           - §5.3 queryWarmPool() spec/checksum matching (~39 lines → ~20):
+             Algorithm for finding compatible warm pool allocations by spec
+             match and init_checksum comparison. Spec-purpose: defines matching
+             semantics.
+           - §5.3 claimWarmPoolAllocation() atomic claiming (~42 lines → ~20):
+             SELECT ... FOR UPDATE SKIP LOCKED protocol. Spec-purpose: defines
+             atomicity and concurrency guarantees.
+           - §5.4 ProxyCommand script (~59 lines bash → ~30):
+             Rewrite connection routing logic as spec pseudocode. The bash is
+             implementation; the routing decision tree is specification.
+           - §5.4 instance-side SSH activity detection (~52 lines → ~25):
+             Heartbeat SSH session reporting algorithm.
+
+         REPLACE with normative requirements + cross-ref:
+           - §5.2 state validation functions (~31 lines → ~10)
+           - §5.3 createAvailableAllocation() (~43 lines → ~10)
+           - §5.4 generateSshConfig() (~73 lines → ~10)
+           - §5.4 control plane API endpoint for JIT (~44 lines → ~10)
+           - §5.4 agent message handler (~48 lines → ~10)
+           - §5.4 control plane SSH activity processing (~56 lines → ~10)
+           - §5.5 CLAIMED allocation timeout (~30 lines → ~8)
+           - §5.7 CLI extend command impl (~39 lines → ~5, keep CLI definition)
+           - §5.7 transitionToComplete + related (~79 lines → ~15)
+           - §5.7 hold expiry background task (~40 lines → ~8)
+           - §5.7 termination blocking (~35 lines → ~10)
+           - §5.7 CLI release command impl (~53 lines → ~5, keep CLI definition)
+
+       Ch06 Workflows (980 lines):
+
+         KEEP AS-IS:
+           - §6.3 four pattern definitions with ASCII transform diagrams
+             (IAR, CB, PFO, RWA) (~115 lines total)
+           - §6.6.1 error→retry decision table (~12 lines)
+           - §6.6.2 node failure→HTTP status mapping table (~10 lines)
+           - §6.6.2 error propagation flow ASCII diagram (~31 lines)
+           - §6.4 subworkflow contract prose (~7 lines)
+           - §6.4 max depth constraint (~13 lines)
+           - §6.6.3-6.6.6 timeout prose (~31 lines)
+           - §6.7 cancellation protocol prose (partial, ~10 lines)
+           - §6.8.1 compensation timeout (~4 lines)
+           - §6.9 observability intro (~11 lines)
+
+         CONDENSE to key fields + constraints + cross-ref:
+           - §6.2 WorkflowEngine + WorkflowSubmission interface (~22 lines → ~12)
+           - §6.2 NodeExecutor + NodeContext interface (~35 lines → ~15)
+           - §6.3.2 CB ConditionalBranchConfig (~10 lines → ~6)
+
+         REWRITE TO SPEC PSEUDOCODE:
+           - §6.2 execution loop (~50 lines → ~25):
+             Core tick semantics: find ready nodes, execute, handle results,
+             check completion. This IS the workflow engine contract.
+           - §6.2 two-phase spawn in node execution (~151 lines → ~50):
+             Reserve-in-DB → execute → compensate pattern, with retry handling.
+             Foundational algorithm, same as Ch08§8.1.1 but from the workflow
+             engine's perspective.
+           - §6.5 compensation vs teardown (~37 lines → ~15):
+             When to compensate vs teardown. Decision algorithm.
+           - §6.2 crash recovery recoverWorkflows() (~39 lines → ~15):
+             Find interrupted workflows, determine resumption point.
+
+         REPLACE with normative requirements + cross-ref:
+           - §6.1 single-step helper pattern (~29 lines → ~8)
+           - §6.2 why workflow_nodes is separate table (~18 lines → ~5)
+           - §6.2.1 retry semantics impl (~37 lines → ~10, keep prose)
+           - §6.4 subworkflow manifest independence functions (~44 lines → ~10)
+           - §6.6.1-6.6.2 error mapping implementations (~82 lines → ~10,
+             keep decision tables)
+           - §6.7 cancellation implementation (~22 lines → ~5, keep protocol)
+           - §6.8.2 compensation retry impl (~33 lines → ~8)
+           - §6.9.1 topology signatures (~32 lines → ~5)
+
+  C3b: Ch04 Manifest + Ch12 Orphans (1,414 lines → ~600-800)
+       Dispatch: opus agent.
+
+       Ch04 Manifest (~700 lines):
+
+         KEEP AS-IS:
+           - §4.1 manifest states prose (~22 lines)
+           - §4.1.1 manifest creation timing (~12 lines)
+           - §4.3 retention policy config table (~22 lines)
+           - §4.3 cleanup priority defaults table (~8 lines)
+           - §4.4 lifecycle examples (4 narratives, ~92 lines)
+           - SQL DDL (manifests + manifest_resources, ~35 lines)
+
+         CONDENSE to key fields + constraints + cross-ref:
+           - §4.3 cleanup workflow blueprint definition (~18 lines → ~8)
+
+         REWRITE TO SPEC PSEUDOCODE:
+           - §4.1 sealManifest() + isManifestExpired() (~37 lines → ~15):
+             State transition semantics (DRAFT→SEALED, expiry detection).
+           - §4.2 claimWarmInstance() + claimResourceAtomic() (~98 lines → ~35):
+             Between-workflow resource claiming protocol, SELECT ... FOR UPDATE,
+             manifest transfer. Foundational claiming algorithm.
+           - §4.2 subworkflow resource claiming (~56 lines → ~20):
+             Parent claiming from completed subworkflow manifest.
+
+         REPLACE with normative requirements + cross-ref:
+           - §4.1 triggerCleanup() (~15 lines → ~5)
+           - §4.2 within-workflow sharing example (~20 lines → ~5)
+           - §4.3 sealManifestWithPolicy() (~20 lines → ~5)
+           - §4.3 cleanupManifest() impl (~17 lines → ~5)
+           - §4.3 cleanup handlers map (~27 lines → ~8)
+           - §4.3 expiry scanner CRON impl (~51 lines → ~8)
+           - §4.3 cost attribution impl (~45 lines → ~8)
+
+       Ch12 Orphans (~714 lines):
+
+         KEEP AS-IS:
+           - §12.1 naming format definition + examples (~56 lines)
+           - §12.3 severity levels decision table (~8 lines)
+           - §12.4 orphan_whitelist SQL DDL (~29 lines)
+           - §12.5 CLI command examples (6 examples, ~109 lines)
+           - §12.7 safety constraints (~18 lines, CRITICAL)
+           - §12.8 spawn error classification table (~19 lines)
+           - §12.10 kill-at-any-step property (~15 lines)
+
+         CONDENSE to key fields + constraints + cross-ref:
+           - §12.8 SpawnFailureAnalysis interface (~10 lines → ~5)
+
+         REWRITE TO SPEC PSEUDOCODE:
+           - §12.2 detection algorithm (~70 lines → ~25):
+             List provider resources, match against DB records by naming
+             convention, classify unmatched. Spec-purpose: defines what
+             constitutes an orphan.
+           - §12.3 classification algorithm (~44 lines → ~15):
+             Session-based classification: which session created it, how long
+             ago, does it match a known pattern.
+           - §12.9 database recovery scenario (~44 lines → ~15):
+             What happens when DB state is lost. Recovery protocol.
+
+         REPLACE with normative requirements + cross-ref:
+           - §12.1 naming implementation functions (~24 lines → ~5)
+           - §12.2 Tailscale orphan detection impl (~40 lines → ~8)
+           - §12.4 whitelist operations (~56 lines → ~8)
+           - §12.6 preflight warnings impl (~35 lines → ~8)
+           - §12.11 background cleanup impl (~45 lines → ~8)
+
+  C4: Ch02 Material (1,144 lines → ~1,050-1,100)
+      Dispatch: sonnet agent. Minimal transformation.
+
+      KEEP AS-IS:
+        - All SQL DDL (10 tables, ~347 lines)
+        - All SQL example queries (~188 lines)
+        - All normative prose (~96 lines)
+        - Prose descriptions of blob GC, SBO strategy, object types (~210 lines)
+
+      REPLACE with normative requirements + cross-ref:
+        - §2.2.3 checkBlobsExist() TS function (~25 lines → ~8):
+          State: system MUST check for existing blobs by checksum before
+          uploading, MUST return presigned upload URLs for missing blobs.
+        - §2.4 getWithCache<T>() TS function (~24 lines → ~8):
+          State: EXTERNAL state MUST use in-memory TTL cache, MUST NOT
+          persist cache to disk. Default TTL 5 minutes for spot prices.
+
+  C5: Ch03 + Ch07 + Ch09 + Ch11 (light-touch, ~5,361 lines combined)
+      Dispatch: 2 sonnet agents.
+
+      C5a: Ch03 Resources + Ch07 Intents + Ch11 Agent
+           Sonnet agent.
+
+           Ch03 Resources (~867 lines):
+
+             KEEP AS-IS:
+               - §3.1 resource type catalog (all 10 resource descriptions, ~330 lines)
+               - §3.2.5 caching strategy prose (~17 lines)
+               - §3.3.2-3.3.3 reconciliation triggers + actions (~18 lines)
+               - §3.4 all status lifecycle tables (5 tables, ~71 lines)
+               - §3.4.3-3.4.4 transition + ownership rules (~41 lines)
+               - §3.4.1 error JSON example (~8 lines)
+
+             CONDENSE to key fields + constraints + cross-ref:
+               - §3.2.1 ResourceMaterializer + MaterializationOptions (~54 lines → ~15)
+
+             REPLACE with normative requirements + cross-ref:
+               - §3.2.2 instance materialization (~72 lines → ~12):
+                 State the assembly recipe (records + features + tailscale +
+                 external), not the code.
+               - §3.2.3 run materialization (~49 lines → ~10)
+               - §3.2.4 simple object materialization (~42 lines → ~10)
+               - §3.3 reconciliation implementation (~53 lines → ~12):
+                 Keep the 4-action decision (none/update/mark_terminated/abort).
+
+           Ch07 Intents (~648 lines):
+
+             KEEP AS-IS:
+               - §7.1 launch-run blueprint ASCII DAG (~72 lines)
+               - §7.1 resource emissions table (~9 lines)
+               - §7.1 error handling table (~10 lines)
+               - §7.1 syncFiles + snapshot-based restart prose (~22 lines)
+               - §7.2 terminate-instance blueprint ASCII DAG (~43 lines)
+               - §7.3 create-snapshot blueprint ASCII DAG (~36 lines)
+               - §7.3 SnapshotCapability interface (~15 lines)
+               - §7.4 cleanup-manifest blueprint ASCII DAG (~58 lines)
+               - §7.4 cleanup priority table (~10 lines)
+               - §7.4 error handling decision table (~12 lines)
+
+             REPLACE with normative requirements + cross-ref:
+               - §7.1 pattern applications TS (~29 lines → ~10):
+                 State which pattern is applied where, not the applyPattern() calls.
+               - §7.1 node handler signatures (~37 lines → ~10)
+               - §7.2 cleanupFeatures() + SSH drain (~64 lines → ~15)
+               - §7.3 registerSnapshotObject() (~20 lines → ~8)
+               - §7.4 per-provider scoping (~44 lines → ~10)
+               - §7.4 expiry scanner + S3 cleanup (~55 lines → ~10)
+               - §7.5 retry-with-alternative notes (~24 lines → ~8)
+
+           Ch11 Agent (~765 lines):
+
+             KEEP AS-IS:
+               - §11.1 communication architecture ASCII diagram (~26 lines)
+               - §11.2 schema notes (~15 lines)
+               - §11.3 message type summary table (~26 lines)
+               - §11.4 message schemas — Control→Agent + Agent→Control (~129 lines)
+               - §11.4.5 command ack protocol + edge cases (~38 lines)
+               - §11.5 agent lifecycle ASCII diagram (~81 lines)
+               - §11.5 degraded state timeline (~29 lines)
+               - §11.7 timing constants table (~18 lines)
+               - §11.7 "when to adjust" guidance + cloud-init example (~23 lines)
+               - §11.13 error handling philosophy (~10 lines)
+
+             REWRITE TO SPEC PSEUDOCODE:
+               - §11.6 byte-by-byte SSE reading (~27 lines Python → ~12):
+                 Problem statement (8KB buffer deadlock on 150-byte messages)
+                 and solution (read(1) syscall) as spec pseudocode. This is a
+                 constraint, not just implementation.
+               - §11.9 spot interruption two-phase protocol (~86 lines → ~30):
+                 IMDSv2 check → notify start → checkpoint → capture artifacts →
+                 notify complete. Protocol definition, not Python code.
+
+             REPLACE with normative requirements + cross-ref:
+               - §11.6 connection management (~27 lines → ~8)
+               - §11.8 lock acquisition (~22 lines → ~5)
+               - §11.10 workdir cleanup (~16 lines → ~5)
+               - §11.11 presigned URL abstraction (~14 lines → ~5)
+               - §11.12 JIT Tailscale installation (~24 lines → ~5)
+               - §11.14 panic diagnostics impl (~60 lines → ~10):
+                 Keep: triggering conditions, 70-90% success rate target.
+
+      C5b: Ch09 API + Ch10 CLI + Ch15 Operations
+           Sonnet agent. Nearly all spec-grade already.
+
+           Ch09 API (~2,671 lines):
+
+             KEEP AS-IS:
+               - ALL JSON request/response examples (~1,600 lines)
+               - All endpoint summary tables (~60 lines)
+               - All error taxonomy examples + mapping tables (~280 lines)
+               - Communication architecture ASCII diagram (~62 lines)
+               - WebSocket message schemas (~140 lines)
+               - Agent endpoint definitions + message schemas (~460 lines)
+               - Idempotency behavior prose + scenario tables (~80 lines)
+
+             CONDENSE to key fields + constraints + cross-ref:
+               - §9.1.2 ListQueryParams interface (~30 lines → ~12)
+               - §9.6.1 ErrorResponse interface (~35 lines → ~12)
+
+             REPLACE with normative requirements + cross-ref:
+               - §9.7.5 launchRunWithRetry() client example (~42 lines → ~8)
+               - §9.7.6 handleIdempotentRequest() impl (~56 lines → ~12):
+                 State the idempotency protocol (check key, compare params,
+                 return cached or execute+store), not the function body.
+
+           Ch10 CLI (~1,071 lines): NO TRANSFORMATION NEEDED.
+             All content is CLI definitions, config tables, UX prose. Already
+             specification-grade. Verify cross-refs only.
+
+           Ch15 Operations (~504 lines): NO TRANSFORMATION NEEDED.
+             All content is normative prose, config tables, deployment profiles.
+             Already specification-grade. Verify cross-refs only.
+
+  Suggested parallelism: C1+C2 in parallel (heaviest), then C3a+C3b+C4+C5 in parallel.
+
+--- Phase C Execution Log (2026-02-06) ---
+
+Phase C: Spec Transformation — COMPLETE
+
+  All 7 agents dispatched in parallel (4 opus, 3 sonnet). All completed successfully.
+
+  Per-chapter results (before → after):
+
+    C1  Ch08 Providers:     3,308 → 1,025  (-2,283, 69.0%)  opus
+        36/37 cross-refs preserved (1 was true duplicate).
+        Spawn idempotency protocol rewritten to spec pseudocode.
+        Materialization/projection pattern rewritten. All CONDENSE/REPLACE applied.
+
+    C2  Ch13 Types:         2,458 →   841  (-1,617, 65.8%)  opus
+        14/14 cross-refs preserved (1 spurious extra removed).
+        Massive CONDENSE of type definitions: 12 Record types reduced to name-only
+        list, converter functions replaced with normative one-liner.
+
+    C3a Ch05 Allocations:   1,390 →   715    (-675, 48.6%)  opus
+        Ch06 Workflows:       981 →   595    (-386, 39.3%)
+        All cross-refs preserved (16 Ch05, 18 Ch06 — 2 new added for replaced sections).
+        Warm pool algorithms (queryWarmPool, claimWarmPoolAllocation) rewritten to
+        spec pseudocode. Execution loop and two-phase spawn rewritten.
+
+    C3b Ch04 Manifest:        699 →   437    (-262, 37.5%)  opus
+        Ch12 Orphans:         715 →   451    (-264, 36.9%)
+        All cross-refs preserved. Claiming protocol and detection/classification
+        algorithms rewritten to spec pseudocode.
+
+    C4  Ch02 Material:      1,143 → 1,106     (-37,  3.2%)  sonnet
+        2 edits only: checkBlobsExist() and getWithCache() replaced with normative
+        requirements. All SQL DDL and example queries preserved.
+
+    C5a Ch03 Resources:       868 →   668    (-200, 23.0%)  sonnet
+        Ch07 Intents:         649 →   452    (-197, 30.4%)
+        Ch11 Agent:           766 →   619    (-147, 19.2%)
+        SSE byte-by-byte reading and spot interruption protocol rewritten to spec
+        pseudocode. Materialization implementations replaced with assembly recipes.
+
+    C5b Ch09 API:           2,672 → 2,579     (-93,  3.5%)  sonnet
+        Ch10 CLI:           1,071 → 1,071       (0,  0.0%)  verified only
+        Ch15 Operations:      506 →   506       (0,  0.0%)  verified only
+        4 small changes in Ch09: ListQueryParams condensed, ErrorResponse condensed,
+        launchRunWithRetry replaced, handleIdempotentRequest replaced.
+
+  Totals:
+    Spec before Phase C: 17,627 lines (15 chapters)
+    Spec after Phase C:  11,466 lines
+    Reduction:            6,161 lines (35.0%)
+    Target was:       9,500-11,500 lines — achieved (within range)
+
+  Cross-ref integrity: All ~132 Phase B stubs preserved across all chapters.
+  Substance preservation: All behavioral requirements, constraints, invariants,
+  and protocols stated in normative language (MUST/SHOULD/MAY) or spec pseudocode.
+
+  Fixes applied during Phase C:
+    - C1 (Ch08): 7 cross-refs initially dropped, 6 restored via diff comparison.
+      1 remaining was true duplicate of existing cross-ref.
+    - C2 (Ch13): 1 spurious cross-ref added (db.types.ts.l2.txt §Record Types),
+      removed via diff comparison. Not in Phase B original.
+    - C3a, C3b, C5a: slight line count overshoot vs targets (+15 to +45 lines each)
+      due to large keep-as-is ASCII diagrams. Accepted — substance preservation
+      takes priority over target precision.
+
+================================================================================
+CROSS-REFERENCES
+================================================================================
+
+Previous: worklogs/008_WORKLOG_IMPL_EXTRACTION.txt
+Spec audit: WORKLOG_SPEC_AUDIT.txt
+Completion worklog: WORKLOG_L2B_COMPLETION.txt
+Spec chapters: spec/01_INTRODUCTION.txt through spec/15_OPERATIONS.txt

@@ -1,0 +1,368 @@
+================================================================================
+WORKLOG: Impl Extraction — L2 Pseudo-Implementation from Spec
+================================================================================
+Status: COMPLETE (archived)
+Date: 2026-02-05 to 2026-02-06
+Previous: worklogs/007_WORKLOG_L2B_ENTRY.txt
+
+================================================================================
+CONTEXT
+================================================================================
+
+WS2 redistributes content from the monolithic spec (~17,400 lines mixing normative
+requirements, pseudo-code, UX, and commercial content) into appropriate homes.
+
+The guiding principle: spec and impl evolve as FORKS, not as source and destination.
+  - impl/ pseudo-code is free to iterate toward working code (increasing fidelity)
+  - spec/ is free to crystallise around core requirements (decreasing fidelity)
+Content is COPIED to impl/, then TRANSFORMED in-place within spec — never deleted.
+
+Chapters: Ch02 Material, Ch03 Resources, Ch04 Manifest, Ch05 Allocations,
+Ch06 Workflows, Ch07 Intents, Ch08 Providers, Ch09 API, Ch10 CLI, Ch11 Agent,
+Ch12 Orphans, Ch13 Types, Ch15 Operations.
+
+================================================================================
+PASS 1: IMPL EXTRACTION (2026-02-05)
+================================================================================
+
+Objective: Copy all implementation-aligned pseudo-code from spec into impl/ L2 files.
+
+Design decisions:
+  1. One L2 file per impl/ source module (matching L1 structure).
+  2. Sequential waves, parallel within each wave.
+  3. Spec changes deferred to pass 2 (but see "Post-mortem" below).
+
+Wave plan:
+  Wave 1: Foundations — Ch13 Types + Ch02 Material
+  Wave 2: Core Systems — Ch08 Providers + Ch05 Allocations + Ch06 Workflows
+  Wave 3: Interface Layer — Ch09 API + Ch07 Intents + Ch11 Agent
+  Wave 4: Supporting — Ch03 Resources + Ch04 Manifest + Ch12 Orphans + Ch10 CLI
+
+--- Wave 1: Foundations (Ch13 + Ch02) ---
+
+Ch13 Types:
+  Created 7 L2 files (2,250 lines total):
+    shared/src/types.ts.l2.txt (273), shared/src/resources.ts.l2.txt (315),
+    shared/src/api/resources.ts.l2.txt (392), shared/src/api/workflows.ts.l2.txt (520),
+    shared/src/api/agent.ts.l2.txt (217), shared/src/errors.ts.l2.txt (140),
+    control/src/material/db.types.ts.l2.txt (393)
+
+Ch02 Material:
+  Extended: db.ts.l2.txt (+151→1,153), storage.ts.l2.txt (+111→546)
+  Created: external.ts.l2.txt (135)
+
+--- Wave 2: Core Systems (Ch08 + Ch05 + Ch06) ---
+
+Ch08 Providers:
+  Created 8 L2 files (3,056 lines total):
+    provider/types.ts.l2.txt (759), provider/errors.ts.l2.txt (261),
+    provider/registry.ts.l2.txt (376), provider/contracts.ts.l2.txt (173),
+    provider/compute/aws.ts.l2.txt (1,053), provider/compute/orbstack.ts.l2.txt (60),
+    provider/feature/tailscale.ts.l2.txt (105), provider/extensions.ts.l2.txt (269)
+
+Ch05 Allocations:
+  Created: allocation.ts.l2.txt (516), cli/src/ssh.ts.l2.txt (315)
+
+Ch06 Workflows:
+  Created: engine.ts.l2.txt (724), patterns.ts.l2.txt (462), compensation.ts.l2.txt (342)
+  state-transitions.ts.l2.txt unchanged (already complete).
+
+--- Wave 3: Interface Layer (Ch09 + Ch07 + Ch11) ---
+
+Ch09 API:
+  Created 5 L2 files (2,549 lines total):
+    api/routes.ts.l2.txt (698), api/operations.ts.l2.txt (344),
+    api/middleware.ts.l2.txt (442), api/agent.ts.l2.txt (562),
+    api/sse-protocol.ts.l2.txt (503)
+
+Ch07 Intents:
+  Created 3 L2 files (1,509 lines total):
+    intent/launch-run.ts.l2.txt (735), intent/terminate.ts.l2.txt (388),
+    intent/snapshot.ts.l2.txt (386)
+
+Ch11 Agent:
+  Created 5 L2 files (1,722 lines total):
+    agent/agent.py.l2.txt (323), agent/executor.py.l2.txt (632),
+    agent/logs.py.l2.txt (308), agent/artifacts.py.l2.txt (221),
+    agent/tailscale.py.l2.txt (238)
+
+--- Wave 4: Supporting Systems (Ch03 + Ch04 + Ch12 + Ch10) ---
+
+Ch03 Resources: resource/types.ts.l2.txt (569)
+Ch04 Manifest: resource/manifest.ts.l2.txt (639)
+Ch12 Orphans: orphan/classifier.ts.l2.txt (253), orphan/scanner.ts.l2.txt (279),
+  orphan/whitelist.ts.l2.txt (106)
+Ch10 CLI: cli/commands/run.ts.l2.txt (343), cli/client.ts.l2.txt (615)
+
+--- Pass 1 Totals ---
+
+L2 files: 11 → 52 (38 new, 3 extended), ~5,200 → ~21,790 lines (+16,590)
+impl/ extraction: COMPLETE — all implementation-aligned pseudo-code now in L2 files.
+
+--- Pass 1 Post-mortem ---
+
+The impl/ L2 files are in great shape. However, pass 1 also made aggressive spec
+changes that were meant to be deferred: the "Spec stubs" directive
+(`> Implementation: impl/path/file.l2.txt §Section`) was applied as a REPLACEMENT
+rather than an ADDITION, eviscerating spec content. Three failure modes:
+
+  1. Over-stubbing: Substantial definitions replaced with 2-line stubs. E.g. the
+     workflow_nodes table was reduced to a one-line description and a pointer to
+     impl — that's not a spec, that's a declaration that workflow nodes are
+     implementation-defined.
+
+  2. Destructive translation: SQL schemas were converted to TypeScript interfaces
+     in db.types.ts.l2.txt, then the SQL originals deleted from spec. Creating a
+     DB driver interface made sense, but the underlying schema was lost. Migrations
+     directory in impl/control/ never created.
+
+  3. Over-eager deletion: Anything "pseudo-codey" was removed — including example
+     queries, annotated SQL, and illustrative code that served specification
+     purposes. These needed creative home-finding (tests, reference docs) or should
+     have been left in-place for a later refinement pass.
+
+Remediation: `git checkout -- spec/` restored all spec chapters to pre-pass-1 state.
+All impl/ L2 files preserved. Both the original spec pseudo-code and the new impl/
+L2 files now coexist — the intended fork.
+
+State at pass 1 close:
+  Spec: 17,445 lines (fully restored)
+  L2 files: 52 files, ~21,790 lines
+
+================================================================================
+PASS 2: SPEC TRANSFORMATION (2026-02-06)
+================================================================================
+
+Objective: Transform spec pseudo-code into specification language in-place, add
+non-destructive impl/ cross-references, and address translation gaps from pass 1.
+
+Key constraint: NO deletions. All changes are additive (cross-ref stubs) or
+transformative (pseudo-code → normative requirements). Content substance is
+preserved; only the FORM changes.
+
+--- Audit Results ---
+Status: COMPLETE (2026-02-06)
+
+6 parallel agents audited all 13 spec chapters + impl/ translation gaps.
+
+Per-chapter composition (pseudo-code % | spec-grade %):
+
+  Ch02 Material    1,112 lines  55% SQL DDL     23% spec  -- SQL IS the spec here
+  Ch03 Resources     856 lines  32% TS          62% spec  -- most spec-grade already
+  Ch04 Manifest      677 lines  53% TS          12% spec
+  Ch05 Allocations 1,364 lines  56% TS+bash     11% spec  + 8% diagrams (spec-grade)
+  Ch06 Workflows     949 lines  54% TS          21% spec
+  Ch07 Intents       637 lines  25% TS          22% spec  + 33% blueprints (spec-grade)
+  Ch08 Providers   3,260 lines  81% TS           6% spec  -- heaviest transformation target
+  Ch09 API         2,656 lines   4% TS          20% spec  + 65% JSON examples
+  Ch10 CLI         1,063 lines   0% TS          15% spec  + 71% CLI/UX (spec-grade)
+  Ch11 Agent         752 lines  20% Python      48% spec  + 19% TS message schemas
+  Ch12 Orphans       705 lines  55% TS          16% spec  + 16% CLI examples
+  Ch13 Types       2,432 lines  81% TS           3% spec  -- second-heaviest target
+  Ch15 Operations    504 lines   0% code        45% spec  + 43% config tables
+
+Key patterns:
+  - Chapters fall into 3 groups by transformation need:
+    HEAVY (>70% pseudo-code): Ch08, Ch13 — bulk TS extraction targets
+    MODERATE (50-65%): Ch02, Ch04, Ch05, Ch06, Ch12 — mixed content
+    LIGHT (<35%): Ch03, Ch07, Ch09, Ch10, Ch11, Ch15 — already spec-grade or
+      content that IS specification (SQL DDL, JSON contracts, CLI UX, blueprints)
+  - Much "pseudo-code" is actually specification in code form: SQL DDL defines the
+    data model, JSON examples define the API contract, CLI definitions define the UX.
+    These should NOT be transformed — they should be annotated with normative language.
+  - True transformation targets: TypeScript/Python function implementations that
+    describe behavior. These become MUST/SHOULD requirements.
+
+--- Phase B Conventions (applied, complete) ---
+
+1. CROSS-REFERENCE STUBS (additive, never replacing)
+
+   Format: `> See also: impl/path/file.l2.txt §Section Name`
+   Placed after the spec content they reference, not before.
+   One stub per logical block (not per line).
+
+2. CONTENT CATEGORY HANDLING
+
+   SQL DDL (Ch02 ~55%):
+     KEEP AS-IS. The DDL IS the data model specification.
+     Add cross-ref to migration files: `> Migration: impl/control/migrations/001.sql.l2.txt`
+     Add normative annotations where missing: "The instances table MUST include..."
+
+   SQL example queries (Ch02, scattered):
+     KEEP AS-IS. They illustrate the data model and serve as acceptance criteria.
+     Mark as: `-- Example: <purpose>` if not already labeled.
+     These are also future test fixtures (impl/tests/).
+
+   JSON request/response examples (Ch09 ~65%):
+     KEEP AS-IS. The examples define the API contract.
+     Add cross-ref to handler L2 files.
+     Add normative annotations: "The response MUST include..."
+
+   CLI command definitions (Ch10 ~44%):
+     KEEP AS-IS. These are UX specifications.
+     Add cross-ref to L2 command handler files where they exist.
+
+   ASCII diagrams + blueprints (Ch05, Ch07, Ch11):
+     KEEP AS-IS. Already specification-grade.
+     These are the authoritative source; L2 copies should cross-ref back.
+
+   TypeScript type/interface definitions:
+     KEEP AS-IS for now. Types are already semi-formal.
+     Add cross-ref to corresponding L2 file.
+     Annotate key fields with MUST/SHOULD where behavior is implied but not stated.
+
+   TypeScript/Python function implementations:
+     Phase B: add cross-ref stubs only.
+     Phase C: these are the primary transformation target — see Phase C treatment
+     rules for REPLACE, CONDENSE, and REWRITE categories.
+
+   Configuration tables (Ch15 ~43%):
+     KEEP AS-IS. Already specification-grade (timing constraints, deployment profiles).
+     Add cross-ref to timing.ts.l2.txt where applicable.
+
+3. NORMATIVE LANGUAGE
+
+   Use RFC 2119 keywords: MUST, MUST NOT, SHOULD, SHOULD NOT, MAY.
+   Add as annotations wrapping existing pseudo-code blocks, not replacing them.
+   Focus on behavioral contracts, invariants, and safety properties.
+
+--- Translation Gaps ---
+
+From pass 1, the following impl/ gaps were identified:
+
+HIGH PRIORITY:
+  1. SQL migration L2 files: 14 tables, ~48 indexes defined in spec with no
+     corresponding L2 migration files. Current migrations/ has only L1 outlines.
+     Action: Create impl/control/migrations/001_initial.sql.l2.txt with all DDL
+     from spec/02_MATERIAL.txt, spec/09_API.txt, spec/12_ORPHANS.txt.
+  2. feature_attachments/feature_installations: Referenced in spec Ch7/Ch8 and
+     impl/ L2 files but has NO CREATE TABLE anywhere. Either needs DDL or
+     clarification that it uses the objects table.
+  3. ObjectRecord schema drift: db.types.ts.l2.txt has tags_json/content_type/payload
+     fields; spec DDL uses blob_id/metadata_json via blobs table. Needs reconciliation.
+
+MEDIUM PRIORITY:
+  4. ~75 example SQL queries across spec → future test fixtures (impl/tests/).
+     Not blocking, but valuable. Catalog exists in audit notes.
+  5. Workflow node L2 files: 9 nodes at L1 only (spawn-instance, sync-files,
+     claim-allocation, etc.). Ch06/Ch07 have substantial pseudo-code for these.
+  6. Missing agent L2 files: sse.py, heartbeat.py, spot.py — referenced by
+     agent.py.l2.txt imports but not created. (Note: pre-existing L2 files
+     heartbeat.py.l2.txt, sse.py.l2.txt, spot.py.l2.txt, checkpoint.py.l2.txt
+     may exist from L2/A — verify before creating duplicates.)
+  7. Missing CLI L2 files: ~9 commands beyond run.ts (logs, list, cancel,
+     artifact, instance, snapshot, orphan, usage, control). Mechanical but large.
+
+LOW PRIORITY (deferred beyond pass 2):
+  8. Zod schemas for external-facing types (API requests, agent messages). Listed
+     as dependency in package.json but zero usage in L2 files. Important for
+     runtime validation at trust boundaries but a new concern, not a translation gap.
+  9. Ch06§6.9 observability (topology signatures), Ch08§8.2 type enhancement
+     pattern — supplementary patterns, L1 only.
+
+--- Work Plan ---
+
+Phase A: Gap Remediation (creates new impl/ files)
+
+  A1. Create impl/control/migrations/001_initial.sql.l2.txt
+      Copy all 14 CREATE TABLE + index statements from spec verbatim.
+      Source: spec/02_MATERIAL.txt (11 tables), spec/09_API.txt (2 tables),
+      spec/12_ORPHANS.txt (1 table).
+      Dispatch: 1 sonnet agent (mechanical copy, no transformation).
+
+  A2. Resolve feature_attachments DDL gap.
+      Dispatch: 1 explore agent to check whether feature_installations use the
+      objects table (type='feature_installation') or need their own table.
+      If own table: add DDL to spec + migrations.
+
+  A3. Reconcile ObjectRecord schema drift.
+      Dispatch: 1 opus agent to compare db.types.ts.l2.txt ObjectRecord against
+      spec/02_MATERIAL.txt objects DDL, produce a reconciliation patch.
+
+  A4. Verify pre-existing agent L2 files (heartbeat, sse, spot, checkpoint).
+      Dispatch: 1 haiku agent to check if these exist from L2/A.
+
+Phase B: Cross-Reference Pass (additive stubs in spec)
+
+  For each spec chapter, add `> See also: impl/...` stubs after every pseudo-code
+  block that has a corresponding L2 file. No other changes.
+
+  Dispatch: 3-4 parallel sonnet agents, each handling 3-4 chapters.
+  Chapters grouped by size to balance load:
+    B1: Ch08 (3,260) — solo (largest)
+    B2: Ch13 (2,432) + Ch15 (504)
+    B3: Ch09 (2,656) + Ch07 (637)
+    B4: Ch05 (1,364) + Ch06 (949) + Ch04 (677)
+    B5: Ch02 (1,112) + Ch03 (856) + Ch10 (1,063) + Ch11 (752) + Ch12 (705)
+
+--- Phase A+B Execution Log (2026-02-06) ---
+
+Phase A: Gap Remediation — COMPLETE
+
+  A1: SQL migration L2 file — DONE
+    Created impl/control/migrations/001_initial.sql.l2.txt
+    14 tables, 50 indexes, all DDL verbatim from spec.
+    Verified: 3 spot-checks (instances, idempotency_keys, orphan_whitelist) identical.
+
+  A2: feature_attachments/feature_installations — RESOLVED
+    Finding: No new table needed. Authoritative design (Ch02§2.2, Ch03§3.1.2)
+    stores FeatureInstallations in objects table with type='feature_installation'.
+    Two phantom table names existed: `feature_installations` (Ch07, terminate L2)
+    and `feature_attachments` (Ch08, tailscale L2).
+    Fix applied: 4 files, 6 edits — all SQL corrected to objects+object_tags pattern.
+
+  A3: ObjectRecord schema drift — DONE (substructured)
+    Root cause: Wl2 decision C6 (blob architecture, two-table split) was only
+    partially propagated. Formal DDL was updated but narrative SQL examples in
+    spec/02_MATERIAL.txt remained stale (pre-C6). L2 ObjectRecord was written
+    against the stale narrative, not the formal DDL.
+    Resolution: formal DDL is canonical (per C6). Narrative and L2 now conform.
+
+    A3.1: Research — DONE
+      Identified: ObjectRecord missing blob_id, metadata_json; has 6 merged blob
+      fields (payload, s3_key, s3_bucket, size_bytes, tags_json, content_type);
+      accessed_at renamed to updated_at. BlobRecord clean (0 divergences).
+
+    A3.2: Fix stale narrative SQL in spec/02_MATERIAL.txt — DONE
+      9 fixes: log streaming (append, polling, prose), artifact query (JOIN blobs),
+      S3 offload (UPDATE blobs not objects, INSERT split into blobs+objects,
+      retrieval/cleanup prose). All narrative SQL now uses two-table architecture.
+
+    A3.3: Fix L2 ObjectRecord in db.types.ts.l2.txt — DONE
+      ObjectRecord: +blob_id, +metadata_json, +accessed_at; -payload, -s3_key,
+      -s3_bucket, -size_bytes, -content_type, -tags_json, -updated_at.
+      Ripple fixes: 9 L2 files + 2 L1 files (db.types, resource/types, manifest,
+      snapshot, api/agent, ssh, api/routes, launch-run, orphan/scanner,
+      provider/compute/aws, resource/artifact.l1, resource/snapshot.l1).
+
+  A4: Pre-existing agent L2 files — CONFIRMED
+    All 9 agent L2 files exist: agent.py, executor.py, logs.py, artifacts.py,
+    tailscale.py, heartbeat.py, sse.py, spot.py, checkpoint.py.
+
+Phase B: Cross-Reference Pass — COMPLETE
+
+  ~132 cross-reference stubs added across 13 spec chapters. All additive.
+
+    B1 Ch08 Providers:        ~35 stubs (8 L2 files referenced)
+    B2 Ch13 Types + Ch15 Ops:  15 stubs (14 + 1)
+    B3 Ch09 API + Ch07 Intents: 12 stubs (8 + 4)
+    B4 Ch05+Ch06+Ch04:         37 stubs (13 + 14 + 10)
+    B5 Ch02+03+10+11+12:       33 stubs (11 + 6 + 4 + 7 + 5)
+
+  Guardrails held: zero deletions, stubs placed after pseudo-code blocks only,
+  SQL DDL and JSON examples not stubbed, ASCII diagrams not stubbed,
+  normative spec sections (e.g. Ch03§3.1 resource catalog) not stubbed.
+
+--- Phase A+B Summary ---
+
+Prerequisites met: Phase A (gap remediation) and Phase B (cross-references) complete.
+
+================================================================================
+CROSS-REFERENCES
+================================================================================
+
+Previous: worklogs/007_WORKLOG_L2B_ENTRY.txt
+Next: worklogs/009_WORKLOG_SPEC_HARDENING.txt
+Spec audit: WORKLOG_SPEC_AUDIT.txt
+Spec chapters: spec/01_INTRODUCTION.txt through spec/15_OPERATIONS.txt
+Impl L2 files: impl/**/*.l2.txt (53 files)

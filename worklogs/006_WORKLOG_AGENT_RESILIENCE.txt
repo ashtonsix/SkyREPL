@@ -1,5 +1,5 @@
 ================================================================================
-WORKLOG: Agent Resilience (L2.6, T1, L2.3)
+WORKLOG: Agent Resilience (L2/A.6, T1, L2/A.3)
 ================================================================================
 Status: SPEC + L1/L2 COMPLETE (pending verification)
 Started: 2026-02-05
@@ -12,7 +12,7 @@ CONTEXT
 Theme: Agent-side reliability improvements sharing heartbeat/checkpoint context.
 
 Dependencies:
-  - Wl5 (WORKLOG_HEARTBEAT_TIMING): COMPLETE - unblocks L2.6
+  - Wl5 (WORKLOG_HEARTBEAT_TIMING): COMPLETE - unblocks L2/A.6
   - Wl4 (L2 Foundation): COMPLETE - provides state transition patterns
 
 Source of truth: Recent WORKLOG > spec > pseudo-impl
@@ -21,7 +21,7 @@ Source of truth: Recent WORKLOG > spec > pseudo-impl
 SCOPE
 ================================================================================
 
-L2.6: Spot artifact prioritization
+L2/A.6: Spot artifact prioritization
   Status: COMPLETE
   Confidence: HIGH (hybrid algorithm implemented)
 
@@ -39,8 +39,8 @@ L2.6: Spot artifact prioritization
     3. Upload as many as fit in remaining window
 
   Files to modify:
-    v2/agent/spot.py.l1.txt       Add prioritization notes
-    v2/agent/spot.py.l2.txt       Full algorithm (exists, needs update)
+    impl/agent/spot.py.l1.txt       Add prioritization notes
+    impl/agent/spot.py.l2.txt       Full algorithm (exists, needs update)
 
 --------------------------------------------------------------------------------
 
@@ -54,14 +54,14 @@ T1: Control plane ID verification in heartbeat
   Files to modify:
     spec/11_AGENT.txt:226-238              HeartbeatMessage schema
     spec/09_API.txt:1589-1625              Heartbeat endpoint response
-    v2/shared/src/api/agent.ts.l1.txt:70-77    HeartbeatMessage type
-    v2/agent/heartbeat.py.l1.txt:12-13         Payload construction
-    v2/control/src/api/agent/agent.ts.l1.txt   Heartbeat handler
-    v2/control/src/api/agent/sse-protocol.ts.l1.txt   HeartbeatAckMessage
+    impl/shared/src/api/agent.ts.l1.txt:70-77    HeartbeatMessage type
+    impl/agent/heartbeat.py.l1.txt:12-13         Payload construction
+    impl/control/src/api/agent/agent.ts.l1.txt   Heartbeat handler
+    impl/control/src/api/agent/sse-protocol.ts.l1.txt   HeartbeatAckMessage
 
 --------------------------------------------------------------------------------
 
-L2.3: SSE byte-by-byte handling
+L2/A.3: SSE byte-by-byte handling
   Status: COMPLETE
   Confidence: HIGH (full L2 created)
 
@@ -79,14 +79,14 @@ L2.3: SSE byte-by-byte handling
     - Reconnection with exponential backoff
 
   Files to modify:
-    v2/agent/sse.py.l1.txt        Add separator/close notes
-    v2/agent/sse.py.l2.txt        (CREATE) Full implementation
+    impl/agent/sse.py.l1.txt        Add separator/close notes
+    impl/agent/sse.py.l2.txt        (CREATE) Full implementation
 
 ================================================================================
 PLAN
 ================================================================================
 
-Phase 1: L2.6 Spot Prioritization
+Phase 1: L2/A.6 Spot Prioritization
   1.1 Review spot.py.l2.txt current state
   1.2 Design prioritization algorithm (size vs recency trade-off)
   1.3 Update spot.py.l1.txt with algorithm notes
@@ -98,7 +98,7 @@ Phase 2: T1 Control Plane ID Verification
   2.3 Update agent heartbeat.py to validate on receipt
   2.4 Update control plane handler to include ID in response
 
-Phase 3: L2.3 SSE Handling
+Phase 3: L2/A.3 SSE Handling
   3.1 Review sse.py.l1.txt current state
   3.2 Create sse.py.l2.txt with generator pattern
   3.3 Update sse.py.l1.txt with key points
@@ -110,14 +110,14 @@ LOG
 ### 2026-02-05 - Worklog Created
 - Extracted from TODO Triage worklog (Wl4)
 - Grouped agent-side reliability work sharing heartbeat/checkpoint context
-- L2.6 unblocked by Wl5 completion
+- L2/A.6 unblocked by Wl5 completion
 - All three items at READY status
 
 ### 2026-02-05 - All Items Complete (Spec + L1/L2)
 
 Executed with 3 parallel subagents (2 opus, 1 sonnet).
 
-**L2.6: Spot Artifact Prioritization** (opus)
+**L2/A.6: Spot Artifact Prioritization** (opus)
 - Implemented hybrid prioritization strategy:
   - Spot (20s budget): Size ascending - maximize artifact count in tight window
   - Panic (4m budget): Recency descending - prioritize newest/most valuable work
@@ -143,7 +143,7 @@ Executed with 3 parallel subagents (2 opus, 1 sonnet).
   - heartbeat.py.l2.txt: Full validation with WARNING log
   - sse-protocol.ts.l1.txt: Updated HeartbeatAckMessage
 
-**L2.3: SSE Byte-by-Byte Handling** (opus)
+**L2/A.3: SSE Byte-by-Byte Handling** (opus)
 - Updated sse.py.l1.txt from 12 to 38 lines with key implementation notes
 - CREATED sse.py.l2.txt (523 lines) with:
   - `read_line()`: Byte-by-byte reading, returns None on empty byte (socket close)
@@ -158,9 +158,9 @@ Executed with 3 parallel subagents (2 opus, 1 sonnet).
 ### 2026-02-05 - Verification & Fixes
 
 Ran 4 parallel verification agents (haiku). Results:
-- L2.6 (Prioritization): EXCELLENT (98%) - consistent across all files
+- L2/A.6 (Prioritization): EXCELLENT (98%) - consistent across all files
 - T1 (Control Plane ID): FULLY CONSISTENT - all criteria pass
-- L2.3 (SSE Handling): ALIGNS WITH SPEC - complete and correct
+- L2/A.3 (SSE Handling): ALIGNS WITH SPEC - complete and correct
 - Cross-References: 2 CRITICAL ISSUES found and fixed
 
 **Critical Fix 1: heartbeat.py.l2.txt - Function Call Mismatch**
@@ -181,5 +181,5 @@ CROSS-REFERENCES
 
 Heartbeat timing: worklogs/005_WORKLOG_HEARTBEAT_TIMING.txt (Wl5)
 L2 foundation: worklogs/004_WORKLOG_L2_FOUNDATION.txt (Wl4)
-Checkpoint path: v2/agent/checkpoint.py.l2.txt (from Wl5)
-SSE implementation: v2/agent/sse.py.l2.txt (NEW - from this worklog)
+Checkpoint path: impl/agent/checkpoint.py.l2.txt (from Wl5)
+SSE implementation: impl/agent/sse.py.l2.txt (NEW - from this worklog)

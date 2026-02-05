@@ -1,0 +1,279 @@
+# scanner.ts - Orphan Detection Scanner (L2 Pseudocode)
+
+## Imports
+
+```typescript
+import { queryMany } from '../material/db';
+import { getProviderClient, listProviderResources, ENABLED_PROVIDERS } from '../provider';
+import { parseResourceName, parseTailscaleName, OrphanedResource } from './classifier';
+import { getActiveWhitelist } from './whitelist';
+import { logger } from '../logger';
+```
+
+## Types
+
+```typescript
+interface OrphanDetectionResult {
+  /** Resources in cloud but not in DB */
+  orphanedResources: OrphanedResource[];
+  /** Resources in DB but not in cloud (for reference) */
+  missingResources: MissingResource[];
+  /** Session that detected these orphans */
+  detectedBy: SessionInfo;
+  /** Timestamp of detection */
+  detectedAt: number;
+}
+
+interface MissingResource {
+  internalId: number;
+  providerId: string;
+  workflow_state: string;
+}
+
+interface TailscaleOrphan {
+  machineId: string;
+  machineName: string;
+  tailscaleIp: string;
+  inferredInstanceIdSlug: string | null;
+  lastSeen: number;
+  ageMs: number;
+}
+
+interface RecoveryHint {
+  providerId: string;
+  provider: string;
+  inferredInstanceIdSlug: string;
+  inferredManifestIdSlug: string | null;
+  resourceType: string;
+  createdAt: number;
+}
+```
+
+## Provider Orphan Detection
+
+```typescript
+/**
+ * Detect orphans for a single provider.
+ * Cross-references cloud resources (repl-* prefix) against DB records.
+ *
+ * Orphan = in cloud but not in DB.
+ * Missing = in DB but not in cloud (informational only).
+ */
+async function detectOrphans(
+  provider: string,
+  sessionStartTime: number
+): Promise<OrphanDetectionResult> {
+  const result: OrphanDetectionResult = {
+    orphanedResources: [],
+    missingResources: [],
+    detectedBy: getCurrentSessionInfo(),
+    detectedAt: Date.now(),
+  };
+
+  // 1. List all resources from provider with our prefix
+  const cloudResources = await listProviderResources(provider, {
+    namePrefix: 'repl-',
+    includeTerminated: false,
+  });
+
+  // 2. Get all tracked resources from DB
+  const dbResources = queryMany<{ provider_id: string; id: number; workflow_state: string }>(`
+    SELECT provider_id, id, workflow_state FROM instances
+    WHERE provider = ? AND workflow_state NOT LIKE 'terminate:%' AND workflow_state NOT LIKE '%:error'
+    UNION ALL
+    SELECT provider_object_id, id, 'active' FROM objects
+    WHERE provider = ? AND type IN ('volume', 'snapshot', 'tailscale_machine')
+  `, [provider, provider]);
+
+  const trackedProviderIds = new Set(dbResources.map(r => r.provider_id));
+
+  // 3. Find orphans (in cloud but not in DB)
+  for (const cloudResource of cloudResources) {
+    if (!trackedProviderIds.has(cloudResource.id)) {
+      const inferredInfo = parseResourceName(cloudResource.name);
+      const ageMs = Date.now() - cloudResource.createdAt;
+
+      // Resources created after session start are likely from this session
+      const likelyCurrentSession = cloudResource.createdAt > sessionStartTime;
+
+      result.orphanedResources.push({
+        providerId: cloudResource.id,
+        resourceType: cloudResource.type,
+        provider: provider,
+        inferredInfo: inferredInfo,
+        createdAt: cloudResource.createdAt,
+        ageMs: ageMs,
+        likelyCurrentSession: likelyCurrentSession,
+        estimatedHourlyCost: getEstimatedCost(cloudResource),
+      });
+    }
+  }
+
+  // 4. Find missing (in DB but not in cloud) - for reference
+  const cloudProviderIds = new Set(cloudResources.map(r => r.id));
+  for (const dbResource of dbResources) {
+    if (!cloudProviderIds.has(dbResource.provider_id)) {
+      result.missingResources.push({
+        internalId: dbResource.id,
+        providerId: dbResource.provider_id,
+        workflow_state: dbResource.workflow_state,
+      });
+    }
+  }
+
+  return result;
+}
+```
+
+## Tailscale Orphan Detection
+
+```typescript
+/**
+ * Detect orphaned Tailscale machines.
+ * Separate from provider detection because Tailscale uses simpler naming
+ * and different tracking table (objects with type='tailscale_machine').
+ */
+async function detectTailscaleOrphans(): Promise<TailscaleOrphan[]> {
+  // 1. List all machines in Tailscale with our prefix
+  const tailscaleMachines = await tailscale.listMachines({
+    namePrefix: 'repl-',
+  });
+
+  // 2. Get tracked Tailscale machines from objects table
+  const trackedMachines = queryMany<{ provider_object_id: string; instance_id: string }>(`
+    SELECT provider_object_id, json_extract(metadata_json, '$.instance_id') as instance_id
+    FROM objects
+    WHERE type = 'tailscale_machine'
+  `);
+
+  const trackedIds = new Set(trackedMachines.map(m => m.provider_object_id));
+
+  // 3. Find orphans
+  const orphans: TailscaleOrphan[] = [];
+  for (const machine of tailscaleMachines) {
+    if (!trackedIds.has(machine.id)) {
+      const inferredInfo = parseTailscaleName(machine.name);
+
+      orphans.push({
+        machineId: machine.id,
+        machineName: machine.name,
+        tailscaleIp: machine.addresses[0],
+        inferredInstanceIdSlug: inferredInfo?.instanceIdSlug ?? null,
+        lastSeen: machine.lastSeen,
+        ageMs: Date.now() - machine.created,
+      });
+    }
+  }
+
+  return orphans;
+}
+```
+
+## Whitelist Filtering
+
+```typescript
+/**
+ * Return only orphans not on the active whitelist.
+ * Filters by provider:providerId pair.
+ */
+async function getUnacknowledgedOrphans(): Promise<OrphanedResource[]> {
+  const allOrphans = await detectAllOrphans();
+  const whitelist = await getActiveWhitelist();
+
+  const whitelistedKeys = new Set(
+    whitelist.map(w => `${w.provider}:${w.providerId}`)
+  );
+
+  return allOrphans.filter(o => !whitelistedKeys.has(`${o.provider}:${o.providerId}`));
+}
+
+/**
+ * Detect orphans across all enabled providers.
+ */
+async function detectAllOrphans(): Promise<OrphanedResource[]> {
+  const sessionStartTime = getSessionStartTime();
+  const allOrphans: OrphanedResource[] = [];
+
+  // Scan all enabled providers in parallel
+  const results = await Promise.all(
+    ENABLED_PROVIDERS.map(provider => detectOrphans(provider, sessionStartTime))
+  );
+
+  for (const result of results) {
+    allOrphans.push(...result.orphanedResources);
+  }
+
+  return allOrphans;
+}
+```
+
+## Background Scan Loop
+
+```typescript
+/**
+ * Background orphan scan at 1-hour intervals.
+ * Detect-and-alert only (dry-run). No automatic termination.
+ *
+ * CRITICAL: NEVER auto-terminate cloud resources.
+ * All termination must be explicitly user-requested.
+ */
+async function backgroundOrphanScan(): Promise<void> {
+  const orphans = await detectAllOrphans();
+
+  if (orphans.length > 0) {
+    // Alert via observability system
+    logger.warn('orphans_detected', {
+      count: orphans.length,
+      estimated_cost_per_hour: sumEstimatedCosts(orphans),
+      dry_run: true,
+    });
+
+    // Store detection result for CLI access
+    await storeOrphanDetectionResult({
+      orphanedResources: orphans,
+      missingResources: [],
+      detectedBy: getCurrentSessionInfo(),
+      detectedAt: Date.now(),
+    });
+  }
+}
+
+function startOrphanScanLoop(): void {
+  setInterval(backgroundOrphanScan, 60 * 60 * 1000); // 1 hour
+}
+```
+
+## Database Recovery Hints
+
+```typescript
+/**
+ * Generate recovery hints from cloud resource names when DB is lost.
+ * Resource names encode controlId, manifestId slug, instanceId slug.
+ * Used by `repl orphans recovery-report`.
+ */
+async function generateRecoveryHints(): Promise<RecoveryHint[]> {
+  const hints: RecoveryHint[] = [];
+
+  for (const provider of ENABLED_PROVIDERS) {
+    const cloudResources = await listProviderResources(provider, {
+      namePrefix: 'repl-',
+    });
+
+    for (const resource of cloudResources) {
+      const parsed = parseResourceName(resource.name);
+      if (parsed) {
+        hints.push({
+          providerId: resource.id,
+          provider: provider,
+          inferredInstanceIdSlug: parsed.instanceIdSlug,
+          inferredManifestIdSlug: parsed.manifestIdSlug,
+          resourceType: resource.type,
+          createdAt: resource.createdAt,
+        });
+      }
+    }
+  }
+
+  return hints;
+}
+```

@@ -1,0 +1,386 @@
+# snapshot.ts - Create Snapshot Intent (L2 Pseudocode)
+
+## Imports
+
+```typescript
+import { TIMING } from '../../../../shared/src/config/timing';
+import { queryMany, queryOne, transaction, getDatabase } from '../material/db';
+import {
+  TransitionResult,
+  transitionSuccess,
+  transitionFailure,
+  Instance,
+  atomicTransition
+} from '../workflow/state-transitions';
+import { WorkflowDefinition, WorkflowContext } from '../workflow/engine.types';
+import { NodeContext } from '../../../../shared/src/api/workflows';
+import type {
+  CreateSnapshotInput,
+  CreateSnapshotOutput
+} from '../../../../shared/src/api/workflows';
+import { logger } from '../logger';
+import { getProviderClient } from '../provider/registry';
+import { generateUUID } from '../util/id';
+```
+
+## Entry Point
+
+```typescript
+export async function createSnapshot(input: CreateSnapshotInput): Promise<Workflow> {
+  return submitWorkflow('create-snapshot', input, {
+    idempotencyKey: `snapshot:${input.instanceId}:${input.name}`
+  });
+}
+```
+
+## Workflow Definition
+
+```typescript
+export const createSnapshotWorkflow: WorkflowDefinition = {
+  name: 'create-snapshot',
+  nodes: [
+    { name: 'validate-snapshot-request', handler: validateSnapshotRequest },
+    { name: 'prepare-instance', handler: prepareInstance, dependencies: ['validate-snapshot-request'] },
+    { name: 'create-provider-snapshot', handler: createProviderSnapshot, dependencies: ['prepare-instance'] },
+    { name: 'wait-for-snapshot', handler: waitForSnapshot, dependencies: ['create-provider-snapshot'] },
+    { name: 'register-snapshot-object', handler: registerSnapshotObject, dependencies: ['wait-for-snapshot'] },
+  ],
+  errorHandling: {
+    'validate-snapshot-request': 'fail_workflow',
+    'prepare-instance': 'fail_workflow',
+    'create-provider-snapshot': 'retry_then_fail',
+    'wait-for-snapshot': 'timeout_then_cleanup',
+    'register-snapshot-object': 'fail_workflow',
+  }
+};
+```
+
+## Blueprint Structure
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          CREATE-SNAPSHOT INTENT                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌───────────────────────────┐                                              │
+│  │ validate-snapshot-request │                                              │
+│  └─────────────┬─────────────┘                                              │
+│                │                                                            │
+│                ▼                                                            │
+│  ┌──────────────────┐                                                       │
+│  │ prepare-instance │◄─────── sync filesystem, clean temp files            │
+│  └────────┬─────────┘                                                       │
+│           │                                                                 │
+│           ▼                                                                 │
+│  ┌──────────────────────────┐                                               │
+│  │ create-provider-snapshot │                                               │
+│  └────────────┬─────────────┘                                               │
+│               │                                                             │
+│               ▼                                                             │
+│  ┌───────────────────┐                                                      │
+│  │ wait-for-snapshot │◄─────── timeout: SNAPSHOT_TIMEOUT                   │
+│  └─────────┬─────────┘                                                      │
+│            │                                                                │
+│            ▼                                                                │
+│  ┌──────────────────────────┐                                               │
+│  │ register-snapshot-object │  Emit resource: object (priority 10)         │
+│  └────────────┬─────────────┘                                               │
+│               │                                                             │
+│               ▼                                                             │
+│         ┌──────────┐                                                        │
+│         │ COMPLETE │                                                        │
+│         └──────────┘                                                        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Provider Abstraction
+
+```typescript
+interface SnapshotCapability {
+  createSnapshot(providerId: string, options: CreateSnapshotOptions): Promise<SnapshotRequest>;
+  getSnapshotStatus(requestId: string): Promise<SnapshotStatus>;
+  deleteSnapshot(providerSnapshotId: string): Promise<void>;
+}
+
+interface CreateSnapshotOptions {
+  name: string;
+  tags: Record<string, string>;
+  description?: string;
+}
+
+interface SnapshotRequest {
+  requestId: string;
+  providerSnapshotId: string;
+  status: 'pending' | 'in_progress';
+}
+
+interface SnapshotStatus {
+  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  providerSnapshotId?: string;
+  sizeBytes?: number;
+  error?: string;
+  progress?: number;  // 0-100 percentage
+}
+
+// Provider implementations:
+// AWS: Creates AMI (ami-xxxxx)
+// Lambda Labs: Not supported
+// RunPod: Pod snapshot (snapshot-xxxxx)
+// OrbStack: VM snapshot
+```
+
+## Node Handlers
+
+### validate-snapshot-request
+
+```typescript
+async function validateSnapshotRequest(
+  ctx: WorkflowContext,
+  input: CreateSnapshotInput
+): Promise<{ instance: Instance; provider: string }> {
+  ctx.log('info', 'Validating snapshot request', { instanceId: input.instanceId });
+
+  const instance = queryOne<Instance>(
+    'SELECT * FROM instances WHERE id = ?',
+    [input.instanceId]
+  );
+
+  if (!instance) {
+    throw new NotFoundError(`Instance ${input.instanceId} not found`);
+  }
+
+  if (instance.status !== 'running') {
+    throw new ValidationError(`Instance must be running to create snapshot (current: ${instance.status})`);
+  }
+
+  // Check provider supports snapshots
+  const client = getProviderClient(instance.provider);
+  if (!client.capabilities.snapshots) {
+    throw new ValidationError(`Provider ${instance.provider} does not support snapshots`);
+  }
+
+  // Check no other snapshot in progress for this instance
+  const existingSnapshot = queryOne<{ id: number }>(
+    `SELECT w.id FROM workflows w
+     WHERE w.type = 'create-snapshot'
+       AND w.status = 'running'
+       AND json_extract(w.input_json, '$.instanceId') = ?`,
+    [input.instanceId]
+  );
+
+  if (existingSnapshot) {
+    throw new ConflictError('Snapshot already in progress for this instance');
+  }
+
+  return { instance, provider: instance.provider };
+}
+```
+
+### prepare-instance
+
+```typescript
+/**
+ * Prepare instance for clean snapshot.
+ * Sends prepare_snapshot command to agent which:
+ * - Syncs filesystems (sync)
+ * - Clears temp files (rm -rf /tmp/* /var/tmp/*)
+ * - Clears workdir: rm -rf /work/run_* (critical — no workdir state in snapshot)
+ * - Flushes buffers (sync; echo 3 > /proc/sys/vm/drop_caches)
+ */
+async function prepareInstance(
+  ctx: WorkflowContext,
+  input: CreateSnapshotInput,
+  deps: { 'validate-snapshot-request': { instance: Instance } }
+): Promise<{ prepared: boolean }> {
+  const { instance } = deps['validate-snapshot-request'];
+  ctx.log('info', 'Preparing instance for snapshot', { instanceId: input.instanceId });
+
+  // Send prepare_snapshot command to agent
+  await sendAgentMessage(instance.ip, {
+    type: 'prepare_snapshot',
+    command_id: generateUUID(),
+    instance_id: input.instanceId
+  });
+
+  // Wait for agent acknowledgment via snapshot-ready endpoint
+  const ackResult = await waitForAgentEvent(instance.ip, 'snapshot_ready', {
+    timeout: TIMING.SNAPSHOT_PREPARE_TIMEOUT_MS  // 5 minutes
+  });
+
+  if (!ackResult.success) {
+    throw new Error(`Instance preparation failed: ${ackResult.error}`);
+  }
+
+  ctx.log('info', 'Instance prepared for snapshot', { instanceId: input.instanceId });
+  return { prepared: true };
+}
+```
+
+### create-provider-snapshot
+
+```typescript
+/**
+ * Initiate snapshot creation at the provider.
+ * Compensation: delete snapshot if providerSnapshotId exists.
+ */
+async function createProviderSnapshot(
+  ctx: WorkflowContext,
+  input: CreateSnapshotInput,
+  deps: { 'validate-snapshot-request': { instance: Instance; provider: string } }
+): Promise<{ snapshotRequestId: string; providerSnapshotId: string }> {
+  const { instance, provider } = deps['validate-snapshot-request'];
+  ctx.log('info', 'Creating provider snapshot', { instanceId: input.instanceId, provider });
+
+  const client = getProviderClient(provider);
+
+  // Generate name if not provided
+  const snapshotName = input.name || `repl-${input.instanceId}-${Date.now()}`;
+
+  const snapshotRequest = await client.createSnapshot(instance.provider_id, {
+    name: snapshotName,
+    tags: {
+      instance_id: String(input.instanceId),
+      spec: instance.spec,
+      init_checksum: input.initChecksum,
+      created_by: 'skyrepl'
+    }
+  });
+
+  ctx.log('info', 'Snapshot creation initiated', {
+    requestId: snapshotRequest.requestId,
+    providerSnapshotId: snapshotRequest.providerSnapshotId
+  });
+
+  return {
+    snapshotRequestId: snapshotRequest.requestId,
+    providerSnapshotId: snapshotRequest.providerSnapshotId
+  };
+}
+
+// Compensation for create-provider-snapshot
+async function compensateCreateProviderSnapshot(
+  ctx: WorkflowContext,
+  output: { providerSnapshotId: string },
+  deps: { 'validate-snapshot-request': { provider: string } }
+): Promise<void> {
+  ctx.log('warn', 'Compensating provider snapshot', { providerSnapshotId: output.providerSnapshotId });
+  const client = getProviderClient(deps['validate-snapshot-request'].provider);
+  await client.deleteSnapshot(output.providerSnapshotId);
+}
+```
+
+### wait-for-snapshot
+
+```typescript
+async function waitForSnapshot(
+  ctx: WorkflowContext,
+  input: CreateSnapshotInput,
+  deps: {
+    'validate-snapshot-request': { provider: string };
+    'create-provider-snapshot': { snapshotRequestId: string; providerSnapshotId: string };
+  }
+): Promise<{ providerSnapshotId: string; sizeBytes: number; completedAt: number }> {
+  const { provider } = deps['validate-snapshot-request'];
+  const { snapshotRequestId, providerSnapshotId } = deps['create-provider-snapshot'];
+
+  ctx.log('info', 'Waiting for snapshot completion', { snapshotRequestId });
+
+  const client = getProviderClient(provider);
+  const snapshotTimeout = TIMING.SNAPSHOT_TIMEOUT_MS;  // 30 minutes
+  const pollInterval = TIMING.SNAPSHOT_POLL_INTERVAL_MS;  // 30 seconds
+  const deadline = Date.now() + snapshotTimeout;
+
+  while (Date.now() < deadline) {
+    ctx.checkCancellation();
+
+    const status = await client.getSnapshotStatus(snapshotRequestId);
+
+    if (status.status === 'completed') {
+      ctx.log('info', 'Snapshot completed', {
+        providerSnapshotId,
+        sizeBytes: status.sizeBytes
+      });
+
+      return {
+        providerSnapshotId,
+        sizeBytes: status.sizeBytes!,
+        completedAt: Date.now()
+      };
+    }
+
+    if (status.status === 'failed') {
+      throw new Error(`Snapshot creation failed at provider: ${status.error}`);
+    }
+
+    // Log progress if available
+    if (status.progress !== undefined) {
+      ctx.log('debug', 'Snapshot progress', { progress: status.progress });
+    }
+
+    await ctx.sleep(pollInterval);
+  }
+
+  throw new Error(`Snapshot creation timed out after ${snapshotTimeout}ms`);
+}
+```
+
+### register-snapshot-object
+
+```typescript
+async function registerSnapshotObject(
+  ctx: WorkflowContext,
+  input: CreateSnapshotInput,
+  deps: {
+    'validate-snapshot-request': { instance: Instance; provider: string };
+    'wait-for-snapshot': { providerSnapshotId: string; sizeBytes: number };
+  }
+): Promise<CreateSnapshotOutput> {
+  const { instance, provider } = deps['validate-snapshot-request'];
+  const { providerSnapshotId, sizeBytes } = deps['wait-for-snapshot'];
+
+  ctx.log('info', 'Registering snapshot object', { providerSnapshotId });
+
+  const db = getDatabase();
+  const objectId = generateUUID();
+  const now = Date.now();
+
+  db.prepare(`
+    INSERT INTO objects (id, type, blob_id, provider, provider_object_id, metadata_json, created_at, accessed_at)
+    VALUES (?, 'snapshot', ?, ?, ?, ?, ?, NULL)
+  `).run(
+    objectId,
+    0,  // Snapshots are provider-managed, no blob payload — placeholder blob_id
+    provider,
+    providerSnapshotId,
+    JSON.stringify({
+      run_id: input.runId,
+      spec: instance.spec,
+      init_checksum: input.initChecksum,
+      name: input.name,
+      size_bytes: sizeBytes
+    }),
+    now
+  );
+
+  // Emit resource to manifest
+  ctx.emitResource('object', objectId, 10);
+
+  ctx.log('info', 'Snapshot object registered', { objectId, providerSnapshotId });
+
+  return {
+    snapshotId: objectId,
+    providerSnapshotId,
+    sizeBytes
+  };
+}
+
+// Compensation for register-snapshot-object
+async function compensateRegisterSnapshotObject(
+  ctx: WorkflowContext,
+  output: CreateSnapshotOutput
+): Promise<void> {
+  ctx.log('warn', 'Compensating snapshot registration', { snapshotId: output.snapshotId });
+  getDatabase().prepare('DELETE FROM objects WHERE id = ?').run(output.snapshotId);
+}
+```

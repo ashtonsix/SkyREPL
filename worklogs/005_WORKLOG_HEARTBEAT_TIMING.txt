@@ -84,23 +84,23 @@ No gradual degradation. No user-visible warning before failure.
    - DEGRADED_CONTROL fits as: `degraded:control_plane_unreachable`
    - Agent already reports workflow_state in HeartbeatMessage
 
-2. **CLI preflight warnings** (v2/cli/src/preflight.ts.l1.txt):
+2. **CLI preflight warnings** (impl/cli/src/preflight.ts.l1.txt):
    - Existing tiers: info / warning / critical
    - Types: orphans, budget, credentials, stale_allocations, provider_issues
    - DEGRADED instances could appear here
 
-3. **HeartbeatMessage fields** (v2/shared/src/api/agent.ts.l1.txt:70-77):
+3. **HeartbeatMessage fields** (impl/shared/src/api/agent.ts.l1.txt:70-77):
    - workflow_state: string (can carry degraded status)
    - dropped_logs_count: number (existing degradation signal)
    - Could add: `control_plane_status?: 'connected' | 'degraded' | 'unreachable'`
 
-4. **Status icons** (v2/cli/src/ui/formatters.ts.l1.txt):
+4. **Status icons** (impl/cli/src/ui/formatters.ts.l1.txt):
    - ⏳ pending, ⏵ running, ✓ done, ✗ failed
    - Could add: ⚠️ degraded
 
 ### Agent-Side Detection
 
-Current (v2/agent/heartbeat.py.l1.txt):
+Current (impl/agent/heartbeat.py.l1.txt):
 - Tracks time since last ack
 - At 30s: initiate shutdown
 - No intermediate reporting
@@ -145,20 +145,20 @@ Option C: Hybrid (RECOMMENDED)
 ### Files to Modify for Early Warning
 
 Agent:
-  v2/agent/heartbeat.py.l1.txt    Add 2m degraded detection
-  v2/agent/heartbeat.py.l2.txt    Full implementation
+  impl/agent/heartbeat.py.l1.txt    Add 2m degraded detection
+  impl/agent/heartbeat.py.l2.txt    Full implementation
 
 Shared:
-  v2/shared/src/api/agent.ts.l1.txt    Add control_plane_status field (optional)
-  v2/shared/src/config/timing.ts.l2.txt    Add HEARTBEAT_DEGRADED_MS
+  impl/shared/src/api/agent.ts.l1.txt    Add control_plane_status field (optional)
+  impl/shared/src/config/timing.ts.l2.txt    Add HEARTBEAT_DEGRADED_MS
 
 Control:
-  v2/control/src/background/reconciliation.ts    Derive degraded status
-  v2/control/src/api/agent/agent.ts.l1.txt       Store degraded status
+  impl/control/src/background/reconciliation.ts    Derive degraded status
+  impl/control/src/api/agent/agent.ts.l1.txt       Store degraded status
 
 CLI:
-  v2/cli/src/ui/formatters.ts.l1.txt    Add ⚠️ degraded icon
-  v2/cli/src/preflight.ts.l1.txt        Add degraded_instance warning type
+  impl/cli/src/ui/formatters.ts.l1.txt    Add ⚠️ degraded icon
+  impl/cli/src/preflight.ts.l1.txt        Add degraded_instance warning type
 
 ================================================================================
 SPIKE RESULTS (from TODO Triage worklog)
@@ -171,7 +171,7 @@ Four additional explore agents examined checkpoint/timing. Key findings:
 16+ files need updates for 15m agent / 25m control plane timeout:
 
 Primary:
-  v2/shared/src/config/timing.ts.l2.txt:35-37
+  impl/shared/src/config/timing.ts.l2.txt:35-37
     - HEARTBEAT_ACK_TIMEOUT_MS: 30_000 → 900_000
     - STALE_DETECTION_MS: 30_000 → 1_500_000
     - Add: HEARTBEAT_DEGRADED_MS: 120_000
@@ -182,12 +182,12 @@ Spec (example values, non-normative):
   spec/11_AGENT.txt:380-386                Self-termination backup safety
 
 Agent:
-  v2/agent/heartbeat.py.l1.txt:15-20       30s → 15m self-term trigger
-  v2/agent/spot.py.l1.txt:13-37            Checkpoint timing (reuse path)
-  v2/agent/checkpoint.py.l1.txt:9-12       Add failover URL support
+  impl/agent/heartbeat.py.l1.txt:15-20       30s → 15m self-term trigger
+  impl/agent/spot.py.l1.txt:13-37            Checkpoint timing (reuse path)
+  impl/agent/checkpoint.py.l1.txt:9-12       Add failover URL support
 
 Control:
-  v2/control/src/background/reconciliation.ts.l1.txt:16-19  25m stale detection
+  impl/control/src/background/reconciliation.ts.l1.txt:16-19  25m stale detection
 
 ### 2. Checkpoint Failover Design
 
@@ -284,7 +284,7 @@ SCOPE
 
 ### Out of Scope
 
-- Spot interrupt prioritization algorithm (L2.6, separate worklog)
+- Spot interrupt prioritization algorithm (L2/A.6, separate worklog)
 - Schema additions (checkpoint_uploaded_at column) - defer unless needed
 
 ================================================================================
@@ -331,29 +331,29 @@ Spec (non-normative examples):
   spec/15_OPERATIONS.txt          Heartbeat chain constraint, defaults table
 
 Shared:
-  v2/shared/src/config/timing.ts.l2.txt    New constants
-  v2/shared/src/api/agent.ts.l1.txt        DEGRADED_CONTROL status, messages
+  impl/shared/src/config/timing.ts.l2.txt    New constants
+  impl/shared/src/api/agent.ts.l1.txt        DEGRADED_CONTROL status, messages
 
 Agent:
-  v2/agent/heartbeat.py.l1.txt    Degraded detection, 15m self-term
-  v2/agent/heartbeat.py.l2.txt    (CREATE) Full implementation
-  v2/agent/spot.py.l1.txt         Extract shared checkpoint logic
-  v2/agent/spot.py.l2.txt         (CREATE) With shared extraction
-  v2/agent/checkpoint.py.l1.txt   Failover URL support
-  v2/agent/checkpoint.py.l2.txt   (CREATE) Full implementation
+  impl/agent/heartbeat.py.l1.txt    Degraded detection, 15m self-term
+  impl/agent/heartbeat.py.l2.txt    (CREATE) Full implementation
+  impl/agent/spot.py.l1.txt         Extract shared checkpoint logic
+  impl/agent/spot.py.l2.txt         (CREATE) With shared extraction
+  impl/agent/checkpoint.py.l1.txt   Failover URL support
+  impl/agent/checkpoint.py.l2.txt   (CREATE) Full implementation
 
 Control:
-  v2/control/src/background/reconciliation.ts.l1.txt  25m timeout, degraded derivation
-  v2/control/src/background/reconciliation.ts.l2.txt  Checkpoint detection
-  v2/control/src/workflow/nodes/start-run.ts.l1.txt   Failover URLs
-  v2/control/src/api/agent/sse-protocol.ts.l1.txt     StartRunMessage update
-  v2/control/src/api/agent/agent.ts.l1.txt            Store degraded status
+  impl/control/src/background/reconciliation.ts.l1.txt  25m timeout, degraded derivation
+  impl/control/src/background/reconciliation.ts.l2.txt  Checkpoint detection
+  impl/control/src/workflow/nodes/start-run.ts.l1.txt   Failover URLs
+  impl/control/src/api/agent/sse-protocol.ts.l1.txt     StartRunMessage update
+  impl/control/src/api/agent/agent.ts.l1.txt            Store degraded status
 
 CLI:
-  v2/cli/src/ui/formatters.ts.l1.txt    Add ⚠️ degraded icon
-  v2/cli/src/preflight.ts.l1.txt        Add degraded_instance warning type
-  v2/cli/src/commands/list.ts.l1.txt    Display degraded status
-  v2/cli/src/commands/status.ts.l1.txt  Display degraded status (if exists)
+  impl/cli/src/ui/formatters.ts.l1.txt    Add ⚠️ degraded icon
+  impl/cli/src/preflight.ts.l1.txt        Add degraded_instance warning type
+  impl/cli/src/commands/list.ts.l1.txt    Display degraded status
+  impl/cli/src/commands/status.ts.l1.txt  Display degraded status (if exists)
 
 ================================================================================
 LOG
@@ -426,4 +426,4 @@ CROSS-REFERENCES
 
 Prior spike: WORKLOG_TODO_TRIAGE.txt (Phase 1 Research, T5 Spike sections)
 Timing consolidation: worklogs/003_WORKLOG_TIMINGS.txt (Wl3)
-Spot checkpoint: v2/agent/spot.py.l1.txt
+Spot checkpoint: impl/agent/spot.py.l1.txt

@@ -1,0 +1,452 @@
+================================================================================
+7. INTENTS
+================================================================================
+
+## Purpose
+
+Intents are offline types/interfaces/generics for testing and verification of
+workflow implementations. They are NOT runtime concepts—providers implement
+workflows to fulfill an intent.
+
+**Each intent defines:**
+- Expected outputs (e.g., "Launch Instance" emits a manifest containing an instance)
+- Type constraints for testing workflow implementations
+- Expected statuses/phases for consistent CLI progress display (e.g., launch-run
+  phases: provisioning, configuring, ready, executing, complete)
+- A micro-library of helpers/builders for common patterns
+
+**Testing Role**: Intents are the foundation of SkyREPL's testing strategy. All
+providers implementing an intent must satisfy the same contract (expected outputs,
+status phases, resource emissions). Testing workflows against OrbStack's intent
+implementation—including chaos scenarios (fault injection, network failures,
+capacity errors)—provides confidence that the control plane handles any
+contract-compliant provider correctly.
+
+Cross-Reference: Chapter 6 (Workflows) covers HOW intents are fulfilled. Chapter 8
+(Providers) covers OrbStack's testing/chaos role.
+
+**Compensation scope**: Compensation applies to single nodes only. Multi-node failures
+rely on manifest tracking for cleanup at the policy level. Workflows do NOT cascade
+compensation through completed nodes.
+
+**This chapter specifies four intents**: launch-run (execute computation),
+terminate-instance (cleanup), create-snapshot (fast restart), and cleanup-manifest
+(resource reclamation). Each specification includes output expectations, pattern
+applications, and verification requirements.
+
+## 7.1 launch-run Intent
+
+### Blueprint Structure
+
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           LAUNCH-RUN INTENT                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌──────────────┐                                                           │
+│  │ check-budget │                                                           │
+│  └──────┬───────┘                                                           │
+│         │                                                                   │
+│         ▼                                                                   │
+│  ┌──────────────────┐                                                       │
+│  │ resolve-instance │ ─────────────────────► CB: warm pool decision         │
+│  └────────┬─────────┘                                                       │
+│           │                                                                 │
+│     ┌─────┴─────┐                                                           │
+│     │           │                                                           │
+│ warm=true   warm=false                                                      │
+│     │           │                                                           │
+│     ▼           ▼                                                           │
+│ ┌────────────────────────┐    ┌────────────────┐                            │
+│ │ claim-warm-allocation  │    │ spawn-instance │                            │
+│ │ (CB: triggerOnError    │    └───────┬────────┘                            │
+│ │  fallback to spawn)    │            │                                     │
+│ └───────────┬────────────┘            ▼                                     │
+│             │                  ┌───────────────┐                            │
+│             │                  │ wait-for-boot │                            │
+│             │                  └───────┬───────┘                            │
+│             │                          │                                    │
+│             │                   IAR: feature install                        │
+│             │                   (Tailscale, GPU drivers)                    │
+│             │                          │                                    │
+│             └──────────┬───────────────┘                                    │
+│                        │                                                    │
+│                        ▼                                                    │
+│               ┌───────────────────┐                                         │
+│               │ create-allocation │                                         │
+│               └─────────┬─────────┘                                         │
+│                         │                                                   │
+│                         ▼                                                   │
+│               ┌────────────────┐    ┌───────────────────────────────────┐   │
+│               │   sync-files   │◄───│ • send start_run to agent         │   │
+│               └────────┬───────┘    │ • agent downloads files           │   │
+│                        │            │ • agent reports sync_complete     │   │
+│                        │            │ • transitions CLAIMED → ACTIVE    │   │
+│                        │            └───────────────────────────────────┘   │
+│                        ▼                                                    │
+│               ┌──────────────────┐                                          │
+│               │ await-completion │                                          │
+│               └────────┬─────────┘                                          │
+│                        │                                                    │
+│                        ▼                                                    │
+│               ┌──────────────┐                                              │
+│               │ finalize-run │ ────────────► CB: conditional snapshot       │
+│               └──────┬───────┘                                              │
+│                      │                                                      │
+│                      ▼                                                      │
+│                 ┌──────────┐                                                │
+│                 │ COMPLETE │                                                │
+│                 └──────────┘                                                │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+LEGEND:
+  ┌───────────┐
+  │ node-name │    Workflow node
+  └───────────┘
+       │
+       ▼           Sequential flow (down)
+      ───►         Pattern application / annotation pointer
+      CB:          Conditional-Branch pattern
+      IAR:         Insert-and-Reconverge pattern
+```
+
+### Pattern Applications
+
+**Conditional-Branch (CB) at resolve-instance**: Warm pool availability determines path (warm=claim-warm-allocation, cold=spawn-instance). Both paths converge at wait-for-boot.
+
+**CB with triggerOnError at claim-warm-allocation**: Optimistic claim with spawn fallback. If claim fails, spawn-instance path is taken automatically.
+
+**Insert-and-Reconverge (IAR) at wait-for-boot**: Feature installation subworkflows (Tailscale, GPU drivers) inserted in parallel, converging before create-allocation.
+
+**CB at finalize-run**: Conditional snapshot creation if run.createSnapshot=true and exitCode=0.
+
+### Node Handlers
+
+**Key node signatures:**
+- `check-budget`: Validate budget constraints before allocation
+- `resolve-instance`: Check warm pool availability for spec/init_checksum match
+- `claim-warm-allocation`: Atomically claim AVAILABLE allocation matching criteria
+- `spawn-instance`: Trigger provider.spawn() with two-phase protocol
+- `wait-for-boot`: Poll instance status until ready (includes IAR for features)
+- `create-allocation`: Create allocation record, transition to CLAIMED
+- `sync-files`: Generate presigned URLs, send start_run to agent, await sync_complete
+- `await-completion`: Block until run_complete message received
+- `finalize-run`: Transition allocation to COMPLETE, trigger snapshot if requested
+
+> See also: impl/control/src/intent/launch-run.ts.l2.txt §Entry Point
+
+**syncFiles handler details:**
+
+The sync-files node combines multiple operations:
+1. Generates presigned URLs for all file checksums
+2. Sends single `start_run` message to agent with files list
+3. Agent downloads files in parallel
+4. Agent reports sync_complete via log channel
+5. Control receives sync_complete and transitions allocation CLAIMED→ACTIVE
+6. Node completes after receiving sync_complete
+
+This replaces the two-step process (download_files → start_job) with a single atomic operation.
+
+### Resource Emissions
+
+| Node              | Resource   | Cleanup Priority | Example Call                                       |
+|-------------------|------------|------------------|----------------------------------------------------|
+| spawn-instance    | instance   | 50               | `ctx.emitResource('instance', instanceId, 50)`     |
+| create-allocation | allocation | 90               | `ctx.emitResource('allocation', allocationId, 90)` |
+| (workflow start)  | run        | 80               | `ctx.emitResource('run', runId, 80)`               |
+| create-snapshot*  | object     | 10               | `ctx.emitResource('object', objectId, 10)`         |
+
+*Only if createSnapshot=true and exitCode=0
+
+### Error Handling
+
+| Failure Point    | Behavior                                    |
+|------------------|---------------------------------------------|
+| check-budget     | Fail immediately, no resources              |
+| claim-warm       | CB with triggerOnError=true to spawn        |
+| spawn-instance   | Retry-with-Alternative (region)             |
+| wait-for-boot    | Timeout → terminate instance                |
+| sync-files       | Allocation → FAILED, terminate instance     |
+| await-completion | Timeout → run cancelled, COMPLETE+debug_hold|
+
+### Snapshot-Based Restart
+
+**Note**: Restart from snapshot is a launch-run variation, not a separate workflow.
+
+When a snapshot exists:
+- **resolve-instance** can match against snapshot-based instances in warm pool
+- Warm pool matching logic prefers instances created from matching snapshots
+- If no warm match, **spawn-instance** can use snapshot as boot source (provider-dependent)
+- Feature installation (IAR at wait-for-boot) is skipped when booting from snapshot
+
+This reduces cold start time (e.g., from minutes to seconds) for repeat runs with identical init state.
+
+## 7.2 terminate-instance Intent
+
+### Blueprint Structure
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        TERMINATE-INSTANCE INTENT                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌───────────────────┐                                                      │
+│  │ validate-instance │  Verify instance exists, acquire termination lock    │
+│  └─────────┬─────────┘                                                      │
+│            │                                                                │
+│            ▼                                                                │
+│  ┌───────────────────┐                                                      │
+│  │ drain-allocations │  Archive ACTIVE allocations, notify agent            │
+│  └─────────┬─────────┘                                                      │
+│            │                                                                │
+│            ▼                                                                │
+│  ┌───────────────────┐     ┌──────────────────┐     ┌──────────────────┐    │
+│  │ drain-ssh-sessions│────►│ notify-ssh-users │────►│ wait-ssh-timeout │    │
+│  └─────────┬─────────┘     └──────────────────┘     └────────┬─────────┘    │
+│            │                                                 │              │
+│            │◄────────────────────────────────────────────────┘              │
+│            │                  (ssh_drain_grace_period, then force)         │
+│            ▼                                                                │
+│  ┌──────────────────┐                                                       │
+│  │ cleanup-features │ ─────────────► PFO: Parallel teardown by feature      │
+│  └─────────┬────────┘                                                       │
+│            │                                                                │
+│            ▼                                                                │
+│  ┌────────────────────┐                                                     │
+│  │ terminate-provider │  Call provider.terminate(), await confirmation      │
+│  └─────────┬──────────┘                                                     │
+│            │                                                                │
+│            ▼                                                                │
+│  ┌─────────────────┐                                                        │
+│  │ cleanup-records │  Update status, close usage records                    │
+│  └────────┬────────┘                                                        │
+│           │                                                                 │
+│           ▼                                                                 │
+│      ┌──────────┐                                                           │
+│      │ COMPLETE │                                                           │
+│      └──────────┘                                                           │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Cleanup Sequence
+
+1. **VALIDATE**: Verify instance exists, acquire termination lock
+2. **DRAIN-ALLOCATIONS**: Archive ACTIVE allocations, notify agent
+3. **DRAIN-SSH**: Notify users, wait ssh_drain_grace_period, force disconnect
+4. **CLEANUP-FEATURES**: Parallel teardown of all FeatureInstallations (Tailscale,
+   GPU drivers, monitoring). Uses Parallel-Fan-Out; partial failures don't block.
+5. **TERMINATE-PROVIDER**: Call provider.terminate(), wait for confirmation
+6. **CLEANUP-RECORDS**: Update status, close usage records
+
+**cleanup-features node**: Queries all FeatureInstallation objects for instance, applies Parallel-Fan-Out pattern to spawn cleanup-feature subnode per feature. All branches converge at terminate-provider. Partial failures SHOULD NOT block termination.
+
+### FeatureInstallation Teardown
+
+Each feature MAY provide optional teardownHandler invoked during cleanup-features (Parallel-Fan-Out):
+
+- **Tailscale**: Deregister device from Tailscale API, delete TailscaleMachine object
+- **GPU drivers**: No teardown (ephemeral instance)
+- **Monitoring agents**: Stop processes, deregister from monitoring service
+
+### SSH Session Draining Protocol
+
+1. Query allocations WHERE instance_id=X AND status='COMPLETE' AND debug_hold_until>now
+2. Broadcast termination warning via instance SSH
+3. Wait ssh_drain_grace_period (configurable)
+4. Force-disconnect remaining sessions
+5. Return count of forced disconnects
+
+> See also: impl/control/src/intent/terminate.ts.l2.txt §Entry Point
+
+## 7.3 create-snapshot Intent
+
+### Blueprint Structure
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          CREATE-SNAPSHOT INTENT                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌───────────────────────────┐                                              │
+│  │ validate-snapshot-request │                                              │
+│  └─────────────┬─────────────┘                                              │
+│                │                                                            │
+│                ▼                                                            │
+│  ┌──────────────────┐                                                       │
+│  │ prepare-instance │◄─────── sync filesystem, clean temp files            │
+│  └────────┬─────────┘                                                       │
+│           │                                                                 │
+│           ▼                                                                 │
+│  ┌──────────────────────────┐                                               │
+│  │ create-provider-snapshot │                                               │
+│  └────────────┬─────────────┘                                               │
+│               │                                                             │
+│               ▼                                                             │
+│  ┌───────────────────┐                                                      │
+│  │ wait-for-snapshot │◄─────── timeout: SNAPSHOT_TIMEOUT                   │
+│  └─────────┬─────────┘                                                      │
+│            │                                                                │
+│            ▼                                                                │
+│  ┌──────────────────────────┐                                               │
+│  │ register-snapshot-object │  Emit resource: object (priority 10)         │
+│  └────────────┬─────────────┘                                               │
+│               │                                                             │
+│               ▼                                                             │
+│         ┌──────────┐                                                        │
+│         │ COMPLETE │                                                        │
+│         └──────────┘                                                        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Provider Abstraction
+
+```typescript
+interface SnapshotCapability {
+  createSnapshot(providerId: string, options: CreateSnapshotOptions): Promise<SnapshotRequest>;
+  getSnapshotStatus(requestId: string): Promise<SnapshotStatus>;
+  deleteSnapshot(providerSnapshotId: string): Promise<void>;
+}
+
+// Provider implementations:
+// AWS: Creates AMI (ami-xxxxx)
+// Lambda Labs: Not supported
+// RunPod: Pod snapshot (snapshot-xxxxx)
+// OrbStack: VM snapshot
+```
+
+### Snapshot Object Registration
+
+**register-snapshot-object node** MUST:
+1. Insert object record with type='snapshot'
+2. Store provider_id, spec, init_checksum, name in tags_json
+3. Call ctx.emitResource('object', objectId, priority=10)
+4. Return snapshotObjectId for workflow output
+
+> See also: impl/control/src/intent/snapshot.ts.l2.txt §Entry Point
+
+## 7.4 cleanup-manifest Intent
+
+### Blueprint Structure
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         CLEANUP-MANIFEST INTENT                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────┐                                                │
+│  │ load-manifest-resources │                                                │
+│  └───────────┬─────────────┘                                                │
+│              │                                                              │
+│              ▼                                                              │
+│  ┌──────────────────┐                                                       │
+│  │ sort-by-priority │                                                       │
+│  └────────┬─────────┘                                                       │
+│           │                                                                 │
+│           ▼                                                                 │
+│  ┌────────────────────────┐                                                 │
+│  │ cleanup-resources-loop │ ──────────────► PFO: Parallel-Fan-Out by type   │
+│  └───────────┬────────────┘                                                 │
+│              │                                                              │
+│    ┌─────────┼─────────┬──────────────┬───────────────┐                     │
+│    │         │         │              │               │                     │
+│    ▼         ▼         ▼              ▼               ▼                     │
+│ ┌────────┐ ┌────────┐ ┌────────┐ ┌──────────┐ ┌───────────┐                 │
+│ │cleanup-│ │cleanup-│ │cleanup-│ │ cleanup- │ │ cleanup-  │                 │
+│ │allocs  │ │ runs   │ │objects │ │instances │ │ snapshots │                 │
+│ │ (90)   │ │ (80)   │ │(60-70) │ │   (50)   │ │   (10)    │                 │
+│ └───┬────┘ └───┬────┘ └───┬────┘ └────┬─────┘ └─────┬─────┘                 │
+│     │          │          │           │             │                       │
+│     └──────────┴──────────┴─────┬─────┴─────────────┘                       │
+│                                 │                                           │
+│                                 ▼                                           │
+│                      ┌─────────────────┐                                    │
+│                      │ delete-manifest │                                    │
+│                      └────────┬────────┘                                    │
+│                               │                                             │
+│                               ▼                                             │
+│                          ┌──────────┐                                       │
+│                          │ COMPLETE │                                       │
+│                          └──────────┘                                       │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+CLEANUP PRIORITY ORDER (highest first):
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │  90: Allocations  │ Release instance slots                            │
+  │  80: Runs         │ Delete files, logs, records                       │
+  │  70: Artifacts    │ Delete S3 objects                                 │
+  │  65: Features     │ Tailscale machines, other feature provider rsrcs  │
+  │  60: Other Objects│ Generic objects                                   │
+  │  50: Instances    │ Terminate via provider                            │
+  │  10: Snapshots    │ Provider snapshots (last - may be reused)         │
+  └───────────────────────────────────────────────────────────────────────┘
+
+Priority ordering enables natural parallel fanout during cleanup. Resources at
+priority 65 (features like Tailscale detach) execute in parallel with each other,
+then priority 50 (instance termination) runs last. This is not sequential
+processing—priorities group concurrent operations while enforcing dependency order.
+```
+
+### Per-Provider Scoping
+
+Cleanup operations MUST be scoped per-provider:
+
+**Orchestration:**
+1. Query DB: `SELECT DISTINCT provider FROM instances WHERE manifest_id = ?`
+2. For each provider: submit cleanup-manifest workflow with (manifestId, provider) input
+3. Each workflow cleans only resources from its provider (e.g., AWS → EC2 instances + EBS snapshots)
+4. Wait for all provider workflows to complete
+5. Manifest marked EXPIRED when all providers complete
+
+**Rationale:** Prevents cross-provider dependencies, enables parallel cleanup, isolates provider-specific failures.
+
+### Expiry-Triggered Cleanup
+
+Background scanner MUST run periodically (every minute) to:
+1. Query manifests WHERE status='SEALED' AND expires_at < now AND no active cleanup workflow
+2. Limit results to prevent overload (e.g., LIMIT 10)
+3. For each expired manifest: submit cleanup workflow (uses per-provider orchestration)
+
+**Note:** EXPIRED is derived status (manifest with no owned resources), not set explicitly. Cleanup workflow handles resource deletion.
+
+### S3 Cleanup
+
+**cleanup-objects node** MUST:
+1. For each object: if s3_key present, delete from S3
+2. Delete object record from DB
+3. Return count of S3 deletions
+
+**Blob Cleanup:** Handled by background GC, NOT inline during manifest cleanup. Objects reference blobs via blob_id FK with ON DELETE RESTRICT. Background GC finds unreferenced blobs (24h grace period) and deletes both S3 objects and blob records. See Ch2 for details.
+
+### Error Handling
+
+Cleanup MUST be resilient - partial failures SHOULD NOT prevent remaining cleanup:
+
+| Error Type         | Action              | Rationale                          |
+|--------------------|---------------------|------------------------------------|
+| NOT_FOUND          | skip_and_continue   | Already deleted, safe to ignore    |
+| PROVIDER_API_ERROR | retry_then_skip     | Best effort, max 3 retries         |
+| S3_ERROR           | log_and_continue    | Don't block cleanup for S3 blip    |
+| DATABASE_ERROR     | fail_workflow       | Critical - manifest state corrupt  |
+
+> See also: impl/control/src/intent/cleanup-manifest.ts.l2.txt §Types
+
+## 7.5 Pattern Library Usage Notes
+
+### Retry-with-Alternative (RWA) Pattern
+
+The RWA pattern is **not used** in the intents above—intents prefer Conditional-Branch
+for failover paths and node-level retry for transient failures.
+
+RWA is designed for custom user workflows requiring runtime failover (e.g., region
+selection during execution rather than at submission). Use cases:
+- Multiple regions/providers attempted sequentially
+- Each attempt needs independent compensation
+- Deterministic failover isn't possible upfront
+
+Example: try multiple regions for spot capacity, where failure in one region triggers attempt in another region with different input.
+

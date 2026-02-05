@@ -1,0 +1,698 @@
+# routes.ts - Route Registration and Resource Handlers (L2 Pseudocode)
+
+## Imports
+
+```typescript
+import { Elysia, t } from 'elysia';
+import { authMiddleware } from './middleware/auth';
+import { errorMiddleware } from './middleware/errors';
+import { idempotencyMiddleware } from './middleware/idempotency';
+import { rateLimitMiddleware } from './middleware/rate-limit';
+import { queryMany, queryOne, transaction } from '../material/db';
+import { logger } from '../logger';
+import type {
+  ApiResponse, ListResponse, PaginationMeta, ListRequest,
+  ListInstancesRequest, ListRunsRequest, ListAllocationsRequest,
+  ListWorkflowsRequest, ListManifestsRequest, ListObjectsResponse,
+  GetInstanceResponse, GetRunResponse, GetAllocationResponse,
+  GetWorkflowResponse, GetManifestResponse, GetWorkflowNodesResponse,
+  GetManifestResourcesResponse, GetObjectResponse,
+  CreateInstanceRequest, CreateRunRequest, CreateAllocationRequest,
+  UpdateRunRequest, UpdateInstanceRequest, UpdateAllocationRequest,
+  BlobCheckRequest, BlobCheckResponse,
+} from '../../../../shared/src/api/resources';
+import type { ErrorCodeType } from '../../../../shared/src/api/resources';
+import { createApiError } from '../../../../shared/src/errors';
+import { httpStatusForCategory } from '../../../../shared/src/errors';
+```
+
+## Server Setup
+
+```typescript
+// =============================================================================
+// SERVER SETUP
+// =============================================================================
+
+export function createServer(config: ServerConfig): Elysia {
+  const app = new Elysia()
+    .use(errorMiddleware())
+    .use(authMiddleware())
+    .use(rateLimitMiddleware());
+
+  // Layer 1: Resource CRUD
+  registerResourceRoutes(app);
+
+  // Layer 2: Workflow submission
+  registerOperationRoutes(app);
+
+  // Agent communication
+  registerAgentRoutes(app);
+
+  // Health checks
+  app.get('/v1/health', () => ({ status: 'ok', timestamp: Date.now() }));
+
+  return app;
+}
+
+interface ServerConfig {
+  port: number;
+  corsOrigins: string[];
+  maxBodySize: number;  // bytes
+}
+```
+
+## Common Pagination Helper
+
+```typescript
+// =============================================================================
+// COMMON PAGINATION HELPER
+// =============================================================================
+
+/** Build paginated SQL query from ListRequest params */
+function buildPaginatedQuery(
+  baseQuery: string,
+  params: ListRequest,
+  allowedSortFields: string[]
+): { sql: string; values: unknown[]; countSql: string } {
+  const values: unknown[] = [];
+  let where = '';
+  let orderBy = '';
+  let limitOffset = '';
+
+  // Filters applied per-resource (caller builds WHERE clause)
+
+  // Sort
+  const sort = params.sortBy && allowedSortFields.includes(params.sortBy)
+    ? params.sortBy
+    : 'created_at';
+  const order = params.sortOrder === 'asc' ? 'ASC' : 'DESC';
+  orderBy = `ORDER BY ${sort} ${order}`;
+
+  // Cursor-based pagination
+  if (params.cursor) {
+    const decoded = decodeCursor(params.cursor);
+    where += ` AND (${sort}, id) < (?, ?)`;
+    values.push(decoded.value, decoded.id);
+  }
+
+  const limit = Math.min(params.limit ?? 50, 500);
+  limitOffset = `LIMIT ${limit + 1}`;  // Fetch one extra to detect has_more
+
+  const sql = `${baseQuery} ${where} ${orderBy} ${limitOffset}`;
+  const countSql = `SELECT COUNT(*) as count FROM (${baseQuery} ${where})`;
+  return { sql, values, countSql };
+}
+
+/** Encode cursor for pagination */
+function encodeCursor(sortValue: unknown, id: number): string {
+  return Buffer.from(JSON.stringify({ value: sortValue, id })).toString('base64url');
+}
+
+/** Decode cursor from pagination */
+function decodeCursor(cursor: string): { value: unknown; id: number } {
+  return JSON.parse(Buffer.from(cursor, 'base64url').toString());
+}
+
+/** Build pagination metadata from results */
+function buildPaginationMeta<T extends { id: number }>(
+  rows: T[],
+  limit: number,
+  sortField: string,
+  countTotal?: boolean
+): { data: T[]; pagination: PaginationMeta } {
+  const hasMore = rows.length > limit;
+  const data = hasMore ? rows.slice(0, limit) : rows;
+  const lastRow = data[data.length - 1];
+
+  return {
+    data,
+    pagination: {
+      total: 0,  // Only populated if count=true requested
+      limit,
+      offset: 0,
+      hasMore,
+      nextCursor: hasMore && lastRow
+        ? encodeCursor((lastRow as any)[sortField], lastRow.id)
+        : undefined,
+    },
+  };
+}
+```
+
+## Layer 1: Resource CRUD Routes
+
+```typescript
+// =============================================================================
+// LAYER 1: RESOURCE CRUD ROUTES
+// =============================================================================
+
+function registerResourceRoutes(app: Elysia): void {
+
+  // ─── Runs ────────────────────────────────────────────────────────────
+
+  app.get('/v1/runs', async ({ query }) => {
+    const filters = buildRunFilters(query);
+    const { sql, values } = buildPaginatedQuery(
+      `SELECT * FROM runs WHERE 1=1 ${filters.where}`,
+      query,
+      ['created_at', 'started_at', 'finished_at']
+    );
+    const rows = await queryMany(sql, [...filters.values, ...values]);
+    return buildPaginationMeta(rows, query.limit ?? 50, 'created_at');
+  });
+
+  app.get('/v1/runs/:id', async ({ params, query }) => {
+    const run = await queryOne('SELECT * FROM runs WHERE id = ?', [params.id]);
+    if (!run) throw createNotFoundError('run', params.id);
+
+    const result: any = { data: run };
+
+    // Optional includes
+    if (query.include?.includes('allocation')) {
+      result.data.allocation = await queryOne(
+        'SELECT * FROM allocations WHERE run_id = ?', [params.id]
+      );
+    }
+    if (query.include?.includes('files')) {
+      result.data.files = await queryMany(
+        'SELECT path, checksum, size_bytes FROM run_files WHERE run_id = ?', [params.id]
+      );
+    }
+    if (query.include?.includes('artifacts')) {
+      result.data.artifacts = await queryMany(
+        'SELECT * FROM objects WHERE metadata_json LIKE ? AND type = ?',
+        [`%"run_id":${params.id}%`, 'artifact']
+      );
+    }
+    return result;
+  });
+
+  app.post('/v1/runs', async ({ body, set }) => {
+    // Handled by idempotency middleware if Idempotency-Key present
+    const run = await transaction(async (tx) => {
+      const id = body.id ?? generateId();
+      const slug = generateSlug(id);
+      await tx.run(
+        `INSERT INTO runs (id, slug, command, workdir, max_duration_ms, create_snapshot,
+         init_checksum, workflow_state, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, slug, body.command, body.workdir ?? '/home/ubuntu/work',
+         body.max_duration_ms ?? 0, body.create_snapshot ?? false,
+         body.init_checksum ?? null, 'pending', Date.now()]
+      );
+      return queryOne('SELECT * FROM runs WHERE id = ?', [id]);
+    });
+    set.status = 201;
+    return { data: run };
+  });
+
+  app.put('/v1/runs/:id', async ({ params, body }) => {
+    const existing = await queryOne('SELECT * FROM runs WHERE id = ?', [params.id]);
+    if (!existing) throw createNotFoundError('run', params.id);
+
+    // Only allow certain field updates based on caller role
+    const updates: string[] = [];
+    const values: unknown[] = [];
+    if (body.workflow_state !== undefined) { updates.push('workflow_state = ?'); values.push(body.workflow_state); }
+    if (body.exit_code !== undefined) { updates.push('exit_code = ?'); values.push(body.exit_code); }
+    if (body.started_at !== undefined) { updates.push('started_at = ?'); values.push(body.started_at); }
+    if (body.finished_at !== undefined) { updates.push('finished_at = ?'); values.push(body.finished_at); }
+
+    if (updates.length === 0) return { data: existing };
+
+    values.push(params.id);
+    await queryOne(`UPDATE runs SET ${updates.join(', ')} WHERE id = ?`, values);
+    return { data: await queryOne('SELECT * FROM runs WHERE id = ?', [params.id]) };
+  });
+
+  app.delete('/v1/runs/:id', async ({ params, set }) => {
+    const existing = await queryOne('SELECT * FROM runs WHERE id = ?', [params.id]);
+    if (!existing) throw createNotFoundError('run', params.id);
+
+    // Prevent deleting in-progress runs
+    if (existing.workflow_state && !existing.workflow_state.includes('complete') && !existing.workflow_state.includes('failed')) {
+      throw createApiError('RUN_IN_PROGRESS', 'Cannot delete run while in progress', 'conflict');
+    }
+
+    await queryOne('DELETE FROM runs WHERE id = ?', [params.id]);
+    set.status = 204;
+  });
+
+  // ─── Instances ───────────────────────────────────────────────────────
+
+  app.get('/v1/instances', async ({ query }) => {
+    const filters = buildInstanceFilters(query);
+    const { sql, values } = buildPaginatedQuery(
+      `SELECT * FROM instances WHERE 1=1 ${filters.where}`,
+      query,
+      ['created_at', 'last_heartbeat']
+    );
+    const rows = await queryMany(sql, [...filters.values, ...values]);
+    return buildPaginationMeta(rows, query.limit ?? 50, 'created_at');
+  });
+
+  app.get('/v1/instances/:id', async ({ params, query }) => {
+    const instance = await queryOne('SELECT * FROM instances WHERE id = ?', [params.id]);
+    if (!instance) throw createNotFoundError('instance', params.id);
+
+    const result: any = { data: instance };
+
+    if (query.include?.includes('allocations')) {
+      result.data.allocations = await queryMany(
+        'SELECT * FROM allocations WHERE instance_id = ?', [params.id]
+      );
+    }
+    if (query.refresh_external === 'true') {
+      // Fetch external state from provider API
+      result.data.external_state = await refreshExternalState(instance);
+    }
+    return result;
+  });
+
+  app.post('/v1/instances', async ({ body, set }) => {
+    const instance = await transaction(async (tx) => {
+      const id = body.id ?? generateId();
+      const slug = generateSlug(id);
+      await tx.run(
+        `INSERT INTO instances (id, slug, provider, provider_id, spec, region, ip,
+         is_spot, spot_request_id, init_checksum, workflow_state, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, slug, body.provider, body.provider_id, body.spec, body.region ?? null,
+         body.ip ?? null, body.is_spot ?? false, body.spot_request_id ?? null,
+         body.init_checksum ?? null, 'pending', Date.now()]
+      );
+      return queryOne('SELECT * FROM instances WHERE id = ?', [id]);
+    });
+    set.status = 201;
+    return { data: instance };
+  });
+
+  app.put('/v1/instances/:id', async ({ params, body }) => {
+    const existing = await queryOne('SELECT * FROM instances WHERE id = ?', [params.id]);
+    if (!existing) throw createNotFoundError('instance', params.id);
+
+    const updates: string[] = [];
+    const values: unknown[] = [];
+    if (body.ip !== undefined) { updates.push('ip = ?'); values.push(body.ip); }
+    if (body.status !== undefined) { updates.push('workflow_state = ?'); values.push(body.status); }
+    if (body.last_heartbeat !== undefined) { updates.push('last_heartbeat = ?'); values.push(body.last_heartbeat); }
+
+    if (updates.length === 0) return { data: existing };
+
+    values.push(params.id);
+    await queryOne(`UPDATE instances SET ${updates.join(', ')} WHERE id = ?`, values);
+    return { data: await queryOne('SELECT * FROM instances WHERE id = ?', [params.id]) };
+  });
+
+  app.delete('/v1/instances/:id', async ({ params, set }) => {
+    const existing = await queryOne('SELECT * FROM instances WHERE id = ?', [params.id]);
+    if (!existing) throw createNotFoundError('instance', params.id);
+
+    // Prevent deleting instances with active allocations
+    const activeAllocs = await queryMany(
+      "SELECT id FROM allocations WHERE instance_id = ? AND status IN ('AVAILABLE', 'CLAIMED', 'ACTIVE')",
+      [params.id]
+    );
+    if (activeAllocs.length > 0) {
+      throw createApiError(
+        'INSTANCE_HAS_ALLOCATIONS',
+        'Cannot delete instance with active allocations',
+        'conflict',
+        { active_allocation_ids: activeAllocs.map(a => a.id) }
+      );
+    }
+
+    await queryOne('DELETE FROM instances WHERE id = ?', [params.id]);
+    set.status = 204;
+  });
+
+  // ─── Allocations ─────────────────────────────────────────────────────
+
+  app.get('/v1/allocations', async ({ query }) => {
+    const filters = buildAllocationFilters(query);
+    const { sql, values } = buildPaginatedQuery(
+      `SELECT * FROM allocations WHERE 1=1 ${filters.where}`,
+      query,
+      ['created_at', 'updated_at']
+    );
+    const rows = await queryMany(sql, [...filters.values, ...values]);
+    return buildPaginationMeta(rows, query.limit ?? 50, 'created_at');
+  });
+
+  app.get('/v1/allocations/:id', async ({ params, query }) => {
+    const alloc = await queryOne('SELECT * FROM allocations WHERE id = ?', [params.id]);
+    if (!alloc) throw createNotFoundError('allocation', params.id);
+
+    const result: any = { data: alloc };
+
+    if (query.include?.includes('instance')) {
+      result.data.instance = await queryOne(
+        'SELECT * FROM instances WHERE id = ?', [alloc.instance_id]
+      );
+    }
+    if (query.include?.includes('run')) {
+      result.data.run = alloc.run_id
+        ? await queryOne('SELECT * FROM runs WHERE id = ?', [alloc.run_id])
+        : null;
+    }
+    // SSH config derived from instance + allocation data
+    if (result.data.instance) {
+      result.data.ssh_config = {
+        host: result.data.instance.tailscale_ip ?? result.data.instance.ip,
+        port: 22,
+        user: alloc.user ?? 'ubuntu',
+        identity_file: `~/.ssh/skyrepl_${result.data.instance.provider}`,
+      };
+    }
+    return result;
+  });
+
+  app.post('/v1/allocations', async ({ body, set }) => {
+    const alloc = await transaction(async (tx) => {
+      const id = body.id ?? generateId();
+      await tx.run(
+        `INSERT INTO allocations (id, instance_id, run_id, user, workdir, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, body.instance_id, body.run_id ?? null, body.user ?? 'ubuntu',
+         body.workdir ?? null, body.status ?? 'AVAILABLE', Date.now(), Date.now()]
+      );
+      return queryOne('SELECT * FROM allocations WHERE id = ?', [id]);
+    });
+    set.status = 201;
+    return { data: alloc };
+  });
+
+  app.put('/v1/allocations/:id', async ({ params, body }) => {
+    const existing = await queryOne('SELECT * FROM allocations WHERE id = ?', [params.id]);
+    if (!existing) throw createNotFoundError('allocation', params.id);
+
+    const updates: string[] = [];
+    const values: unknown[] = [];
+    if (body.status !== undefined) { updates.push('status = ?'); values.push(body.status); }
+    if (body.run_id !== undefined) { updates.push('run_id = ?'); values.push(body.run_id); }
+    if (body.hold_until !== undefined) { updates.push('debug_hold_until = ?'); values.push(body.hold_until); }
+    updates.push('updated_at = ?'); values.push(Date.now());
+
+    values.push(params.id);
+    await queryOne(`UPDATE allocations SET ${updates.join(', ')} WHERE id = ?`, values);
+    return { data: await queryOne('SELECT * FROM allocations WHERE id = ?', [params.id]) };
+  });
+
+  app.delete('/v1/allocations/:id', async ({ params, set }) => {
+    const existing = await queryOne('SELECT * FROM allocations WHERE id = ?', [params.id]);
+    if (!existing) throw createNotFoundError('allocation', params.id);
+    await queryOne('DELETE FROM allocations WHERE id = ?', [params.id]);
+    set.status = 204;
+  });
+
+  // ─── Workflows (Read-Only) ──────────────────────────────────────────
+
+  app.get('/v1/workflows', async ({ query }) => {
+    const filters = buildWorkflowFilters(query);
+    const { sql, values } = buildPaginatedQuery(
+      `SELECT * FROM workflows WHERE 1=1 ${filters.where}`,
+      query,
+      ['created_at', 'started_at', 'finished_at']
+    );
+    const rows = await queryMany(sql, [...filters.values, ...values]);
+    return buildPaginationMeta(rows, query.limit ?? 50, 'created_at');
+  });
+
+  app.get('/v1/workflows/:id', async ({ params, query }) => {
+    const workflow = await queryOne('SELECT * FROM workflows WHERE id = ?', [params.id]);
+    if (!workflow) throw createNotFoundError('workflow', params.id);
+
+    const result: any = { data: workflow };
+
+    if (query.include?.includes('nodes')) {
+      result.data.nodes = await queryMany(
+        'SELECT * FROM workflow_nodes WHERE workflow_id = ? ORDER BY started_at ASC',
+        [params.id]
+      );
+    }
+    if (query.include?.includes('manifest')) {
+      result.data.manifest = await queryOne(
+        'SELECT * FROM manifests WHERE workflow_id = ?', [params.id]
+      );
+    }
+    return result;
+  });
+
+  app.get('/v1/workflows/:id/nodes', async ({ params }) => {
+    const workflow = await queryOne('SELECT * FROM workflows WHERE id = ?', [params.id]);
+    if (!workflow) throw createNotFoundError('workflow', params.id);
+
+    const nodes = await queryMany(
+      'SELECT * FROM workflow_nodes WHERE workflow_id = ? ORDER BY started_at ASC',
+      [params.id]
+    );
+    return { data: nodes };
+  });
+
+  // ─── Manifests (Read-Only) ──────────────────────────────────────────
+
+  app.get('/v1/manifests', async ({ query }) => {
+    const filters = buildManifestFilters(query);
+    const { sql, values } = buildPaginatedQuery(
+      `SELECT * FROM manifests WHERE 1=1 ${filters.where}`,
+      query,
+      ['created_at']
+    );
+    const rows = await queryMany(sql, [...filters.values, ...values]);
+    return buildPaginationMeta(rows, query.limit ?? 50, 'created_at');
+  });
+
+  app.get('/v1/manifests/:id', async ({ params, query }) => {
+    const manifest = await queryOne('SELECT * FROM manifests WHERE id = ?', [params.id]);
+    if (!manifest) throw createNotFoundError('manifest', params.id);
+
+    const result: any = { data: manifest };
+
+    if (query.include?.includes('resources')) {
+      result.data.resources = await queryMany(
+        'SELECT * FROM manifest_resources WHERE manifest_id = ?', [params.id]
+      );
+    }
+    if (query.include?.includes('workflow')) {
+      result.data.workflow = await queryOne(
+        'SELECT * FROM workflows WHERE id = ?', [manifest.workflow_id]
+      );
+    }
+    return result;
+  });
+
+  app.get('/v1/manifests/:id/resources', async ({ params }) => {
+    const manifest = await queryOne('SELECT * FROM manifests WHERE id = ?', [params.id]);
+    if (!manifest) throw createNotFoundError('manifest', params.id);
+
+    const resources = await queryMany(
+      'SELECT * FROM manifest_resources WHERE manifest_id = ?', [params.id]
+    );
+    return { data: resources };
+  });
+
+  // ─── Objects ─────────────────────────────────────────────────────────
+
+  app.get('/v1/objects', async ({ query }) => {
+    const filters = buildObjectFilters(query);
+    const { sql, values } = buildPaginatedQuery(
+      `SELECT * FROM objects WHERE 1=1 ${filters.where}`,
+      query,
+      ['created_at', 'updated_at']
+    );
+    const rows = await queryMany(sql, [...filters.values, ...values]);
+    return buildPaginationMeta(rows, query.limit ?? 50, 'created_at');
+  });
+
+  app.get('/v1/objects/:id', async ({ params, query }) => {
+    const obj = await queryOne('SELECT * FROM objects WHERE id = ?', [params.id]);
+    if (!obj) throw createNotFoundError('object', params.id);
+
+    const result: any = { data: obj };
+
+    // For small objects (<=64KB) with inline storage, include payload if requested
+    if (query.include_payload === 'true' && obj.payload) {
+      result.data.payload = obj.payload;  // Base64 encoded
+    }
+    // For large objects, provide presigned URL
+    if (obj.s3_key) {
+      result.data.s3_url = await generatePresignedUrl(obj.s3_key, 3600);
+    }
+    return result;
+  });
+
+  app.delete('/v1/objects/:id', async ({ params, set }) => {
+    const existing = await queryOne('SELECT * FROM objects WHERE id = ?', [params.id]);
+    if (!existing) throw createNotFoundError('object', params.id);
+
+    // Delete from S3 if stored there
+    if (existing.s3_key) {
+      await deleteS3Object(existing.s3_key);
+    }
+    await queryOne('DELETE FROM objects WHERE id = ?', [params.id]);
+    set.status = 204;
+  });
+
+  // ─── Blobs ───────────────────────────────────────────────────────────
+
+  app.post('/v1/blobs/check', async ({ body }) => {
+    const { checksums } = body as BlobCheckRequest;
+
+    // Check which blobs already exist
+    const placeholders = checksums.map(() => '?').join(',');
+    const existing = await queryMany(
+      `SELECT checksum FROM objects WHERE checksum IN (${placeholders})`,
+      checksums
+    );
+    const existingSet = new Set(existing.map(r => r.checksum));
+
+    // Identify missing and generate presigned upload URLs
+    const missing: string[] = [];
+    const urls: Record<string, string> = {};
+
+    for (const checksum of checksums) {
+      if (!existingSet.has(checksum)) {
+        missing.push(checksum);
+        const s3Key = `blobs/${checksum.replace('sha256:', '')}`;
+        urls[checksum] = await generatePresignedUploadUrl(s3Key, 4 * 60 * 60);  // 4-hour TTL
+      } else {
+        // Increment ref_count for existing blobs
+        await queryOne(
+          'UPDATE objects SET ref_count = ref_count + 1 WHERE checksum = ?',
+          [checksum]
+        );
+      }
+    }
+
+    return { missing, urls } satisfies BlobCheckResponse;
+  });
+}
+```
+
+## Filter Builders
+
+```typescript
+// =============================================================================
+// FILTER BUILDERS
+// =============================================================================
+
+function buildRunFilters(query: any): { where: string; values: unknown[] } {
+  const clauses: string[] = [];
+  const values: unknown[] = [];
+
+  if (query.status) {
+    const statuses = String(query.status).split(',');
+    clauses.push(`workflow_state IN (${statuses.map(() => '?').join(',')})`);
+    values.push(...statuses);
+  }
+  if (query.created_after) { clauses.push('created_at >= ?'); values.push(query.created_after); }
+  if (query.created_before) { clauses.push('created_at <= ?'); values.push(query.created_before); }
+
+  return { where: clauses.length > 0 ? 'AND ' + clauses.join(' AND ') : '', values };
+}
+
+function buildInstanceFilters(query: any): { where: string; values: unknown[] } {
+  const clauses: string[] = [];
+  const values: unknown[] = [];
+
+  if (query.provider) { clauses.push('provider = ?'); values.push(query.provider); }
+  if (query.status) {
+    const statuses = String(query.status).split(',');
+    clauses.push(`workflow_state IN (${statuses.map(() => '?').join(',')})`);
+    values.push(...statuses);
+  }
+  if (query.spec) { clauses.push('spec = ?'); values.push(query.spec); }
+  if (query.available === 'true') {
+    clauses.push("EXISTS (SELECT 1 FROM allocations a WHERE a.instance_id = instances.id AND a.status = 'AVAILABLE')");
+  }
+
+  return { where: clauses.length > 0 ? 'AND ' + clauses.join(' AND ') : '', values };
+}
+
+function buildAllocationFilters(query: any): { where: string; values: unknown[] } {
+  const clauses: string[] = [];
+  const values: unknown[] = [];
+
+  if (query.status) { clauses.push('status = ?'); values.push(query.status); }
+  if (query.instance_id) { clauses.push('instance_id = ?'); values.push(query.instance_id); }
+  if (query.run_id) { clauses.push('run_id = ?'); values.push(query.run_id); }
+
+  return { where: clauses.length > 0 ? 'AND ' + clauses.join(' AND ') : '', values };
+}
+
+function buildWorkflowFilters(query: any): { where: string; values: unknown[] } {
+  const clauses: string[] = [];
+  const values: unknown[] = [];
+
+  if (query.type) { clauses.push('type = ?'); values.push(query.type); }
+  if (query.status) {
+    const statuses = String(query.status).split(',');
+    clauses.push(`status IN (${statuses.map(() => '?').join(',')})`);
+    values.push(...statuses);
+  }
+
+  return { where: clauses.length > 0 ? 'AND ' + clauses.join(' AND ') : '', values };
+}
+
+function buildManifestFilters(query: any): { where: string; values: unknown[] } {
+  const clauses: string[] = [];
+  const values: unknown[] = [];
+
+  if (query.status) { clauses.push('status = ?'); values.push(query.status); }
+  if (query.expires_before) { clauses.push('expires_at <= ?'); values.push(query.expires_before); }
+
+  return { where: clauses.length > 0 ? 'AND ' + clauses.join(' AND ') : '', values };
+}
+
+function buildObjectFilters(query: any): { where: string; values: unknown[] } {
+  const clauses: string[] = [];
+  const values: unknown[] = [];
+
+  if (query.type) { clauses.push('type = ?'); values.push(query.type); }
+
+  return { where: clauses.length > 0 ? 'AND ' + clauses.join(' AND ') : '', values };
+}
+```
+
+## Utility Functions
+
+```typescript
+// =============================================================================
+// UTILITY FUNCTIONS
+// =============================================================================
+
+function createNotFoundError(resourceType: string, resourceId: string | number) {
+  const code = `${resourceType.toUpperCase()}_NOT_FOUND` as ErrorCodeType;
+  return createApiError(code, `${resourceType} '${resourceId}' not found`, 'not_found', {
+    resource_type: resourceType,
+    resource_id: resourceId,
+  });
+}
+
+function generateId(): number {
+  // Auto-increment handled by SQLite; this is for client-provided IDs
+  return Date.now();  // Placeholder; real impl uses DB sequence
+}
+
+function generateSlug(id: number): string {
+  // Base36 encode for short human-readable slugs
+  return id.toString(36);
+}
+
+async function refreshExternalState(instance: any): Promise<any> {
+  // Delegate to provider adapter to fetch live instance state
+  // Returns { status, ip, fetched_at }
+}
+
+async function generatePresignedUrl(s3Key: string, ttlSeconds: number): Promise<string> {
+  // Generate S3 presigned GET URL
+}
+
+async function generatePresignedUploadUrl(s3Key: string, ttlSeconds: number): Promise<string> {
+  // Generate S3 presigned PUT URL
+}
+
+async function deleteS3Object(s3Key: string): Promise<void> {
+  // Delete object from S3
+}
+```

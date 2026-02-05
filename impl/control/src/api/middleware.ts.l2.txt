@@ -1,0 +1,442 @@
+# middleware.ts - API Middleware (L2 Pseudocode)
+
+## Imports
+
+```typescript
+import { Elysia } from 'elysia';
+import { queryOne, queryMany } from '../material/db';
+import { logger } from '../logger';
+import type { ApiError, ErrorCodeType } from '../../../../shared/src/api/resources';
+import { createApiError } from '../../../../shared/src/errors';
+import { httpStatusForCategory, categoryForCode } from '../../../../shared/src/errors';
+import type { ErrorCategory } from '../../../../shared/src/types';
+```
+
+## Auth Middleware
+
+```typescript
+// =============================================================================
+// AUTH MIDDLEWARE
+// =============================================================================
+
+/**
+ * Authentication middleware for all API endpoints.
+ * For authentication strategy and security architecture, see Ch15.7 Security.
+ */
+export function authMiddleware() {
+  return new Elysia({ name: 'auth' })
+    .derive(async ({ request, headers }) => {
+      const apiKey = headers['x-api-key'] ?? headers['authorization']?.replace('Bearer ', '');
+
+      // Agent endpoints use instance-level auth
+      if (request.url.includes('/v1/agent/')) {
+        return deriveAgentAuth(headers);
+      }
+
+      if (!apiKey) {
+        throw createApiError('MISSING_API_KEY', 'No API key provided', 'auth');
+      }
+
+      // Validate API key
+      const keyRecord = await queryOne(
+        'SELECT * FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL',
+        [hashApiKey(apiKey)]
+      );
+
+      if (!keyRecord) {
+        throw createApiError('INVALID_API_KEY', 'API key is invalid or expired', 'auth');
+      }
+
+      // Check expiry
+      if (keyRecord.expires_at && keyRecord.expires_at < Date.now()) {
+        throw createApiError('INVALID_API_KEY', 'API key is invalid or expired', 'auth');
+      }
+
+      // Update last_used_at
+      await queryOne(
+        'UPDATE api_keys SET last_used_at = ? WHERE id = ?',
+        [Date.now(), keyRecord.id]
+      );
+
+      return {
+        auth: {
+          keyId: keyRecord.id,
+          scopes: JSON.parse(keyRecord.scopes_json) as string[],
+          userId: keyRecord.user_id,
+        },
+      };
+    });
+}
+
+/** Derive auth context for agent endpoints */
+async function deriveAgentAuth(headers: Record<string, string | undefined>) {
+  const instanceToken = headers['x-instance-token'];
+  if (!instanceToken) {
+    throw createApiError('MISSING_API_KEY', 'No instance token provided', 'auth');
+  }
+
+  const instance = await queryOne(
+    'SELECT id, provider FROM instances WHERE auth_token_hash = ?',
+    [hashApiKey(instanceToken)]
+  );
+
+  if (!instance) {
+    throw createApiError('INVALID_API_KEY', 'Instance token is invalid', 'auth');
+  }
+
+  return {
+    auth: {
+      keyId: `instance-${instance.id}`,
+      scopes: ['agent:*'],
+      userId: null,
+      instanceId: instance.id,
+    },
+  };
+}
+
+/** Check if auth context has required scope */
+export function requireScope(scopes: string[], required: string): void {
+  const hasScope = scopes.some(s =>
+    s === required || s === '*' || s.endsWith(':*') && required.startsWith(s.replace(':*', ':'))
+  );
+  if (!hasScope) {
+    throw createApiError(
+      'INSUFFICIENT_PERMISSIONS',
+      `API key does not have required scope: ${required}`,
+      'auth',
+      { required_scope: required, current_scopes: scopes }
+    );
+  }
+}
+
+function hashApiKey(key: string): string {
+  // SHA256 hash of API key for storage comparison
+  // crypto.createHash('sha256').update(key).digest('hex');
+  return `sha256:${key}`;  // Placeholder
+}
+```
+
+## Error Handling Middleware
+
+```typescript
+// =============================================================================
+// ERROR HANDLING MIDDLEWARE
+// =============================================================================
+
+/**
+ * Global error handling middleware.
+ * Catches all errors and returns standardized ApiError responses.
+ */
+export function errorMiddleware() {
+  return new Elysia({ name: 'errors' })
+    .onError(({ error, set, request }) => {
+      const requestId = generateRequestId();
+
+      // Already-formatted API errors (thrown by handlers)
+      if (isApiError(error)) {
+        const apiError = error as ApiError;
+        const category = apiError.error.category;
+        set.status = httpStatusForCategory(category);
+        apiError.error.request_id = requestId;
+        return apiError;
+      }
+
+      // Validation errors from ElysiaJS schema validation
+      if (error.code === 'VALIDATION') {
+        set.status = 400;
+        return createApiError(
+          'INVALID_INPUT',
+          error.message ?? 'Invalid request',
+          'validation',
+          { validation_errors: error.all ?? [] }
+        );
+      }
+
+      // Not found (404 from Elysia routing)
+      if (error.code === 'NOT_FOUND') {
+        set.status = 404;
+        return createApiError(
+          'RESOURCE_NOT_FOUND',
+          `Endpoint not found: ${request.method} ${new URL(request.url).pathname}`,
+          'not_found'
+        );
+      }
+
+      // Unexpected errors
+      logger.error('Unhandled API error', {
+        requestId,
+        method: request.method,
+        url: request.url,
+        error: error.message,
+        stack: error.stack,
+      });
+
+      set.status = 500;
+      return createApiError(
+        'INTERNAL_ERROR',
+        'An unexpected error occurred',
+        'internal',
+        undefined,
+        undefined
+      );
+    });
+}
+
+function isApiError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'error' in error
+    && typeof (error as any).error === 'object' && 'code' in (error as any).error;
+}
+
+function generateRequestId(): string {
+  return `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+```
+
+## Rate Limiting Middleware
+
+```typescript
+// =============================================================================
+// RATE LIMITING MIDDLEWARE
+// =============================================================================
+
+/**
+ * Rate limiting middleware using sliding window counter.
+ * Different limits for different endpoint categories.
+ */
+export function rateLimitMiddleware() {
+  return new Elysia({ name: 'rate-limit' })
+    .derive(async ({ request, headers }) => {
+      const apiKey = headers['x-api-key'] ?? headers['authorization']?.replace('Bearer ', '') ?? 'anonymous';
+      const path = new URL(request.url).pathname;
+      const category = getRateLimitCategory(path);
+      const limits = RATE_LIMITS[category];
+
+      // Sliding window counter
+      const windowKey = `ratelimit:${apiKey}:${category}`;
+      const windowStart = Date.now() - limits.windowMs;
+
+      // Count requests in window
+      const count = await queryOne(
+        'SELECT COUNT(*) as count FROM rate_limit_log WHERE key = ? AND timestamp > ?',
+        [windowKey, windowStart]
+      );
+
+      if (count && count.count >= limits.maxRequests) {
+        const oldestInWindow = await queryOne(
+          'SELECT MIN(timestamp) as oldest FROM rate_limit_log WHERE key = ? AND timestamp > ?',
+          [windowKey, windowStart]
+        );
+        const retryAfterMs = oldestInWindow
+          ? (oldestInWindow.oldest + limits.windowMs) - Date.now()
+          : limits.windowMs;
+
+        throw Object.assign(
+          createApiError(
+            'RATE_LIMITED',
+            `Too many requests. Please retry after ${Math.ceil(retryAfterMs / 1000)} seconds.`,
+            'rate_limit',
+            { limit: limits.maxRequests, window_ms: limits.windowMs, current_count: count.count },
+            retryAfterMs
+          ),
+          { retryAfterMs }
+        );
+      }
+
+      // Log this request
+      await queryOne(
+        'INSERT INTO rate_limit_log (key, timestamp) VALUES (?, ?)',
+        [windowKey, Date.now()]
+      );
+
+      // Cleanup old entries periodically
+      if (Math.random() < 0.01) {
+        await queryOne(
+          'DELETE FROM rate_limit_log WHERE timestamp < ?',
+          [Date.now() - 3600_000]
+        );
+      }
+
+      return {};
+    });
+}
+
+type RateLimitCategory = 'mutation' | 'query' | 'agent' | 'streaming';
+
+const RATE_LIMITS: Record<RateLimitCategory, { maxRequests: number; windowMs: number }> = {
+  mutation: { maxRequests: 100, windowMs: 60_000 },
+  query: { maxRequests: 300, windowMs: 60_000 },
+  agent: { maxRequests: 600, windowMs: 60_000 },  // Higher for heartbeats
+  streaming: { maxRequests: 50, windowMs: 60_000 },
+};
+
+function getRateLimitCategory(path: string): RateLimitCategory {
+  if (path.includes('/agent/')) return 'agent';
+  if (path.includes('/stream') || path.includes('/logs') || path.includes('/progress')) return 'streaming';
+  if (path.startsWith('/v1/workflows/') && !path.includes('/status')) return 'mutation';
+  return 'query';
+}
+```
+
+## Idempotency Middleware
+
+```typescript
+// =============================================================================
+// IDEMPOTENCY MIDDLEWARE
+// =============================================================================
+
+/**
+ * Idempotency key middleware for mutation endpoints.
+ * Global scope: same key cannot be reused across ANY endpoint.
+ *
+ * Schema:
+ *   CREATE TABLE idempotency_keys (
+ *       key TEXT PRIMARY KEY,
+ *       endpoint TEXT NOT NULL,
+ *       params_hash TEXT NOT NULL,
+ *       response_status INTEGER NOT NULL,
+ *       response_body TEXT NOT NULL,
+ *       workflow_id INTEGER,
+ *       created_at INTEGER NOT NULL,
+ *       expires_at INTEGER NOT NULL,
+ *       FOREIGN KEY (workflow_id) REFERENCES workflows(id)
+ *   );
+ *   CREATE INDEX idx_idempotency_expires ON idempotency_keys(expires_at);
+ *
+ * Expiry policy (example defaults, configurable):
+ *   - 2xx: 24 hours
+ *   - 4xx: 1 hour (allow retry with fixes)
+ *   - 5xx: immediate expiry (allow immediate retry)
+ */
+export function idempotencyMiddleware(options?: { scope?: string }) {
+  return new Elysia({ name: 'idempotency' })
+    .onBeforeHandle(async ({ request, body, set }) => {
+      const key = request.headers.get('idempotency-key');
+      if (!key) return;  // No key = no idempotency handling
+
+      if (key.length > 256) {
+        throw createApiError(
+          'INVALID_INPUT',
+          'Idempotency-Key must be at most 256 characters',
+          'validation'
+        );
+      }
+
+      const endpoint = new URL(request.url).pathname;
+      const paramsHash = hashParams(body);
+
+      // Check existing record
+      const existing = await queryOne(
+        'SELECT * FROM idempotency_keys WHERE key = ? AND expires_at > ?',
+        [key, Date.now()]
+      );
+
+      if (existing) {
+        // Same key, check params match
+        if (existing.params_hash !== paramsHash) {
+          throw createApiError(
+            'IDEMPOTENCY_CONFLICT',
+            `Idempotency key '${key}' was already used with different parameters`,
+            'conflict',
+            {
+              idempotency_key: key,
+              existing_workflow_id: existing.workflow_id,
+              original_endpoint: existing.endpoint,
+              original_created_at: existing.created_at,
+            }
+          );
+        }
+
+        // Return cached response
+        set.status = existing.response_status;
+        return JSON.parse(existing.response_body);
+      }
+
+      // Store key for post-processing in afterHandle
+      (request as any).__idempotencyKey = key;
+      (request as any).__idempotencyEndpoint = endpoint;
+      (request as any).__idempotencyParamsHash = paramsHash;
+    })
+    .onAfterHandle(async ({ request, response, set }) => {
+      const key = (request as any).__idempotencyKey;
+      if (!key) return;
+
+      const status = set.status ?? 200;
+      const responseBody = JSON.stringify(response);
+
+      // Calculate expiry
+      const expiresAt = calculateExpiry(status as number);
+
+      // Extract workflow_id from response if present
+      const workflowId = extractWorkflowId(response);
+
+      await queryOne(
+        `INSERT OR IGNORE INTO idempotency_keys
+         (key, endpoint, params_hash, response_status, response_body, workflow_id, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          key,
+          (request as any).__idempotencyEndpoint,
+          (request as any).__idempotencyParamsHash,
+          status,
+          responseBody,
+          workflowId,
+          Date.now(),
+          expiresAt,
+        ]
+      );
+    });
+}
+
+/** Hash request params for idempotency comparison */
+function hashParams(body: unknown): string {
+  const normalized = JSON.stringify(sortKeys(body as Record<string, unknown>));
+  // crypto.createHash('sha256').update(normalized).digest('hex');
+  return `sha256:${normalized}`;  // Placeholder
+}
+
+/** Sort object keys recursively for consistent hashing */
+function sortKeys(obj: Record<string, unknown>): Record<string, unknown> {
+  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) return obj as any;
+  return Object.keys(obj).sort().reduce((sorted, key) => {
+    sorted[key] = sortKeys(obj[key] as Record<string, unknown>);
+    return sorted;
+  }, {} as Record<string, unknown>);
+}
+
+/** Calculate expiry based on response status */
+function calculateExpiry(status: number): number {
+  if (status >= 500) return Date.now();                          // Immediate expiry for 5xx
+  if (status >= 400) return Date.now() + 1 * 60 * 60 * 1000;   // 1 hour for 4xx
+  return Date.now() + 24 * 60 * 60 * 1000;                     // 24 hours for 2xx
+}
+
+/** Extract workflow_id from response for idempotency record linkage */
+function extractWorkflowId(response: unknown): number | null {
+  if (typeof response === 'object' && response !== null) {
+    const r = response as Record<string, unknown>;
+    if ('workflow_id' in r) return r.workflow_id as number;
+    if ('data' in r && typeof r.data === 'object' && r.data !== null) {
+      const data = r.data as Record<string, unknown>;
+      if ('workflowId' in data) return data.workflowId as number;
+    }
+  }
+  return null;
+}
+```
+
+## Idempotency Cleanup
+
+```typescript
+// =============================================================================
+// IDEMPOTENCY CLEANUP
+// =============================================================================
+
+/** Periodic cleanup of expired idempotency keys (called by scheduler) */
+export async function cleanupExpiredIdempotencyKeys(): Promise<number> {
+  const result = await queryOne(
+    'DELETE FROM idempotency_keys WHERE expires_at < ?',
+    [Date.now()]
+  );
+  return result?.changes ?? 0;
+}
+```

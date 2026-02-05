@@ -1,0 +1,173 @@
+# contracts.ts - Provider Workflow Constraints & Contracts (L2 Pseudocode)
+
+# Cross-references:
+# - Provider types: ./types.ts.l2.txt (ProviderName, BootstrapConfig, SpawnOptions)
+# - Shared types: ../../../../shared/src/types.ts.l2.txt (ProviderName)
+# - Timing: ../../../../shared/src/config/timing.ts.l2.txt (SPAWN_MAX_DURATION_MS, etc.)
+
+## Imports
+
+```typescript
+import type { ProviderName } from '../../../../shared/src/types';
+import type { BootstrapConfig } from './types';
+import * as timing from '../../../../shared/src/config/timing';
+```
+
+## Provider Workflow Constraints
+
+```typescript
+/**
+ * Provider workflows have constraints ensuring
+ * uniform control plane management.
+ */
+
+interface ProviderWorkflowConstraints {
+  /** Maximum workflow duration */
+  maxDurationMs: number;
+
+  /** Required output fields */
+  requiredOutputFields: string[];
+
+  /** Allowed input types */
+  inputSchema: JSONSchema;
+
+  /** Resources the workflow may emit */
+  emittableResources: ResourceType[];
+
+  /** Whether workflow can spawn subworkflows */
+  canSpawnSubworkflows: boolean;
+
+  /** Maximum subworkflow depth */
+  maxSubworkflowDepth: number;
+}
+
+/**
+ * Abstract contracts that provider workflows must satisfy.
+ */
+interface ProviderWorkflowContract {
+  /** Workflow type identifier */
+  type: string;
+
+  /** Provider this workflow belongs to */
+  provider: ProviderName;
+
+  /** Description of what this workflow does */
+  description: string;
+
+  /** Constraints */
+  constraints: ProviderWorkflowConstraints;
+
+  /**
+   * Validation function for input.
+   * Called before workflow submission.
+   */
+  validateInput(input: unknown): ValidationResult;
+
+  /**
+   * Compensation function for single-node cleanup.
+   * Called when this node fails and needs cleanup.
+   */
+  compensate(context: CompensationContext): Promise<void>;
+}
+
+/**
+ * Registry of provider workflow types.
+ */
+const PROVIDER_WORKFLOW_REGISTRY: Map<string, ProviderWorkflowContract> = new Map();
+
+function registerProviderWorkflow(contract: ProviderWorkflowContract): void {
+  const key = `${contract.provider}:${contract.type}`;
+  if (PROVIDER_WORKFLOW_REGISTRY.has(key)) {
+    throw new Error(`Provider workflow already registered: ${key}`);
+  }
+  PROVIDER_WORKFLOW_REGISTRY.set(key, contract);
+}
+```
+
+## Abstract Contracts
+
+```typescript
+/**
+ * spawn-instance contract: All providers that support instance spawning
+ * must satisfy this contract when used by launch-run workflow.
+ */
+interface SpawnInstanceContract extends ProviderWorkflowContract {
+  type: 'spawn-instance';
+
+  constraints: {
+    maxDurationMs: timing.SPAWN_MAX_DURATION_MS;
+    requiredOutputFields: ['instanceId', 'providerId', 'ip'];
+    emittableResources: ['instance'];
+    canSpawnSubworkflows: false;
+    maxSubworkflowDepth: 0;
+  };
+
+  input: {
+    spec: string;
+    region?: string;
+    spot?: boolean;
+    bootstrap: BootstrapConfig;
+  };
+
+  output: {
+    instanceId: string;      // Our internal ID
+    providerId: string;      // Provider's instance ID
+    ip: string | null;       // Public IP (may be null initially)
+    status: string;
+  };
+}
+
+/**
+ * terminate-instance contract: Uniform termination behavior.
+ */
+interface TerminateInstanceContract extends ProviderWorkflowContract {
+  type: 'terminate-instance';
+
+  constraints: {
+    maxDurationMs: timing.TERMINATE_MAX_DURATION_MS;
+    requiredOutputFields: ['terminated'];
+    emittableResources: [];
+    canSpawnSubworkflows: false;
+    maxSubworkflowDepth: 0;
+  };
+
+  input: {
+    providerId: string;
+    gracePeriodMs?: number;
+  };
+
+  output: {
+    terminated: boolean;
+    finalStatus: string;
+  };
+}
+
+/**
+ * create-snapshot contract: Snapshot creation behavior.
+ * Only providers with capabilities.snapshots need implement.
+ */
+interface CreateSnapshotContract extends ProviderWorkflowContract {
+  type: 'create-snapshot';
+
+  constraints: {
+    maxDurationMs: timing.SNAPSHOT_MAX_DURATION_MS;
+    requiredOutputFields: ['snapshotId', 'providerSnapshotId'];
+    emittableResources: ['object'];
+    canSpawnSubworkflows: false;
+    maxSubworkflowDepth: 0;
+  };
+
+  input: {
+    providerId: string;
+    name: string;
+    spec: string;
+    initChecksum?: string;
+  };
+
+  output: {
+    snapshotId: string;
+    providerSnapshotId: string;
+    sizeBytes?: number;
+  };
+}
+```

@@ -1,0 +1,135 @@
+# external.ts - Provider State Caching (L2 Pseudocode)
+
+# Note: NOT persisted to database — in-memory only, cleared on restart
+# Note: Cross-references to provider adapters in impl/control/src/providers/
+
+## Types
+
+```typescript
+interface CacheEntry<T> {
+  value: T;
+  expiresAt: number;  // Unix timestamp ms
+}
+
+interface CacheOptions {
+  bypassCache?: boolean;  // Skip cache read, always fetch fresh
+}
+```
+
+## Config
+
+```typescript
+// TTL defaults (milliseconds)
+const SPOT_PRICES_TTL_MS = 5 * 60 * 1000;         // 5 minutes
+const INSTANCE_STATE_TTL_MS = 30 * 1000;           // 30 seconds
+const SNAPSHOT_STATE_TTL_MS = 5 * 60 * 1000;       // 5 minutes
+
+// Cache key format: {provider}:{type}:{region}:{spec}
+// Instance key format: instance:{id}:external
+```
+
+## Cache Store
+
+```typescript
+const cache = new Map<string, CacheEntry<unknown>>();
+```
+
+## Core Cache Function
+
+```typescript
+/**
+ * TTL-based cache wrapper for provider state.
+ *
+ * Fetches from cache if entry exists and not expired.
+ * On miss or expiry, calls fetcher and stores result.
+ *
+ * bypassCache option: skips cache read but still updates cache after fetch,
+ * so subsequent non-critical reads benefit from the fresh value.
+ *
+ * Used for: spot prices, instance external state, snapshot external state.
+ */
+async function getWithCache<T>(
+  key: string,
+  ttlMs: number,
+  fetcher: () => Promise<T>,
+  options?: CacheOptions
+): Promise<T> {
+  // Check cache unless bypass requested
+  if (!options?.bypassCache) {
+    const cached = cache.get(key) as CacheEntry<T> | undefined;
+    if (cached && Date.now() < cached.expiresAt) {
+      return cached.value;
+    }
+  }
+
+  // Fetch fresh value
+  const value = await fetcher();
+
+  // Always update cache (even on bypass) for subsequent reads
+  cache.set(key, { value, expiresAt: Date.now() + ttlMs });
+
+  return value;
+}
+```
+
+## Cache Invalidation
+
+```typescript
+/**
+ * Invalidate cached instance state.
+ * Called on: spawn complete, terminate complete, allocation state change.
+ * Ensures critical operations see fresh provider state.
+ */
+function invalidateInstanceCache(instanceId: number): void {
+  cache.delete(`instance:${instanceId}:external`);
+}
+
+/**
+ * Invalidate provider-specific cache entries by pattern.
+ * Example: invalidateProviderCache('aws', 'instance:*')
+ *
+ * Pattern uses simple prefix matching (no regex).
+ */
+function invalidateProviderCache(provider: string, pattern: string): void {
+  const prefix = `${provider}:${pattern.replace('*', '')}`;
+
+  for (const key of cache.keys()) {
+    if (key.startsWith(prefix)) {
+      cache.delete(key);
+    }
+  }
+}
+
+/**
+ * Invalidate a specific cache entry by exact key.
+ */
+function invalidateCacheByKey(key: string): void {
+  cache.delete(key);
+}
+```
+
+## Usage Examples
+
+```typescript
+// Spot prices: 5 minute TTL
+const spotPrices = await getWithCache(
+  'aws:spot_prices:us-east-1',
+  SPOT_PRICES_TTL_MS,
+  () => aws.describeSpotPriceHistory(...)
+);
+
+// Instance external state: 30 second TTL
+const instanceState = await getWithCache(
+  `instance:${instanceId}:external`,
+  INSTANCE_STATE_TTL_MS,
+  () => provider.describeInstance(providerId)
+);
+
+// Critical operation: bypass cache for orphan detection
+const freshState = await getWithCache(
+  `instance:${instanceId}:external`,
+  INSTANCE_STATE_TTL_MS,
+  () => provider.describeInstance(providerId),
+  { bypassCache: true }
+);
+```

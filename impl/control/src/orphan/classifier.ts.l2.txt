@@ -1,0 +1,253 @@
+# classifier.ts - Orphan Classification (L2 Pseudocode)
+
+## Imports
+
+```typescript
+import { TIMING } from '../../../../shared/src/config/timing';
+import { logger } from '../logger';
+```
+
+## Types
+
+```typescript
+type OrphanResourceType = 'instance' | 'volume' | 'snapshot' | 'tailscale_machine';
+type OrphanSeverity = 'WARNING' | 'INFO' | 'CAUTION';
+
+interface ResourceNameParts {
+  controlId: string;
+  manifestIdSlug: string | null;
+  instanceIdSlug: string;
+}
+
+interface OrphanedResource {
+  /** Provider's resource ID */
+  providerId: string;
+  /** Resource type */
+  resourceType: OrphanResourceType;
+  /** Provider name */
+  provider: string;
+  /** Parsed from resource name (if parseable) */
+  inferredInfo: ResourceNameParts | null;
+  /** Resource creation time (from provider) */
+  createdAt: number;
+  /** Resource age in ms */
+  ageMs: number;
+  /** Whether this likely originated from current session */
+  likelyCurrentSession: boolean;
+  /** Estimated hourly cost (if available) */
+  estimatedHourlyCost?: number;
+}
+
+interface ClassifiedOrphan extends OrphanedResource {
+  severity: OrphanSeverity;
+  reason: string;
+}
+
+interface OrphanClassification {
+  /** Orphans likely from current control plane session */
+  currentSession: ClassifiedOrphan[];
+  /** Orphans likely from previous sessions */
+  otherSessions: ClassifiedOrphan[];
+  /** Orphans that can't be classified (no parseable name) */
+  unknown: ClassifiedOrphan[];
+  stats: {
+    total: number;
+    byProvider: Record<string, number>;
+    bySeverity: Record<OrphanSeverity, number>;
+  };
+}
+
+interface SpawnErrorClassification {
+  /** Whether this error type can leave orphans */
+  orphanRisk: boolean;
+  /** How confident we are the resource was never created */
+  confidenceNoResource: 'high' | 'medium' | 'low';
+  /** Recommended action */
+  action: 'none' | 'scan_immediately' | 'scan_delayed';
+}
+
+interface PreflightWarning {
+  severity: 'WARNING' | 'INFO';
+  message: string;
+  suggestion: string;
+  resources?: string[];
+}
+```
+
+## Resource Name Parsing
+
+```typescript
+/**
+ * Generate cloud resource name encoding recovery information.
+ * Format: repl-{controlId}-{manifestSlug}-{instanceSlug}
+ */
+function generateResourceName(
+  controlId: string,
+  manifestId: number | null,
+  instanceId: number
+): string {
+  const manifestSlug = manifestId ? idToSlug(manifestId) : 'none';
+  const instanceSlug = idToSlug(instanceId);
+
+  return `repl-${controlId}-${manifestSlug}-${instanceSlug}`;
+}
+
+/**
+ * Parse a cloud resource name back into components.
+ * Returns null if name doesn't match expected format.
+ */
+function parseResourceName(name: string): ResourceNameParts | null {
+  const match = name.match(/^repl-([a-z0-9]+)-([a-z0-9]+|none)-([a-z0-9]+)$/);
+  if (!match) return null;
+
+  return {
+    controlId: match[1],
+    manifestIdSlug: match[2] === 'none' ? null : match[2],
+    instanceIdSlug: match[3],
+  };
+}
+
+/**
+ * Tailscale uses simpler naming: repl-{controlId}-{instanceId}
+ * (provider implicit, manifest tracked in DB)
+ */
+function parseTailscaleName(name: string): { controlId: string; instanceIdSlug: string } | null {
+  const match = name.match(/^repl-([a-z0-9]+)-([a-z0-9]+)$/);
+  if (!match) return null;
+  return { controlId: match[1], instanceIdSlug: match[2] };
+}
+```
+
+## Session-Based Classification
+
+```typescript
+/**
+ * Classify orphans by likely origin session.
+ *
+ * Severity levels:
+ *   Current session → WARNING (active spawn failures, costing money)
+ *   Other sessions  → INFO    (historical, accumulated debt)
+ *   Unknown         → CAUTION (unparseable names, may be old version or manual)
+ */
+function classifyOrphans(
+  orphans: OrphanedResource[],
+  sessionStartTime: number,
+  currentSessionThresholdMs: number = TIMING.CURRENT_SESSION_THRESHOLD
+): OrphanClassification {
+  const classification: OrphanClassification = {
+    currentSession: [],
+    otherSessions: [],
+    unknown: [],
+    stats: { total: 0, byProvider: {}, bySeverity: { WARNING: 0, INFO: 0, CAUTION: 0 } },
+  };
+
+  for (const orphan of orphans) {
+    if (!orphan.inferredInfo) {
+      // Can't parse name - unknown origin
+      classification.unknown.push({
+        ...orphan,
+        severity: 'CAUTION',
+        reason: "Unknown resource (name doesn't match expected pattern)",
+      });
+    } else if (orphan.likelyCurrentSession) {
+      // Created after session start - likely ours
+      classification.currentSession.push({
+        ...orphan,
+        severity: 'WARNING',
+        reason: 'Created during current session',
+      });
+    } else if (orphan.ageMs < currentSessionThresholdMs) {
+      // Recent but before session - could be ours from restart
+      classification.currentSession.push({
+        ...orphan,
+        severity: 'WARNING',
+        reason: `Recent orphan (${Math.floor(orphan.ageMs / 60000)} minutes old)`,
+      });
+    } else {
+      // Older - from previous session
+      classification.otherSessions.push({
+        ...orphan,
+        severity: 'INFO',
+        reason: 'Orphan from previous session',
+      });
+    }
+  }
+
+  // Compute stats
+  const all = [
+    ...classification.currentSession,
+    ...classification.otherSessions,
+    ...classification.unknown,
+  ];
+  classification.stats.total = all.length;
+  for (const o of all) {
+    classification.stats.byProvider[o.provider] = (classification.stats.byProvider[o.provider] || 0) + 1;
+    classification.stats.bySeverity[o.severity]++;
+  }
+
+  return classification;
+}
+```
+
+## Spawn Error Classification
+
+```typescript
+/**
+ * Classify spawn errors by orphan risk.
+ * On failure with orphanRisk=true, trigger immediate scan for
+ * expected resource name prefix.
+ */
+const SPAWN_ERROR_CLASSIFICATIONS: Record<string, SpawnErrorClassification> = {
+  // Pre-API errors - no orphan risk
+  'INVALID_SPEC':    { orphanRisk: false, confidenceNoResource: 'high',   action: 'none' },
+  'AUTH_ERROR':      { orphanRisk: false, confidenceNoResource: 'high',   action: 'none' },
+  'BUDGET_EXCEEDED': { orphanRisk: false, confidenceNoResource: 'high',   action: 'none' },
+  'CAPACITY_ERROR':  { orphanRisk: false, confidenceNoResource: 'high',   action: 'none' },
+  'SPOT_INTERRUPTED':{ orphanRisk: false, confidenceNoResource: 'high',   action: 'none' },
+
+  // API errors with partial execution - possible orphans
+  'TIMEOUT':            { orphanRisk: true, confidenceNoResource: 'low',    action: 'scan_immediately' },
+  'NETWORK_ERROR':      { orphanRisk: true, confidenceNoResource: 'medium', action: 'scan_immediately' },
+  'PROVIDER_INTERNAL':  { orphanRisk: true, confidenceNoResource: 'low',    action: 'scan_immediately' },
+
+  // Post-creation errors - orphan very likely
+  'WAIT_FOR_BOOT_TIMEOUT':       { orphanRisk: true, confidenceNoResource: 'low', action: 'scan_immediately' },
+  'AGENT_REGISTRATION_FAILED':   { orphanRisk: true, confidenceNoResource: 'low', action: 'scan_immediately' },
+};
+```
+
+## Preflight Orphan Check
+
+```typescript
+/**
+ * Check for orphans before operations (launch-run, terminate-all, cleanup).
+ * Returns warnings for CLI display (see Ch10 for preflight format).
+ */
+async function preflightOrphanCheck(
+  operation: 'launch-run' | 'terminate-all' | 'cleanup'
+): Promise<PreflightWarning[]> {
+  const orphans = await getUnacknowledgedOrphans();
+  const classified = classifyOrphans(orphans, getSessionStartTime());
+
+  const warnings: PreflightWarning[] = [];
+
+  if (classified.currentSession.length > 0) {
+    warnings.push({
+      severity: 'WARNING',
+      message: `${classified.currentSession.length} orphaned resource(s) detected from current session`,
+      suggestion: 'Run "repl orphans list" to investigate',
+      resources: classified.currentSession.map(o => o.providerId),
+    });
+  }
+
+  if (classified.otherSessions.length > 0) {
+    warnings.push({
+      severity: 'INFO',
+      message: `${classified.otherSessions.length} orphaned resource(s) from previous sessions`,
+      suggestion: 'Consider investigating with "repl orphans list"',
+    });
+  }
+
+  return warnings;
+}
+```

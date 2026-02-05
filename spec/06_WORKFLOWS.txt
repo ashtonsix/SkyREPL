@@ -1,0 +1,595 @@
+================================================================================
+6. WORKFLOWS
+================================================================================
+
+## Purpose
+
+The Workflow Engine orchestrates multi-step operations that cannot be reduced to
+single atomic transactions. It provides DAG execution, pattern-based composition,
+node-level retry, and single-node compensation for launching runs, creating
+snapshots, and cleaning up resources.
+
+Key Principle: Everything is a workflow, but single-step workflows get helper
+functions hiding complexity. Ask: "Does this need orchestration overhead?" If no,
+use the single-step helper.
+
+Cross-Reference: See Chapter 7 (Intents) for what workflows achieve. Intents define
+expected outputs and verification requirements. This chapter focuses on how
+workflows are executed.
+
+## 6.1 Single-Step Workflows
+
+Everything is a workflow. Single-step operations use shared infrastructure but skip
+orchestration overhead.
+
+**Single-step helper** (`runSingleStep(type, input, handler)`):
+
+Provides: emitResource(), claimResource(), log() (structured logging)
+Lacks: applyPattern(), spawnSubworkflow(), compensate() (not needed for atomic ops)
+
+Benefits:
+- Shared machinery (manifests, resource tracking, audit)
+- No orchestration overhead (no DAG, no compensation logic)
+- Clean API for simple operations
+
+> See also: impl/control/src/workflow/engine.ts.l2.txt §SingleStepHelper
+
+## 6.2 Engine Architecture
+
+### Core Interface
+
+**WorkflowEngine**:
+- `submit(request)` -> WorkflowSubmissionResult: submit workflow for execution
+- `get(workflowId)` -> Workflow | null: retrieve workflow state
+- `cancel(workflowId, reason)`: cancel running workflow
+- `pause(workflowId)`: pause workflow execution
+- `resume(workflowId)`: resume paused workflow
+- `retry(workflowId)` -> string: creates NEW workflow from failed one (see 6.2.1)
+
+**WorkflowSubmission** fields:
+- `type` (string): workflow type (launch-run, terminate, etc.)
+- `input` (Record): workflow input parameters
+- `idempotencyKey?` (string): deduplication key
+- `parentWorkflowId?` (string): for subworkflows
+- `priority?` ('low' | 'normal' | 'high')
+- `timeout?` (number): per-workflow timeout override
+
+> See also: impl/control/src/workflow/engine.ts.l2.txt §Core Interface
+
+### 6.2.1 Retry Semantics
+
+**Important**: `retry()` does NOT transition a failed workflow back to running state
+(invalid per state machine). Instead, it creates a NEW workflow with the same inputs.
+
+Retry MUST:
+- Only apply to workflows with status='failed'
+- Create a NEW workflow with same type and inputs
+- Generate a new idempotency key (append `:retry:<timestamp>` to original)
+- Preserve parent_workflow_id, priority, and timeout from original
+- Link new workflow to original via retry_of_workflow_id for audit trail
+
+**Rationale**: Preserves failed workflow for audit trail, avoids state machine
+violations, enables clean retry without contaminating original workflow state.
+
+> See also: impl/control/src/workflow/engine.ts.l2.txt §Retry Semantics
+
+### Execution Loop
+
+```
+FUNCTION executeLoop(workflowId):
+  SET workflow status = 'running', started_at = NOW
+
+  LOOP:
+    workflow = load workflow from DB
+    IF workflow.status == 'cancelled': handleCancellation(); BREAK
+    IF workflow.timeout_at exceeded: handleWorkflowTimeout(); BREAK
+
+    nodes = load all workflow_nodes
+    readyNodes = nodes WHERE status='pending' AND all dependencies completed/skipped
+
+    IF no readyNodes:
+      running = count nodes WHERE status='running'
+      pending = count nodes WHERE status='pending'
+      failed  = count nodes WHERE status='failed'
+
+      IF running > 0: WAIT for node completion; CONTINUE
+      IF pending == 0 AND failed == 0: completeWorkflow(); BREAK
+      IF failed > 0: handleWorkflowFailure(); BREAK
+
+    EXECUTE readyNodes concurrently (all in parallel)
+  END LOOP
+```
+
+Key invariant: ready nodes execute concurrently via parallel dispatch.
+
+**Why workflow_nodes is a separate table:** Concurrent node updates on a JSON blob
+create read-modify-write races. Separate rows = separate updates = no races.
+
+> See also: impl/control/src/workflow/engine.ts.l2.txt §Execution Loop
+
+### Node Execution Model
+
+**NodeExecutor** interface:
+- `execute(ctx: NodeContext)` -> NodeOutput: execute the node
+- `compensate?(ctx: CompensationContext)`: optional single-node cleanup
+- `validate?(input)` -> ValidationResult: optional input validation
+
+**NodeContext** provides:
+- `workflowId`, `nodeId`, `nodeType`, `attempt`, `input`, `manifestId`, `depth`
+- Resource management: `emitResource(type, id, priority?)`, `claimResource(nodeId, type)`
+- Pattern application: `applyPattern(pattern, config)`
+- Subworkflow: `spawnSubworkflow(type, input)` -> SubworkflowHandle
+- Utilities: `getNodeOutput(nodeId)`, `log(level, message, data?)` (emits OTel span events)
+
+> See also: impl/control/src/workflow/engine.ts.l2.txt §Node Execution Model
+
+### Two-Phase Spawn in Node Execution
+
+Instance spawning uses a two-phase protocol to prevent orphaned resources:
+
+```
+FUNCTION executeSpawnNode(ctx):
+  -- Phase 1: Reserve in DB BEFORE cloud call
+  idempotencyKey = "{ctx.workflowId}:{ctx.nodeId}"
+
+  INSERT instance record with:
+    workflow_state = 'spawn:pending'
+    spawn_idempotency_key = idempotencyKey
+    current_manifest_id = ctx.manifestId
+  instanceId = auto-generated ID
+
+  EMIT resource to manifest BEFORE cloud call
+
+  -- Phase 2: Execute cloud API call
+  provider = getProvider(options.provider)
+  IF provider supports idempotent spawn: pass idempotencyKey as clientRequestId
+
+  TRY:
+    providerInstance = provider.spawn(options)
+    UPDATE instance SET provider_id, workflow_state='launch-run:provisioning', ip
+    RETURN { instanceId, providerId, ip, workflow_state }
+  CATCH error:
+    UPDATE instance SET workflow_state='spawn:error'
+    THROW error
+
+FUNCTION retrySpawnNode(ctx):
+  -- Check for existing spawn attempt via idempotency key
+  existing = QUERY instances WHERE spawn_idempotency_key = key
+
+  IF existing found:
+    IF spawn:pending: attempt reconciliation with provider
+      IF reconciled: RETURN existing instance
+      IF not found in provider: mark as spawn:error, fall through
+    IF viable state (not error): RETURN existing instance
+
+  -- No viable existing instance, execute fresh spawn
+  RETURN executeSpawnNode(ctx)
+
+FUNCTION compensateSpawnNode(ctx):
+  -- If provider_id exists: terminate in provider (ignore NOT_FOUND)
+  -- Mark instance as terminate:complete in DB
+```
+
+**Key Properties:**
+- DB record + manifest entry created before cloud API call
+- Idempotency key prevents duplicate spawns on retry
+- Reconciliation finds instances if DB update fails
+- Compensation handles both phases (DB only or DB + cloud)
+- Kill at any step guarantees no orphans
+
+> See also: impl/control/src/workflow/compensation.ts.l2.txt §Two-Phase Spawn
+
+### Persistence Strategy (Crash Recovery)
+
+All state persisted before action:
+- Node marked 'running' BEFORE execution begins
+- Node marked 'completed' AFTER execution succeeds
+- Pattern applications persisted before DAG modification
+
+```
+FUNCTION recoverWorkflows():
+  -- On startup, find all interrupted workflows
+
+  -- 1. Stale pending workflows (exceed PENDING_WORKFLOW_TIMEOUT): mark failed
+  FOR EACH workflow WHERE status='pending' AND updated_at < NOW - PENDING_TIMEOUT:
+    SET status='failed', error='PENDING_TIMEOUT'
+    Seal manifest
+
+  -- 2. Running workflows: handle interrupted nodes
+  FOR EACH workflow WHERE status='running':
+    FOR EACH node WHERE status='running':
+      IF node type is idempotent:
+        RESET to pending, increment attempt, set retry_reason='crash_recovery'
+      ELSE:
+        MARK as failed with error='CRASH_RECOVERY'
+
+    RESUME execution loop for this workflow
+```
+
+> See also: impl/control/src/workflow/engine.ts.l2.txt §Crash Recovery
+
+## 6.3 Pattern Library
+
+Four patterns, restricted by design. A small palette signposts good workflow
+design and minimizes moving parts. More patterns added only when justified.
+
+### 6.3.1 Insert-and-Reconverge (IAR)
+
+**Purpose**: Insert parallel node that must complete before downstream.
+
+**Transform**:
+```
+A -> B -> C  becomes  A -> A' -> B -> C
+                         \______/
+```
+
+**Constraints**: Max 1 insertion depth; target node must be pending.
+
+```typescript
+ctx.applyPattern('insert-and-reconverge', {
+  insertedNode: { id: 'install-tailscale', type: 'subworkflow', ... },
+  beforeNode: 'start-run'
+});
+```
+
+> See also: impl/control/src/workflow/patterns.ts.l2.txt §Insert-and-Reconverge
+
+### 6.3.2 Conditional-Branch (CB)
+
+**Purpose**: Choose between two mutually exclusive paths, or try-fallback on error.
+
+**Transform**:
+```
+A -> B -> C  becomes  A -> B_opt1 -> C  (B_opt2 skipped)
+```
+
+**Constraints**: Exactly two branches; deterministic condition.
+
+**ConditionalBranchConfig**:
+- `triggerOnError?` (boolean): if true, option2 runs only on option1 failure
+- `condition?` (boolean): required if triggerOnError=false (default)
+- `option1` (NodeDefinition): primary branch
+- `option2` (NodeDefinition): alternative branch
+- `joinNode` (string): convergence point
+
+**Examples**:
+
+Standard conditional branch:
+```typescript
+ctx.applyPattern('conditional-branch', {
+  condition: warmAvailable,
+  option1: { id: 'claim-warm', type: 'claim-warm-allocation', ... },
+  option2: { id: 'spawn', type: 'spawn-instance', ... },
+  joinNode: 'create-allocation'
+});
+```
+
+Try-fallback (triggerOnError=true):
+```typescript
+ctx.applyPattern('conditional-branch', {
+  triggerOnError: true,
+  option1: { id: 'sync-s3-direct', type: 'sync-files-s3', ... },
+  option2: { id: 'sync-tailscale', type: 'sync-files-tailscale', ... },
+  joinNode: 'start-run'
+});
+```
+
+> See also: impl/control/src/workflow/patterns.ts.l2.txt §Conditional-Branch
+
+### 6.3.3 Parallel-Fan-Out (PFO)
+
+**Purpose**: Spawn multiple independent parallel work items.
+
+**Transform**:
+```
+A -> B  becomes  A -> A1 -> B
+                   -> A2 -/
+                   -> A3 -/
+```
+
+**Constraints**: MAX_PARALLEL_BRANCHES = 16
+
+```typescript
+ctx.applyPattern('parallel-fan-out', {
+  branches: workers.map((w, i) => ({
+    id: `spawn-worker-${i}`,
+    type: 'spawn-instance',
+    input: { ...w, workerIndex: i }
+  })),
+  joinNode: 'configure-cluster'
+});
+```
+
+> See also: impl/control/src/workflow/patterns.ts.l2.txt §Parallel-Fan-Out
+
+### 6.3.4 Retry-with-Alternative (RWA)
+
+**Purpose**: On failure, retry with different parameters.
+
+**Transform**:
+```
+Attempt 1: A_primary (fails, compensated)
+Attempt 2: A_alternative
+```
+
+**Constraints**: MAX_RETRY_ATTEMPTS = 3; same output contract.
+
+```typescript
+ctx.applyPattern('retry-with-alternative', {
+  failedNodeId: 'spawn-instance-us-east-1',
+  alternativeNode: {
+    id: 'spawn-instance-us-west-2',
+    type: 'spawn-instance',
+    input: { ...input, region: 'us-west-2' }
+  },
+  reason: 'Spot capacity unavailable'
+});
+```
+
+> See also: impl/control/src/workflow/patterns.ts.l2.txt §Retry-with-Alternative
+
+
+## 6.4 Subworkflow Contract
+
+### Parent/Child Visibility
+
+**Parent sees**: status, output, resource summary (black box)
+**Parent cannot see**: internal nodes, execution order
+
+**Child sees**: input, parent manifest ID (read-only)
+**Child cannot see**: parent internals, siblings
+
+### Manifest Independence
+
+Subworkflows are independent by default---they release their own manifests on
+completion. Parents claim resources by querying SEALED manifests.
+
+**Manifest sealing waits for subworkflows**: The finalize node blocks until all
+child subworkflows complete. A parent workflow cannot seal its manifest while
+children are still emitting resources. This ensures complete resource tracking.
+
+Subworkflow completion MUST release its own manifest. Parent resource claiming MUST
+query child's SEALED manifest and use atomic claim operations.
+
+> See also: impl/control/src/workflow/engine.ts.l2.txt §Subworkflow Handling
+
+### Max Depth
+
+```
+MAX_SUBWORKFLOW_DEPTH = 3
+
+Root (depth 0) -> Child (1) -> Grandchild (2) -> Great-grandchild (3) [MAX]
+```
+
+Depth 3 supports common patterns (parent -> provider -> internal) while preventing
+unbounded nesting. The `ctx.depth` value passes through provider delegation boundaries.
+When a provider delegates to a custom workflow, that workflow automatically increments
+depth. MAX_SUBWORKFLOW_DEPTH=3 applies globally across all delegation.
+
+## 6.5 Compensation vs Teardown
+
+**COMPENSATION**: Error correction during workflow execution
+- Triggered by: node failure, user abort, timeout
+- Scope: Single failed node only (no cascade through completed nodes)
+- On failure: manifest annotated with failure, documents resources created
+- Respects ownership (skips transferred resources)
+
+**TEARDOWN**: Scheduled cleanup after workflow completes
+- Triggered by: manifest expiry
+- Separate cleanup workflow destroys resources by cleanup priority
+
+Complex teardown logic belongs at the manifest/policy level, not embedded in
+workflow execution. Manifests track all resources, enabling proper cleanup
+regardless of where the workflow failed.
+
+```
+FUNCTION compensateFailedNode(workflowId, failedNodeId):
+  node = load node from DB
+  IF node.status != 'failed': RETURN
+
+  -- Skip if resource transferred to another workflow
+  IF NOT shouldCompensate(workflowId, node): RETURN
+
+  -- Compensate ONLY this single failed node
+  executor = nodeExecutors.get(node.node_type)
+  IF executor has compensate handler:
+    executor.compensate({ nodeId, output })
+
+  -- NOTE: No cascade to other completed nodes.
+  -- Manifest policies handle broader resource cleanup.
+```
+
+> See also: impl/control/src/workflow/compensation.ts.l2.txt §CompensateFailedNode
+
+## 6.6 Error Handling and Retry Strategy
+
+### 6.6.1 Error -> Retry Mapping
+
+Standardized error handling determines whether errors trigger retry, fallback, or
+immediate failure.
+
+**Error Handling Table:**
+
+| Error Code              | Retryable | Strategy                                          | Max Retries |
+|-------------------------|-----------|---------------------------------------------------|-------------|
+| CAPACITY_UNAVAILABLE    | Yes       | Retry-with-Alternative (different region)         | 3           |
+| PROVIDER_API_ERROR      | Yes       | Exponential backoff, retry same params            | 3           |
+| RATE_LIMITED            | Yes       | Exponential backoff with retry_after_ms           | 5           |
+| SPOT_INTERRUPTED        | Yes       | Retry or fallback to on-demand                    | 1           |
+| OPERATION_TIMEOUT       | Yes       | Retry with increased timeout                      | 2           |
+| VALIDATION_ERROR        | No        | Fail immediately (input validation)               | 0           |
+| INVALID_STATE_TRANSITION| No        | Fail immediately (state machine violation)        | 0           |
+| DATABASE_ERROR          | No        | Fail immediately (critical infrastructure)        | 0           |
+| INSUFFICIENT_PERMISSIONS| No        | Fail immediately (auth/config error)              | 0           |
+
+**Retry Strategies Explained:**
+
+1. **Retry-with-Alternative (region):**
+   - On failure: Apply `retry-with-alternative` pattern
+   - Alternative uses different region from `details.alternative_regions`
+   - Example: us-east-1 fails -> retry us-west-2
+
+2. **Exponential backoff:**
+   - Delays: exponential from RETRY_BASE_DELAY, capped at RETRY_MAX_DELAY (see Ch15 §15.9)
+   - Respects `retry_after_ms` from error response if present
+   - Formula: `min(2^attempt * base_ms, max_backoff_ms)`
+
+3. **Retry or fallback:**
+   - First attempt: Retry spot instance spawn
+   - Second attempt: Apply `conditional-branch` pattern to fallback to on-demand
+
+4. **Fail immediately:**
+   - No retry attempted
+   - Workflow state -> 'failed'
+   - Compensation applied to failed node only
+   - Manifest preserved with resources for cleanup
+
+> See also: impl/control/src/workflow/engine.ts.l2.txt §Error Handling
+
+### 6.6.2 Workflow -> API Error Mapping
+
+Workflow node failures propagate to API layer with appropriate HTTP status codes.
+
+**Node Failure -> HTTP Response Mapping:**
+
+| Node Failure Scenario              | HTTP Status | Error Code              | Details                                    |
+|------------------------------------|-------------|-------------------------|--------------------------------------------|
+| spawn-instance timeout             | 504         | OPERATION_TIMEOUT       | Gateway timeout waiting for provider       |
+| spawn-instance capacity error      | 429         | CAPACITY_UNAVAILABLE    | Rate limit (resource unavailable)          |
+| spawn-instance provider API error  | 502         | PROVIDER_API_ERROR      | Bad gateway (upstream failure)             |
+| validation failure in node         | 400         | VALIDATION_ERROR        | Invalid workflow input                     |
+| state transition violation         | 409         | INVALID_STATE_TRANSITION| Conflict (resource in wrong state)         |
+| database error in node             | 500         | DATABASE_ERROR          | Internal server error                      |
+| workflow cancelled by user         | 200         | N/A                     | Success response with status='cancelled'   |
+
+**Error Propagation Flow:**
+
+```
+Node fails with error
+     |
+     v
+NodeError { code, message, category, details, retryable }
+     |
+     v
+Retry logic (if retryable)
+     |
+     v (if exhausted)
+Workflow fails, sets workflow.error = NodeError
+     |
+     v
+API endpoint returns ErrorResponse with appropriate HTTP status
+     |
+     v
+Client receives:
+{
+  "error": {
+    "code": "OPERATION_TIMEOUT",
+    "message": "Instance spawn timed out after 5 minutes",
+    "category": "timeout",
+    "details": {
+      "node_id": "spawn-instance",
+      "workflow_id": "wf-abc123",
+      "timeout_ms": 300000
+    }
+  }
+}
+```
+
+Error-to-HTTP mapping MUST use error category: validation->400, auth->401/403,
+not_found->404, conflict->409, rate_limit->429, timeout->504, provider->502,
+internal->500.
+
+> See also: impl/control/src/workflow/engine.ts.l2.txt §Error Mapping
+
+### 6.6.3 Workflow Timeout
+
+Prevents workflows from running indefinitely due to stuck nodes or slow provider APIs.
+
+**Schema fields**: `timeout_ms` (per-workflow override), `timeout_at` (absolute timestamp)
+
+**Default**: WORKFLOW_TIMEOUT (configurable, see Ch15 §15.9)
+
+**Enforcement**: Execution loop checks `workflow.timeout_at` before each iteration:
+
+```typescript
+if (workflow.timeout_at && Date.now() > workflow.timeout_at) {
+  // Mark workflow failed with WORKFLOW_TIMEOUT, compensate running nodes
+  await handleWorkflowTimeout(workflowId);
+  break;
+}
+```
+
+**Per-workflow override**: Pass `timeout` in `WorkflowSubmission` (e.g., shorter for
+terminate, longer for training). Compensation ensures partial work cleaned up on timeout.
+
+### 6.6.5 Node Timeout Hierarchy
+
+**Node execution timeout:** NODE_TIMEOUT (see Ch15 §15.9) applies to node execution logic.
+
+**Wait operations:** Explicit timeout parameters (e.g., 10 minutes for sync).
+Wait operations are exempt from the node execution timeout.
+
+Example: sync-files node has 10-minute wait timeout but no execution timeout.
+
+### 6.6.6 Pending Workflow Timeout
+
+Pending workflows exceeding PENDING_WORKFLOW_TIMEOUT (see Ch15 §15.9) transition to failed during crash recovery (see 6.2).
+
+## 6.7 Cancellation Protocol
+
+Cancellation uses fire-and-forget CancelRunMessage via SSE. Heartbeat timeout handles unresponsive agents.
+
+**Agent alive:** receives cancel -> stops run -> emits run_complete
+**Agent dead:** heartbeat timeout -> ACTIVE->FAILED
+
+Cancellation MUST:
+1. Send cancel_run message to agent via SSE (fire-and-forget)
+2. Set workflow status to 'cancelling' with cancel_reason
+3. Rely on agent response (run_complete) or heartbeat timeout for resolution
+
+> See also: impl/control/src/workflow/engine.ts.l2.txt §Cancellation Protocol
+
+## 6.8 Compensation Behavior
+
+### 6.8.1 Compensation Timeout
+
+Each compensation handler has a 5-minute timeout.
+
+On timeout: log error, allow orphan scan to catch remaining resources.
+
+### 6.8.2 Compensation Retry
+
+Compensation MUST retry on retryable errors (RATE_LIMITED, NETWORK_ERROR) up to
+MAX_RETRIES with exponential backoff from RETRY_BASE_DELAY. Each attempt MUST
+be wrapped with the 5-minute compensation timeout.
+
+Non-retryable errors MUST fail immediately. On final failure, MUST log error and
+rely on orphan scan for cleanup.
+
+> See also: impl/control/src/workflow/compensation.ts.l2.txt §CompensateWithRetry
+
+## 6.9 Observability
+
+OTel/Loki handles observability, not the core database. The workflow itself is
+the audit trail: nodes emit OpenTelemetry spans/events, pattern applications emit
+as span events, and the workflow_nodes table provides execution history.
+
+The core database focuses on operational state. OTel provides auditability without
+polluting the schema. Span schema details (attribute names, event structures) will
+be finalized based on observability tooling requirements.
+
+**Note**: For production observability deployment, see Chapter 15.1 Observability.
+
+### 6.9.1 Topology Signatures (Observability Extension)
+
+Topology signatures are useful for Grafana dashboards but are NOT part of the core
+workflow engine. They are computed on-demand or by an observability sidecar, not
+stored in the workflows table. The signature is emitted as a span attribute on
+workflow completion, enabling grouping queries without polluting the core schema.
+
+Use cases (all served via Grafana/Loki queries):
+- "Show all workflows with same topology"
+- "Which topology has highest failure rate?"
+- "Has this topology been seen before?"
+
+> See also: impl/control/src/workflow/engine.ts.l2.txt §Observability

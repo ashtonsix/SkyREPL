@@ -7,12 +7,33 @@ Last updated: 2026-02-05
 VERIFICATION ONLY (No design work needed)
 ================================================================================
 
-L2.2: In-flight blob deduplication
+L2/A.2: In-flight blob deduplication
   Status: DESIGN ALREADY EXISTS - verification only
   Finding: Spec explicitly uses eventual consistency (no UNIQUE constraint)
   Evidence: spec/02_MATERIAL.txt:611,630,639 - "NOT unique", index for perf only
   Pattern: Both uploads succeed → GC merges within 24h (garbage-collection.ts.l2.txt)
   Action: Verify storage.ts.l2.txt documents this as intentional
+
+================================================================================
+DEFERRED (from WS3 legacy gap analysis)
+================================================================================
+
+WS3.1: Circuit breaker — cross-request failure aggregation
+  Status: DEFERRED
+  Context: Per-request retry logic exists (Ch6§6.6.1 ERROR_RETRY_MAPPING with
+    exponential backoff, max retries per error type). Missing: higher-level
+    circuit breaker state machine (open/closed/half-open) that tracks failures
+    across requests and prevents cascading failures per-provider or per-operation.
+  When: L3 (implementation phase) — pattern is well-understood, add when building
+    the provider adapter layer.
+
+WS3.2: Budget enforcement — per-user quotas
+  Status: DEFERRED
+  Context: Advisory budget warnings exist (Ch9§9.2.9 preflight, Ch10 CLI warnings),
+    check-budget workflow node can fail launches (Ch7§7.3), BUDGET_EXCEEDED error
+    code defined (Ch9§9.3.10), AWS budget alert handling (Ch8§8.3). Missing:
+    per-user/per-manifest budget quotas and mid-execution cost controls.
+  When: Post-MVP — single-user system initially, quotas needed for multi-tenancy.
 
 ================================================================================
 DEFERRED (Low urgency / edge cases)
@@ -23,6 +44,6 @@ T2: Tailscale JIT installation timing
   When: Install between jobs (not during job, not on cold start)
   Exception: Interactive mode (Jupyter) → install on start
 
-L2.7: Materialization depth (shallow vs deep)
+L2/A.7: Materialization depth (shallow vs deep)
   Rationale: API design, can defer until N+1 becomes a problem
   Deliverable: `include` param, batch loading, default shallow

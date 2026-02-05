@@ -57,7 +57,7 @@ PART 2: COMPONENT-BASED RESTRUCTURE
 
 Final structure (128 files, up from 80):
 
-  v2/
+  impl/
   ├── control/                    # Control plane (VPS deployment)
   │   ├── migrations/
   │   └── src/
@@ -113,5 +113,4 @@ CROSS-REFERENCES
 ================================================================================
 
 See also:
-- specification/WORKLOG_REVISIONS.txt: R9 (v2 structure alignment)
-- 002_WORKLOG_R0X_L1_REFINEMENT.txt: Subsequent refinement rounds
+- 002_WORKLOG_R0X_L1_REFINEMENT.txt: Subsequent refinement rounds + spec revisions R0-R9

@@ -1,0 +1,308 @@
+# logs.py - Log Collection, Batching, Upload (L2 Pseudocode)
+
+# Note: Timing constants reference ../../shared/src/config/timing.ts.l2.txt
+# - LOG_LOCAL_BUFFER_MS (100ms) - local buffer flush interval
+# - LOG_NETWORK_BATCH_MS (5s) - network batch send interval
+# Note: Message types reference ../../shared/src/api/agent.ts.l2.txt (LogMessage)
+
+"""
+Two-Level Log Batching
+
+Level 1 - Local Buffer (100ms):
+  Collects stdout/stderr into memory, flushes to send queue every 100ms.
+  Ensures low-latency local processing without per-line overhead.
+
+Level 2 - Network Batch (5s or 64KB):
+  Sends queued logs to control plane every 5s OR when queue exceeds 64KB.
+  Reduces HTTP request overhead. Backpressure: if network slow, logs buffer locally.
+
+Special: sync_complete bypasses both levels (sent immediately via flush_and_send).
+"""
+
+```python
+import os
+import threading
+import time
+from collections import deque
+from typing import List, Optional
+
+# Configuration from environment (milliseconds, converted to seconds)
+LOG_LOCAL_BUFFER_MS = int(os.getenv('REPL_LOG_FLUSH_INTERVAL_MS', '100'))
+LOG_NETWORK_BATCH_MS = int(os.getenv('REPL_LOG_NETWORK_BATCH_MS', '5000'))
+LOG_NETWORK_BATCH_SIZE = 64 * 1024  # 64KB threshold
+LOG_BUFFER_MAX_SIZE = 1024 * 1024   # 1MB max buffer before overflow
+
+# Retry backoff for network failures
+LOG_RETRY_BASE_S = 1
+LOG_RETRY_MAX_S = 32
+
+# Module-level state
+shutting_down: bool = False
+
+
+# =============================================================================
+# Log Buffer
+# =============================================================================
+
+class LogBuffer:
+    """
+    Thread-safe log buffer with two-level batching.
+
+    Producers (executor threads) append log entries.
+    Consumer (log_flusher_thread) drains and sends in batches.
+    """
+
+    def __init__(self):
+        self._buffer: List[dict] = []       # Level 1: local buffer
+        self._send_queue: List[dict] = []    # Level 2: network send queue
+        self._lock = threading.Lock()
+        self._batch_sequence_id: int = 0     # Monotonic counter per session
+        self._dropped_logs_count: int = 0    # Total logs dropped (reported in heartbeat)
+        self._total_queued_bytes: int = 0    # Approximate bytes in send queue
+
+    def append(self, entry: dict) -> None:
+        """Add log entry to local buffer. Thread-safe."""
+        with self._lock:
+            # Check buffer overflow (>1MB)
+            entry_size = len(entry.get('data', ''))
+            if self._total_queued_bytes + entry_size > LOG_BUFFER_MAX_SIZE:
+                self._handle_overflow(entry_size)
+                return
+
+            self._buffer.append(entry)
+
+    def _handle_overflow(self, entry_size: int) -> None:
+        """
+        Handle buffer overflow (>1MB).
+
+        Strategy: Drop oldest entries to make room.
+        Insert synthetic warning and increment dropped count.
+        """
+        # Drop oldest entries from send queue until under limit
+        dropped = 0
+        while self._total_queued_bytes + entry_size > LOG_BUFFER_MAX_SIZE and self._send_queue:
+            removed = self._send_queue.pop(0)
+            self._total_queued_bytes -= len(removed.get('data', ''))
+            dropped += 1
+
+        self._dropped_logs_count += dropped
+
+        if dropped > 0:
+            # Insert synthetic warning
+            self._buffer.append({
+                'type': 'log',
+                'stream': 'stderr',
+                'data': f"[WARN] Log buffer overflow, {dropped} oldest entries dropped",
+                'phase': 'execution',
+            })
+
+        log("WARN", f"Log buffer overflow: dropped {dropped} entries "
+                    f"(total dropped: {self._dropped_logs_count})")
+
+    def flush_local_to_queue(self) -> None:
+        """
+        Level 1 flush: Move local buffer entries to network send queue.
+        Called every LOG_LOCAL_BUFFER_MS (100ms).
+        """
+        with self._lock:
+            if not self._buffer:
+                return
+
+            for entry in self._buffer:
+                self._total_queued_bytes += len(entry.get('data', ''))
+            self._send_queue.extend(self._buffer)
+            self._buffer.clear()
+
+    def drain_send_queue(self) -> Optional[List[dict]]:
+        """
+        Level 2 drain: Get all entries from send queue for network transmission.
+        Returns None if queue is empty.
+
+        Each batch gets a monotonic batch_sequence_id for reordering.
+        Control plane reorders batches that arrive out-of-order.
+        """
+        with self._lock:
+            if not self._send_queue:
+                return None
+
+            batch = self._send_queue.copy()
+            self._send_queue.clear()
+            self._total_queued_bytes = 0
+
+            # Stamp batch with sequence ID
+            seq_id = self._batch_sequence_id
+            self._batch_sequence_id += 1
+
+        # Add batch_sequence_id to all entries
+        for entry in batch:
+            entry['batch_sequence_id'] = seq_id
+
+        return batch
+
+    def should_send(self) -> bool:
+        """Check if send queue exceeds size threshold (64KB)."""
+        with self._lock:
+            return self._total_queued_bytes >= LOG_NETWORK_BATCH_SIZE
+
+    def get_dropped_count(self) -> int:
+        """Return total dropped logs count (included in heartbeat)."""
+        return self._dropped_logs_count
+
+    def size(self) -> int:
+        """Return approximate buffer size (for diagnostics)."""
+        with self._lock:
+            return len(self._buffer) + len(self._send_queue)
+
+
+# Singleton log buffer (imported by executor.py and agent.py)
+log_buffer = LogBuffer()
+
+
+# =============================================================================
+# Log Flusher Thread
+# =============================================================================
+
+def log_flusher_thread():
+    """
+    Background thread: two-level log batching.
+
+    Inner loop (100ms): flush local buffer to send queue.
+    Outer check: send to network every 5s OR when queue > 64KB.
+    """
+    last_network_send = time.time()
+
+    while not shutting_down:
+        time.sleep(LOG_LOCAL_BUFFER_MS / 1000.0)  # 100ms
+        if shutting_down:
+            break
+
+        # Level 1: flush local buffer to send queue
+        log_buffer.flush_local_to_queue()
+
+        # Level 2: check if network send needed
+        time_since_send = (time.time() - last_network_send) * 1000  # ms
+        should_send_time = time_since_send >= LOG_NETWORK_BATCH_MS
+        should_send_size = log_buffer.should_send()
+
+        if should_send_time or should_send_size:
+            batch = log_buffer.drain_send_queue()
+            if batch:
+                send_log_batch(batch)
+                last_network_send = time.time()
+
+    # Final flush on shutdown
+    flush_all()
+
+
+# =============================================================================
+# Network Sending
+# =============================================================================
+
+def send_log_batch(batch: List[dict]) -> bool:
+    """
+    POST /v1/agent/logs with retry and backoff.
+
+    Retry on 5xx: 1s -> 2s -> 4s -> ... -> 32s max.
+    Fire-and-forget on persistent failure (logs are supplementary).
+
+    Returns:
+        True if sent successfully, False on persistent failure
+    """
+    delay = LOG_RETRY_BASE_S
+    max_attempts = 5
+
+    for attempt in range(max_attempts):
+        try:
+            response = http_post('/v1/agent/logs', batch, timeout=10)
+            if response.status == 200:
+                return True
+            elif response.status >= 500:
+                log("WARN", f"Log batch failed (5xx): {response.status}, retrying in {delay}s")
+            else:
+                log("WARN", f"Log batch failed: {response.status}, not retrying")
+                return False
+        except Exception as e:
+            log("WARN", f"Log batch send error: {e}, retrying in {delay}s")
+
+        if shutting_down:
+            return False
+
+        time.sleep(delay)
+        delay = min(delay * 2, LOG_RETRY_MAX_S)
+
+    log("ERROR", f"Log batch failed after {max_attempts} attempts, dropping")
+    return False
+
+
+# =============================================================================
+# Immediate Send (for critical events)
+# =============================================================================
+
+def flush_and_send(entries: List[dict]) -> bool:
+    """
+    Immediate send bypassing both buffer levels.
+
+    Used for critical events that cannot tolerate batching delay:
+    - sync_complete (latency counts against allocation timeout)
+    - run_complete
+    - Critical errors
+
+    Also flushes current local buffer to ensure ordering.
+    """
+    # First flush any pending local buffer
+    log_buffer.flush_local_to_queue()
+
+    # Drain anything in the send queue (send it first for ordering)
+    pending_batch = log_buffer.drain_send_queue()
+    if pending_batch:
+        send_log_batch(pending_batch)
+
+    # Now send the critical entries immediately
+    if entries:
+        # Stamp with sequence ID
+        seq_id = log_buffer._batch_sequence_id
+        log_buffer._batch_sequence_id += 1
+        for entry in entries:
+            entry['batch_sequence_id'] = seq_id
+
+        return send_log_batch(entries)
+
+    return True
+
+
+def flush_all():
+    """Flush all buffered logs. Called during shutdown."""
+    log_buffer.flush_local_to_queue()
+    batch = log_buffer.drain_send_queue()
+    if batch:
+        send_log_batch(batch)
+
+
+def flush_all_logs():
+    """Alias for flush_all, called by agent.py during shutdown."""
+    flush_all()
+
+
+# =============================================================================
+# State Accessors (for heartbeat and diagnostics)
+# =============================================================================
+
+def get_dropped_logs_count() -> int:
+    """Return total dropped logs count (for HeartbeatMessage)."""
+    return log_buffer.get_dropped_count()
+
+
+def get_log_buffer_size() -> int:
+    """Return buffer size (for panic diagnostics)."""
+    return log_buffer.size()
+
+
+# =============================================================================
+# Logging Utility
+# =============================================================================
+
+def log(level: str, message: str) -> None:
+    """Internal logging (not sent to control plane)."""
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{timestamp}] [{level}] [logs] {message}")
+```

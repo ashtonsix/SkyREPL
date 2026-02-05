@@ -1,0 +1,140 @@
+# errors.ts - Error Types and Factory Functions (L2 Pseudocode)
+
+# Note: Cross-references to other L2 files
+# - ErrorCategory from ./resources.ts.l2.txt
+# - ErrorCode, ErrorCodeType, ApiError from ./api/resources.ts.l2.txt
+# - WorkflowError, NodeError from ./resources.ts.l2.txt
+
+## Error Category to HTTP Status Mapping
+
+```typescript
+import type { ErrorCategory } from './resources';
+
+// =============================================================================
+// ERROR CATEGORY -> HTTP STATUS MAPPING
+// =============================================================================
+
+/** Map error category to HTTP status code */
+export const ERROR_CATEGORY_HTTP_STATUS: Record<ErrorCategory, number> = {
+  validation: 400,   // Bad Request
+  auth: 401,         // Unauthorized (or 403 Forbidden, check details.code)
+  not_found: 404,    // Not Found
+  conflict: 409,     // Conflict
+  rate_limit: 429,   // Too Many Requests
+  provider: 502,     // Bad Gateway (cloud provider error)
+  timeout: 504,      // Gateway Timeout
+  internal: 500,     // Internal Server Error
+};
+
+/** Get HTTP status code for an error category */
+export function httpStatusForCategory(category: ErrorCategory): number {
+  return ERROR_CATEGORY_HTTP_STATUS[category] ?? 500;
+}
+```
+
+## Error Codes by Category
+
+```typescript
+// =============================================================================
+// ERROR CODES BY CATEGORY
+// =============================================================================
+
+/** All error codes grouped by category for documentation/validation */
+export const ERROR_CODES_BY_CATEGORY: Record<ErrorCategory, string[]> = {
+  validation: [
+    'INVALID_INPUT',
+    'MISSING_REQUIRED_FIELD',
+    'INVALID_FORMAT',
+  ],
+  auth: [
+    'UNAUTHORIZED',
+    'FORBIDDEN',
+  ],
+  not_found: [
+    'RESOURCE_NOT_FOUND',
+    'INSTANCE_NOT_FOUND',
+    'RUN_NOT_FOUND',
+    'ALLOCATION_NOT_FOUND',
+    'WORKFLOW_NOT_FOUND',
+  ],
+  conflict: [
+    'IDEMPOTENCY_CONFLICT',
+    'RESOURCE_ALREADY_EXISTS',
+    'OWNERSHIP_CONFLICT',
+    'INVALID_STATE_TRANSITION',
+  ],
+  rate_limit: [
+    'RATE_LIMITED',
+    'BUDGET_EXCEEDED',
+  ],
+  provider: [
+    'PROVIDER_ERROR',
+    'CAPACITY_UNAVAILABLE',
+    'SPOT_INTERRUPTED',
+  ],
+  timeout: [
+    'REQUEST_TIMEOUT',
+    'OPERATION_TIMEOUT',
+  ],
+  internal: [
+    'INTERNAL_ERROR',
+    'DATABASE_ERROR',
+  ],
+};
+```
+
+## Error Factory Functions
+
+```typescript
+import type { ApiError, ErrorCodeType } from './api/resources';
+import type { WorkflowError, NodeError } from './resources';
+
+// =============================================================================
+// ERROR FACTORY FUNCTIONS
+// =============================================================================
+
+/** Create standardized API error response */
+export function createApiError(
+  code: ErrorCodeType,
+  message: string,
+  category: ErrorCategory,
+  details?: Record<string, unknown>,
+  retryAfterMs?: number
+): ApiError {
+  return {
+    error: { code, message, category, details, retryAfterMs },
+  };
+}
+
+/** Create a WorkflowError for storage in workflow records */
+export function createWorkflowError(
+  code: string,
+  message: string,
+  category: ErrorCategory,
+  nodeId?: string,
+  details?: Record<string, unknown>
+): WorkflowError {
+  return { code, message, category, nodeId, details };
+}
+
+/** Create a NodeError for storage in workflow node records */
+export function createNodeError(
+  code: string,
+  message: string,
+  category: ErrorCategory,
+  retryable: boolean,
+  details?: Record<string, unknown>
+): NodeError {
+  return { code, message, category, retryable, details };
+}
+
+/** Determine error category from an error code string */
+export function categoryForCode(code: string): ErrorCategory {
+  for (const [category, codes] of Object.entries(ERROR_CODES_BY_CATEGORY)) {
+    if (codes.includes(code)) {
+      return category as ErrorCategory;
+    }
+  }
+  return 'internal';
+}
+```

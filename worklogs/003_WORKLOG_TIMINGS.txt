@@ -12,7 +12,7 @@ This worklog represents two milestones:
 
 ## Problem Statement
 
-Timing values are scattered across 15 spec chapters (~100 values) and 45+ v2/ files (~50 values). Issues:
+Timing values are scattered across 15 spec chapters (~100 values) and 45+ impl/ files (~50 values). Issues:
 1. Duplication - same value defined in multiple places
 2. Normative/non-normative confusion - spec mixes hard constraints with example values
 3. No single source of truth - changes require updating multiple locations
@@ -25,14 +25,14 @@ Timing values are scattered across 15 spec chapters (~100 values) and 45+ v2/ fi
 | Location | Count | Notes |
 |----------|-------|-------|
 | Spec chapters | ~100 | Many marked as examples |
-| v2/ pseudo-impl | ~50+ | Hard-coded constants |
-| v2/docs/timeouts.md.l1.txt | 0 | Structure only, no values |
+| impl/ pseudo-impl | ~50+ | Hard-coded constants |
+| impl/docs/timeouts.md.l1.txt | 0 | Structure only, no values |
 
 ### Consistency Check
 
-Most values are consistent between spec and v2/, but both sources have problems:
+Most values are consistent between spec and impl/, but both sources have problems:
 - **Spec**: Values inline with prose, unclear which are normative
-- **v2/**: Values scattered across files as magic numbers
+- **impl/**: Values scattered across files as magic numbers
 
 ### Categories Identified
 
@@ -67,7 +67,7 @@ Replace inline values with:
 One table per category with columns:
 | Parameter | Constraint | Default | Range | Rationale |
 
-### Phase B: v2/ Consolidation
+### Phase B: impl/ Consolidation
 
 Goal: Single source of truth for timing constants
 
@@ -96,10 +96,10 @@ export function validateTimingConstraints(): void {
 }
 ```
 
-**B2. Update v2/ files to import from timing.ts**
+**B2. Update impl/ files to import from timing.ts**
 Replace magic numbers with `TIMING.X` references
 
-**B3. Expand v2/docs/timeouts.md.l1.txt → .l2.txt**
+**B3. Expand impl/docs/timeouts.md.l1.txt → .l2.txt**
 Add:
 - Actual default values (reference timing.ts)
 - Tuning guidance per deployment type
@@ -109,7 +109,7 @@ Add:
 ### Phase C: Documentation
 
 **C1. Operational tuning guide**
-Create v2/docs/tuning-guide.md.l1.txt:
+Create impl/docs/tuning-guide.md.l1.txt:
 - When to adjust which values
 - Trade-offs (faster detection vs more false positives)
 - Deployment profiles
@@ -123,14 +123,14 @@ Define how users override defaults:
 ## Specific Values to Normalize
 
 ### Heartbeat Chain (A-priority - affects liveness)
-| Parameter | Spec Value | v2/ Value | Recommended | Notes |
+| Parameter | Spec Value | impl/ Value | Recommended | Notes |
 |-----------|------------|-----------|-------------|-------|
 | heartbeat_interval | 10s | 10s | 10s | Agent → control |
 | ack_timeout | 30s | 30s | 30s | Agent shutdown trigger |
 | stale_detection | 30s | 30s | 30s | Control marks allocation FAILED |
 
 ### Hold Duration Chain
-| Parameter | Spec Value | v2/ Value | Recommended | Notes |
+| Parameter | Spec Value | impl/ Value | Recommended | Notes |
 |-----------|------------|-----------|-------------|-------|
 | default_hold | 5m | 5m | 5m | After run completion |
 | ssh_extension | 5m per detect | 5m | 5m per | Configurable |
@@ -140,7 +140,7 @@ Define how users override defaults:
 | absolute_max | 24h | 24h | 24h | Hard limit |
 
 ### Background Tasks
-| Parameter | Spec Value | v2/ Value | Recommended | Notes |
+| Parameter | Spec Value | impl/ Value | Recommended | Notes |
 |-----------|------------|-----------|-------------|-------|
 | heartbeat_check | 30s | 30s | 30s | — |
 | hold_expiry_check | 60s | 60s | 60s | — |
@@ -150,14 +150,14 @@ Define how users override defaults:
 | blob_gc | — | 24h | 24h | Not in spec |
 
 ### Provider Operations
-| Parameter | Spec Value | v2/ Value | Recommended | Notes |
+| Parameter | Spec Value | impl/ Value | Recommended | Notes |
 |-----------|------------|-----------|-------------|-------|
 | spawn_timeout | 5-10m | 5m | 10m | Provider-dependent |
 | terminate_timeout | 5m | — | 5m | — |
 | snapshot_timeout | 30m | 30m | 30m | — |
 
 ### Workflow Engine
-| Parameter | Spec Value | v2/ Value | Recommended | Notes |
+| Parameter | Spec Value | impl/ Value | Recommended | Notes |
 |-----------|------------|-----------|-------------|-------|
 | node_timeout | 5m | 5m | 5m | Per-node default |
 | workflow_timeout | 60m | 60m | 60m | Overall |
@@ -165,14 +165,14 @@ Define how users override defaults:
 | cancel_verification | — | 90s | 90s | 3x heartbeat |
 
 ### Retry/Backoff
-| Parameter | Spec Value | v2/ Value | Recommended | Notes |
+| Parameter | Spec Value | impl/ Value | Recommended | Notes |
 |-----------|------------|-----------|-------------|-------|
 | base_delay | 2s | 2s | 2s | — |
 | max_delay | 60s | 60s | 60s | Cap |
 | max_retries | 5 | varies | 5 | — |
 
 ### Cache TTLs (Provider-Specific)
-| Resource | Spec Value | v2/ Value | Recommended | Notes |
+| Resource | Spec Value | impl/ Value | Recommended | Notes |
 |----------|------------|-----------|-------------|-------|
 | spot_prices | 5m | 5m | 5m | — |
 | capacity | 1m | 1m | 1m | — |
@@ -181,18 +181,18 @@ Define how users override defaults:
 
 ## Inconsistencies Found
 
-| Item | Spec | v2/ | Resolution |
+| Item | Spec | impl/ | Resolution |
 |------|------|-----|------------|
 | manifest_cleanup interval | 60s (Ch05:1062) | 5m (main.ts) | Use 5m, update spec |
-| CLAIMED timeout | 10m (Ch05:1030) | — | Add to v2/ |
-| pending workflow timeout | 30m (Ch06:829) | — | Add to v2/ |
+| CLAIMED timeout | 10m (Ch05:1030) | — | Add to impl/ |
+| pending workflow timeout | 30m (Ch06:829) | — | Add to impl/ |
 
 ## Execution Order
 
 1. [A1] Define constraint vocabulary in spec Ch02
 2. [B1] Create timing.ts.l2.txt with all values
 3. [A2] Update spec chapters to reference constraints
-4. [B2] Update v2/ files to use timing.ts
+4. [B2] Update impl/ files to use timing.ts
 5. [B3] Expand timeouts.md.l1.txt with values
 6. [C1] Create tuning guide
 7. [A3] Add normative tables to spec
@@ -208,15 +208,15 @@ Q3: **Constraints only in spec** - Move operational guidance to Ch15 OPERATIONS 
 1. Create `shared/src/config/timing.ts.l2.txt` with env var support + provider overrides
 2. Update spec chapters: remove specific values, add constraint references
 3. Add "Timing Configuration" section to Ch15 OPERATIONS with suggested values
-4. Expand `v2/docs/timeouts.md.l2.txt` with implementation details
-5. Update v2/ files to import from timing.ts
+4. Expand `impl/docs/timeouts.md.l2.txt` with implementation details
+5. Update impl/ files to import from timing.ts
 
 ---
 
 ## Log
 
 ### 2026-02-04 - Initial Analysis
-- Searched spec (100+ values) and v2/ (50+ values)
+- Searched spec (100+ values) and impl/ (50+ values)
 - Found mostly consistent values, main issue is organization
 - Created resolution plan with 3 phases
 - Identified 3 inconsistencies to fix
@@ -248,24 +248,24 @@ All tasks completed:
    - Implementation notes
    - Testing patterns
 
-5. **Updated v2/ files** (17 files):
+5. **Updated impl/ files** (17 files):
    - Added timing.ts imports
    - Replaced magic numbers with TIMING.X references
 
 Files modified:
-- v2/shared/src/config/timing.ts.l2.txt (new)
-- v2/docs/timeouts.md.l2.txt (renamed, expanded)
-- specification/03_RESOURCES.txt
-- specification/04_MANIFEST.txt
-- specification/05_ALLOCATIONS.txt
-- specification/06_WORKFLOWS.txt
-- specification/07_INTENTS.txt
-- specification/08_PROVIDERS.txt
-- specification/09_API.txt
-- specification/11_AGENT.txt
-- specification/12_ORPHANS.txt
-- specification/15_OPERATIONS.txt
-- v2/agent/*.l1.txt (4 files)
-- v2/control/src/*.l1.txt (10 files)
-- v2/cli/src/*.l1.txt (2 files)
-- v2/shared/src/types.ts.l1.txt
+- impl/shared/src/config/timing.ts.l2.txt (new)
+- impl/docs/timeouts.md.l2.txt (renamed, expanded)
+- spec/03_RESOURCES.txt
+- spec/04_MANIFEST.txt
+- spec/05_ALLOCATIONS.txt
+- spec/06_WORKFLOWS.txt
+- spec/07_INTENTS.txt
+- spec/08_PROVIDERS.txt
+- spec/09_API.txt
+- spec/11_AGENT.txt
+- spec/12_ORPHANS.txt
+- spec/15_OPERATIONS.txt
+- impl/agent/*.l1.txt (4 files)
+- impl/control/src/*.l1.txt (10 files)
+- impl/cli/src/*.l1.txt (2 files)
+- impl/shared/src/types.ts.l1.txt

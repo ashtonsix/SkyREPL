@@ -1,0 +1,114 @@
+# tailscale.ts - Tailscale Feature Provider (L2 Pseudocode)
+
+# Cross-references:
+# - Provider types: ../types.ts.l2.txt (FeatureProvider, FeatureCapabilities, FeatureReconcileContext)
+# - Shared types: ../../../../../shared/src/types.ts.l2.txt (FeatureProviderName)
+
+## Imports
+
+```typescript
+import type { FeatureProvider, FeatureCapabilities, FeatureReconcileContext } from '../types';
+```
+
+## Types
+
+```typescript
+interface TailscaleConfig {
+  authKey: string;
+  hostname?: string;
+  advertiseRoutes?: string[];
+  acceptRoutes?: boolean;
+}
+
+interface TailscaleState {
+  machineId: string;
+  tailscaleIp: string;
+  online: boolean;
+  lastSeen: number;
+}
+```
+
+## TailscaleFeatureProvider
+
+```typescript
+class TailscaleFeatureProvider implements FeatureProvider<TailscaleConfig, TailscaleState> {
+  name = 'tailscale';
+
+  capabilities = {
+    requiresBootstrap: true,
+    supportsHotAttach: true,
+    supportsDetach: true,
+    crossProvider: true,
+  };
+
+  async attach(instanceId: string, config: TailscaleConfig): Promise<TailscaleState> {
+    const instance = await getInstance(instanceId);
+
+    if (this.capabilities.supportsHotAttach && instance.status === 'running') {
+      // Hot attach via SSH
+      await this.installViaSsh(instance, config);
+    } else {
+      // Bootstrap script handles installation
+      // Just register machine with Tailscale API
+    }
+
+    // Wait for machine to appear in Tailscale network
+    const machine = await this.waitForMachine(config.hostname ?? instance.id);
+
+    return {
+      machineId: machine.id,
+      tailscaleIp: machine.addresses[0],
+      online: true,
+      lastSeen: Date.now(),
+    };
+  }
+
+  async detach(instanceId: string): Promise<void> {
+    const state = await this.status(instanceId);
+    if (!state) return;
+
+    // Remove machine from Tailscale network
+    await tailscaleApi.deleteMachine(state.machineId);
+
+    // Clean up local state
+    // Feature state stored in objects table (type='feature_installation')
+    await db.execute(`
+      DELETE FROM objects WHERE id IN (
+        SELECT o.id FROM objects o
+        JOIN object_tags ot ON o.id = ot.object_id
+        WHERE o.type = 'feature_installation'
+          AND ot.tag = 'instance_id:' || CAST(? AS TEXT)
+          AND ot.tag = 'feature:tailscale'
+      )
+    `, [instanceId]);
+  }
+
+  async status(instanceId: string): Promise<TailscaleState | null> {
+    const attachment = await db.queryOne(`
+      SELECT o.metadata_json FROM objects o
+      JOIN object_tags ot ON o.id = ot.object_id
+      WHERE o.type = 'feature_installation'
+        AND ot.tag = 'instance_id:' || CAST(? AS TEXT)
+        AND ot.tag = 'feature:tailscale'
+    `, [instanceId]);
+
+    if (!attachment) return null;
+
+    const state = JSON.parse(attachment.state_json) as TailscaleState;
+
+    // Refresh online status from Tailscale API
+    const machine = await tailscaleApi.getMachine(state.machineId);
+    state.online = machine?.online ?? false;
+    state.lastSeen = machine?.lastSeen ?? state.lastSeen;
+
+    return state;
+  }
+
+  generateBootstrapCommands(config: TailscaleConfig): string[] {
+    return [
+      'curl -fsSL https://tailscale.com/install.sh | sh',
+      `tailscale up --authkey=${config.authKey} --hostname=${config.hostname ?? '$INSTANCE_ID'}`,
+    ];
+  }
+}
+```

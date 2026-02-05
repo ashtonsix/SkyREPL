@@ -20,7 +20,7 @@ chaos problem. Tracking what's running, ensuring cleanup, avoiding cost surprise
 
 **Status: COMPLETE**
 
-~15,000 lines across 15 chapters. Ready for implementation.
+~11,500 lines across 15 chapters (post-hardening). Ready for implementation.
 
 Chapters:
   01 Introduction        09 API
@@ -40,19 +40,19 @@ Key design elements:
 - Intent contracts for provider abstraction
 
 ================================================================================
-3. PSEUDO-IMPLEMENTATION STATUS (v2/)
+3. PSEUDO-IMPLEMENTATION STATUS (impl/)
 ================================================================================
 
-**Current state: L1 complete, L2 transition in progress**
+**Current state: L1 complete, L2 ~44% (53/120 files)**
 
 Fidelity levels:
-  .l1.txt  - Bullet-point outlines (COMPLETE - 128 files)
-  .l2.txt  - Detailed pseudocode (IN PROGRESS - 13 files)
+  .l1.txt  - Bullet-point outlines (COMPLETE - 120 files)
+  .l2.txt  - Detailed pseudocode (IN PROGRESS - 53 files, 22,309 lines)
   .l3.txt  - Partial implementation (not started)
   (none)   - Working code (not started)
 
 Structure:
-  v2/
+  impl/
   ├── control/    Control plane (VPS deployment)
   ├── cli/        CLI client (user machine)
   ├── shared/     Types shared between control + CLI
@@ -88,18 +88,19 @@ First implementation target:
 ================================================================================
 
 Hot (active):
-  (none)
+  WORKLOG_L2B_COMPLETION.txt - L2/B remaining work (cross-refs, fidelity, etc.)
+  WORKLOG_SPEC_AUDIT.txt     - WS2 verification findings (reference for above)
 
 Cold (archived):
-  worklogs/001_WORKLOG_L1_RESTRUCTURING.txt  - Structural overhaul (Wl1)
-  worklogs/002_WORKLOG_R0X_L1_REFINEMENT.txt - L1 refinement rounds (Wl2)
-  worklogs/003_WORKLOG_TIMINGS.txt           - Timing consolidation (Wl3)
-  worklogs/004_WORKLOG_L2_FOUNDATION.txt     - T3, T4, L2.1, L2.5 (Wl4)
-  worklogs/005_WORKLOG_HEARTBEAT_TIMING.txt  - T5 heartbeat 15m (Wl5)
-  worklogs/006_WORKLOG_AGENT_RESILIENCE.txt  - L2.6, T1, L2.3 (Wl6)
-
-Spec history:
-  specification/WORKLOG_REVISIONS.txt - Revision history (R0-R9)
+  worklogs/001_WORKLOG_L1_RESTRUCTURING.txt  - Structural overhaul
+  worklogs/002_WORKLOG_R0X_L1_REFINEMENT.txt - L1 refinement rounds
+  worklogs/003_WORKLOG_TIMINGS.txt           - Timing consolidation
+  worklogs/004_WORKLOG_L2_FOUNDATION.txt     - T3, T4, L2/A.1, L2/A.5
+  worklogs/005_WORKLOG_HEARTBEAT_TIMING.txt  - Heartbeat 15m
+  worklogs/006_WORKLOG_AGENT_RESILIENCE.txt  - L2/A.6, T1, L2/A.3
+  worklogs/007_WORKLOG_L2B_ENTRY.txt         - Project restructuring for L2/B
+  worklogs/008_WORKLOG_IMPL_EXTRACTION.txt   - L2 pseudo-impl from spec (53 files)
+  worklogs/009_WORKLOG_SPEC_HARDENING.txt    - Spec → normative transformation
 
 Backlog:
   TODO.txt - Active backlog with status

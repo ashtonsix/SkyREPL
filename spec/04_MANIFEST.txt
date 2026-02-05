@@ -1,0 +1,437 @@
+================================================================================
+4. MANIFEST
+================================================================================
+
+## Purpose
+
+Every workflow-created resource has a clear owner (manifest) with explicit
+lifecycle policies. No ambiguity, no orphans, no manual cleanup.
+
+Manifests track workflow-created resources and manage their lifecycle. They
+establish ownership boundaries between workflows, enabling clean handoff
+without coupling.
+
+## 4.1 Manifest Schema & Lifecycle
+
+### Schema Reference
+
+The manifest tables were defined in Section 2.3. Here we detail their semantics.
+
+**manifests table** - Ownership boundary for workflow-created resources:
+
+```sql
+CREATE TABLE manifests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id INTEGER NOT NULL,           -- Workflow that created this manifest
+    status TEXT NOT NULL,                   -- DRAFT, SEALED (EXPIRED is derived)
+    default_cleanup_priority INTEGER NOT NULL DEFAULT 50,
+    retention_ms INTEGER,                   -- Time to keep after SEALED (null = indefinite)
+    created_at INTEGER NOT NULL,
+    released_at INTEGER,                    -- When workflow released ownership (sealed)
+    expires_at INTEGER,                     -- When eligible for cleanup
+    FOREIGN KEY (workflow_id) REFERENCES workflows(id)
+);
+```
+
+**manifest_resources table** - Links manifests to owned resources:
+
+```sql
+CREATE TABLE manifest_resources (
+    manifest_id INTEGER NOT NULL,
+    resource_type TEXT NOT NULL,            -- 'instance', 'run', 'allocation', 'object'
+    resource_id TEXT NOT NULL,
+    cleanup_priority INTEGER,               -- Override manifest default (per-resource)
+    added_at INTEGER NOT NULL,
+    owner_type TEXT DEFAULT 'manifest',     -- 'manifest', 'workflow', 'policy'
+    owner_id INTEGER,                       -- workflow_id or null (null = manifest owns it)
+    FOREIGN KEY (manifest_id) REFERENCES manifests(id) ON DELETE CASCADE,
+    PRIMARY KEY (manifest_id, resource_type, resource_id)
+);
+```
+
+The join table enables:
+1. Per-resource cleanup_priority (cleanup order within a manifest)
+2. "Find manifests containing resource X" queries (useful for debugging)
+3. Per-resource ownership tracking (owner_type/owner_id)
+
+**Per-Resource Ownership**: When a resource is claimed by a workflow or policy,
+owner_type and owner_id are updated. The manifest is "expired" (eligible for
+deletion) when no resources have owner_type='manifest':
+
+```sql
+-- Manifest is expired when all resources have been claimed
+SELECT COUNT(*) = 0 as is_expired
+FROM manifest_resources
+WHERE manifest_id = ? AND owner_type = 'manifest';
+```
+
+### Manifest States
+
+```
+DRAFT -> SEALED (EXPIRED is derived from resource count)
+```
+
+**DRAFT** - Mutable working set owned by running workflow
+- Workflow can add/remove resources
+- Transitions to: SEALED (workflow completes)
+
+**SEALED** - Immutable, resources awaiting cleanup or reuse
+- Resources detached from workflow ownership
+- Other workflows can query and claim resources
+- Retention timer starts (expires_at = now + retention_ms)
+- retention_ms=null means never expires (e.g., snapshot manifests)
+- Transitions to: deleted (when expired and all resources cleaned up)
+
+**EXPIRED (Derived State)** - Not stored, computed from ownership:
+- Manifest is expired when COUNT(*) WHERE owner_type='manifest' = 0
+- When expired AND retention elapsed, cleanup workflow destroys remaining resources
+- After cleanup completes, manifest is deleted
+
+### 4.1.1 Manifest Creation Timing
+
+Manifests are created at workflow submission, before any node executes, ensuring
+resources always have an owner from creation.
+
+- **Manifest created at workflow submission** (before first node executes)
+- **Resources added via ctx.emitResource()** during node execution
+- **Manifest stays DRAFT during compensation** (allows recovery before sealing)
+
+If a workflow fails partway through, resources created so far are already tracked
+in the DRAFT manifest, enabling proper cleanup.
+
+### State Transition Semantics
+
+**sealManifest(manifestId)**
+
+```
+PRECONDITION: manifest.status = DRAFT
+POSTCONDITION: manifest.status = SEALED,
+               manifest.released_at = now,
+               manifest.expires_at = now + retention_ms (or null if retention_ms is null)
+
+STEPS:
+  1. Validate manifest exists and status is DRAFT (else error)
+  2. Compute expires_at from retention_ms
+  3. Within transaction:
+     a. Update manifest: status='SEALED', released_at=now, expires_at
+     b. Detach resources: clear current_manifest_id on each resource row
+        (makes them available for warm pool queries)
+     c. Preserve manifest_resources links (needed for cleanup tracking)
+```
+
+> See also: impl/control/src/resource/manifest.ts.l2.txt §Seal Manifest
+
+**isManifestExpired(manifestId) -> boolean**
+
+```
+Returns TRUE when ALL of:
+  1. manifest.status = SEALED
+  2. manifest.expires_at is NOT null
+  3. now >= manifest.expires_at
+  4. COUNT(manifest_resources WHERE owner_type='manifest') = 0
+Returns FALSE otherwise (including when manifest not found or retention is null).
+```
+
+> See also: impl/control/src/resource/manifest.ts.l2.txt §Manifest Expiry Check
+
+**triggerCleanup(manifestId) -> workflowId**
+
+The system MUST spawn a cleanup-manifest workflow when a manifest is expired. The
+manifest status is NOT changed (EXPIRED is derived, never stored). The manifest
+MUST be in SEALED state; triggering cleanup on a DRAFT manifest is an error.
+
+> See also: impl/control/src/resource/manifest.ts.l2.txt §Trigger Cleanup
+
+## 4.2 Resource Claiming Protocol
+
+Resources move between workflows through a claim protocol. Workflows query SEALED
+manifests and claim individual resources -- no manifest absorption.
+
+### Within-Workflow Resource Sharing
+
+Within a workflow, nodes reference resources created by other nodes directly via
+node output wiring. No manifest ceremony is needed because all nodes share the
+same manifest. For example, a spawn-instance node emits an instance_id, which a
+subsequent allocate-run node receives as input and uses to create an allocation.
+
+> See also: impl/control/src/resource/manifest.ts.l2.txt §Claim Resource
+
+### Between-Workflow Resource Claiming
+
+**Key principle**: Resources are claimed individually, not at manifest-level.
+
+When a resource is claimed:
+1. The manifest_resources row transfers from old manifest to new manifest
+2. The original manifest keeps unclaimed resources with its retention timer
+3. If ALL resources claimed, old manifest deleted immediately
+4. Otherwise, old manifest continues toward expiration normally
+5. Cleanup workflows destroy remaining resources when retention expires
+
+**claimWarmInstance(ctx, spec) -> { claimed, instance_id? }**
+
+```
+PRECONDITION: ctx.workflow has an active (DRAFT) manifest
+
+STEPS:
+  1. QUERY candidates:
+     SELECT from manifests m
+       JOIN manifest_resources mr (resource_type='instance', owner_type='manifest')
+       JOIN instances i (spec matches, workflow_state LIKE '%:complete',
+                         current_manifest_id IS NULL)
+     WHERE m.status = 'SEALED'
+     LIMIT 1
+
+  2. If no candidates -> return { claimed: false }
+
+  3. Within transaction (SELECT ... FOR UPDATE on old manifest):
+     a. Re-check old manifest status = SEALED (else lost race, return false)
+     b. Update old manifest_resources: set owner_type='workflow',
+        owner_id=ctx.workflow.id for the claimed instance
+     c. INSERT into new manifest's manifest_resources
+     d. UPDATE instance: current_manifest_id = ctx.workflow.manifestId
+     e. Check remaining manifest-owned resources in old manifest:
+        - If count = 0: DELETE old manifest (fully claimed, now expired)
+        - Else: old manifest continues with original retention timer
+
+  4. Return { claimed: true, instance_id }
+```
+
+> See also: impl/control/src/resource/manifest.ts.l2.txt §Claim Resource
+
+### Conflict Resolution
+
+Transaction isolation handles concurrent claims. Retry strategy:
+1. Try to claim available resource
+2. If conflict (already claimed), retry with next candidate
+3. If no candidates, fall back to spawn
+
+**claimResourceAtomic(newManifestId, resourceType, resourceId) -> { success, reason? }**
+
+```
+Within transaction:
+  1. SELECT resource FOR UPDATE (check current_manifest_id is NULL)
+     - If resource not found -> { success: false, reason: 'not found' }
+     - If current_manifest_id is not NULL -> { success: false, reason: 'already claimed' }
+  2. UPDATE resource: set current_manifest_id = newManifestId
+  3. INSERT into manifest_resources for newManifestId
+  4. Return { success: true }
+```
+
+> See also: impl/control/src/resource/manifest.ts.l2.txt §Claim Resource Atomic
+
+### Subworkflow Manifest Independence
+
+Subworkflows are independent by default. They create their own manifests and
+seal them on completion -- no hierarchy, no absorption.
+
+Parent workflows query SEALED manifests to claim subworkflow resources, like any
+warm pool claim.
+
+**handleSubworkflowComplete(subworkflowId)**
+
+```
+  1. Look up subworkflow's manifest_id and workflow type
+  2. Seal manifest with workflow-type-specific retention policy
+     (calls sealManifestWithPolicy)
+```
+
+**parentClaimSubworkflowResource(parentCtx, subworkflowId, resourceType) -> resourceId | null**
+
+```
+  1. Look up subworkflow's manifest_id
+  2. Query manifest_resources for unclaimed resource of given type
+     (WHERE owner_type='manifest', LIMIT 1)
+  3. If found, call claimResourceAtomic(parentCtx.manifestId, resourceType, resourceId)
+  4. Return resourceId on success, null on failure or no candidates
+```
+
+> See also: impl/control/src/resource/manifest.ts.l2.txt §Subworkflow Independence
+
+## 4.3 Cleanup System
+
+When retention expires, resources are destroyed in priority order.
+
+### Retention Policy
+
+Retention is set once at sealing. No extension complexity.
+
+### DOS Prevention
+
+- **Priority ordering**: Process resources by priority across all manifests
+- **Rate limiting per-manifest**: Bounded cleanup throughput per manifest
+- **Future: tenant-level queuing**: Fair share of cleanup bandwidth
+
+**Default retention policies by workflow type:**
+
+| Workflow Type      | retention_ms           | Notes                                      |
+|--------------------|------------------------|--------------------------------------------|
+| launch-run         | 30 min (1,800,000 ms)  | Warm pool instances                        |
+| create-snapshot    | null (indefinite)      | May stay SEALED for weeks/months           |
+| install-feature    | 60 min (3,600,000 ms)  | Feature installations                      |
+| (other)            | DEFAULT_MANIFEST_RETENTION_MS (Ch15 §15.9) | Fallback              |
+
+**sealManifestWithPolicy(manifestId, workflowType)**
+
+The system MUST look up the retention policy for the given workflowType (falling
+back to DEFAULT_MANIFEST_RETENTION_MS), update the manifest's retention_ms, then
+call sealManifest. This ensures workflow-type-specific retention without caller
+needing to know policy details.
+
+> See also: impl/control/src/resource/manifest.ts.l2.txt §Retention Policy
+
+### Cleanup Priority
+
+Higher priority = deleted sooner within an expired manifest.
+
+| Resource Type | Default Priority | Rationale                    |
+|---------------|-----------------|------------------------------|
+| allocation    | 90              | First: release instance slots|
+| run           | 80              | Then: free file storage      |
+| artifact      | 70              | Then: S3 storage             |
+| object        | 60              | Then: generic objects        |
+| instance      | 50              | Then: provider resources     |
+| snapshot      | 10              | Last: may be needed for runs |
+
+**cleanupManifest(manifestId)**
+
+The system MUST query manifest_resources ordered by cleanup_priority DESC
+(defaulting to 50), destroy each resource in order, remove each
+manifest_resources row, then delete the manifest itself.
+
+> See also: impl/control/src/resource/manifest.ts.l2.txt §Cleanup Execution
+
+### Cleanup Workflow
+
+Expired manifests trigger cleanup workflows. The cleanup-manifest workflow
+blueprint MUST contain three phases:
+
+1. **get-resources**: Retrieve all resources from the manifest ordered by priority
+2. **cleanup-loop**: Destroy resources using parallel fan-out (resource-type-specific handlers)
+3. **finalize**: Delete the manifest record
+
+Resource-type-specific cleanup handlers MUST perform:
+- **instance**: Terminate via provider API (if not already terminating), then delete DB record
+- **allocation**: Delete DB record
+- **run**: Delete files, logs, then DB record
+- **object**: Delete from S3 (if applicable), then delete DB record
+
+> See also: impl/control/src/intent/cleanup-manifest.ts.l2.txt §Cleanup Workflow Blueprint
+
+### Expiry Scanner
+
+The system MUST run a CRON job (every minute) that scans for expired manifests.
+The scanner MUST find SEALED manifests where expires_at < now AND no
+manifest-owned resources remain. For each candidate, the scanner MUST check
+whether a cleanup-manifest workflow is already running before spawning a new one
+(to prevent duplicate cleanup). The scanner SHOULD use a consecutive-failure
+counter (alert after 5 failures) and MUST NOT rethrow errors (next run catches up).
+
+> See also: impl/control/src/resource/manifest.ts.l2.txt §Expiry Scanner
+
+### Cost Attribution
+
+The system MUST support cost attribution per manifest for billing and analysis.
+Cost MUST be aggregated by resource type (compute for instances via usage_records,
+storage for objects via blob size). The breakdown MUST include per-resource
+itemization and category totals (compute, storage, network).
+
+> See also: impl/control/src/resource/manifest.ts.l2.txt §Cost Attribution
+
+## 4.4 Manifest Examples
+
+### Example 1: Simple Run Lifecycle
+
+```
+1. launch-run workflow submitted
+   - Manifest M1 created immediately (status: DRAFT)
+   - First node hasn't executed yet
+
+2. Workflow creates resources (via ctx.emitResource())
+   - Spawns instance I1 -> manifest_resources: (M1, instance, I1, owner_type='manifest')
+   - Creates allocation A1 -> manifest_resources: (M1, allocation, A1, owner_type='manifest')
+   - Creates run R1 -> manifest_resources: (M1, run, R1, owner_type='manifest')
+
+3. Run completes, workflow seals manifest
+   - M1.status = SEALED
+   - M1.expires_at = now + 30min (retention policy)
+   - I1.current_manifest_id = null (detached, available for warm pool)
+
+4a. If another run claims warm instance:
+    - New workflow claims I1
+    - I1's owner_type = 'workflow', owner_id = new_workflow_id
+    - M1 still has A1, R1 with owner_type='manifest'
+    - M1 continues with retention timer
+
+4b. If retention expires and all resources claimed/cleaned:
+    - M1 is "expired" (derived: no resources with owner_type='manifest')
+    - Cleanup workflow terminates remaining resources (A1, R1, and I1 if unclaimed)
+    - M1 deleted
+```
+
+### Example 2: Warm Pool Reuse
+
+**Case A: Single resource - manifest deleted**
+```
+1. Run A completes (manifest M_A with instance I1 only)
+   - M_A sealed, I1 detached, status = 'available'
+
+2. Run B starts, finds warm pool candidate
+   - Query: manifests WHERE status=SEALED, has instance matching spec, owner_type='manifest'
+   - Found M_A with I1
+
+3. Run B claims I1 (manifest M_B)
+   - I1.owner_type = 'workflow', I1.owner_id = workflow_B
+   - manifest_resources: (M_B, instance, I1, owner_type='manifest')
+   - M_A had only I1 with owner_type='manifest' -> M_A expired and deleted
+
+4. Run B uses I1 without spawn delay
+   - Creates allocation A2 for I1
+   - Runs command
+
+5. Run B completes
+   - M_B sealed
+   - I1 detached again (or terminated based on policy)
+```
+
+**Case B: Multiple resources - partial claim**
+```
+1. Run A completes (manifest M_A with I1, A1, R1)
+   - M_A sealed, I1 detached and available
+   - A1 and R1 remain with owner_type='manifest'
+   - M_A.expires_at = now + 30min
+
+2. Run B claims only I1
+   - I1.owner_type = 'workflow' (no longer owned by manifest)
+   - M_A still has: A1, R1 with owner_type='manifest'
+   - M_A continues with original retention timer
+
+3. After warm_pool_retention_period expires (if no further claims)
+   - M_A is expired (derived: still has manifest-owned resources but retention elapsed)
+   - Cleanup workflow destroys A1, R1
+   - M_A deleted
+```
+
+### Example 3: Independent Subworkflow
+
+```
+1. Parent workflow PW submitted (manifest M_P created as DRAFT)
+
+2. PW spawns subworkflow SW for feature installation
+   - SW creates manifest M_S (DRAFT)
+   - SW creates feature_installation object F1 via ctx.emitResource()
+
+3. SW completes
+   - M_S sealed (status: SEALED)
+   - F1 detached (current_manifest_id = null)
+   - PW continues running
+
+4. PW needs F1 later
+   - Queries SEALED manifests for feature_installation where owner_type='manifest'
+   - Finds M_S with F1
+   - Claims F1 atomically (updates owner_type='workflow', owner_id=PW)
+   - M_S had only F1 with owner_type='manifest' -> M_S expired and deleted
+
+5. PW completes
+   - M_P sealed with F1
+   - Cleanup handles F1 when retention expires
+```

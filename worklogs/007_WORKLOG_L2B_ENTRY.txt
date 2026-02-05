@@ -1,0 +1,79 @@
+================================================================================
+WORKLOG: L2/B Entry — Project Restructuring
+================================================================================
+Status: COMPLETE (archived)
+Date: 2026-02-05
+Previous: worklogs/006_WORKLOG_AGENT_RESILIENCE.txt
+
+================================================================================
+CONTEXT
+================================================================================
+
+L2/A is complete (~15% of L2). L2/B migrates the spec from a developmental
+"brain dump" into a formal system architecture. Also marks the transition from
+Claude Opus 4.5 → 4.6.
+
+Four deliverables restructure the project for the L2/B phase. Spec extraction
+and fidelity reduction are follow-up work spawned from this entry point.
+
+================================================================================
+DELIVERABLES
+================================================================================
+
+1. L2/A Reference Rename
+
+   Renamed all "L2.x" references to "L2/A.x": 47 replacements across 5 files
+   (BACKLOG.txt, STATUS.txt, worklogs/004, worklogs/005, worklogs/006).
+
+2. Legacy Gap Analysis
+
+   Cross-referenced 8 specified + 13 newly discovered sharp edges from
+   SkyREPL-legacy against current spec.
+
+   Fully covered (no gap): SSE byte-by-byte, warm pool atomicity, OrbStack
+   workaround, SSH proxy, workdir cleanup, agent lock/fcntl.flock, artifact
+   checksum verification, JIT Tailscale agent-side, pessimistic termination
+   extensions, content-addressable sync.
+
+   Improved over legacy: Non-idempotent spawn (now uses idempotency keys),
+   warm pool (CAS vs exclusive lock).
+
+   Real gaps (deferred to BACKLOG.txt):
+     - Circuit breaker: Per-request retry exists, missing cross-request aggregation
+     - Budget enforcement: Warnings + preflight exist, missing per-user quotas
+
+   Verification note: Original Opus 4.5 analysis overclaimed 6 of 8 gaps as
+   missing. Re-verification with Opus 4.6 confirmed spec already covers them.
+
+3. Project Meta-Ontology
+
+   New top-level structure: spec/ (peer, not inside docs/) + impl/ +
+   docs/{design,reference,guides} + workshop/{product,ux,commercial}.
+
+   Executed: git mv v2/ impl/, git mv specification/ spec/, created all new
+   directories, moved misplaced files, updated all active-file references.
+
+4. CLAUDE.md Redesign
+
+   Updated for Opus 4.6: dispatch table with Model × Effort matrix, agent teams
+   guidance, overthinking warning. Compacted 129 → 59 lines.
+
+================================================================================
+FOLLOW-UP SPAWNED
+================================================================================
+
+Spec extraction & redistribution:
+  worklogs/008_WORKLOG_IMPL_EXTRACTION.txt
+  worklogs/009_WORKLOG_SPEC_HARDENING.txt
+  WORKLOG_SPEC_AUDIT.txt (hot — verification findings)
+
+Remaining L2/B work:
+  WORKLOG_L2B_COMPLETION.txt (hot — fidelity reduction, cross-ref fixes, etc.)
+
+================================================================================
+CROSS-REFERENCES
+================================================================================
+
+Source: TODO.txt (WS1-WS6 defined)
+Previous: worklogs/006_WORKLOG_AGENT_RESILIENCE.txt
+Next: worklogs/008_WORKLOG_IMPL_EXTRACTION.txt

@@ -1,0 +1,323 @@
+# agent.py - Agent Main Entry Point (L2 Pseudocode)
+
+# Note: Timing constants reference ../../shared/src/config/timing.ts.l2.txt
+# - HEARTBEAT_INTERVAL_MS (10s)
+# - SHUTDOWN_GRACE_PERIOD_S (5s)
+# - SSE_RECONNECT_BASE_MS (2s), SSE_RECONNECT_MAX_MS (64s), SSE_MAX_RETRIES (10)
+# Note: Message types reference ../../shared/src/api/agent.ts.l2.txt
+
+"""
+Agent Main Entry Point
+
+Startup: lock -> detect tailscale -> start threads -> connect SSE
+Running: SSE dispatch loop + background threads (heartbeat, logs, spot)
+Shutdown: panic diagnostics -> tailscale logout -> terminate run -> flush logs -> grace -> self-term
+
+All connections agent-initiated (instances may be behind NAT/VPCs).
+Complexity lives in the control plane, not the agent.
+"""
+
+```python
+import fcntl
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+from typing import Optional
+
+from sse import run_command_loop, set_shutting_down
+from heartbeat import heartbeat_thread
+from logs import log_flusher_thread, flush_all_logs
+from spot import spot_monitor_thread
+from executor import RunExecutor
+from tailscale import detect_tailscale_ip, tailscale_logout
+
+
+# =============================================================================
+# Configuration (from environment, see spec 11.7)
+# =============================================================================
+
+CONTROL_PLANE_URL = os.getenv('REPL_CONTROL_PLANE_URL', 'https://api.skyrepl.io')
+INSTANCE_ID = os.getenv('REPL_INSTANCE_ID')          # Required
+PROVIDER = os.getenv('REPL_PROVIDER', 'aws')          # aws | gcp | azure
+SHUTDOWN_GRACE_PERIOD_S = int(os.getenv('REPL_SHUTDOWN_GRACE_PERIOD_S', '5'))
+
+# All timing env vars use milliseconds (consistent with timing.ts)
+# See spec 11.7 for full configuration table
+
+
+# =============================================================================
+# Global State
+# =============================================================================
+
+shutting_down: bool = False
+agent_start_time: float = 0.0
+lock_fd = None  # File lock descriptor
+executor: Optional[RunExecutor] = None
+
+
+# =============================================================================
+# Lock Acquisition (spec 11.8)
+# =============================================================================
+
+def acquire_lock() -> Optional[int]:
+    """
+    Acquire exclusive agent lock to prevent duplicates on warm pool reuse.
+
+    Lock file: /tmp/repl-agent.lock
+    - Persists across restarts within same boot
+    - Cleared on instance termination
+    - Uses LOCK_NB (non-blocking) to fail immediately if held
+
+    Returns:
+        File descriptor if acquired, None if lock held by another process
+    """
+    lock_file = "/tmp/repl-agent.lock"
+    try:
+        fd = open(lock_file, 'w')
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except IOError:
+        return None
+
+
+# =============================================================================
+# Signal Handling
+# =============================================================================
+
+def setup_signal_handlers():
+    """Register SIGTERM and SIGINT handlers for graceful shutdown."""
+
+    def signal_handler(signum, frame):
+        sig_name = 'SIGTERM' if signum == signal.SIGTERM else 'SIGINT'
+        log("INFO", f"Received {sig_name}, initiating shutdown")
+        initiate_shutdown(reason=sig_name.lower())
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+
+# =============================================================================
+# Panic Diagnostics (spec 11.14)
+# =============================================================================
+
+def send_panic_diagnostics(reason: str):
+    """
+    Best-effort diagnostic transmission before shutdown.
+
+    POST /v1/instances/:id/panic with 2s timeout.
+    Does not block shutdown - returns immediately on failure.
+    70-90% success rate sufficient (supplements normal logging).
+
+    Triggers: heartbeat timeout, SSE loss, fatal errors, signals,
+    spot interruption, self-termination.
+    """
+    try:
+        payload = {
+            "instance_id": INSTANCE_ID,
+            "reason": reason,
+            "last_state": {
+                "workflow_state": get_current_workflow_state(),
+                "run_id": get_current_run_id(),
+                "allocation_id": get_current_allocation_id(),
+                "uptime_seconds": time.time() - agent_start_time,
+                "last_heartbeat_ack": get_last_heartbeat_ack_time(),
+                "sse_reconnect_count": get_sse_reconnect_count(),
+            },
+            "diagnostics": {
+                "active_threads": threading.active_count(),
+                "log_buffer_size": get_log_buffer_size(),
+            },
+            "error_logs": get_recent_error_logs(max_lines=50),
+            "timestamp": int(time.time() * 1000),
+        }
+
+        # 2-second timeout - don't block shutdown
+        response = http_post(
+            f"{CONTROL_PLANE_URL}/v1/instances/{INSTANCE_ID}/panic",
+            json=payload,
+            timeout=2.0
+        )
+
+        if response.status == 200:
+            log("INFO", f"Panic diagnostics sent: {reason}")
+        else:
+            log("WARN", f"Panic endpoint returned {response.status}")
+
+    except Exception as e:
+        # Failures are expected and acceptable
+        log("WARN", f"Failed to send panic diagnostics: {e}")
+
+
+# =============================================================================
+# Shutdown Sequence (spec 11.5)
+# =============================================================================
+
+def initiate_shutdown(reason: str = "unknown"):
+    """
+    Ordered shutdown sequence:
+    1. Set shutting_down flag (stops all threads)
+    2. Send panic diagnostics (2s timeout, best-effort)
+    3. Tailscale logout (cleanup device list)
+    4. Terminate running run (if any)
+    5. Flush remaining logs
+    6. Wait grace period (SHUTDOWN_GRACE_PERIOD_S)
+    7. Self-terminate: shutdown -h now (BACKUP SAFETY)
+
+    Agent self-termination is LAST RESORT. Normal path: control plane
+    terminates via provider API. Backup: agent self-terminates if control
+    plane unreachable (crash, network partition, bug).
+    """
+    global shutting_down
+
+    if shutting_down:
+        return  # Already shutting down
+    shutting_down = True
+
+    log("INFO", f"Shutdown initiated: {reason}")
+
+    # Signal SSE reader to exit
+    set_shutting_down(True)
+
+    # Step 1: Panic diagnostics (best-effort, 2s timeout)
+    send_panic_diagnostics(reason)
+
+    # Step 2: Tailscale logout
+    try:
+        tailscale_logout()
+    except Exception as e:
+        log("WARN", f"Tailscale logout failed: {e}")
+
+    # Step 3: Terminate running run
+    if executor:
+        try:
+            executor.terminate_current_run()
+        except Exception as e:
+            log("WARN", f"Run termination failed: {e}")
+
+    # Step 4: Flush remaining logs
+    try:
+        flush_all_logs()
+    except Exception as e:
+        log("WARN", f"Log flush failed: {e}")
+
+    # Step 5: Grace period
+    log("INFO", f"Waiting {SHUTDOWN_GRACE_PERIOD_S}s grace period")
+    time.sleep(SHUTDOWN_GRACE_PERIOD_S)
+
+    # Step 6: Self-terminate (backup safety)
+    log("INFO", "Self-terminating: shutdown -h now")
+    try:
+        subprocess.run(["shutdown", "-h", "now"], timeout=5)
+    except Exception as e:
+        log("ERROR", f"Self-termination failed: {e}")
+        sys.exit(1)
+
+
+# =============================================================================
+# Main Entry Point (spec 11.5)
+# =============================================================================
+
+def main():
+    """
+    Agent startup and main loop.
+
+    Startup sequence:
+    1. Validate required env vars
+    2. Acquire lock (/tmp/repl-agent.lock)
+    3. Detect Tailscale IP (if available)
+    4. Start background threads (log flusher, heartbeat, spot monitor)
+    5. Connect SSE command stream and enter dispatch loop
+
+    Exit triggers:
+    - Heartbeat timeout (15m no ack) -> panic checkpoint -> shutdown
+    - SSE connection loss (10 retries fail) -> shutdown
+    - SIGTERM/SIGINT -> graceful shutdown
+    - Spot interruption -> checkpoint -> shutdown
+    """
+    global agent_start_time, lock_fd, executor
+
+    agent_start_time = time.time()
+
+    # Validate required configuration
+    if not INSTANCE_ID:
+        log("FATAL", "REPL_INSTANCE_ID not set")
+        sys.exit(1)
+
+    # Step 1: Acquire lock
+    lock_fd = acquire_lock()
+    if not lock_fd:
+        log("FATAL", "Another agent already running (lock held)")
+        sys.exit(1)
+
+    log("INFO", f"Agent starting (instance={INSTANCE_ID}, provider={PROVIDER})")
+
+    # Step 2: Setup signal handlers
+    setup_signal_handlers()
+
+    # Step 3: Detect Tailscale IP
+    tailscale_ip = detect_tailscale_ip()
+    if tailscale_ip:
+        log("INFO", f"Tailscale IP detected: {tailscale_ip}")
+
+    # Step 4: Create executor
+    executor = RunExecutor()
+
+    # Step 5: Start background threads (all daemon=True)
+    threads = []
+
+    # Log flusher: 100ms interval (LOG_LOCAL_BUFFER_MS)
+    log_thread = threading.Thread(target=log_flusher_thread, daemon=True, name="log-flusher")
+    log_thread.start()
+    threads.append(log_thread)
+
+    # Heartbeat: 10s interval, immediate first beat
+    hb_thread = threading.Thread(target=heartbeat_thread, daemon=True, name="heartbeat")
+    hb_thread.start()
+    threads.append(hb_thread)
+
+    # Spot monitor: 5s interval, AWS only
+    if PROVIDER == "aws":
+        spot_thread = threading.Thread(target=spot_monitor_thread, daemon=True, name="spot-monitor")
+        spot_thread.start()
+        threads.append(spot_thread)
+
+    # Step 6: Enter SSE command loop (blocks until exit)
+    exit_reason = run_command_loop(executor)
+    log("INFO", f"Command loop exited: {exit_reason}")
+
+    # Initiate shutdown based on exit reason
+    if not shutting_down:
+        initiate_shutdown(reason=exit_reason)
+
+
+# =============================================================================
+# Logging Utility
+# =============================================================================
+
+def log(level: str, message: str) -> None:
+    """Log message with level prefix. TODO: integrate with logs.py."""
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{timestamp}] [{level}] [agent] {message}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+## Tailscale Integration (spec 11.12)
+
+Tailscale IP detection during startup and JIT installation are in tailscale.py.
+See tailscale.py.l2.txt for detect_tailscale_ip() and install_tailscale_jit().
+
+## Thread Summary
+
+| Thread        | Interval | Module        | Purpose                    |
+|---------------|----------|---------------|----------------------------|
+| log-flusher   | 100ms    | logs.py       | Buffer + batch log upload  |
+| heartbeat     | 10s      | heartbeat.py  | Liveness + degraded/panic  |
+| spot-monitor  | 5s       | spot.py       | AWS IMDS polling           |
+| SSE (main)    | blocking | sse.py        | Command dispatch           |
+| run executor  | per-run  | executor.py   | Subprocess management      |

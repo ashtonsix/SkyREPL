@@ -1,0 +1,22 @@
+# artifact.ts - Artifact Materialization
+
+## Material Backing
+- Primary: objects table (type='artifact')
+- External: S3/MinIO for large artifacts
+
+## Key Metadata (objects.metadata_json)
+- run_id, path, content_type, keep
+
+## Storage Strategy
+- Payload stored via blob_id FK to blobs table
+- ≤64KB: inline in blobs.payload (SBO)
+- >64KB: S3, referenced via blobs.s3_key/s3_bucket
+
+## Presigned URLs
+- Generate for download regardless of storage location
+- Same HTTP GET interface for both inline and S3
+
+## Lifecycle
+- Created when agent uploads
+- keep=true exempts from auto-cleanup
+- Deleted by cleanup workflow based on retention

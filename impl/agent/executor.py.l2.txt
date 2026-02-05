@@ -1,0 +1,632 @@
+# executor.py - Run Executor (L2 Pseudocode)
+
+# Note: Timing constants reference ../../shared/src/config/timing.ts.l2.txt
+# - LOG_LOCAL_BUFFER_MS (100ms)
+# - ARTIFACT_COLLECTION_TIMEOUT_MS (30min)
+# Note: Message types reference ../../shared/src/api/agent.ts.l2.txt
+
+"""
+Run Executor
+
+Handles start_run, cancel_run, prepare_snapshot commands.
+Manages subprocess lifecycle, file sync, and command acknowledgment.
+
+Command acknowledgment protocol (spec 11.4.5):
+- Track last 100 processed command_ids for deduplication
+- Queue acks in pending_command_acks for next heartbeat
+- Prevents duplicate execution on SSE retries
+"""
+
+```python
+import collections
+import hashlib
+import os
+import shutil
+import signal
+import subprocess
+import threading
+import time
+import urllib.request
+from dataclasses import dataclass, field
+from typing import Optional, List, Set
+
+from logs import log_buffer, flush_and_send
+from artifacts import collect_and_upload_artifacts
+
+
+# =============================================================================
+# Constants
+# =============================================================================
+
+PROCESSED_COMMAND_HISTORY_SIZE = 100  # Fixed, not configurable
+CANCEL_GRACE_PERIOD_S = 10           # SIGTERM -> SIGKILL timeout
+
+
+# =============================================================================
+# Run Executor
+# =============================================================================
+
+class RunExecutor:
+    """
+    Manages run lifecycle: file sync, command execution, artifact collection.
+
+    State tracking:
+    - current_run_id: Active run identifier (None when idle)
+    - current_process: subprocess.Popen for running command
+    - current_allocation_id: Allocation executing current run
+    - interrupted: Set on spot interrupt (affects run_complete message)
+    - pending_command_acks: Command IDs awaiting heartbeat transmission
+    - processed_command_ids: Last 100 command IDs (deduplication buffer)
+    """
+
+    def __init__(self):
+        self.current_run_id: Optional[str] = None
+        self.current_process: Optional[subprocess.Popen] = None
+        self.current_allocation_id: Optional[int] = None
+        self.interrupted: bool = False
+
+        # Command acknowledgment protocol (spec 11.4.5)
+        self.pending_command_acks: Set[int] = set()
+        self.processed_command_ids: collections.deque = collections.deque(
+            maxlen=PROCESSED_COMMAND_HISTORY_SIZE
+        )
+
+        self._lock = threading.Lock()
+
+    # -------------------------------------------------------------------------
+    # Command Acknowledgment (spec 11.4.5)
+    # -------------------------------------------------------------------------
+
+    def _check_and_ack_command(self, command_id: Optional[int]) -> bool:
+        """
+        Check deduplication and queue acknowledgment.
+
+        Returns:
+            True if command is a duplicate (skip execution)
+            False if command is new (proceed with execution)
+        """
+        if command_id is None:
+            return False  # No command_id = fire-and-forget, always execute
+
+        with self._lock:
+            # Always ack (even duplicates)
+            self.pending_command_acks.add(command_id)
+
+            # Check deduplication
+            if command_id in self.processed_command_ids:
+                log("INFO", f"Duplicate command_id={command_id}, skipping execution")
+                return True  # Duplicate
+
+            # New command - record it
+            self.processed_command_ids.append(command_id)
+            return False  # Not duplicate
+
+    def get_and_clear_pending_acks(self) -> List[int]:
+        """Called by heartbeat thread after successful heartbeat POST."""
+        with self._lock:
+            acks = list(self.pending_command_acks)
+            self.pending_command_acks.clear()
+            return acks
+
+    # -------------------------------------------------------------------------
+    # start_run Handler
+    # -------------------------------------------------------------------------
+
+    def start_run(self, msg: dict) -> None:
+        """
+        Handle start_run command. Full sequence:
+        1. Dedup check + ack
+        2. Clean workdir (critical for warm pool security)
+        3. Download files (verify checksums)
+        4. Execute init script (if provided)
+        5. Send sync_complete
+        6. Execute command (subprocess)
+        7. Stream stdout/stderr to log buffer
+        8. Wait for completion
+        9. Send run_complete
+        10. Collect and upload artifacts
+        """
+        command_id = msg.get('command_id')
+        if self._check_and_ack_command(command_id):
+            return  # Duplicate
+
+        run_id = msg['run_id']
+        allocation_id = msg['allocation_id']
+        workdir = msg['workdir']
+        command = msg['command']
+        files = msg.get('files', [])
+        artifacts = msg.get('artifacts', [])
+        run_init = msg.get('run_init', False)
+        init_script = msg.get('init_script')
+        create_snapshot = msg.get('create_snapshot', False)
+
+        self.current_run_id = run_id
+        self.current_allocation_id = allocation_id
+        self.interrupted = False
+
+        log("INFO", f"Starting run {run_id} (allocation={allocation_id})")
+
+        try:
+            # Step 1: Clean workdir (spec 11.10)
+            cleanup_workdir(workdir)
+            os.makedirs(workdir, exist_ok=True)
+
+            # Step 2: Download files
+            sync_success = download_files(run_id, allocation_id, workdir, files)
+            if not sync_success:
+                send_sync_complete(run_id, allocation_id, success=False, error="file_sync_failed")
+                send_run_complete(run_id, allocation_id, exit_code=1,
+                                  workflow_state='launch-run:error')
+                return
+
+            # Step 3: Execute init script (if provided)
+            if run_init and init_script:
+                init_success = execute_init_script(run_id, allocation_id, workdir, init_script)
+                if not init_success:
+                    send_sync_complete(run_id, allocation_id, success=False, error="init_failed")
+                    send_run_complete(run_id, allocation_id, exit_code=1,
+                                      workflow_state='launch-run:error')
+                    return
+
+            # Step 4: Send sync_complete (bypasses batching)
+            send_sync_complete(run_id, allocation_id, success=True)
+
+            # Step 5: Snapshot-only mode (no command execution)
+            if create_snapshot and not command:
+                log("INFO", f"Snapshot-only mode for run {run_id}")
+                send_run_complete(run_id, allocation_id, exit_code=0,
+                                  workflow_state='launch-run:complete')
+                return
+
+            # Step 6: Execute command
+            exit_code = execute_command(run_id, allocation_id, workdir, command)
+
+            # Step 7: Send run_complete
+            workflow_state = 'launch-run:complete' if exit_code == 0 else 'launch-run:error'
+            send_run_complete(
+                run_id, allocation_id, exit_code,
+                workflow_state=workflow_state,
+                interrupted=self.interrupted,
+            )
+
+            # Step 8: Collect and upload artifacts
+            if artifacts:
+                collect_and_upload_artifacts(run_id, workdir, artifacts)
+
+        except Exception as e:
+            log("ERROR", f"Run {run_id} failed: {e}")
+            send_run_complete(run_id, allocation_id, exit_code=1,
+                              workflow_state='launch-run:error')
+
+        finally:
+            self.current_run_id = None
+            self.current_process = None
+            self.current_allocation_id = None
+
+    # -------------------------------------------------------------------------
+    # cancel_run Handler
+    # -------------------------------------------------------------------------
+
+    def cancel_run(self, msg: dict) -> None:
+        """
+        Cancel a running run. Sequence:
+        1. Dedup check + ack
+        2. Find process by run_id
+        3. Send SIGTERM, wait 10s
+        4. If still running: SIGKILL
+        5. Send run_complete with exit_code=-15 (SIGTERM)
+        """
+        command_id = msg.get('command_id')
+        if self._check_and_ack_command(command_id):
+            return  # Duplicate
+
+        run_id = msg['run_id']
+        log("INFO", f"Cancelling run {run_id}")
+
+        if self.current_run_id != run_id:
+            log("WARN", f"Cancel for unknown run {run_id}, ignoring")
+            return
+
+        proc = self.current_process
+        if proc is None or proc.poll() is not None:
+            log("WARN", f"Run {run_id} not running, ignoring cancel")
+            return
+
+        try:
+            # Send SIGTERM for graceful exit
+            proc.send_signal(signal.SIGTERM)
+            log("INFO", f"Sent SIGTERM to run {run_id}")
+
+            # Wait for graceful exit
+            try:
+                proc.wait(timeout=CANCEL_GRACE_PERIOD_S)
+                log("INFO", f"Run {run_id} exited gracefully after SIGTERM")
+            except subprocess.TimeoutExpired:
+                # Force kill
+                proc.kill()
+                proc.wait(timeout=5)
+                log("WARN", f"Run {run_id} killed after {CANCEL_GRACE_PERIOD_S}s grace period")
+
+        except Exception as e:
+            log("ERROR", f"Cancel failed for run {run_id}: {e}")
+
+    # -------------------------------------------------------------------------
+    # prepare_snapshot Handler
+    # -------------------------------------------------------------------------
+
+    def prepare_snapshot(self, msg: dict) -> None:
+        """
+        Prepare instance for snapshot creation. Sequence:
+        1. Dedup check + ack
+        2. Sync filesystems
+        3. Clear temp files
+        4. Clear workdir (no run state in snapshots)
+        5. Flush buffers
+        6. Send prepare_snapshot_ack
+        """
+        command_id = msg.get('command_id')
+        if self._check_and_ack_command(command_id):
+            return  # Duplicate
+
+        instance_id = msg['instance_id']
+        log("INFO", f"Preparing snapshot for instance {instance_id}")
+
+        try:
+            # Sync filesystems
+            subprocess.run(["sync"], timeout=30)
+
+            # Clear temp files
+            for tmp_dir in ["/tmp", "/var/tmp"]:
+                try:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                    os.makedirs(tmp_dir, mode=0o1777, exist_ok=True)
+                except Exception as e:
+                    log("WARN", f"Failed to clear {tmp_dir}: {e}")
+
+            # Clear workdir (critical: no run state in snapshots)
+            for entry in os.listdir("/work"):
+                if entry.startswith("run_"):
+                    shutil.rmtree(os.path.join("/work", entry), ignore_errors=True)
+
+            # Drop caches (best-effort, may fail without root)
+            try:
+                subprocess.run(["sync"], timeout=10)
+                with open("/proc/sys/vm/drop_caches", "w") as f:
+                    f.write("3")
+            except Exception:
+                pass  # Expected if not root
+
+            send_prepare_snapshot_ack(instance_id, success=True)
+
+        except Exception as e:
+            log("ERROR", f"Snapshot preparation failed: {e}")
+            send_prepare_snapshot_ack(instance_id, success=False, error=str(e))
+
+    # -------------------------------------------------------------------------
+    # capture_artifacts Handler
+    # -------------------------------------------------------------------------
+
+    def capture_artifacts(self, msg: dict) -> None:
+        """
+        Mid-run or emergency artifact capture (fire-and-forget).
+        Runs in background thread to not block SSE reader.
+        """
+        command_id = msg.get('command_id')
+        if command_id is not None:
+            self._check_and_ack_command(command_id)
+
+        run_id = msg['run_id']
+        if self.current_run_id != run_id:
+            log("WARN", f"capture_artifacts for unknown run {run_id}")
+            return
+
+        # Run in background
+        thread = threading.Thread(
+            target=collect_and_upload_artifacts,
+            args=(run_id, get_workdir_for_run(run_id), get_artifact_patterns()),
+            daemon=True,
+        )
+        thread.start()
+
+    # -------------------------------------------------------------------------
+    # Run Termination (for shutdown)
+    # -------------------------------------------------------------------------
+
+    def terminate_current_run(self) -> None:
+        """Terminate current run during shutdown. Called by agent.py."""
+        proc = self.current_process
+        if proc and proc.poll() is None:
+            try:
+                proc.send_signal(signal.SIGTERM)
+                proc.wait(timeout=CANCEL_GRACE_PERIOD_S)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            except Exception as e:
+                log("WARN", f"Failed to terminate run: {e}")
+
+
+# =============================================================================
+# Workdir Cleanup (spec 11.10)
+# =============================================================================
+
+def cleanup_workdir(workdir: str):
+    """
+    Clean workdir before start_run. Critical for warm pool:
+    - Security: previous run's secrets visible
+    - Correctness: stale files affect behavior
+    - Disk: accumulated files fill disk
+    """
+    if os.path.exists(workdir):
+        os.chdir(os.path.expanduser("~"))  # Avoid error if cwd was workdir
+        try:
+            shutil.rmtree(workdir)
+        except Exception as e:
+            log("WARN", f"Error removing workdir: {e}")
+
+
+# =============================================================================
+# File Download
+# =============================================================================
+
+def download_files(run_id: str, allocation_id: int, workdir: str, files: list) -> bool:
+    """
+    Download files from presigned URLs, verify checksums.
+
+    Presigned URL abstraction (spec 11.11):
+    - >64KB: S3 directly (control plane never sees payload)
+    - <=64KB: Control plane endpoint (lower latency)
+    Agent code unchanged - same GET regardless of backing store.
+
+    Returns:
+        True if all files downloaded and verified, False on any failure
+    """
+    for file_entry in files:
+        path = file_entry['path']
+        checksum = file_entry['checksum']
+        url = file_entry['url']
+
+        full_path = os.path.join(workdir, path)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+
+        try:
+            # Download file
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                data = resp.read()
+
+            # Verify checksum
+            actual_checksum = hashlib.sha256(data).hexdigest()
+            if actual_checksum != checksum:
+                log("ERROR", f"Checksum mismatch for {path}: "
+                           f"expected={checksum}, actual={actual_checksum}")
+                send_log(run_id, allocation_id, 'stderr',
+                        f"Checksum mismatch: {path}", phase='sync')
+                return False
+
+            # Write to workdir
+            with open(full_path, 'wb') as f:
+                f.write(data)
+
+            log("DEBUG", f"Downloaded: {path} ({len(data)} bytes)")
+
+        except Exception as e:
+            log("ERROR", f"Download failed for {path}: {e}")
+            send_log(run_id, allocation_id, 'stderr',
+                    f"Download failed: {path}: {e}", phase='sync')
+            return False
+
+    log("INFO", f"Downloaded {len(files)} files for run {run_id}")
+    return True
+
+
+# =============================================================================
+# Init Script Execution
+# =============================================================================
+
+def execute_init_script(run_id: str, allocation_id: int, workdir: str, init_script: str) -> bool:
+    """
+    Execute init script before main command.
+
+    Writes script to /tmp/init.sh, makes executable, runs with timeout.
+    Output streamed as phase='sync' logs.
+
+    Returns:
+        True if init script succeeded (exit code 0), False otherwise
+    """
+    script_path = "/tmp/init.sh"
+
+    try:
+        # Write init script
+        with open(script_path, 'w') as f:
+            f.write(init_script)
+        os.chmod(script_path, 0o755)
+
+        # Execute with timeout (5 min default)
+        proc = subprocess.Popen(
+            [script_path],
+            cwd=workdir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        # Stream output as sync-phase logs
+        stdout, stderr = proc.communicate(timeout=300)
+
+        if stdout:
+            send_log(run_id, allocation_id, 'stdout',
+                    stdout.decode('utf-8', errors='replace'), phase='sync')
+        if stderr:
+            send_log(run_id, allocation_id, 'stderr',
+                    stderr.decode('utf-8', errors='replace'), phase='sync')
+
+        if proc.returncode == 0:
+            log("INFO", f"Init script completed successfully for run {run_id}")
+            send_init_complete(run_id)
+            return True
+        else:
+            log("ERROR", f"Init script failed with exit code {proc.returncode}")
+            return False
+
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        log("ERROR", "Init script timed out")
+        return False
+
+    except Exception as e:
+        log("ERROR", f"Init script error: {e}")
+        return False
+
+
+# =============================================================================
+# Command Execution
+# =============================================================================
+
+def execute_command(run_id: str, allocation_id: int, workdir: str, command: str) -> int:
+    """
+    Execute run command as subprocess.
+
+    Captures stdout/stderr and streams to log buffer.
+    Returns exit code (0 = success).
+    """
+    try:
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            cwd=workdir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        # Store reference for cancel_run
+        # (caller sets self.current_process)
+
+        # Stream stdout/stderr in background threads
+        stdout_thread = threading.Thread(
+            target=stream_output,
+            args=(proc.stdout, run_id, allocation_id, 'stdout'),
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=stream_output,
+            args=(proc.stderr, run_id, allocation_id, 'stderr'),
+            daemon=True,
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        # Wait for completion
+        proc.wait()
+        stdout_thread.join(timeout=5)
+        stderr_thread.join(timeout=5)
+
+        return proc.returncode
+
+    except Exception as e:
+        log("ERROR", f"Command execution failed: {e}")
+        return 1
+
+
+def stream_output(pipe, run_id: str, allocation_id: int, stream: str):
+    """Read subprocess pipe and send to log buffer."""
+    try:
+        for line in iter(pipe.readline, b''):
+            text = line.decode('utf-8', errors='replace')
+            send_log(run_id, allocation_id, stream, text, phase='execution')
+    except Exception as e:
+        log("WARN", f"Output stream error ({stream}): {e}")
+    finally:
+        pipe.close()
+
+
+# =============================================================================
+# Message Senders
+# =============================================================================
+
+def send_sync_complete(run_id: str, allocation_id: int, success: bool, error: str = None):
+    """
+    Send sync_complete log message. BYPASSES batching via flush_and_send().
+    Critical: sync_complete latency counts against allocation timeout.
+    """
+    payload = {
+        'type': 'log',
+        'run_id': run_id,
+        'allocation_id': allocation_id,
+        'stream': 'sync_complete',
+        'data': '',
+        'phase': 'sync',
+        'sync_success': success,
+    }
+    if error:
+        payload['error'] = error
+
+    flush_and_send([payload])
+
+
+def send_run_complete(run_id: str, allocation_id: int, exit_code: int,
+                      workflow_state: str, interrupted: bool = False):
+    """POST /v1/agent/run-complete"""
+    payload = {
+        'type': 'run_complete',
+        'run_id': run_id,
+        'allocation_id': allocation_id,
+        'exit_code': exit_code,
+        'workflow_state': workflow_state,
+    }
+    if interrupted:
+        payload['interrupted'] = True
+
+    try:
+        http_post('/v1/agent/run-complete', payload, timeout=10)
+    except Exception as e:
+        log("ERROR", f"Failed to send run_complete: {e}")
+
+
+def send_init_complete(run_id: str):
+    """POST /v1/agent/init-complete"""
+    payload = {
+        'type': 'init_complete',
+        'run_id': run_id,
+    }
+    try:
+        http_post('/v1/agent/init-complete', payload, timeout=10)
+    except Exception as e:
+        log("ERROR", f"Failed to send init_complete: {e}")
+
+
+def send_prepare_snapshot_ack(instance_id: int, success: bool, error: str = None):
+    """POST /v1/agent/snapshot-ready"""
+    payload = {
+        'type': 'prepare_snapshot_ack',
+        'instance_id': instance_id,
+        'success': success,
+    }
+    if error:
+        payload['error_message'] = error
+
+    try:
+        http_post('/v1/agent/snapshot-ready', payload, timeout=10)
+    except Exception as e:
+        log("ERROR", f"Failed to send prepare_snapshot_ack: {e}")
+
+
+def send_log(run_id: str, allocation_id: int, stream: str, data: str, phase: str = 'execution'):
+    """Queue log message to log buffer (batched by logs.py)."""
+    log_buffer.append({
+        'type': 'log',
+        'run_id': run_id,
+        'allocation_id': allocation_id,
+        'stream': stream,
+        'data': data,
+        'phase': phase,
+    })
+
+
+# =============================================================================
+# Logging Utility
+# =============================================================================
+
+def log(level: str, message: str) -> None:
+    """Log message with level prefix."""
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{timestamp}] [{level}] [executor] {message}")
+```
