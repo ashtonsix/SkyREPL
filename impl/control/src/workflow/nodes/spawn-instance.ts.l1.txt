@@ -158,7 +158,7 @@ Called if node fails after partial execution.
 - providers/{provider}.ts: Provider implementation
 - Provider workflows: Optional black-box delegation
 
-## Error Handling
+## ErrorHandling
 
 Errors bubble to workflow engine, which consults error taxonomy:
 - CapacityError -> retry-with-alternative (different region)

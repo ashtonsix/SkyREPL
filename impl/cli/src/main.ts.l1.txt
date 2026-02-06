@@ -54,7 +54,7 @@
 - `loadConfig(): ReplConfig` - Search upward for repl.toml, parse, validate
 - `resolveProfile(name?): ProfileConfig` - Resolve profile by name or use default
 
-## API Client
+## APIClient
 - `ApiClient` - HTTP client with auth, error handling, SSE streaming
 - `submitWorkflow(type, input): { workflowId, ... }` - Submit workflow
 - `streamProgress(workflowId, callback): void` - SSE progress stream

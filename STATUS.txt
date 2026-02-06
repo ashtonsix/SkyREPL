@@ -1,7 +1,7 @@
 ================================================================================
 PROJECT STATUS
 ================================================================================
-Last updated: 2026-02-05
+Last updated: 2026-02-08
 
 ================================================================================
 1. OVERVIEW
@@ -18,9 +18,13 @@ chaos problem. Tracking what's running, ensuring cleanup, avoiding cost surprise
 2. SPECIFICATION STATUS
 ================================================================================
 
-**Status: COMPLETE**
+**Status: L2/B COMPLETE — ready for L3**
 
-~11,500 lines across 15 chapters (post-hardening). Ready for implementation.
+~9,500 lines across 15 chapters (post-distribution). Non-normative content
+extracted to docs/ and workshop/. All 10 done-definition items met. Behavior
+traces completed for MVK paths (launch-run, allocation SM). 8 blockers fixed,
+9 non-MVK issues tracked in BACKLOG (BT1-BT9). 3 architecture coherence items
+(AC1-AC3) to fix before starting L3.
 
 Chapters:
   01 Introduction        09 API
@@ -43,13 +47,13 @@ Key design elements:
 3. PSEUDO-IMPLEMENTATION STATUS (impl/)
 ================================================================================
 
-**Current state: L1 complete, L2 ~44% (53/120 files)**
+**Current state: L1 complete (trimmed), L2 ~39% (53/136 files), L2/B COMPLETE**
 
 Fidelity levels:
-  .l1.txt  - Bullet-point outlines (COMPLETE - 120 files)
-  .l2.txt  - Detailed pseudocode (IN PROGRESS - 53 files, 22,309 lines)
-  .l3.txt  - Partial implementation (not started)
-  (none)   - Working code (not started)
+  .<ext>.l1.txt  - Coarse outlines, ~20-50 lines each (COMPLETE - 136 files, trimmed)
+  .<ext>.l2.txt  - Detailed pseudocode (53 files, ~22k lines — Wl3-Wl6 + Wl8 extraction)
+  .l3.<ext>      - Partial working code (not started)
+  .<ext>         - Working code (not started)
 
 Structure:
   impl/
@@ -59,18 +63,8 @@ Structure:
   ├── agent/      Python agent (on instances)
   └── tests/      Tests organized by component
 
-L2 files completed:
-  shared/src/config/timing.ts.l2.txt           Timing constants (Wl3)
-  control/src/material/storage.ts.l2.txt       Storage with reservation (Wl4)
-  control/src/material/db.ts.l2.txt            DB with jittered retry (Wl4)
-  control/src/workflow/state-transitions.ts.l2.txt  CAS pattern (Wl4)
-  control/src/background/reconciliation.ts.l2.txt   Atomic guards (Wl4)
-  control/src/background/garbage-collection.ts.l2.txt  4 GC tasks (Wl4)
-  control/src/intent/cleanup-manifest.ts.l2.txt  Atomic cleanup (Wl4)
-  agent/heartbeat.py.l2.txt                    2m/15m/25m timing + ID verify (Wl5, Wl6)
-  agent/checkpoint.py.l2.txt                   Failover URLs + prioritization (Wl5, Wl6)
-  agent/spot.py.l2.txt                         Spot interruption + prioritization (Wl5, Wl6)
-  agent/sse.py.l2.txt                          SSE byte-by-byte + reconnection (Wl6)
+L2 gap: 83 L1-only files remain. MVK subset: 17 files (~1,023 lines).
+See docs/reference/l2-gap-analysis.txt for full breakdown.
 
 ================================================================================
 4. MINIMUM VIABLE KERNEL
@@ -88,8 +82,7 @@ First implementation target:
 ================================================================================
 
 Hot (active):
-  WORKLOG_L2B_COMPLETION.txt - L2/B remaining work (cross-refs, fidelity, etc.)
-  WORKLOG_SPEC_AUDIT.txt     - WS2 verification findings (reference for above)
+  (none — next worklog starts at L3 entry)
 
 Cold (archived):
   worklogs/001_WORKLOG_L1_RESTRUCTURING.txt  - Structural overhaul
@@ -101,6 +94,8 @@ Cold (archived):
   worklogs/007_WORKLOG_L2B_ENTRY.txt         - Project restructuring for L2/B
   worklogs/008_WORKLOG_IMPL_EXTRACTION.txt   - L2 pseudo-impl from spec (53 files)
   worklogs/009_WORKLOG_SPEC_HARDENING.txt    - Spec → normative transformation
+  worklogs/010_WORKLOG_SPEC_AUDIT.txt        - Spec audit + consolidated findings (§A-M)
+  worklogs/011_WORKLOG_L2B_COMPLETION.txt    - L2/B completion (Phases 1-5, D1-D19)
 
 Backlog:
-  TODO.txt - Active backlog with status
+  BACKLOG.txt

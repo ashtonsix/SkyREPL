@@ -1,77 +1,27 @@
 # allocation.ts - Allocation State Machine (Ch5)
 
-## Purpose
-- Explicit state machine for run-to-instance binding
-- AVAILABLE allocations ARE the warm pool (no separate concept)
+Run-to-instance binding. AVAILABLE allocations ARE the warm pool.
+See L2 for state transition logic, warm pool replenishment, debug hold semantics, single-tenant enforcement.
 
-## AllocationStatus Enum
-- AVAILABLE: Instance slot ready, run_id=NULL
-- CLAIMED: Run assigned, files syncing
-- ACTIVE: Run executing
-- COMPLETE: Finalized (terminal state for this allocation)
-- FAILED: Lifecycle error (not run error, terminal state)
+## Status Enum
+AVAILABLE | CLAIMED | ACTIVE | COMPLETE | FAILED
 
 ## State Transitions
-- AVAILABLE → CLAIMED (workflow: claim-allocation)
-- CLAIMED → ACTIVE (control: on sync_complete log)
-- CLAIMED → FAILED (control: sync timeout 10min)
-- ACTIVE → COMPLETE (workflow: finalize node, after run completion)
-- ACTIVE → FAILED (control: heartbeat >30s, spot interrupt)
+- AVAILABLE → CLAIMED (claim-allocation node)
+- CLAIMED → ACTIVE (sync_complete log) | FAILED (sync timeout 10min)
+- ACTIVE → COMPLETE (finalize node) | FAILED (heartbeat loss, spot interrupt)
 
-## Warm Pool Replenishment (CRITICAL)
+## Key Invariants
+- At most ONE ACTIVE allocation per instance (single-tenant)
+- COMPLETE can have debug_hold_until (blocks termination, max 24h)
+- Warm pool replenishment: ACTIVE→COMPLETE creates NEW AVAILABLE allocation
+- Each run gets its own allocation record (never reused)
 
-The warm pool is replenished when ACTIVE → COMPLETE transitions:
+## Exports
+createAvailableAllocation, queryWarmPool, claimWarmPoolAllocation, transitionToComplete, extendAllocationDebugHold, canTerminateInstance, terminateInstance, reconcileClaimedAllocations, holdExpiryTask, getTailscaleState, updateTailscaleStatus
 
-```
-ACTIVE → COMPLETE (finalize workflow node):
-  1. Mark current allocation COMPLETE
-  2. Set debug_hold_until if configured (for debugging)
-  3. If instance is warm-pool eligible:
-     → Create NEW allocation record with status=AVAILABLE
-  4. The NEW allocation is the warm pool entry (not the old one)
-
-Each run gets its own allocation record. Allocations are never "reset" or "reused".
-```
-
-Instance warm-pool eligibility:
-- workflow_state ends with ':complete'
-- No pending terminate workflow
-- Instance healthy (recent heartbeat)
-
-## Debug Hold Behavior
-
-- debug_hold_until is a timestamp field on COMPLETE allocations
-- When set (non-null): blocks instance termination, allows SSH access
-- When NULL or expired: allocation eligible for cleanup
-- Max duration: 24 hours from completed_at (hard limit)
-- SSH activity does NOT auto-extend (debugging tool, not indefinite hold)
-- Background task clears expired debug_hold_until timestamps
-
-## Key Fields
-- run_id (NULL = AVAILABLE state)
-- instance_id, user, workdir, status
-- debug_hold_until (TimestampMs | null, applies only to COMPLETE allocations)
-- completed_at (set when COMPLETE or FAILED)
-
-## Key Behaviors
-- COMPLETE with debug_hold_until > NOW blocks instance termination
-- COMPLETE with debug_hold_until <= NOW (or NULL) allows cleanup
-- Timestamps: created_at, updated_at, completed_at
-- Multiple allocations can exist for one instance (history)
-
-## Single-Tenant Model (CRITICAL)
-- At most ONE ACTIVE allocation per instance at any time
-- Enforced at claim time: claim fails if instance has ACTIVE allocation
-- AVAILABLE, COMPLETE, FAILED allocations do NOT block new claims
-- Multiple AVAILABLE allocations CAN exist (edge case during replenishment race)
-- Multiple COMPLETE allocations CAN exist (sequential runs)
-- Rationale: Simplifies resource accounting, prevents workdir conflicts, clear ownership
+## Fields
+instance_id, run_id (NULL=AVAILABLE), status, user, workdir, current_manifest_id, debug_hold_until, created_at, updated_at
 
 ## Materialization
-- Simple DB record + optional related instance/run
-- Belongs to: Instance (required), Run (optional), Manifest (optional)
-
-## Workdir Assignment
-- AVAILABLE allocations get workdir assigned at creation time
-- Pattern: /work/run_N where N increments per instance
-- Workdir cleaned at start of run (not between allocations)
+DB record. Belongs to Instance (required), Run (optional), Manifest (optional).

@@ -1,0 +1,10 @@
+# Competitive Positioning
+
+SkyREPL is part of the Sky Computing ecosystem. SkyPilot focuses on cluster
+management and job scheduling; SkyREPL takes a complementary approach,
+emphasizing lifecycle management and reproducibility for development workflows.
+
+Current support: AWS, Lambda Labs, RunPod, OrbStack.
+Target ecosystem: +GCP, Azure, CoreWeave, Vast.ai, SLURM.
+
+Source: Ch01 S1.1

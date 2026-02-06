@@ -17,9 +17,11 @@ import type {
   PanicRequest, ControlToAgentMessage,
 } from '../../../../shared/src/api/agent';
 import { createApiError } from '../../../../shared/src/errors';
+import { TIMING } from '../../../../shared/src/config/timing';
+import { extendAllocationDebugHold } from '../resource/allocation';
 ```
 
-## Route Registration
+## RouteRegistration
 
 ```typescript
 // =============================================================================
@@ -62,12 +64,16 @@ export function registerAgentRoutes(app: Elysia): void {
       );
     }
 
-    // Update SSH session count
-    if (hb.active_ssh_sessions !== undefined) {
-      await queryOne(
-        'UPDATE instances SET active_ssh_sessions = ? WHERE id = ?',
-        [hb.active_ssh_sessions, hb.instance_id]
-      );
+    // Extend debug holds for allocations with active SSH sessions
+    if (hb.active_allocations && hb.active_allocations.length > 0) {
+      for (const alloc of hb.active_allocations) {
+        if (alloc.has_ssh_sessions) {
+          await extendAllocationDebugHold(alloc.allocation_id, {
+            extensionMs: TIMING.SSH_EXTENSION_MS,
+            maxExtensionMs: TIMING.MAX_SSH_EXTENSION_MS,
+          });
+        }
+      }
     }
 
     // Send heartbeat_ack via SSE (if SSE connection exists)
@@ -90,11 +96,28 @@ export function registerAgentRoutes(app: Elysia): void {
   app.post('/v1/agent/logs', async ({ body }) => {
     const log = body as AgentLogsRequest;
 
-    // Store log entry
+    // Store log entry as object with blob
+    const now = Date.now();
+
+    // Create blob for log content
+    const blobResult = await queryOne(
+      `INSERT INTO blobs (bucket, checksum, inline_content, size_bytes, created_at, last_referenced_at)
+       VALUES ('logs', NULL, ?, ?, ?, ?)`,
+      [log.data, log.data.length, now, now]
+    );
+    const blobId = blobResult.lastInsertRowid;
+
+    // Create object record with type='log'
     await queryOne(
-      `INSERT INTO run_logs (run_id, stream, data, timestamp, sequence, phase)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [log.run_id, log.stream, log.data, log.timestamp, log.sequence ?? null, log.phase ?? null]
+      `INSERT INTO objects (type, blob_id, metadata_json, created_at, accessed_at)
+       VALUES ('log', ?, ?, ?, NULL)`,
+      [blobId, JSON.stringify({
+        run_id: log.run_id,
+        stream: log.stream,
+        timestamp: log.timestamp,
+        sequence: log.sequence ?? null,
+        phase: log.phase ?? null
+      }), now]
     );
 
     // Forward to WebSocket clients watching this run's logs
@@ -183,7 +206,7 @@ export function registerAgentRoutes(app: Elysia): void {
     );
     const holdDurationMs = alloc?.debug_hold_until
       ? Math.max(0, alloc.debug_hold_until - Date.now())
-      : 300000;
+      : TIMING.DEFAULT_HOLD_MS;
 
     return {
       ack: true,
@@ -300,7 +323,12 @@ export function registerAgentRoutes(app: Elysia): void {
     const checksum = query.checksum as string;
 
     const file = await queryOne(
-      'SELECT * FROM run_files WHERE run_id = ? AND path = ?',
+      `SELECT o.*, b.s3_key, b.checksum, b.size_bytes, b.inline_content
+       FROM objects o
+       JOIN blobs b ON o.blob_id = b.id
+       WHERE o.type = 'run_file'
+         AND JSON_EXTRACT(o.metadata_json, '$.run_id') = ?
+         AND JSON_EXTRACT(o.metadata_json, '$.path') = ?`,
       [runId, params.path]
     );
 
@@ -330,7 +358,7 @@ export function registerAgentRoutes(app: Elysia): void {
     }
 
     // Inline content
-    return file.content;
+    return file.inline_content;
   });
 
   // ─── Panic Diagnostics ──────────────────────────────────────────────
@@ -364,7 +392,7 @@ export function registerAgentRoutes(app: Elysia): void {
 }
 ```
 
-## Agent Request Types (Endpoint-Specific)
+## AgentRequestTypes
 
 ```typescript
 // =============================================================================
@@ -384,7 +412,7 @@ interface AgentHeartbeatRequest {
   gpu_utilization?: number;
   gpu_memory_percent?: number;
   tailscale_ip?: string | null;
-  active_ssh_sessions?: number;
+  active_allocations: Array<{allocation_id: number, has_ssh_sessions: boolean}>;
   tailscale_status?: 'not_installed' | 'installing' | 'ready' | 'failed';
 }
 
@@ -457,7 +485,7 @@ interface PanicDiagnosticsRequest {
 }
 ```
 
-## Handler Helpers
+## HandlerHelpers
 
 ```typescript
 // =============================================================================
@@ -545,7 +573,7 @@ function getMimeType(path: string): string {
 }
 ```
 
-## Panic Storage Schema
+## PanicStorageSchema
 
 ```sql
 -- =============================================================================

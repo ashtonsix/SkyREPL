@@ -1,328 +1,54 @@
-# types.ts - Cross-cutting type definitions
+# types.ts - Cross-cutting Type Definitions
 
-# Note: Timing constants import from ./config/timing.ts.l2.txt
-# - ABSOLUTE_MAX_HOLD_MS (24h)
+Cross-cutting primitives and utilities.
+See L2 for InstanceSpec normalization, WorkflowState parsing, Duration/Timestamp utilities, pre-defined workflow state builders.
 
-## PRIMITIVES
+## Primitives
 
-- ID = number (INTEGER AUTOINCREMENT from database)
-- TimestampMs = number (Unix timestamp in milliseconds)
-- DurationMs = number (duration in milliseconds)
-- Checksum = string (SHA256 hash as hex string)
-- ProviderName = 'aws' | 'lambda' | 'runpod' | 'orbstack'
+ID (number), TimestampMs (number), DurationMs (number), Checksum (string), ProviderName (aws | lambda | runpod | orbstack)
 
-## INSTANCE SPECIFICATION
+## IDUtilities
 
-### InstanceSpec
-- instanceType: string (provider-specific identifier, e.g., 'g5.xlarge', 'gpu_1x_a100', 'A100x1')
-- vcpus: number (virtual CPU cores)
-- memoryMb: number (memory in megabytes)
-- gpuCount?: number (number of GPUs, optional)
-- gpuType?: string (GPU model, e.g., 'A100', 'H100', 'RTX4090')
-- storageMb?: number (ephemeral storage in megabytes, optional)
-- spot?: boolean (whether this is a spot/preemptible instance)
+idToSlug(id), slugToId(slug), formatId(id)
+Convert integer IDs to/from base-36 slugs for display
 
-### Normalization Notes
+## InstanceSpec
 
-**Provider-Specific Instance Type Mapping:**
-- AWS: instanceType = EC2 instance type (e.g., 'g5.xlarge' -> 4 vCPUs, 16384 MB, 1 A10G GPU)
-- Lambda Labs: instanceType = instance_type_id (e.g., 'gpu_1x_a100' -> 30 vCPUs, 200000 MB, 1 A100)
-- RunPod: instanceType = pod template ID or custom spec string (e.g., '1xRTX4090' -> varies by config)
-- OrbStack: instanceType = VM config identifier (e.g., 'ubuntu-22.04' -> cpuCores, memoryMb from config)
+instanceType, vcpus, memoryMb, gpuCount?, gpuType?, storageMb?, spot?
+Normalized view across providers
 
-**Cross-Provider Normalization:**
-- InstanceSpec provides a normalized view across providers
-- Control plane compares instances by normalized resources (vcpus, memoryMb, gpuType)
-- Provider implementations map their native types to/from InstanceSpec
-- When spawning, control plane passes InstanceSpec; provider translates to native type
-- When listing, provider translates native types back to InstanceSpec
+## StatusEnums
 
-**Storage Handling:**
-- storageMb is ephemeral/instance storage only (not persistent volumes)
-- AWS: EBS volumes are separate from InstanceSpec (managed via volumes array)
-- RunPod: Container disk is included in storageMb
-- Lambda Labs: NVMe storage included in storageMb
-- OrbStack: VM disk size included in storageMb
+AllocationStatus: AVAILABLE | CLAIMED | ACTIVE | COMPLETE | FAILED
+WorkflowExecutionStatus: pending | running | completed | failed | cancelled | rolling_back
+ManifestStatus: DRAFT | SEALED (EXPIRED is derived)
+NodeStatus: pending | running | completed | failed | skipped
+TailscaleStatus: not_installed | installing | ready | failed
 
-**Spot/Preemptible Instances:**
-- spot flag indicates instance lifecycle (spot vs on-demand)
-- AWS: Uses EC2 spot instances
-- RunPod: Uses "Community Cloud" pricing model
-- Lambda Labs: Does not support spot (spot=false always)
-- OrbStack: Does not support spot (spot=false always)
+## WorkflowState
 
-**GPU Normalization:**
-- gpuType is canonical GPU model name (e.g., 'A100', 'H100', 'A10G', 'RTX4090')
-- Providers may use different naming (A100-SXM4-40GB -> 'A100')
-- Control plane normalizes to simple model names for comparison
-- gpuCount is total number of GPUs attached to instance
+Format: "workflow:phase"
+Availability is INFERRED: workflowState.endsWith(':complete') && currentManifestId === null
+parseStatus(status), buildWorkflowState(workflow, phase), isAvailable(resource)
 
-**Example Mappings:**
+## Domain Resources
 
-AWS g5.xlarge:
-  instanceType: 'g5.xlarge'
-  vcpus: 4
-  memoryMb: 16384
-  gpuCount: 1
-  gpuType: 'A10G'
-  storageMb: 256000 (NVMe SSD)
-  spot: false (unless spawned via spot request)
+Instance, Run, Allocation, Workflow, Manifest
+Fields include: id, status/workflowState, timestamps, foreign keys, currentManifestId
 
-Lambda Labs gpu_1x_a100:
-  instanceType: 'gpu_1x_a100'
-  vcpus: 30
-  memoryMb: 200000
-  gpuCount: 1
-  gpuType: 'A100'
-  storageMb: 512000 (NVMe)
-  spot: false
+Allocation.debugHoldUntil: Preserves COMPLETE allocation for debugging, max ABSOLUTE_MAX_HOLD_MS (24h)
 
-RunPod 1xRTX4090:
-  instanceType: '1xRTX4090'
-  vcpus: 8
-  memoryMb: 32768
-  gpuCount: 1
-  gpuType: 'RTX4090'
-  storageMb: 100000 (container disk)
-  spot: false (or true if Community Cloud)
+## Simple Resources
 
-OrbStack ubuntu-22.04-4cpu-8gb:
-  instanceType: 'ubuntu-22.04'
-  vcpus: 4
-  memoryMb: 8192
-  gpuCount: 0
-  gpuType: undefined
-  storageMb: 102400 (100GB VM disk)
-  spot: false
+Snapshot, Artifact, FeatureInstallation, TailscaleMachine
+Object-backed, simpler lifecycle
 
-## ID UTILITIES
+## SupportingTypes
 
-- idToSlug(id: number): string - Convert to base-36 slug
-- slugToId(slug: string): number - Parse base-36 slug to integer
-- formatId(id: number): string - Alias for idToSlug
+RunFile, RunLogEntry, UsageRecord, WorkflowNode, ManifestResource
+ManifestResource includes ownerType/ownerId for provenance tracking
 
-## WORKFLOW STATE
+## Utilities
 
-- WorkflowState = string (format: "<workflow>:<phase>")
-- Availability is INFERRED, not stored as a state
-- parseStatus(status: WorkflowState): {workflow: string | null, state: string}
-- buildWorkflowState(workflow: string, phase: string): WorkflowState
-- isAvailable(resource): boolean - workflowState.endsWith(':complete') && currentManifestId === null
-
-## STATUS ENUMS
-
-- AllocationStatus = 'AVAILABLE' | 'CLAIMED' | 'ACTIVE' | 'COMPLETE' | 'FAILED'
-- WorkflowExecutionStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'rolling_back'
-- ManifestStatus = 'DRAFT' | 'SEALED' (EXPIRED is derived, not stored)
-- NodeStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
-- TailscaleStatus = 'not_installed' | 'installing' | 'ready' | 'failed'
-
-## MATERIALIZED RESOURCES (Domain Objects)
-
-### Instance
-- id: ID
-- provider: ProviderName
-- providerId: string (provider's instance ID like i-xxx)
-- spec: string (instance type like g5.xlarge)
-- region: string | null
-- ip: string | null
-- workflowState: WorkflowState
-- workflowError: string | null (JSON-serialized WorkflowError)
-- isSpot, spotRequestId, initChecksum, spawnIdempotencyKey
-- createdAt, lastHeartbeat: TimestampMs
-- currentManifestId: ID | null
-- Optional (depth-based): features?, tailscaleMachine?, externalStatus?, externalIp?
-
-### Run
-- id: ID
-- command: string
-- workdir: string
-- maxDurationMs: DurationMs
-- workflowState: WorkflowState
-- workflowError: string | null (JSON-serialized WorkflowError)
-- exitCode: number | null
-- createSnapshot: boolean
-- initChecksum: Checksum | null
-- spotInterrupted: boolean
-- createdAt: TimestampMs
-- startedAt: TimestampMs | null
-- finishedAt: TimestampMs | null
-- currentManifestId: ID | null
-- files?: RunFile[] (populated based on depth)
-- logs?: RunLogEntry[] (populated based on depth)
-- artifacts?: Artifact[] (populated based on depth)
-- allocation?: Allocation (populated based on depth)
-
-### Allocation
-- id: ID
-- runId: ID | null (null for AVAILABLE state)
-- instanceId: ID
-- user: string (Unix username, platform-dependent)
-- workdir: string
-- status: AllocationStatus
-- debugHoldUntil: TimestampMs | null (preserves COMPLETE allocation for debugging)
-- createdAt: TimestampMs
-- updatedAt: TimestampMs
-- completedAt: TimestampMs | null
-- currentManifestId: ID | null
-- instance?: Instance (populated based on depth)
-- run?: Run (populated based on depth)
-
-NOTE: debugHoldUntil applies only to COMPLETE allocations:
-- When set: blocks instance termination, allows SSH access
-- When NULL or expired: allocation eligible for cleanup
-- Max duration: ABSOLUTE_MAX_HOLD_MS (24h) from completedAt (hard limit from timing.ts)
-- SSH activity does NOT auto-extend (debugging tool, not indefinite hold)
-
-### Workflow
-- id: ID
-- type: string (launch-run, terminate-instance, etc.)
-- parentWorkflowId: ID | null
-- depth: number (max 3 for subworkflows)
-- status: WorkflowExecutionStatus
-- currentNode: string | null
-- input: Record<string, unknown> (parsed from JSON)
-- output: Record<string, unknown> | null
-- error: WorkflowError | null
-- manifestId: ID | null
-- traceId: string | null (OpenTelemetry trace ID)
-- idempotencyKey: string | null
-- createdAt: TimestampMs
-- startedAt: TimestampMs | null
-- finishedAt: TimestampMs | null
-- nodes?: WorkflowNode[] (populated based on depth)
-- manifest?: Manifest (populated based on depth)
-
-### Manifest
-- id: ID
-- workflowId: ID
-- status: ManifestStatus
-- defaultCleanupPriority: number (0-100)
-- retentionMs: DurationMs | null
-- createdAt: TimestampMs
-- releasedAt: TimestampMs | null
-- expiresAt: TimestampMs | null
-- resources?: ManifestResource[] (populated based on depth)
-
-## SIMPLE RESOURCES (Object-backed)
-
-### Snapshot
-- id: ID
-- provider: ProviderName
-- providerId: string (provider's snapshot ID)
-- spec: string
-- initChecksum: Checksum
-- name: string
-- createdAt: TimestampMs
-- lastUsedAt: TimestampMs
-- useCount: number
-- externalExists?: boolean (from provider API)
-
-### Artifact
-- id: ID
-- runId: ID
-- path: string (relative path in workdir)
-- sizeBytes: number
-- keep: boolean (exempt from auto-cleanup)
-- createdAt: TimestampMs
-
-### FeatureInstallation
-- id: ID
-- instanceId: ID
-- featureName: string (jupyter, code-server, etc.)
-- version: string
-- status: 'installing' | 'ready' | 'failed'
-- port: number | null
-- url: string | null
-- installedAt: TimestampMs
-
-### TailscaleMachine
-- id: ID
-- instanceId: ID
-- tailscaleIp: string
-- hostname: string
-- authKeyUsed: boolean
-- createdAt: TimestampMs
-
-## SUPPORTING TYPES
-
-### RunFile
-- path: string
-- checksum: Checksum
-- sizeBytes: number
-
-### RunLogEntry
-- stream: 'stdout' | 'stderr'
-- data: string
-- timestamp: TimestampMs
-
-### UsageRecord
-- id: ID
-- instanceId: ID
-- allocationId: ID | null
-- runId: ID | null
-- provider: ProviderName
-- spec: string
-- region: string | null
-- isSpot: boolean
-- startedAt: TimestampMs
-- endedAt: TimestampMs | null
-- durationMs: DurationMs | null
-- estimatedCostUsd: number | null
-
-### WorkflowNode
-- id: ID
-- workflowId: ID
-- nodeId: string (workflow-scoped identifier)
-- nodeType: string (handler type)
-- status: NodeStatus
-- input: Record<string, unknown>
-- output: Record<string, unknown> | null
-- error: NodeError | null
-- attempt: number (retry attempt)
-- retryReason: string | null
-- createdAt: TimestampMs
-- startedAt: TimestampMs | null
-- finishedAt: TimestampMs | null
-
-### ManifestResource
-- manifestId: ID
-- resourceType: 'instance' | 'run' | 'allocation' | 'object'
-- resourceId: ID
-- cleanupPriority: number | null (override manifest default)
-- addedAt: TimestampMs
-- ownerType: 'manifest' | 'workflow' | 'policy'  # Who added this resource
-- ownerId: number | null                          # ID of owner (workflow_id, policy_id, etc)
-
-NOTE: ownerType/ownerId track WHO added the resource to the manifest, which is
-important for understanding resource provenance during compensation and cleanup.
-- ownerType='manifest': Added directly during manifest creation
-- ownerType='workflow': Added by a workflow node (ownerId = workflow_id)
-- ownerType='policy': Added by retention policy (ownerId = policy_id)
-
-### WorkflowError (JSON-serialized in DB)
-- code, message, nodeId?, category: ErrorCategory, details?
-
-### NodeError (JSON-serialized in DB)
-- code, message, category: ErrorCategory, details?, retryable: boolean
-
-### ErrorCategory
-- 'validation' | 'auth' | 'not_found' | 'conflict' | 'rate_limit' | 'provider' | 'timeout' | 'internal'
-
-### PatternType
-- 'insert-and-reconverge' | 'conditional-branch' | 'parallel-fan-out' | 'retry-with-alternative'
-
-## DURATION UTILITIES
-
-- Duration.SECOND/MINUTE/HOUR/DAY = 1000/60000/3600000/86400000
-- Duration.seconds/minutes/hours/days(n): DurationMs
-- Duration.format(ms): string - "42s", "5m", "2.5h", "1.2d"
-- Duration.parse(str): DurationMs - Parses "30s", "10m", "2h", "1d"
-
-## TIMESTAMP UTILITIES
-
-- Timestamp.now(): TimestampMs
-- Timestamp.fromDate(date): TimestampMs
-- Timestamp.toDate(ts): Date
-- Timestamp.addMs(ts, ms): TimestampMs
-- Timestamp.isExpired(expiresAt): boolean - false if null
+Duration: SECOND/MINUTE/HOUR/DAY, seconds/minutes/hours/days(n), format(ms), parse(str)
+Timestamp: now(), fromDate(date), toDate(ts), addMs(ts, ms), isExpired(expiresAt)

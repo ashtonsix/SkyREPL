@@ -129,7 +129,7 @@ See Section 3.4.2 for complete state listing.
 
 #### Allocation
 
-Run-to-instance binding with its own lifecycle. Replaces grace_period.
+Run-to-instance binding with its own lifecycle.
 
 MATERIAL BACKING:
 - Primary: allocations table (records)
@@ -224,7 +224,7 @@ MATERIAL BACKING:
 - Primary: objects table (type='snapshot')
 - External: Provider API (provider's snapshot/image system)
 
-KEY FIELDS (stored in objects.tags_json):
+KEY FIELDS (stored in objects.metadata_json):
 - id: integer (snapshot ID for references)
 - provider: string
 - provider_id: string (ID in provider's snapshot system)
@@ -244,7 +244,7 @@ RELATIONSHIPS:
 
 MATERIALIZATION:
 1. Get object from objects WHERE id=snapshot_id
-2. Parse tags_json for metadata
+2. Parse metadata_json for metadata
 3. Optionally fetch external state from provider.getSnapshotByName(name)
 
 LIFECYCLE:
@@ -260,7 +260,7 @@ MATERIAL BACKING:
 - Primary: objects table (type='artifact')
 - External: S3/MinIO (for artifacts >64KB) OR inline payload (for artifacts ≤64KB)
 
-KEY FIELDS (stored in objects.tags_json):
+KEY FIELDS (stored in objects.metadata_json):
 - id: integer (artifact ID for references)
 - run_id: integer (which run produced this)
 - path: string (relative path in workdir)
@@ -278,7 +278,7 @@ RELATIONSHIPS:
 
 MATERIALIZATION:
 1. Get object from objects WHERE id=artifact_id
-2. Parse tags_json for metadata
+2. Parse metadata_json for metadata
 3. Generate presigned URL (S3 URL for large artifacts, control plane endpoint URL for small artifacts)
 4. Agent/CLI downloads via same HTTP GET regardless of storage location
 
@@ -296,7 +296,7 @@ MATERIAL BACKING:
 - Primary: objects table (type='tailscale_machine')
 - External: Tailscale API (device registration, status, IP)
 
-KEY FIELDS (stored in objects.tags_json):
+KEY FIELDS (stored in objects.metadata_json):
 - instance_id: integer
 - tailscale_ip: string
 - hostname: string
@@ -312,7 +312,7 @@ RELATIONSHIPS:
 
 MATERIALIZATION:
 1. Get object from objects WHERE type='tailscale_machine' AND tags.instance_id=id
-2. Parse tags_json and payload for metadata
+2. Parse metadata_json and payload for metadata
 3. Optionally fetch external state from Tailscale API
 
 LIFECYCLE:
@@ -331,7 +331,7 @@ MATERIAL BACKING:
 - Primary: objects table (type='feature_installation')
 - External: None (installation state tracked in control plane)
 
-KEY FIELDS (stored in objects.tags_json):
+KEY FIELDS (stored in objects.metadata_json):
 - instance_id: integer
 - feature_name: string (jupyter, code-server, etc.)
 - version: string
@@ -348,7 +348,7 @@ RELATIONSHIPS:
 
 MATERIALIZATION:
 1. Get all objects WHERE type='feature_installation' AND tags.instance_id=id
-2. Parse tags_json for each feature
+2. Parse metadata_json for each feature
 3. Return array of installed features
 
 LIFECYCLE:
@@ -432,7 +432,7 @@ Instance materialization MUST combine four sources:
 
 **IP Preference:** External state IP MUST take precedence over cached record IP when fresh external state is available.
 
-> See also: impl/control/src/resource/types.ts.l2.txt §Instance Materialization
+> See also: impl/control/src/resource/types.ts.l2.txt §InstanceMaterialization
 
 ### 3.2.3 Run Materialization
 
@@ -448,7 +448,7 @@ Run materialization MUST combine five sources:
 
 **Log Limits:** Log queries SHOULD limit results (e.g., 1000 most recent) to prevent excessive payload sizes.
 
-> See also: impl/control/src/resource/types.ts.l2.txt §Run Materialization
+> See also: impl/control/src/resource/types.ts.l2.txt §RunMaterialization
 
 ### 3.2.4 Simple Object Materialization
 
@@ -457,12 +457,12 @@ Run materialization MUST combine five sources:
 Simple objects (Snapshot, Artifact, FeatureInstallation, etc.) MUST:
 
 1. **Fetch object** from objects table by id
-2. **Parse tags_json** for metadata
+2. **Parse metadata_json** for metadata
 3. **Optionally fetch external state** with TTL-based caching (Snapshots only)
 
 **Snapshot External Validation:** Snapshot materialization MAY check provider API to verify snapshot still exists (uses timing.SNAPSHOT_CACHE_TTL).
 
-> See also: impl/control/src/resource/types.ts.l2.txt §Simple Object Materialization
+> See also: impl/control/src/resource/types.ts.l2.txt §ObjectParsers
 
 ### 3.2.5 Caching Strategy
 
@@ -503,7 +503,7 @@ Reconciliation MUST fetch both control plane record and fresh external state, th
 - `reason`: Human-readable explanation
 - `updates`: Fields to update in DB (optional)
 
-> See also: impl/control/src/resource/types.ts.l2.txt §Reconciliation
+> See also: impl/control/src/resource/types.ts.l2.txt §InstanceReconciliation
 
 **Principle:** See everything in one place (our records + fresh external state)
 and decide what to do. No elaborate drift reports. Just: "Here's what's
@@ -546,7 +546,7 @@ function isAvailable(resource: Instance | Run): boolean {
 }
 ```
 
-> See also: impl/control/src/resource/types.ts.l2.txt §State Validation
+> See also: impl/control/src/resource/types.ts.l2.txt §StateTransitionValidation
 
 This centralizes availability logic and eliminates synchronization bugs.
 

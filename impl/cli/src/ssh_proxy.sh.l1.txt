@@ -37,7 +37,7 @@ Establishes SSH connection via Tailscale with JIT connection setup:
 - Execute: ssh -o ProxyCommand=none user@tailscale_ip
 - Pass through stdin/stdout for SSH protocol
 
-## Error Handling
+## ErrorHandling
 - Network errors: Retry with backoff (3 attempts)
 - Timeout: "Tailscale connection timeout. Check instance status with 'repl status'"
 - Auth errors: "Failed to authenticate with control plane"

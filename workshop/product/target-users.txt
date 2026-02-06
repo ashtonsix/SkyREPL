@@ -1,0 +1,6 @@
+# Target Users
+
+Target users: ML researchers and engineers who value reproducibility and
+cost-efficiency - those with a "forgot to terminate an instance" horror story.
+
+Source: Ch01 S1.1

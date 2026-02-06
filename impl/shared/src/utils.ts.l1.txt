@@ -1,17 +1,17 @@
 # utils.ts - Shared Utilities
 
-## ID Utilities
+## IDUtilities
 - idToSlug(id: number): string - Convert to base-36
 - slugToId(slug: string): number - Parse base-36 to number
 
-## Timestamp Utilities
+## TimestampUtilities
 - Timestamp.now(): TimestampMs
 - Timestamp.fromDate(date): TimestampMs
 - Timestamp.toDate(ts): Date
 - Timestamp.addMs(ts, ms): TimestampMs
 - Timestamp.isExpired(expiresAt): boolean
 
-## Duration Utilities
+## DurationUtilities
 - Duration constants: SECOND, MINUTE, HOUR, DAY
 - Duration.seconds(n), minutes(n), hours(n), days(n)
 - Duration.format(ms): string ("5s", "10m", "2.5h")

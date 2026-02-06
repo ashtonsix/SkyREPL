@@ -345,9 +345,7 @@ class RunExecutor:
                 log("WARN", f"Failed to terminate run: {e}")
 
 
-# =============================================================================
-# Workdir Cleanup (spec 11.10)
-# =============================================================================
+## WorkdirCleanup
 
 def cleanup_workdir(workdir: str):
     """

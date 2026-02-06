@@ -46,7 +46,7 @@ const BATCH_SIZE = 500;
 const DEDUPABLE_BUCKETS = ['run-files', 'artifacts'];
 ```
 
-## Main Loop
+## MainLoop
 
 ```typescript
 /**
@@ -105,7 +105,7 @@ export function startGarbageCollectionLoop(): void {
 }
 ```
 
-## Update Blob References
+## UpdateBlobReferences
 
 ```typescript
 /**
@@ -127,7 +127,7 @@ async function updateBlobReferences(): Promise<void> {
 }
 ```
 
-## Orphaned Blob Cleanup (Primary Task)
+## OrphanedBlobCleanup
 
 ```typescript
 interface BlobCleanupMetrics {
@@ -186,7 +186,7 @@ async function cleanOrphanedBlobs(): Promise<BlobCleanupMetrics> {
 }
 ```
 
-## Duplicate Blob Merger (Secondary Task)
+## DuplicateBlobMerger
 
 ```typescript
 /**
@@ -292,7 +292,7 @@ async function mergeDuplicateGroup(group: DuplicateGroup): Promise<number> {
 }
 ```
 
-## Expired Object Cleanup (Tertiary Task)
+## ExpiredObjectCleanup
 
 ```typescript
 /**
@@ -329,7 +329,7 @@ async function cleanExpiredObjects(): Promise<number> {
 }
 ```
 
-## Idempotency Key Expiry (Quaternary Task)
+## IdempotencyKeyExpiry
 
 ```typescript
 /**
@@ -371,7 +371,7 @@ async function cleanExpiredIdempotencyKeys(): Promise<number> {
 }
 ```
 
-## Metrics Export
+## MetricsExport
 
 ```typescript
 /**

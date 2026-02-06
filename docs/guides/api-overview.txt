@@ -1,0 +1,140 @@
+================================================================================
+API Architecture Overview
+================================================================================
+
+Source: spec/09_API.txt §9.1 (Purpose) and §9.3 (Communication Architecture)
+Extracted: 2024-02-06
+
+This document provides high-level architectural guidance on the SkyREPL API.
+For normative endpoint definitions and requirements, see spec/09_API.txt.
+
+================================================================================
+
+Purpose
+-------
+
+The API provides HTTP endpoints for CLI and agent communication with the control
+plane. Design principle: keep handlers thin—orchestration belongs in workflows,
+not HTTP handlers.
+
+**Two-layer architecture:**
+- **Layer 2 (Workflow)**: Primary CLI interface. Submit workflows that abstract
+  orchestration complexity behind simple submission.
+- **Layer 1 (Resource)**: CRUD on resources. For debugging, monitoring dashboards,
+  and power users who need direct manipulation of instances, runs, allocations.
+
+**Endpoint roles:**
+- **External endpoints**: Standard HTTP REST API for CLI clients and external tools.
+  Full authentication, validation, and error handling.
+- **Internal endpoints**: Control plane operations that bypass HTTP overhead via
+  FFI-style direct function calls (same process). Share TypeScript types and
+  validation logic with external endpoints.
+
+**Framework**: ElysiaJS provides type/schema generation from TypeScript types,
+automatic runtime validation, and type-safe request/response handling.
+
+Future: Users may define custom workflows for complex runs (multi-instance,
+staged execution).
+
+
+Communication Architecture
+--------------------------
+
+The system uses three distinct communication patterns:
+
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                            COMMUNICATION FLOWS                               ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                              ║
+║  CLI ↔ CONTROL                        AGENT ↔ CONTROL                        ║
+║  ─────────────────                    ─────────────────                      ║
+║  • HTTP POST  → workflows             • SSE           ← commands             ║
+║  • HTTP GET   → resource queries      • HTTP POST     → logs/heartbeat       ║
+║  • WebSocket  ↔ logs streaming        • HTTP POST     → status updates       ║
+║  • WebSocket  ↔ workflow progress     • Presigned URL ↔ artifacts/files      ║
+║                                                                              ║
+╟──────────────────────────────────────────────────────────────────────────────╢
+║  KEY PRINCIPLES                                                              ║
+║  • All agent connections are agent-initiated (NAT/firewall friendly)         ║
+║  • CLI uses WebSocket for streaming, HTTP for commands/queries               ║
+║  • Agents use SSE for commands (unidirectional: control → agent)             ║
+║  • Agents use HTTP POST for status/logs (fire-and-forget semantics)          ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+                         ┌───────────────────────────┐
+                         │       CLI CLIENT          │
+                         └─────────────┬─────────────┘
+                                       │
+                    ┌──────────────────┼──────────────────┐
+                    │                  │                  │
+               HTTP POST          HTTP GET           WebSocket
+              (workflows)        (queries)       (logs, progress)
+                    │                  │                  │
+                    ▼                  ▼                  ▼
+         ┌─────────────────────────────────────────────────────────┐
+         │                     CONTROL PLANE                       │
+         └─────────────────────────────────────────────────────────┘
+                    │                  │                  │
+                    │                  │                  │
+               SSE stream         HTTP POST          Presigned
+              (commands)      (logs, heartbeat)        URLs
+                    │                  │                  │
+                    ▼                  ▲                  │
+         ┌─────────────────────────────────────────────────────────┐
+         │                         AGENT                           │
+         │                  (on remote instance)                   │
+         └─────────────────────────────────────────────────────────┘
+                                       │
+                                       │ HTTP PUT/GET
+                                       │ (presigned URLs)
+                                       ▼
+                         ┌───────────────────────────┐
+                         │        S3 STORAGE         │
+                         └───────────────────────────┘
+
+         ╭─────────────────────────────────────────────────────────╮
+         │  LEGEND                                                 │
+         │    →  Request direction    ↔  Bidirectional             │
+         │    ▼  Data flows down      ▲  Data flows up             │
+         ╰─────────────────────────────────────────────────────────╯
+```
+
+Communication Flow Details
+--------------------------
+
+**CLI ↔ Control Plane:**
+- HTTP POST for workflow submission (launch-run, terminate-instance, etc.)
+- HTTP GET for resource queries (list runs, get instance details, etc.)
+- WebSocket for real-time log streaming from running jobs
+- WebSocket for workflow progress updates
+
+**Agent ↔ Control Plane:**
+- SSE (Server-Sent Events) stream for receiving commands from control plane
+  - Long-lived connection, agent-initiated
+  - Unidirectional: control → agent
+  - Commands: start_run, cancel_run, capture_artifacts, trigger_tailscale
+- HTTP POST for sending status updates to control plane
+  - Heartbeat messages with system metrics
+  - Log data (batched for efficiency)
+  - Run status changes (started, completed, failed)
+- Presigned URLs for large file transfers
+  - Files downloaded directly from S3 (or control plane for small files)
+  - Artifacts uploaded directly to S3
+
+**Key Design Principles:**
+1. All agent connections are agent-initiated
+   - Enables agents behind NAT/firewalls
+   - No inbound connectivity required to instances
+
+2. Appropriate protocol for each use case
+   - SSE for commands: simple, unidirectional, auto-reconnect
+   - WebSocket for logs: bidirectional, efficient streaming
+   - HTTP for state updates: simple, stateless, retryable
+   - Presigned URLs: bypass control plane for large transfers
+
+3. Separation of concerns
+   - Control plane orchestrates but doesn't relay large files
+   - S3 handles storage and transfer efficiency
+   - Agents maintain simple, predictable communication patterns

@@ -8,7 +8,7 @@
 # These types define the shared API contract (HTTP request/response shapes).
 # Internal workflow types (LaunchRunInput, etc.) live in control/src/intent/*.types.ts.
 
-## Workflow Engine Types (Blueprints)
+## WorkflowEngineTypes
 
 ```typescript
 import type { ID, TimestampMs, PatternType, NodeStatus, WorkflowExecutionStatus } from '../types';
@@ -84,7 +84,7 @@ export interface JsonSchema {
 }
 ```
 
-## Workflow Runtime Types
+## WorkflowRuntimeTypes
 
 ```typescript
 // =============================================================================
@@ -161,7 +161,7 @@ export interface NodeExecutionState {
 }
 ```
 
-## NodeContext Interface
+## NodeContextInterface
 
 ```typescript
 // =============================================================================
@@ -272,7 +272,7 @@ export interface SingleStepContext {
 }
 ```
 
-## Pattern Configuration Types
+## PatternConfigurationTypes
 
 ```typescript
 // =============================================================================
@@ -323,7 +323,7 @@ export interface InlineNodeDef {
 }
 ```
 
-## Node Executor Interface
+## NodeExecutorInterface
 
 ```typescript
 // =============================================================================
@@ -370,7 +370,7 @@ export interface ValidationError {
 }
 ```
 
-## Workflow Engine Interface
+## WorkflowEngineInterface
 
 ```typescript
 // =============================================================================
@@ -416,7 +416,7 @@ export interface WorkflowEngine {
 }
 ```
 
-## Intent-Specific Input/Output Types
+## IntentSpecificIOTypes
 
 ```typescript
 // =============================================================================

@@ -33,7 +33,7 @@ interface ProviderInstanceState {
 }
 ```
 
-## Main Loop
+## MainLoop
 
 ```typescript
 /**
@@ -71,7 +71,7 @@ export function startReconciliationLoop(): void {
 }
 ```
 
-## Instance State Sync
+## InstanceStateSync
 
 ```typescript
 /**
@@ -130,16 +130,16 @@ async function reconcileInstanceState(
       // Update workflow_state to reflect termination
       transaction(() => {
         queryOne(`
-          UPDATE instances SET workflow_state = 'terminate:complete', updated_at = ?
+          UPDATE instances SET workflow_state = 'terminate:complete'
           WHERE id = ?
-        `, [Date.now(), instance.id]);
+        `, [instance.id]);
       });
     }
   }
 }
 ```
 
-## Degraded Heartbeat Detection (NEW)
+## DegradedHeartbeatDetection
 
 ```typescript
 /**
@@ -179,15 +179,15 @@ async function detectDegradedHeartbeats(): Promise<void> {
     // Mark as degraded for CLI visibility
     transaction(() => {
       queryOne(`
-        UPDATE instances SET workflow_state = 'degraded:control_plane_unreachable', updated_at = ?
+        UPDATE instances SET workflow_state = 'degraded:control_plane_unreachable'
         WHERE id = ? AND workflow_state NOT LIKE 'degraded:%'
-      `, [Date.now(), instance.id]);
+      `, [instance.id]);
     });
   }
 }
 ```
 
-## Heartbeat Timeout (UPDATED: 25m with graceful panic detection)
+## HeartbeatTimeout
 
 ```typescript
 /**
@@ -255,9 +255,9 @@ async function checkHeartbeatTimeouts(): Promise<void> {
     // Mark instance as suspect
     transaction(() => {
       queryOne(`
-        UPDATE instances SET workflow_state = 'suspect:heartbeat_timeout', updated_at = ?
+        UPDATE instances SET workflow_state = 'suspect:heartbeat_timeout'
         WHERE id = ?
-      `, [Date.now(), instance.id]);
+      `, [instance.id]);
     });
   }
 }
@@ -277,27 +277,31 @@ async function checkGracefulPanic(
   allocationId: number,
   lastHeartbeat: number
 ): Promise<GracefulPanicResult> {
-  // Check for HeartbeatPanicCompleteMessage
-  const panicComplete = queryMany<{ timestamp: number }>(`
-    SELECT timestamp FROM agent_messages
-    WHERE allocation_id = ?
-      AND type = 'heartbeat_panic_complete'
-      AND timestamp > ?
-    ORDER BY timestamp DESC
+  // Check for HeartbeatPanicCompleteMessage stored in objects table
+  const panicComplete = queryMany<{ created_at: number }>(`
+    SELECT o.created_at
+    FROM objects o
+    WHERE o.type = 'message'
+      AND JSON_EXTRACT(o.metadata_json, '$.allocation_id') = ?
+      AND JSON_EXTRACT(o.metadata_json, '$.message_type') = 'heartbeat_panic_complete'
+      AND o.created_at > ?
+    ORDER BY o.created_at DESC
     LIMIT 1
   `, [allocationId, lastHeartbeat]);
 
   if (panicComplete.length > 0) {
-    return { hasCheckpoint: true, checkpointAt: panicComplete[0].timestamp };
+    return { hasCheckpoint: true, checkpointAt: panicComplete[0].created_at };
   }
 
-  // Check for checkpoint objects created after last heartbeat
+  // Check for checkpoint artifacts created after last heartbeat
   const checkpoints = queryMany<{ created_at: number }>(`
-    SELECT o.created_at FROM objects o
-    JOIN run_artifacts ra ON o.id = ra.object_id
-    WHERE ra.allocation_id = ?
+    SELECT o.created_at
+    FROM objects o
+    WHERE o.type = 'artifact'
+      AND JSON_EXTRACT(o.metadata_json, '$.allocation_id') = ?
       AND o.created_at > ?
-      AND (o.metadata->>'artifact_type' = 'checkpoint' OR o.path LIKE '%checkpoint%')
+      AND (JSON_EXTRACT(o.metadata_json, '$.artifact_type') = 'checkpoint'
+           OR JSON_EXTRACT(o.metadata_json, '$.path') LIKE '%checkpoint%')
     ORDER BY o.created_at DESC
     LIMIT 1
   `, [allocationId, lastHeartbeat]);
@@ -310,7 +314,7 @@ async function checkGracefulPanic(
 }
 ```
 
-## Pending Spawn Handling
+## PendingSpawnHandling
 
 ```typescript
 /**
@@ -332,18 +336,18 @@ async function checkPendingSpawns(): Promise<void> {
         // Spawn completed
         transaction(() => {
           queryOne(`
-            UPDATE instances SET workflow_state = 'spawn:complete', updated_at = ?
+            UPDATE instances SET workflow_state = 'spawn:complete'
             WHERE id = ?
-          `, [Date.now(), instance.id]);
+          `, [instance.id]);
         });
         logger.info('spawn_completed', { instanceId: instance.id });
       } else if (state.status === 'terminated' || state.status === 'unknown') {
         // Spawn failed
         transaction(() => {
           queryOne(`
-            UPDATE instances SET workflow_state = 'spawn:error', updated_at = ?
+            UPDATE instances SET workflow_state = 'spawn:error'
             WHERE id = ?
-          `, [Date.now(), instance.id]);
+          `, [instance.id]);
         });
         logger.error('spawn_failed', {
           instanceId: instance.id,
@@ -361,7 +365,7 @@ async function checkPendingSpawns(): Promise<void> {
 }
 ```
 
-## Stuck CLAIMED Allocation Recovery
+## StuckClaimedAllocationRecovery
 
 ```typescript
 /**
@@ -398,9 +402,9 @@ async function recoverStuckClaimedAllocations(): Promise<void> {
       // Mark instance as suspect
       transaction(() => {
         queryOne(`
-          UPDATE instances SET workflow_state = 'suspect:claimed_timeout', updated_at = ?
+          UPDATE instances SET workflow_state = 'suspect:claimed_timeout'
           WHERE id = (SELECT instance_id FROM allocations WHERE id = ?)
-        `, [Date.now(), allocation.id]);
+        `, [allocation.id]);
       });
     } else {
       // Transition failed - allocation state changed
@@ -430,7 +434,7 @@ async function recoverStuckClaimedAllocations(): Promise<void> {
 }
 ```
 
-## Orphan AVAILABLE Allocation Cleanup
+## OrphanAvailableAllocationCleanup
 
 ```typescript
 /**
@@ -529,7 +533,7 @@ async function failOrphanAllocation(
 }
 ```
 
-## Error Handling
+## ErrorHandling
 
 ```typescript
 /**

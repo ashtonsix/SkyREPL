@@ -70,7 +70,7 @@ Two workflows may find the same AVAILABLE allocation simultaneously:
 - None needed (read-only operation)
 - No side effects to reverse
 
-## Error Handling
+## ErrorHandling
 
 | Error | Source | Response |
 |-------|--------|----------|

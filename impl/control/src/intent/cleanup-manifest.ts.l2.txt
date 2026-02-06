@@ -51,7 +51,7 @@ interface Manifest {
 }
 ```
 
-## Entry Point
+## EntryPoint
 
 ```typescript
 export async function cleanupManifest(input: CleanupManifestInput): Promise<Workflow> {
@@ -62,7 +62,7 @@ export async function cleanupManifest(input: CleanupManifestInput): Promise<Work
 }
 ```
 
-## Workflow Definition
+## WorkflowDefinition
 
 ```typescript
 export const cleanupManifestWorkflow: WorkflowDefinition = {
@@ -81,19 +81,19 @@ export const cleanupManifestWorkflow: WorkflowDefinition = {
     { name: 'finalize', handler: finalize, dependencies: ['delete-manifest'] },
   ],
   errorHandling: {
-    'allocations': 'skip_and_continue',
-    'runs': 'skip_and_continue',
-    'artifacts': 'skip_and_continue',
-    'features': 'skip_and_continue',
-    'objects': 'skip_and_continue',
-    'instances': 'retry_then_skip',
-    'snapshots': 'log_and_continue',
-    'manifest': 'fail_workflow',
+    'cleanup-allocations': 'skip_and_continue',
+    'cleanup-runs': 'skip_and_continue',
+    'cleanup-artifacts': 'skip_and_continue',
+    'cleanup-features': 'skip_and_continue',
+    'cleanup-objects': 'skip_and_continue',
+    'cleanup-instances': 'retry_then_skip',
+    'cleanup-snapshots': 'log_and_continue',
+    'delete-manifest': 'fail_workflow',
   }
 };
 ```
 
-## Node Handlers
+## NodeHandlers
 
 ### validate-manifest
 
@@ -147,9 +147,64 @@ async function loadResources(
     resourcesByPriority.set(resource.cleanup_priority, list);
   }
 
-  return { resourcesByPriority };
+  // Per-provider scoping: group resources by provider (spec Ch04, Ch07 MUST requirement).
+  // Cleanup of each provider's resources proceeds independently so cross-provider
+  // failures don't block cleanup of unrelated providers.
+  const resourcesByProvider = new Map<string, ManifestResource[]>();
+  for (const resource of resources) {
+    // Resolve provider from the resource's backing instance or object
+    const provider = await resolveResourceProvider(resource);
+    const list = resourcesByProvider.get(provider) || [];
+    list.push(resource);
+    resourcesByProvider.set(provider, list);
+  }
+
+  return { resourcesByPriority, resourcesByProvider };
 }
 ```
+
+### resolveResourceProvider (helper)
+
+```typescript
+/**
+ * Resolve the provider for a manifest resource by looking up the backing
+ * instance or object. Used for per-provider cleanup scoping.
+ */
+async function resolveResourceProvider(resource: ManifestResource): Promise<string> {
+  if (resource.resource_type === 'instance') {
+    const instance = queryOne<{ provider: string }>(
+      'SELECT provider FROM instances WHERE id = ?', [resource.resource_id]
+    );
+    return instance?.provider ?? 'unknown';
+  }
+
+  if (resource.resource_type === 'allocation') {
+    const alloc = queryOne<{ instance_id: number }>(
+      'SELECT instance_id FROM allocations WHERE id = ?', [resource.resource_id]
+    );
+    if (alloc) {
+      const instance = queryOne<{ provider: string }>(
+        'SELECT provider FROM instances WHERE id = ?', [alloc.instance_id]
+      );
+      return instance?.provider ?? 'unknown';
+    }
+    return 'unknown';
+  }
+
+  // Objects (logs, artifacts, snapshots, run_files) have a provider column
+  const obj = queryOne<{ provider: string }>(
+    'SELECT provider FROM objects WHERE id = ?', [resource.resource_id]
+  );
+  return obj?.provider ?? 'unknown';
+}
+```
+
+> **Per-provider fan-out**: The cleanup nodes below operate on all resources
+> regardless of provider. At L3/L4 implementation, each cleanup node MUST
+> iterate over `resourcesByProvider` and process each provider group
+> independently, so that a failure in one provider (e.g., AWS API timeout)
+> does not block cleanup of another provider's resources (e.g., OrbStack).
+> See L1 §PerProviderOrchestration and spec Ch04/Ch07.
 
 ### cleanup-allocations (Priority 90)
 
@@ -281,11 +336,10 @@ async function cleanupRuns(
     if (resource.resource_type !== 'run') continue;
 
     try {
-      const now = Date.now();
       const result = getDatabase().prepare(`
-        UPDATE runs SET workflow_state = 'cleanup:complete', updated_at = ?
+        UPDATE runs SET workflow_state = 'cleanup:complete'
         WHERE id = ? AND workflow_state != 'cleanup:complete'
-      `).run(now, resource.resource_id);
+      `).run(resource.resource_id);
 
       if (result.changes > 0) {
         cleaned++;
@@ -435,6 +489,32 @@ async function cleanupObjects(
         continue;
       }
 
+      // S3 deletion: if the object references a blob with an S3 key,
+      // delete the S3 data before removing the DB record. DB cascade
+      // (ON DELETE RESTRICT) prevents blob row deletion while objects
+      // reference it, but S3 is external and requires explicit API calls.
+      const obj = queryOne<{ blob_id: number; provider: string }>(
+        'SELECT blob_id, provider FROM objects WHERE id = ?',
+        [resource.resource_id]
+      );
+
+      if (obj && obj.blob_id) {
+        const blob = queryOne<{ s3_key: string | null }>(
+          'SELECT s3_key FROM blobs WHERE id = ?',
+          [obj.blob_id]
+        );
+
+        if (blob?.s3_key) {
+          const client = getProviderClient(obj.provider);
+          await client.deleteS3Object(blob.s3_key);
+          logger.debug('s3_object_deleted', {
+            blobId: obj.blob_id,
+            s3Key: blob.s3_key,
+            resourceId: resource.resource_id
+          });
+        }
+      }
+
       transaction(() => {
         const db = getDatabase();
         const now = Date.now();
@@ -489,9 +569,9 @@ async function cleanupInstances(
         await client.terminate(instance.provider_id);
 
         getDatabase().prepare(`
-          UPDATE instances SET workflow_state = 'terminate:complete', updated_at = ?
+          UPDATE instances SET workflow_state = 'terminate:complete'
           WHERE id = ?
-        `).run(Date.now(), instance.id);
+        `).run(instance.id);
       }
 
       cleaned++;
@@ -530,15 +610,18 @@ async function cleanupSnapshots(
     if (resource.resource_type !== 'snapshot') continue;
 
     try {
-      // Get snapshot details
-      const snapshot = queryOne<{ provider_snapshot_id: string; provider: string }>(
-        'SELECT * FROM snapshots WHERE id = ?',
+      // Get snapshot details from objects table
+      const snapshot = queryOne<{ metadata_json: string; provider: string }>(
+        `SELECT o.metadata_json, o.provider
+         FROM objects o
+         WHERE o.id = ? AND o.type = 'snapshot'`,
         [resource.resource_id]
       );
 
       if (snapshot) {
+        const metadata = JSON.parse(snapshot.metadata_json);
         const client = getProviderClient(snapshot.provider);
-        await client.deleteSnapshot(snapshot.provider_snapshot_id);
+        await client.deleteSnapshot(metadata.provider_snapshot_id);
       }
 
       getDatabase().prepare('DELETE FROM objects WHERE id = ?').run(resource.resource_id);
@@ -617,7 +700,7 @@ async function finalize(
 }
 ```
 
-## Compensation for Partial Cleanup
+## CompensationForPartialCleanup
 
 ```typescript
 /**

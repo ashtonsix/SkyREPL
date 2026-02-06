@@ -63,9 +63,7 @@ def match_artifact_patterns(workdir: str, patterns: List[str]) -> List[str]:
     return result
 
 
-# =============================================================================
-# Artifact Upload
-# =============================================================================
+## ArtifactUpload
 
 def upload_artifact(workdir: str, rel_path: str, presigned_url: str) -> Optional[dict]:
     """

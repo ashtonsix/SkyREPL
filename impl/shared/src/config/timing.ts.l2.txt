@@ -4,7 +4,7 @@ Centralized timing constants with env var overrides and provider inheritance.
 
 **Design doc:** See `impl/docs/timeouts.md.l2.txt` for constraint rationale, failure modes, and testing guidance.
 
-## Duration Parsing
+## DurationParsing
 
 ```typescript
 function parseDuration(value: string): number {
@@ -27,7 +27,7 @@ function getEnvDuration(key: string, defaultMs: number): number {
 }
 ```
 
-## Base Timing Constants
+## BaseTimingConstants
 
 ```typescript
 export const TIMING = {
@@ -56,16 +56,21 @@ export const TIMING = {
   // WORKFLOW ENGINE — Constraint: node_timeout < workflow_timeout
   DEFAULT_NODE_TIMEOUT_MS: getEnvDuration('REPL_NODE_TIMEOUT', 300_000),            // 5m
   DEFAULT_WORKFLOW_TIMEOUT_MS: getEnvDuration('REPL_WORKFLOW_TIMEOUT', 3_600_000),  // 60m
+  PENDING_WORKFLOW_TIMEOUT_MS: getEnvDuration('REPL_PENDING_WORKFLOW_TIMEOUT', 1_800_000), // 30m
   COMPENSATION_TIMEOUT_MS: getEnvDuration('REPL_COMPENSATION_TIMEOUT', 300_000),    // 5m
   CANCEL_VERIFICATION_MS: getEnvDuration('REPL_CANCEL_VERIFICATION', 90_000),       // 90s
 
   // PROVIDER OPERATIONS
   SPAWN_TIMEOUT_MS: getEnvDuration('REPL_SPAWN_TIMEOUT', 600_000),                  // 10m
   SPAWN_POLL_INTERVAL_MS: getEnvDuration('REPL_SPAWN_POLL_INTERVAL', 5_000),        // 5s
+  INSTANCE_BOOT_TIMEOUT_MS: getEnvDuration('REPL_INSTANCE_BOOT_TIMEOUT', 600_000),  // 10m
+  BOOT_POLL_INTERVAL_MS: getEnvDuration('REPL_BOOT_POLL_INTERVAL', 5_000),          // 5s
   TERMINATE_TIMEOUT_MS: getEnvDuration('REPL_TERMINATE_TIMEOUT', 300_000),          // 5m
   SNAPSHOT_TIMEOUT_MS: getEnvDuration('REPL_SNAPSHOT_TIMEOUT', 1_800_000),          // 30m
+  SNAPSHOT_PREPARE_TIMEOUT_MS: getEnvDuration('REPL_SNAPSHOT_PREPARE_TIMEOUT', 300_000), // 5m
   SNAPSHOT_POLL_INTERVAL_MS: getEnvDuration('REPL_SNAPSHOT_POLL_INTERVAL', 30_000), // 30s
   DRAIN_TIMEOUT_MS: getEnvDuration('REPL_DRAIN_TIMEOUT', 60_000),                   // 60s
+  PENDING_SPAWN_STALE_THRESHOLD_MS: getEnvDuration('REPL_PENDING_SPAWN_STALE_THRESHOLD', 600_000), // 10m
 
   // ALLOCATION STATE MACHINE
   CLAIMED_TIMEOUT_MS: getEnvDuration('REPL_CLAIMED_TIMEOUT', 600_000),              // 10m
@@ -75,6 +80,7 @@ export const TIMING = {
   ORPHAN_MIN_AGE_MS: getEnvDuration('REPL_ORPHAN_MIN_AGE', 600_000),                // 10m
   BLOB_GRACE_PERIOD_MS: getEnvDuration('REPL_BLOB_GRACE_PERIOD', 86_400_000),       // 24h
   RECENT_SESSION_THRESHOLD_MS: getEnvDuration('REPL_RECENT_SESSION_THRESHOLD', 3_600_000), // 1h
+  DEFAULT_MANIFEST_RETENTION_MS: getEnvDuration('REPL_DEFAULT_MANIFEST_RETENTION', 86_400_000), // 24h
 
   // RETRY & BACKOFF — Constraint: base < max
   RETRY_BASE_DELAY_MS: getEnvDuration('REPL_RETRY_BASE_DELAY', 2_000),              // 2s
@@ -108,15 +114,18 @@ export const TIMING = {
   // CACHE TTLs
   CACHE_SPOT_PRICES_TTL_MS: getEnvDuration('REPL_CACHE_SPOT_PRICES_TTL', 300_000),  // 5m
   CACHE_CAPACITY_TTL_MS: getEnvDuration('REPL_CACHE_CAPACITY_TTL', 60_000),         // 1m
+  CACHE_REFRESH_MIN_INTERVAL: getEnvDuration('REPL_CACHE_REFRESH_MIN_INTERVAL', 60_000), // 1m
   CACHE_INSTANCE_STATE_TTL_MS: getEnvDuration('REPL_CACHE_INSTANCE_STATE_TTL', 30_000), // 30s
   CACHE_INSTANCE_TYPES_TTL_MS: getEnvDuration('REPL_CACHE_INSTANCE_TYPES_TTL', 3_600_000), // 1h
+  RESOURCE_CACHE_TTL: getEnvDuration('REPL_RESOURCE_CACHE_TTL', 300_000),           // 5m
+  SNAPSHOT_CACHE_TTL: getEnvDuration('REPL_SNAPSHOT_CACHE_TTL', 300_000),           // 5m
 } as const;
 
 export type TimingConfig = typeof TIMING;
 export type TimingKey = keyof TimingConfig;
 ```
 
-## Provider Overrides
+## ProviderOverrides
 
 ```typescript
 interface ProviderTimingOverrides {
@@ -153,7 +162,7 @@ export function getProviderTimings(provider: string): TimingConfig {
 }
 ```
 
-## Constraint Validation
+## ConstraintValidation
 
 ```typescript
 export function validateTimingConstraints(): void {

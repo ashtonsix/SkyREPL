@@ -38,6 +38,6 @@ For each allocation with expired debug hold:
 - Alert if error rate > 5%
 
 ## Notes
-- SSH activity DOES auto-extend debug_hold_until (keeping instances alive while users are connected)
+- SSH activity does NOT auto-extend debug_hold_until (explicit extension required via `repl extend` command)
 - Clearing debug_hold_until makes instance eligible for termination
 - Instance termination checks for ANY allocation with debug_hold_until > NOW

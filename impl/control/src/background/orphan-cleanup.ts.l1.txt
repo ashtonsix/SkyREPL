@@ -141,7 +141,7 @@ Alerts are sent via configured notification channel (Slack, email, etc.)
 - `orphans.by_provider` (gauge, labeled): Orphan count per provider
 - `orphans.estimated_daily_cost_usd` (gauge): Estimated cost of orphans
 
-## Error Handling
+## ErrorHandling
 
 ```typescript
 try {

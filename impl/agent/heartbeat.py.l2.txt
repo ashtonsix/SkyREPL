@@ -68,7 +68,7 @@ def send_heartbeat(workflow_state: str = None) -> bool:
 
     payload = {
         'tailscale_ip': get_tailscale_ip(),
-        'active_ssh_sessions': count_ssh_sessions(),
+        'active_allocations': get_active_allocations_with_ssh(),  # [{allocation_id, has_ssh_sessions}]
         'tailscale_status': get_tailscale_status(),
         'workflow_state': workflow_state or get_current_workflow_state(),
         'pending_command_acks': get_pending_command_acks(),
@@ -98,6 +98,20 @@ def send_heartbeat(workflow_state: str = None) -> bool:
     except Exception as e:
         log("WARN", f"Heartbeat failed: {e}")
         return False
+
+
+def get_active_allocations_with_ssh() -> list:
+    """Build per-allocation SSH state for heartbeat payload.
+    Returns list of {allocation_id: int, has_ssh_sessions: bool}."""
+    result = []
+    for alloc_id, user in get_tracked_allocations():
+        # `who | grep -c "<user>"` per allocation to detect active SSH sessions
+        session_count = count_ssh_sessions_for_user(user)
+        result.append({
+            'allocation_id': alloc_id,
+            'has_ssh_sessions': session_count > 0,
+        })
+    return result
 
 
 def initiate_panic_checkpoint(time_since_ack_ms: int):
@@ -159,14 +173,14 @@ def send_panic_complete_message(run_id: int, checkpoint_exit_code: Optional[int]
         log("WARN", f"Failed to send panic complete: {e}")
 ```
 
-## Timing Budget (15m → 25m window = 10m total)
+## TimingBudget
 
 - Checkpoint script: PANIC_CHECKPOINT_BUDGET_MS (5m)
 - Artifact upload: 4m
 - Messaging overhead: 1m buffer
 - Control plane force-term at 25m if agent fails
 
-## Shared Logic with Spot Interrupt
+## SharedLogicWithSpotInterrupt
 
 The `execute_panic_checkpoint()` function is shared between:
 - Spot interruption (2m warning, 90s checkpoint budget)
@@ -180,7 +194,7 @@ Both paths:
 
 See checkpoint.py.l2.txt for shared implementation.
 
-## Control Plane Recovery
+## ControlPlaneRecovery
 
 If control plane recovers during degraded window (2m-15m):
 - Agent receives heartbeat ack

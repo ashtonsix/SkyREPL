@@ -1,0 +1,89 @@
+# UNVALIDATED AND AUTHORED BY UNRELIABLE AGENT. DO NOT TRUST. THIS DOCUMENT IS INTENDED TO BE MINED FOR INSIGHT: ALL INSIGHTS EXTRACTED MUST PASS DISCOVERY BEFORE INTEGRATION INTO PLANNING
+
+## Guidance: Transitioning SkyREPL from L2 Architecture to Working Code (L3)
+
+This document synthesizes current architectural requirements, operational principles, and "thin-slice" execution strategies to guide the transition from pseudo-code (`.l2.txt`) to functional implementation.
+
+---
+
+## 1. The Core Philosophy: "Kill-Safe Execution"
+
+The primary goal of the L3 transition is not just "feature parity," but **Operational Immunity.** > **The North Star:** The system must be capable of recovering to a consistent state from a hard power-off at any line of code without human intervention.
+
+* **State is the Truth:** Every external effect (spawning an instance, starting a run) must be preceded by a database "intent" record (`spawn:pending`).
+* **Discovery over Memory:** The system should treat the Cloud Provider (OrbStack/AWS) as the source of truth for resource existence, discovered via **Reconciliation**, not just by remembering what it did.
+
+---
+
+## 2. Execution Strategy: The Three Thin Slices
+
+Do not build "layers" (e.g., all of the DB, then all of the API). Build **Slices** that exercise the entire spine of the system.
+
+### Slice 1: The "Spine" (Hello World Run)
+
+**Goal:** Prove the Agent-to-Control-Plane communication and the basic lifecycle.
+
+* **Focus:** Implement the `agent.py` SSE byte-by-byte reader and the `launch-run` workflow.
+* **Operational Gate:** You must be able to stream a "Hello World" log from an OrbStack VM to your local terminal via the Control Plane.
+* **Files to implement:** `db.ts`, `agent.py`, `sse.py`, `executor.py`, `engine.ts`, `launch-run.ts`.
+
+### Slice 2: The "Immunity" (Idempotency & Recovery)
+
+**Goal:** Prove that the system cannot be "tricked" or "broken" by failure.
+
+* **Focus:** Implement `Idempotency-Key` middleware and the **Two-Phase Spawn** protocol.
+* **Operational Gate:** Submitting the same `repl run` request 5 times in 5 seconds (with the same key) must result in exactly one instance and one run.
+* **Chaos Test:** Kill the Control Plane process *after* the DB record is created but *before* the OrbStack call. It must resume and find/create the instance on restart.
+
+### Slice 3: The "Cleanup" (Orphan & Manifest Management)
+
+**Goal:** Ensure zero "cloud litter" and cost protection.
+
+* **Focus:** Implement the `DRAFT` -> `SEALED` manifest transition and the `orphan-scanner`.
+* **Operational Gate:** Manually delete a row from the `instances` table. The `orphan-scanner` must detect the "leak" in OrbStack and notify you (or clean it up).
+
+---
+
+## 3. The "Harness" Approach: OrbStack vs. AWS
+
+OrbStack is your **Chaos Harness**, not just a provider. To avoid "Synchronous Poisoning" (assuming everything works instantly):
+
+1. **Inject Artificial Latency:** Wrap all OrbStack API calls in a random delay (2s to 10s) to force the Control Plane to handle `pending` states.
+2. **Simulate Partial Failures:** Randomly throw errors *after* a VM is successfully created in OrbStack but *before* the response is returned to the Control Plane. This validates your **Reconciliation** logic.
+3. **Provider Conformance Tests:** Write tests against the *Interface*, not the implementation.
+* *Test:* `provider.spawn()` returns a `ProviderId`.
+* *Test:* `provider.list()` includes the newly created resource.
+* *Result:* If OrbStack passes, AWS should "just work" later.
+
+
+
+---
+
+## 4. Implementation Priorities (The First 10 Files)
+
+| Priority | Component | File | Rationale |
+| --- | --- | --- | --- |
+| **1** | **Material** | `db.ts` + Migrations | The foundation of the "Intent-First" model. |
+| **2** | **Agent** | `agent.py` + `sse.py` | Validates the "Byte-by-Byte" moat. |
+| **3** | **Shared** | `types.ts` | Enforces the `WorkflowState` (`<wf>:<phase>`) convention. |
+| **4** | **Workflow** | `engine.ts` | The core "tick" loop and crash recovery logic. |
+| **5** | **API** | `idempotency.ts` | Middleware to protect mutation endpoints. |
+| **6** | **Provider** | `compute/orbstack.ts` | The first implementation of the provider contract. |
+| **7** | **Intent** | `launch-run.ts` | The primary orchestration logic. |
+| **8** | **Resource** | `manifest.ts` | Ownership tracking and sealing logic. |
+| **9** | **Orphan** | `scanner.ts` | The "Safety Net" discovery algorithm. |
+| **10** | **CLI** | `commands/run.ts` | The end-to-end user entry point. |
+
+---
+
+## 5. Sharp Edges to Guard Against
+
+* **Zod at the Boundary:** Do not trust the Agent. Every `POST /v1/agent/logs` or `heartbeat` MUST be validated via Zod. This prevents a compromised or buggy instance from corrupting the Control Plane DB.
+* **Buffer Deadlocks:** Strictly adhere to the `read(1)` syscall in the Python agent. Standard `readline()` will fail in production environments with 8KB buffer constraints.
+* **Atomic Claiming:** Use `SELECT ... FOR UPDATE` (or the SQLite equivalent) in the **Warm Pool** query. Never claim an allocation in two steps (`SELECT` then `UPDATE`); it must be a single atomic transaction.
+
+---
+
+### Next Step for the User
+
+Would you like me to generate the **Phase D: Behavioral Coverage Audit** for **Chapter 5 (Allocations)**, focusing specifically on whether the L2 pseudo-code correctly handles the "Active vs. Failed" race condition described in Section 5.2.1?

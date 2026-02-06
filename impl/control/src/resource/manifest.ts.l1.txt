@@ -16,7 +16,7 @@
 
 ## Retention
 - retention_ms: Time after sealing before cleanup eligible
-- Default: 1 hour for runs, 24 hours for snapshots
+- Default: 30 minutes for launch-run, null (indefinite) for create-snapshot
 - null = never auto-cleanup (explicit deletion only)
 - expires_at = released_at + retention_ms
 
@@ -32,5 +32,5 @@
 
 ## Cleanup Priority
 - Higher number = cleaned first (default: 50)
-- Order: allocations(90) → runs(80) → artifacts(70) → objects(60) → instances(40) → snapshots(30)
+- Order: allocations(90) → runs(80) → artifacts(70) → objects(60) → instances(50) → snapshots(10)
 - Per-resource override via cleanup_priority in join table

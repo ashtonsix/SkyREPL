@@ -28,7 +28,7 @@ import type {
 import type { ApiResponse } from '../../shared/src/api/resources';
 ```
 
-## Authentication Token Management
+## AuthenticationTokenManagement
 
 ```typescript
 // =============================================================================
@@ -104,7 +104,7 @@ async function saveAuthToken(
 }
 ```
 
-## API Client
+## APIClient
 
 ```typescript
 // =============================================================================
@@ -404,7 +404,7 @@ export class ApiClient {
 }
 ```
 
-## Preflight Check Client
+## PreflightCheckClient
 
 ```typescript
 // =============================================================================
@@ -515,7 +515,7 @@ export function displayPreflightWarnings(
 }
 ```
 
-## Workflow Completion Types
+## WorkflowCompletionTypes
 
 ```typescript
 // =============================================================================
@@ -535,7 +535,7 @@ interface WorkflowCompletionResult {
 }
 ```
 
-## Utility Functions
+## UtilityFunctions
 
 ```typescript
 // =============================================================================

@@ -1,170 +1,24 @@
-# orbstack.ts - OrbStack Provider
+# orbstack.ts - OrbStack Provider (Ch8)
 
-Local testing provider with chaos injection.
-Contract-based testing: OrbStack implements the same intent contracts as cloud providers,
-validating that the control plane handles contract-compliant behavior correctly.
+Local testing provider with chaos injection for contract validation.
+See L2 for bootstrap generation, VM lifecycle commands, chaos fault injection.
 
 ## Capabilities
+snapshots: true (instant copy-on-write), spot: false, gpu: false, multiRegion: false, idempotentSpawn: true (by VM name)
 
-- snapshots: true (VM snapshots, instant copy-on-write)
-- spot: false (local provider)
-- gpu: false (no GPU passthrough)
-- multiRegion: false (single machine)
-- persistentVolumes: false
-- idempotentSpawn: true (by VM name)
-- tailscaleNative: true (OrbStack has built-in Tailscale)
-
-## OrbStackProvider implements Provider<OrbStackInstance>
-
-### spawn(options)
-
-- Generate VM name: options.clientRequestId or repl-${controlId}-${manifestSlug}-${instanceSlug}
-- Check chaos: if pendingFault('capacity_error'), throw CapacityError
-- Check existing: `orbstack list -q ${vmName}`
-  - If exists: return existing (idempotent by name)
-- Create VM: `orbstack create ${vmName} ubuntu:22.04 --cpu N --memory N --disk N`
-- Execute bootstrap: `orbstack run ${vmName} -- bash -s < bootstrap.sh`
-- Return OrbStackInstance
-
-### terminate(providerId)
-
-- Check chaos: if pendingFault('api_timeout'), delay then throw
-- Delete: `orbstack delete ${providerId} --force`
-- Instant (~1 second)
-- Idempotent (not found = no-op)
-
-### list(filter?)
-
-- Run: `orbstack list --json`
-- Filter by 'repl-' prefix (only SkyREPL VMs)
-- For each VM: `orbstack info ${vmName} --json` for full details
-- Map to OrbStackInstance[]
-
-### get(providerId)
-
-- Run: `orbstack info ${providerId} --json`
-- Return OrbStackInstance or null if not found
-
-### generateBootstrap(config)
-
-- Format: shell script (no cloud-init on OrbStack)
-- Update packages, install dependencies
-- Download agent from config.agentUrl
-- Tailscale available via OrbStack (no install needed)
-- Run config.initScript if provided
-- Create systemd service, enable and start
-- Return: { content: bash, format: 'shell', checksum: SHA256 }
-
-### createSnapshot(providerId, options)
-
-- Run: `orbstack snapshot create ${providerId} ${options.name}`
-- Instant (copy-on-write)
-- Tags stored in control plane DB (no native tag support)
-- Return: { requestId: name, providerSnapshotId: name }
-
-### getSnapshotStatus(requestId)
-
-- Always returns 'available' (instant snapshots)
-
-### deleteSnapshot(providerSnapshotId)
-
-- Run: `orbstack snapshot delete ${providerSnapshotId} --force`
-
-## OrbStack Lifecycle Hooks
-
-### onStartup()
-
-- Verify OrbStack installed: `orbstack version`
-- Check OrbStack running: `orbstack status`
-- Initialize chaos framework if SKYREPL_CHAOS_ENABLED=true
-
-### onHeartbeat(expectations)
-
-- Handle reconciliation task (if requested in expectations.tasks)
-  - List VMs with 'repl-' prefix
-  - Compare to DB records
-  - Fast reconciliation (every 30s vs 5 min for cloud)
-  - Detect chaos-injected drift (VMs stopped without DB update)
-  - Return orphans, drifted, missing in receipt
-- Handle cache_refresh task (if requested)
-- Handle health_check task (if requested)
-- Return HeartbeatReceipts with task statuses
-
-### onShutdown()
-
-- Clear pending faults
-- Flush any metrics
+## Key Operations
+- spawn: Create VM via `orbstack create`, execute bootstrap, idempotent by name
+- terminate: Delete VM via `orbstack delete --force`, instant (~1 second)
+- createSnapshot: `orbstack snapshot create`, instant (copy-on-write)
+- onHeartbeat: Fast reconciliation (30s vs 5 min for cloud), detect chaos drift
 
 ## Chaos Testing Framework
+- Fault types: capacity_error, spot_interruption, network_partition, drift, api_timeout, auth_failure
+- Validates control plane handles failures correctly (retry logic, compensation, state transitions)
+- Contract-based testing: OrbStack implements same intent contracts as cloud providers
 
-Development/testing only. Enabled by SKYREPL_CHAOS_ENABLED=true.
-Validates that SkyREPL handles failures correctly.
+## Testing Philosophy
+Contract as unit of trust. OrbStack implements contracts identically to cloud providers, plus chaos injection. Control plane tested once via OrbStack, not repeated per provider.
 
-### Fault Types
-
-- capacity_error: Next spawn fails with CapacityError
-- spot_interruption: Schedule VM shutdown after delay (simulates spot)
-- network_partition: Block VM network via iptables
-- drift: Stop VM without updating DB (simulates external changes)
-- api_timeout: Next API call times out
-- auth_failure: Next API call fails with AuthError
-
-### injectFault(config: FaultConfig)
-
-FaultConfig:
-- type: FaultType
-- targetInstance?: string (specific VM, or next operation if omitted)
-- probability?: number (0-1, for random injection)
-- duration?: number (how long fault persists)
-
-### clearFaults()
-
-- Remove all pending faults
-- Called after test scenarios
-
-### Chaos Scenarios (for testing)
-
-spawn-capacity-exhaustion:
-- injectFault({ type: 'capacity_error' })
-- Verify: retry-with-alternative pattern applied
-
-spot-interruption-mid-run:
-- Start run, then injectFault({ type: 'spot_interruption', duration: 5000 })
-- Verify: checkpoint saved, workflow retried
-
-network-partition-recovery:
-- injectFault({ type: 'network_partition', duration: 10000 })
-- Verify: agent reconnects, run continues
-
-drift-detection:
-- injectFault({ type: 'drift', targetInstance: vmName })
-- Verify: onReconcile detects drift, returns recommendation
-
-## Error Mapping
-
-| OrbStack Error | Provider Error |
-|----------------|----------------|
-| "machine not found" | NotFoundError |
-| "machine already exists" | Return existing (idempotent) |
-| "OrbStack not running" | AuthError (provider unavailable) |
-| Chaos capacity_error | CapacityError |
-| Chaos api_timeout | ProviderApiError with OPERATION_TIMEOUT |
-| Chaos auth_failure | AuthError |
-
-## Testing Philosophy: Contract as Unit of Trust
-
-Intent contracts define provider-agnostic behavior: required inputs, guaranteed
-outputs, allowed phases, cleanup priorities. The contract is the unit of trust.
-
-OrbStack implements these contracts identically to cloud providers, plus chaos
-injection for failure scenarios. The test suite validates that the control plane
-handles contract-compliant behavior correctly: retry logic, compensation, state
-transitions.
-
-When a provider implements the same contracts, it inherits the validated behavior.
-The shared 80% (everything at the contract level) is tested once via OrbStack,
-not repeated per provider.
-
-Key insight: We're not testing "OrbStack works therefore AWS works." We're testing
-"the control plane handles intent contracts correctly, and any provider implementing
-those contracts gets the same behavior."
+## Exports
+OrbStackProvider, injectFault, clearFaults

@@ -1,6 +1,6 @@
 # routes.ts - Route Registration
 
-## Server Setup
+## ServerSetup
 - ElysiaJS with type-safe request/response
 - Port, CORS, body size limits configuration
 
@@ -15,4 +15,4 @@
 - Layer 2: Workflow-mediated operations (launch-run, terminate, etc.)
 
 ## Middleware Stack
-- auth → idempotency → errors → handler
+- auth → idempotency → handler (errors handled by Elysia automatically)

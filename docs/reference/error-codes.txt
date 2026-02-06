@@ -1,0 +1,152 @@
+================================================================================
+API Error Codes Reference
+================================================================================
+
+Source: spec/09_API.txt §9.6.4
+Extracted: 2024-02-06
+
+Complete reference of API error codes, categories, and descriptions. For error
+response structure and HTTP status mapping, see spec/09_API.txt §9.6.
+
+================================================================================
+
+Error Code Table
+----------------
+
+| Code                        | Category   | Description                                 |
+|-----------------------------|------------|---------------------------------------------|
+| INVALID_SPEC                | validation | Instance spec not valid for provider        |
+| INVALID_REGION              | validation | Region not valid for provider               |
+| INVALID_PROVIDER            | validation | Unknown provider                            |
+| MISSING_REQUIRED_FIELD      | validation | Required field not provided                 |
+| INVALID_FIELD_VALUE         | validation | Field value doesn't meet constraints        |
+| INVALID_STATUS_TRANSITION   | validation | State transition not allowed                |
+| INVALID_JSON                | validation | Request body is not valid JSON              |
+| INVALID_API_KEY             | auth       | API key invalid or expired                  |
+| MISSING_API_KEY             | auth       | No API key provided                         |
+| INSUFFICIENT_PERMISSIONS    | auth       | API key lacks required scope                |
+| RUN_NOT_FOUND               | not_found  | Run ID doesn't exist                        |
+| INSTANCE_NOT_FOUND          | not_found  | Instance ID doesn't exist                   |
+| ALLOCATION_NOT_FOUND        | not_found  | Allocation ID doesn't exist                 |
+| WORKFLOW_NOT_FOUND          | not_found  | Workflow ID doesn't exist                   |
+| MANIFEST_NOT_FOUND          | not_found  | Manifest ID doesn't exist                   |
+| OBJECT_NOT_FOUND            | not_found  | Object ID doesn't exist                     |
+| RESOURCE_ALREADY_OWNED      | conflict   | Resource owned by another manifest          |
+| IDEMPOTENCY_CONFLICT        | conflict   | Same idempotency key, different params      |
+| WARM_POOL_CLAIM_FAILED      | conflict   | Race condition on warm pool claim           |
+| RUN_IN_PROGRESS             | conflict   | Cannot modify running run                   |
+| INSTANCE_HAS_ALLOCATIONS    | conflict   | Cannot delete instance with allocations     |
+| RATE_LIMIT_EXCEEDED         | rate_limit | Too many API requests                       |
+| BUDGET_EXCEEDED             | rate_limit | Monthly budget limit reached                |
+| PROVIDER_CAPACITY           | rate_limit | No capacity at provider                     |
+| SPOT_INTERRUPTED            | rate_limit | Spot instance was reclaimed                 |
+| INTERNAL_ERROR              | internal   | Unexpected server error                     |
+| PROVIDER_API_ERROR          | internal   | Provider API failure                        |
+| DATABASE_ERROR              | internal   | Database operation failed                   |
+| S3_ERROR                    | internal   | S3 operation failed                         |
+
+
+Category Descriptions
+---------------------
+
+**validation (400 Bad Request)**
+Invalid input or malformed request. Client should fix the request before
+retrying. These errors are not transient.
+
+**auth (401/403)**
+Authentication or authorization failures. 401 for missing/invalid credentials,
+403 for insufficient permissions. Not transient unless credentials are about
+to expire.
+
+**not_found (404 Not Found)**
+Requested resource does not exist. May be transient if resource is still being
+created, but usually indicates client error (wrong ID).
+
+**conflict (409 Conflict)**
+State conflict or resource contention. May be transient for race conditions
+(WARM_POOL_CLAIM_FAILED) but often indicates client needs to refresh state.
+
+**rate_limit (429 Too Many Requests)**
+Rate limiting, budget exceeded, or provider capacity issues. Often transient -
+client should respect retry_after_ms hint and retry with backoff.
+
+**internal (500/502/503)**
+Server-side errors. Usually transient. Clients should retry with exponential
+backoff. 5xx errors do not count against idempotency retention.
+
+
+Client Handling Guidelines
+---------------------------
+
+**Validation Errors:**
+- Do NOT retry automatically
+- Display error message to user
+- Fix request parameters before resubmitting
+
+**Auth Errors:**
+- Check API key validity
+- Verify required scopes/permissions
+- Do NOT retry without fixing credentials
+
+**Not Found Errors:**
+- Verify resource ID is correct
+- Check if resource was deleted
+- May retry once after brief delay (resource may be creating)
+
+**Conflict Errors:**
+- For WARM_POOL_CLAIM_FAILED: safe to retry immediately
+- For IDEMPOTENCY_CONFLICT: do NOT retry (parameter mismatch)
+- For RESOURCE_ALREADY_OWNED: refresh state and retry if appropriate
+
+**Rate Limit Errors:**
+- Respect retry_after_ms hint
+- Use exponential backoff
+- For PROVIDER_CAPACITY: consider alternative regions/specs in details
+
+**Internal Errors:**
+- Retry with exponential backoff
+- 5xx errors are safe to retry with same idempotency key
+- Log request_id for support escalation
+
+
+Response Structure
+------------------
+
+All errors follow this structure:
+
+```json
+{
+  "error": {
+    "code": "INVALID_SPEC",
+    "message": "Instance spec 'xyz123' is not valid for provider 'aws'",
+    "category": "validation",
+    "details": {
+      "field": "spec",
+      "value": "xyz123",
+      "valid_specs": ["g6.xlarge", "g6.2xlarge", "p4d.24xlarge"]
+    },
+    "request_id": "req-abc123"
+  }
+}
+```
+
+Fields:
+- `code`: Machine-readable error code (from table above)
+- `message`: Human-readable description
+- `category`: Error category for client handling logic
+- `details`: Additional context (structure varies by error)
+- `request_id`: For support requests (optional)
+- `retry_after_ms`: Retry hint for rate_limit category (optional)
+
+
+HTTP Status Mapping
+-------------------
+
+| Category    | HTTP Status |
+|-------------|-------------|
+| validation  | 400         |
+| auth        | 401 or 403  |
+| not_found   | 404         |
+| conflict    | 409         |
+| rate_limit  | 429         |
+| internal    | 500/502/503 |

@@ -12,7 +12,7 @@ import { httpStatusForCategory, categoryForCode } from '../../../../shared/src/e
 import type { ErrorCategory } from '../../../../shared/src/types';
 ```
 
-## Auth Middleware
+## AuthMiddleware
 
 ```typescript
 // =============================================================================
@@ -75,21 +75,25 @@ async function deriveAgentAuth(headers: Record<string, string | undefined>) {
     throw createApiError('MISSING_API_KEY', 'No instance token provided', 'auth');
   }
 
-  const instance = await queryOne(
-    'SELECT id, provider FROM instances WHERE auth_token_hash = ?',
+  const apiKey = await queryOne(
+    'SELECT * FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL',
     [hashApiKey(instanceToken)]
   );
 
-  if (!instance) {
+  if (!apiKey) {
     throw createApiError('INVALID_API_KEY', 'Instance token is invalid', 'auth');
   }
 
+  // Extract instance_id from permissions JSON (agent keys are scoped to instances)
+  const permissions = JSON.parse(apiKey.permissions ?? '{}');
+  const instanceId = permissions.instance_id;
+
   return {
     auth: {
-      keyId: `instance-${instance.id}`,
+      keyId: apiKey.id,
       scopes: ['agent:*'],
       userId: null,
-      instanceId: instance.id,
+      instanceId: instanceId,
     },
   };
 }
@@ -116,7 +120,7 @@ function hashApiKey(key: string): string {
 }
 ```
 
-## Error Handling Middleware
+## ErrorHandlingMiddleware
 
 ```typescript
 // =============================================================================
@@ -192,7 +196,7 @@ function generateRequestId(): string {
 }
 ```
 
-## Rate Limiting Middleware
+## RateLimitingMiddleware
 
 ```typescript
 // =============================================================================
@@ -277,7 +281,7 @@ function getRateLimitCategory(path: string): RateLimitCategory {
 }
 ```
 
-## Idempotency Middleware
+## IdempotencyMiddleware
 
 ```typescript
 // =============================================================================
@@ -424,7 +428,7 @@ function extractWorkflowId(response: unknown): number | null {
 }
 ```
 
-## Idempotency Cleanup
+## IdempotencyCleanup
 
 ```typescript
 // =============================================================================

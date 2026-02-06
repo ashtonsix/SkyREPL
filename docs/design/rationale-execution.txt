@@ -1,0 +1,68 @@
+# Execution Layer Design Rationale
+
+## Provider Key Principles (Ch08 S8.1)
+
+- Providers are NOT uniform. Complex platforms (AWS, GCP, Azure) benefit from
+  deep integration; simpler providers use fixed, minimal workflows.
+- The control plane cares about outcomes ("I need an instance"), not
+  implementation details.
+- 80% of functionality works across providers through the common interface.
+  The remaining 20% can be platform-specific where justified.
+- Testing against OrbStack (with fault injection) validates contract-compliant
+  behavior; providers following the same contracts inherit that validation.
+
+## Spawn Idempotency: Kill-at-any-step (Ch08 S8.1.1)
+
+Kill-at-any-step analysis:
+- Kill before Phase 1: Nothing created, transaction not committed
+- Kill during Phase 1: If transaction commits, we have DB record with
+  spawn:pending but no cloud resource. Reconciliation detects and marks as
+  failed.
+- Kill after Phase 1, before Phase 2: DB has spawn:pending, no cloud resource.
+  Reconciliation marks as failed.
+- Kill during Phase 2: Two sub-cases:
+  - Provider call succeeds but UPDATE fails: Reconciliation finds instance by
+    clientRequestId (if supported) or via periodic list() sweep, updates DB
+    record
+  - Provider call fails: No cloud resource created, DB record remains
+    spawn:pending, reconciliation marks as failed
+- Kill after Phase 2: Normal completion, no orphans
+
+For providers that don't support clientRequestId (Lambda Labs, RunPod),
+reconciliation relies on periodic list() operations and matching by
+tags/timestamps. Less efficient but still prevents orphans.
+
+## Why Agent-Initiated Architecture (Ch11 S11.1)
+
+All connections originate from agent: instances may be behind NAT/VPCs; simpler
+firewall rules (outbound only); control plane doesn't need instance IPs; load
+balancer compatible without sticky sessions.
+
+## Byte-by-byte SSE Reading (Ch11 S11.6)
+
+Problem: Python HTTP libraries use 8KB internal buffers. `read(n)` and
+`readline()` block until buffer fills or connection closes. SSE messages are
+~150 bytes and infrequent, causing indefinite blocking.
+
+Solution: Agent MUST use `read(1)` syscall to bypass buffering.
+
+Spec pseudocode:
+```
+FUNCTION read_lines(response):
+  WHILE NOT shutting_down:
+    line = empty_buffer
+    WHILE TRUE:
+      byte = response.read(1)  // Single-byte syscall
+      IF byte is empty:
+        RETURN  // Stream closed
+      IF byte == newline:
+        BREAK
+      line.append(byte)
+
+    text = decode_utf8(line)
+    IF text not empty:
+      YIELD text
+```
+
+Trade-off: Syscall overhead negligible for low-frequency control signaling
+(agent spends 99.9% of time blocked on read(1)).

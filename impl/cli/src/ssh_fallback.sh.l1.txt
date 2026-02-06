@@ -50,7 +50,7 @@ GET /v1/allocations?slug_prefix=${SLUG}
 - Suggest: "Use full allocation slug to disambiguate"
 - Exit code: 1
 
-## Error Handling
+## ErrorHandling
 - Network errors: "Failed to reach control plane at ${API_URL}"
 - Auth errors: "Authentication failed. Run 'repl auth login'"
 - API errors: Display error message from response

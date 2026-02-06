@@ -1,0 +1,147 @@
+# Type Conventions Reference
+Extracted from spec/13_TYPES.txt
+
+## Type Placement Decision Tree
+
+Follow this decision tree when adding a new type:
+
+```
+Is this type a database row representation?
+  YES --> db.types.ts
+  NO  |
+      v
+Is this type an API request/response shape?
+  YES --> api/{resource}.types.ts or api/workflows.types.ts
+  NO  |
+      v
+Is this type provider-specific?
+  YES --> providers/provider.types.ts
+  NO  |
+      v
+Is this type workflow engine internals?
+  YES --> workflows/engine.types.ts
+  NO  |
+      v
+Is this type specific to a single module (foo.ts)?
+  YES --> foo.types.ts (create if doesn't exist)
+  NO  |
+      v
+Is this type used by 3+ files across src/?
+  YES --> types.ts
+  NO  --> types.ts (cross-cutting by elimination)
+```
+
+## Type Placement Rules and Organization
+
+### Adding a New Resource Type
+
+1. Define the materialized type in `types.ts`:
+   ```typescript
+   export interface NewResource {
+     id: ID;
+     // ... fields
+   }
+   ```
+
+2. Define the record type in `db.types.ts`:
+   ```typescript
+   export interface NewResourceRecord {
+     id: ID;
+     // ... snake_case fields
+   }
+   ```
+
+3. Add converters in `db.types.ts`:
+   ```typescript
+   export function recordToNewResource(record: NewResourceRecord): NewResource;
+   export function newResourceToRecord(resource: NewResource): NewResourceRecord;
+   ```
+
+4. Add API types in `api/resources.types.ts`:
+   ```typescript
+   export interface CreateNewResourceRequest { ... }
+   export type GetNewResourceResponse = ApiResponse<NewResource>;
+   ```
+
+### Adding a New Workflow Type
+
+1. Create `workflows/workflow-{name}.types.ts`:
+   ```typescript
+   export interface {Name}WorkflowInput { ... }
+   export interface {Name}WorkflowOutput { ... }
+   ```
+
+2. Add to `WorkflowType` union in `engine.types.ts`:
+   ```typescript
+   export type WorkflowType =
+     | 'launch-run'
+     | 'new-workflow'  // Add here
+     | string;
+   ```
+
+3. Define blueprint in `workflows/workflow-{name}.ts`
+
+### Adding Provider-Specific Types
+
+Provider-specific types live in `providers/provider.types.ts`. Core provider
+types like SpawnOptions are defined there and referenced by workflow types.
+
+**SpawnOptions** — key fields with semantic constraints:
+- spec: string — Instance type (g5.xlarge, A100x1, etc). MUST match provider catalog.
+- region?: string — Target region/zone
+- spot?: boolean — Use spot/preemptible pricing
+- maxSpotPrice?: number — Maximum spot price ($/hour)
+- initChecksum?: string — Init script checksum for warm pool matching
+- tags?: Record<string, string>
+- bootstrap: BootstrapConfig — Bootstrap configuration. MUST be provided.
+- snapshotId?: string — Spawn from snapshot
+- clientRequestId?: string — Client-provided request ID for idempotency
+
+**Adding custom provider types:**
+
+1. Add to `providers/provider.types.ts`:
+   ```typescript
+   export interface AWSInstanceExtension {
+     availabilityZone: string;
+     spotRequestId: string | null;
+   }
+   ```
+
+2. Use type intersection for provider-specific resources:
+   ```typescript
+   type AWSInstance = Instance & AWSInstanceExtension;
+   ```
+
+### Adding Pattern/Feature/Heartbeat Types
+
+All live in `providers/provider.types.ts`:
+
+- **New pattern**: Add to `PatternType` union, define config interface, add to `PatternConfig` discriminated union
+- **New feature provider**: Define config/state types, implement `FeatureProvider<TConfig, TState>`, add to `FeatureProviderName` union
+- **New heartbeat task**: Add to `HeartbeatTask.type` union, use `TaskReceipt` for completions
+
+**Note:** Remote agent communication types (Ch11) live in `api/agent.types.ts`.
+Don't confuse provider heartbeats with agent heartbeats.
+
+## Type Naming Conventions and Anti-Patterns
+
+| Type Category     | Naming Pattern              | Example                    |
+|-------------------|-----------------------------|----------------------------|
+| Materialized      | `{Resource}`                | `Instance`, `Run`          |
+| Database record   | `{Resource}Record`          | `InstanceRecord`           |
+| API request       | `{Action}{Resource}Request` | `CreateRunRequest`         |
+| API response      | `{Action}{Resource}Response`| `ListInstancesResponse`    |
+| Workflow input    | `{Workflow}Input`           | `LaunchRunInput`           |
+| Workflow output   | `{Workflow}Output`          | `LaunchRunOutput`          |
+| Status enum       | `{Resource}Status`          | `AllocationStatus`         |
+| Config type       | `{Feature}Config`           | `HoldDurationConfig`       |
+| Options type      | `{Feature}Options`          | `MaterializationOptions`   |
+
+### Anti-Patterns to Avoid
+
+1. **Mixed concern types** - Don't put API shapes in db.types.ts
+2. **any usage** - Use generics or unknown with type guards
+3. **Inline complex types** - Extract to named interfaces
+4. **Circular imports** - Use type-only imports: `import type { X } from`
+5. **Overly generic types** - Prefer specific types with discriminated unions
+6. **String enums for status** - Use union types with const assertions

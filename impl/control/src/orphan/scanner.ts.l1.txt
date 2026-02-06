@@ -13,7 +13,7 @@
 - OrbStack: VMs (local only)
 - Tailscale: Machines in tailnet
 
-## Resource Name Parsing
+## ResourceNameParsing
 - Format: repl-{control_id}-{manifest_id}-{instance_id}
 - Tailscale: repl-{control_id}-{instance_id}
 - Unparseable names → classified as "unknown"

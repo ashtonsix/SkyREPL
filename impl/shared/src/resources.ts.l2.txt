@@ -5,7 +5,7 @@
 # - Status enums from ./types.ts.l2.txt (WorkflowState, AllocationStatus, etc.)
 # - Error types from ./errors.ts.l2.txt (ErrorCategory)
 
-## Primary Resources
+## PrimaryResources
 
 ```typescript
 import type {
@@ -129,7 +129,7 @@ export interface Manifest {
 }
 ```
 
-## Object-Backed Resources
+## ObjectBackedResources
 
 ```typescript
 // =============================================================================
@@ -185,7 +185,7 @@ export interface TailscaleMachine {
 }
 ```
 
-## Supporting Types
+## SupportingTypes
 
 ```typescript
 // =============================================================================
@@ -251,7 +251,7 @@ export interface ManifestResource {
 }
 ```
 
-## Error Detail Types
+## ErrorDetailTypes
 
 ```typescript
 // =============================================================================

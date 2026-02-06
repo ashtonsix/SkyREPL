@@ -13,7 +13,7 @@ const MULTIPART_URL_TTL = PRESIGNED_URL_TTL_MS;  // 4 hours per part
 const LARGE_FILE_THRESHOLD = 104857600;  // 100MB triggers multipart
 ```
 
-## Presigned URLs
+## PresignedURLs
 
 ### generateUploadUrl
 
@@ -128,7 +128,7 @@ function generateDownloadUrl(blobId: number): { url: string; inline: boolean } {
 }
 ```
 
-## Inline Storage (<=64KB, SBO)
+## InlineStorage
 
 ```typescript
 /**
@@ -137,8 +137,8 @@ function generateDownloadUrl(blobId: number): { url: string; inline: boolean } {
  */
 function storeInline(blobId: number, data: Buffer): void {
   db.run(
-    'UPDATE blobs SET payload = ?, size_bytes = ?, updated_at = ? WHERE id = ?',
-    data, data.length, Date.now(), blobId
+    'UPDATE blobs SET payload = ?, size_bytes = ? WHERE id = ?',
+    data, data.length, blobId
   );
 }
 
@@ -148,7 +148,7 @@ function getInline(blobId: number): Buffer | null {
 }
 ```
 
-## S3 Operations (>64KB)
+## S3Operations
 
 ```typescript
 function uploadToS3(blobId: number, data: Buffer, contentType?: string): void {
@@ -162,8 +162,8 @@ function uploadToS3(blobId: number, data: Buffer, contentType?: string): void {
   });
 
   db.run(
-    'UPDATE blobs SET s3_key = ?, s3_bucket = ?, size_bytes = ?, payload = NULL, updated_at = ? WHERE id = ?',
-    s3Key, S3_BUCKET, data.length, Date.now(), blobId
+    'UPDATE blobs SET s3_key = ?, s3_bucket = ?, size_bytes = ?, payload = NULL WHERE id = ?',
+    s3Key, S3_BUCKET, data.length, blobId
   );
 }
 
@@ -190,7 +190,7 @@ function deleteFromS3(blobId: number): void {
 }
 ```
 
-## Multipart Uploads (>100MB)
+## MultipartUploads
 
 ```typescript
 interface MultipartInfo {
@@ -267,8 +267,8 @@ function completeMultipartUpload(
   });
 
   db.run(
-    'UPDATE blobs SET s3_key = ?, s3_bucket = ?, size_bytes = ?, payload = NULL, updated_at = ? WHERE id = ?',
-    s3Key, S3_BUCKET, ContentLength, Date.now(), blobId
+    'UPDATE blobs SET s3_key = ?, s3_bucket = ?, size_bytes = ?, payload = NULL WHERE id = ?',
+    s3Key, S3_BUCKET, ContentLength, blobId
   );
 }
 
@@ -295,7 +295,7 @@ function calculatePartSize(totalSize: number): number {
 }
 ```
 
-## Blob Deduplication (Opt-In)
+## BlobDeduplication
 
 ```typescript
 /**
@@ -382,7 +382,7 @@ function createBlobWithDedup(
 }
 ```
 
-## File Sync Preparation
+## FileSyncPreparation
 
 ```typescript
 interface FileInfo {
@@ -415,7 +415,7 @@ function prepareFilesForRun(runId: number, files: FileInfo[]): PreparedFile[] {
 
     // Create run_file object linking run to blob
     db.run(
-      'INSERT INTO objects (manifest_id, type, blob_id, metadata) VALUES (?, ?, ?, ?)',
+      'INSERT INTO objects (current_manifest_id, type, blob_id, metadata_json) VALUES (?, ?, ?, ?)',
       getManifestId(runId), 'run_file', blobId, JSON.stringify({ path: file.path })
     );
 
@@ -433,7 +433,7 @@ function prepareFilesForRun(runId: number, files: FileInfo[]): PreparedFile[] {
 }
 ```
 
-## Log Streaming
+## LogStreaming
 
 ```typescript
 /**
@@ -481,11 +481,11 @@ function getLogUpdates(
 }
 ```
 
-## Background Blob GC
+## BackgroundBlobGC
 
 ```typescript
 # Note: Orchestrates blob GC using db.findOrphanedBlobs() + S3 deletion.
-# DB queries are in db.ts.l2.txt §Background Blob GC Operations.
+# DB queries are in db.ts.l2.txt §BackgroundBlobGCOperations.
 
 /**
  * Run one cycle of background blob garbage collection.
@@ -523,11 +523,11 @@ async function runBlobGC(): Promise<number> {
 }
 ```
 
-## Manifest Cleanup
+## ManifestCleanup
 
 ```typescript
 # Note: Uses db.getManifestObjectIds() and db.deleteObjectBatch()
-# from db.ts.l2.txt §Manifest Cleanup Operations.
+# from db.ts.l2.txt §ManifestCleanupOperations.
 
 /**
  * Clean up objects owned by an expired manifest.

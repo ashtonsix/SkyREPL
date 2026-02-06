@@ -1,0 +1,229 @@
+================================================================================
+Orphan Management CLI Guide
+================================================================================
+
+Source: spec/12_ORPHANS.txt §12.5
+Extracted: 2024-02-06
+
+This guide covers the CLI commands for detecting and managing orphaned cloud
+resources. For architecture and detection algorithms, see spec/12_ORPHANS.txt.
+
+================================================================================
+
+Overview
+--------
+
+Orphan detection identifies cloud resources that exist in providers but aren't
+tracked in the database. The CLI provides commands to list, inspect, whitelist,
+and manage these resources.
+
+IMPORTANT: SkyREPL never auto-terminates resources. All cleanup actions require
+explicit user confirmation.
+
+
+List Orphans
+------------
+
+```bash
+# List all orphans
+repl orphans list
+
+# List orphans for specific provider
+repl orphans list --provider aws
+
+# Include whitelisted orphans
+repl orphans list --include-whitelisted
+
+# Output as JSON for scripting
+repl orphans list --json
+```
+
+**Output Format:**
+
+```
+Orphaned Resources (3 found)
+
+CURRENT SESSION (WARNING):
+  [aws] i-0abc123def456  repl-v2a1b2c3-9ix-1h2i
+        Age: 15m | Est. Cost: $1.23/hr | Type: instance
+
+OTHER SESSIONS (INFO):
+  [aws] i-0xyz789abc012  repl-v2a1b2c3-none-2j3k
+        Age: 2d 4h | Est. Cost: $0.45/hr | Type: instance
+
+  [aws] vol-0123456789   repl-v2a1b2c3-3l4m-4n5o
+        Age: 5d | Est. Cost: $0.02/hr | Type: volume
+
+TAILSCALE:
+  [ts] repl-v2a1b2c3-5p6q
+       IP: 100.64.0.15 | Last Seen: 3h ago
+
+Run 'repl orphans inspect <provider_id>' for details.
+Run 'repl orphans whitelist <provider_id> --reason "..."' to acknowledge.
+```
+
+
+Inspect Orphan
+--------------
+
+Get detailed information about a specific orphaned resource:
+
+```bash
+repl orphans inspect i-0abc123def456
+```
+
+**Output:**
+
+```
+Orphan Details: i-0abc123def456
+
+Provider:     aws
+Resource:     EC2 Instance
+Name:         repl-v2a1b2c3-9ix-1h2i
+Created:      2024-01-31 14:32:15 UTC (15 minutes ago)
+Status:       running
+Instance Type: g5.xlarge
+Region:       us-east-1
+Est. Cost:    $1.23/hr ($29.52/day)
+
+Inferred Information:
+  Control ID: v2a1b2c3 (matches current installation)
+  Manifest ID slug: 9ix
+  Instance ID slug: 1h2i
+
+Possible Matches in DB:
+  inst-1h2i (workflow_state: terminate:complete) - 95% confidence
+
+Actions:
+  repl orphans whitelist i-0abc123def456 --reason "..."
+  repl orphans open i-0abc123def456   # Open in AWS Console
+```
+
+
+Whitelist Orphan
+----------------
+
+Acknowledge an orphan that you want to keep (prevents it from appearing in
+warning lists):
+
+```bash
+# Add to whitelist with reason (required)
+repl orphans whitelist i-0abc123def456 --reason "Test instance for debugging"
+
+# Add with expiry
+repl orphans whitelist i-0abc123def456 \
+  --reason "Temporary keep for investigation" \
+  --expires "2024-02-07"
+
+# Add with notes
+repl orphans whitelist i-0abc123def456 \
+  --reason "Production backup" \
+  --notes "Contact ops@example.com before removing"
+```
+
+The reason field is required and documents why this resource is being kept.
+Optional expiry dates allow automatic re-evaluation after a set time.
+
+
+Remove from Whitelist
+---------------------
+
+Remove an acknowledged orphan from the whitelist (will appear in future scans):
+
+```bash
+repl orphans unwhitelist i-0abc123def456
+```
+
+
+Open in Provider Console
+------------------------
+
+Open the appropriate provider console page for an orphaned resource:
+
+```bash
+repl orphans open i-0abc123def456
+```
+
+This opens your browser to the provider's console page for the resource.
+
+Supported providers:
+- AWS: Opens EC2/EBS console
+- RunPod: Opens pod details page
+- Lambda: Not supported
+
+
+Scan Command
+------------
+
+Force an immediate orphan scan across all providers:
+
+```bash
+# Scan all providers
+repl orphans scan
+
+# Scan specific provider
+repl orphans scan --provider aws
+
+# Verbose output with scan details
+repl orphans scan --verbose
+```
+
+Note: Orphan scans run automatically every hour in the background. This command
+forces an immediate scan.
+
+
+Preflight Warnings
+------------------
+
+Before launching runs or other operations, SkyREPL checks for orphans and
+displays warnings:
+
+```
+⚠ WARNING: 3 orphaned resources detected
+  Current session: 1 instance ($1.23/hr)
+  Other sessions: 2 resources ($0.47/hr)
+
+  Run 'repl orphans list' to review.
+
+Proceed with launch? [y/N]
+```
+
+These warnings are advisory only and don't block operations. Use the
+`--yes` or `--no-preflight` flags to bypass the prompt.
+
+
+Safety Guarantees
+-----------------
+
+**CRITICAL: No automatic termination**
+
+SkyREPL will NEVER automatically terminate cloud resources. All cleanup
+actions require explicit user confirmation via the CLI.
+
+The orphan detection system:
+- ✓ Detects and reports orphaned resources
+- ✓ Provides cost estimates and metadata
+- ✓ Suggests actions and opens console links
+- ✓ Maintains audit trail via whitelist
+- ✗ NEVER terminates resources automatically
+- ✗ NEVER deletes volumes/snapshots automatically
+- ✗ NEVER modifies cloud resources without explicit user action
+
+This conservative approach prevents accidental termination of workloads due to
+false positives or database recovery scenarios.
+
+
+Recovery Scenarios
+------------------
+
+If you lose your database but cloud resources remain, orphan detection can help
+with recovery:
+
+```bash
+# Generate recovery report from cloud resources
+repl orphans recovery-report
+```
+
+This lists all cloud resources with SkyREPL naming, groups them by control ID
+and slugs, shows potential correlations, and offers an import option to re-track
+discovered resources.

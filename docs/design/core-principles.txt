@@ -1,0 +1,21 @@
+# Core Design Principles
+
+## The Core Insight (Ch01 S1.2)
+
+Cloud compute orchestration isn't fundamentally a compute problem - it's a
+lifecycle chaos problem. Everyone can spin up instances. The hard part is
+tracking what's running, ensuring cleanup on failure, and avoiding cost
+surprises. This spec crystallizes around three concepts:
+
+1. **ALLOCATIONS AS LIFECYCLE PRIMITIVE** (Chapter 5)
+   Every run-to-instance binding has a clear state machine. The warm pool is a
+   query (`WHERE status='AVAILABLE'`), not a separate system. debug_hold_until
+   replaces vague "grace periods" with explicit timestamps.
+
+2. **MANIFESTS AS OWNERSHIP BOUNDARIES** (Chapter 4)
+   Every resource has a clear owner. When a workflow fails, its manifest
+   identifies exactly what needs cleanup. No orphaned resources.
+
+3. **WORKFLOWS AS EXPLICIT STATE MACHINES** (Chapter 6)
+   Visible DAGs replace implicit state. Fixed pattern library (4 patterns).
+   Each step has compensation actions for rollback.

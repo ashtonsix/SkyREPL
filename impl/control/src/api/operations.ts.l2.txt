@@ -18,7 +18,7 @@ import type {
 import { createApiError } from '../../../../shared/src/errors';
 ```
 
-## Route Registration
+## RouteRegistration
 
 ```typescript
 // =============================================================================
@@ -43,7 +43,7 @@ export function registerOperationRoutes(app: Elysia): void {
       initChecksum: body.init_checksum ?? null,
       useTailscale: body.use_tailscale ?? false,
       maxDurationMs: body.max_duration_ms ?? 0,
-      holdDurationMs: body.hold_duration_ms ?? 300000,
+      holdDurationMs: body.hold_duration_ms ?? TIMING.DEFAULT_HOLD_MS,
       createSnapshot: body.create_snapshot ?? false,
       files: body.files ?? [],
       artifactPatterns: body.artifact_patterns ?? [],
@@ -79,7 +79,7 @@ export function registerOperationRoutes(app: Elysia): void {
     const input: TerminateInstanceInput = {
       instanceId: body.instance_id,
       force: body.force ?? false,
-      sshDrainTimeoutMs: body.drain_timeout_ms ?? 60000,
+      sshDrainTimeoutMs: body.drain_timeout_ms ?? TIMING.DRAIN_TIMEOUT_MS,
     };
 
     const result = await submitWorkflow({
@@ -231,9 +231,10 @@ export function registerOperationRoutes(app: Elysia): void {
     }
     if (workflow.status === 'failed') {
       const failedNode = nodes.find(n => n.status === 'failed');
+      const errorData = failedNode?.error_json ? JSON.parse(failedNode.error_json) : {};
       result.error = {
-        code: failedNode?.error_code ?? 'INTERNAL_ERROR',
-        message: failedNode?.error_message ?? 'Workflow failed',
+        code: errorData.code ?? 'INTERNAL_ERROR',
+        message: errorData.message ?? 'Workflow failed',
         node_id: failedNode?.node_id,
       };
     }
@@ -297,7 +298,7 @@ export function registerOperationRoutes(app: Elysia): void {
 }
 ```
 
-## Helper Functions
+## HelperFunctions
 
 ```typescript
 // =============================================================================

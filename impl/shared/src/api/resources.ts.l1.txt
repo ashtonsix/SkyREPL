@@ -1,71 +1,29 @@
-# resources.types.ts - Layer 1 API Types
+# resources.ts - API Request/Response Types
 
-## Request/Response Envelopes
+Standard API envelopes for requests, responses, pagination, errors.
+See L2 for envelope schemas, error code mappings, resource CRUD types.
 
-### ApiResponse<T>
-- data: T
-- meta?: object
+## RequestEnvelopes
+ApiRequest, PaginationParams, SortParams, FilterParams, ListRequest
 
-### ListResponse<T>
-- data: T[]
-- pagination: PaginationMeta
+## ResponseEnvelopes
+ApiResponse, ListResponse, ResponseMeta, PaginationMeta
 
-### ApiError
-- code: string
-- message: string
-- category: ErrorCategory  # See types.ts for full enum
-- details?: object
-- retryAfterMs?: number    # For rate limit errors
+## ErrorEnvelope
+ApiError with code, message, category, details, retryAfterMs
+ErrorCategory: validation | auth | not_found | conflict | rate_limit | provider | timeout | internal
 
-ErrorCategory = 'validation' | 'auth' | 'not_found' | 'conflict' | 'rate_limit' | 'provider' | 'timeout' | 'internal'
+## ErrorCodes
+INVALID_INPUT, MISSING_REQUIRED_FIELD, INVALID_FORMAT, UNAUTHORIZED, FORBIDDEN, RESOURCE_NOT_FOUND, IDEMPOTENCY_CONFLICT, INVALID_STATE_TRANSITION, RATE_LIMITED, PROVIDER_ERROR, REQUEST_TIMEOUT, INTERNAL_ERROR
 
-Category → HTTP Status mapping:
-- validation → 400 Bad Request
-- auth → 401 Unauthorized or 403 Forbidden (check details.code)
-- not_found → 404 Not Found
-- conflict → 409 Conflict
-- rate_limit → 429 Too Many Requests
-- provider → 502 Bad Gateway (cloud provider error)
-- timeout → 504 Gateway Timeout
-- internal → 500 Internal Server Error
+## ResourceCRUDTypes
+GetInstanceResponse, ListInstancesRequest/Response, CreateInstanceRequest/Response, DeleteInstanceRequest/Response
+GetRunRequest/Response, ListRunsRequest/Response, CreateRunRequest/Response, CancelRunRequest/Response
+GetAllocationResponse, ListAllocationsRequest/Response, ExtendAllocationRequest/Response
+GetWorkflowRequest/Response, ListWorkflowsRequest/Response, CancelWorkflowRequest/Response
+GetManifestRequest/Response, ListManifestsRequest/Response
+GetSnapshotResponse, ListSnapshotsRequest/Response, DeleteSnapshotResponse
+GetArtifactResponse, DownloadArtifactResponse, ListRunArtifactsRequest/Response, UpdateArtifactRequest/Response
 
-## Pagination
-
-### Pagination Constants
-- DEFAULT_PAGE_LIMIT = 50
-- MAX_PAGE_LIMIT = 1000
-- CURSOR_TTL_MS = 3600000
-
-### PaginationParams
-- limit: number (default: DEFAULT_PAGE_LIMIT, max: MAX_PAGE_LIMIT)
-- cursor?: string (opaque base64-encoded JSON: { id: number, created_at: number })
-
-### PaginationMeta
-- hasMore: boolean
-- cursor: string | null
-- limit: number
-
-### Cursor Validation
-- Format: base64-encoded JSON { id: number, created_at: number }
-- Expiry: 1 hour (CURSOR_TTL_MS)
-- Invalid/expired cursor → 400 with error code INVALID_CURSOR
-
-### Sort Order
-- Default: created_at DESC
-- Empty results: { data: [], pagination: { hasMore: false, cursor: null } }
-
-### FilterParams
-- status?: string
-- provider?: string
-- created_after?: number
-- created_before?: number
-
-## Error Codes
-
-- INVALID_INPUT
-- INVALID_CURSOR
-- UNAUTHORIZED
-- NOT_FOUND
-- CONFLICT
-- RATE_LIMITED
-- INTERNAL_ERROR
+## Materialization
+Shared types used by control plane API server and CLI client.

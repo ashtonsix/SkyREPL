@@ -1,66 +1,30 @@
 # external.ts - Provider State Caching
 
-## Purpose
-- In-memory TTL cache for ephemeral provider state
-- NOT persisted to database (memory-only, cleared on restart)
-
-## Core Function
-- `getWithCache<T>(key, ttlMs, fetcher)` - TTL-based cache wrapper
+In-memory TTL cache for ephemeral provider state (not persisted to DB).
+See L2 for cache implementation, invalidation hooks, bypass semantics.
 
 ## Cache Keys
-- Format: `{provider}:{type}:{region}:{spec}` (e.g., `aws:spot_prices:us-east-1:g5.xlarge`)
-- Instance: `instance:{id}:external`
+Format: {provider}:{type}:{region}:{spec} or instance:{id}:external
 
 ## TTL Defaults
-- Spot prices: 5 minutes (300,000 ms)
-- Instance external state: 30 seconds
-- Snapshot external state: 5 minutes
+- Spot prices: 5 minutes
+- Instance state: 30 seconds
+- Snapshot state: 5 minutes
 
-## Cache Invalidation
+## Exports
+getWithCache, invalidateInstanceCache, invalidateProviderCache, invalidateCacheByKey
 
-Hooks for explicit cache invalidation on known state changes:
+## Cache Bypass
+Critical operations use bypassCache=true option to skip cache read (still updates cache after fetch).
+Used by: orphan detection, allocation claims, budget checks.
 
-- `invalidateInstanceCache(instanceId)` - Clear cached instance state
-  - Called on: spawn complete, terminate complete, allocation state change
-  - Ensures critical operations see fresh state
+## Invalidation Hooks
+- invalidateInstanceCache: Called on spawn/terminate/allocation state change
+- invalidateProviderCache: Pattern-based invalidation (e.g., 'instance:*')
+- invalidateCacheByKey: Direct key targeting
 
-- `invalidateProviderCache(provider, pattern)` - Clear provider-specific keys
-  - Example: `invalidateProviderCache('aws', 'instance:*')`
+## Staleness Risks
+Up to 30s staleness window for instance state. Mitigations: bypass flag, invalidation hooks, grace periods.
 
-- `invalidateCacheByKey(key)` - Clear specific cache entry
-  - Direct cache key targeting
-
-## Cache Bypass for Critical Operations
-
-`CACHE_BYPASS` flag for operations requiring guaranteed fresh state:
-
-- `getWithCache<T>(key, ttlMs, fetcher, options?: { bypassCache?: boolean })`
-  - If `options.bypassCache=true`, always fetch fresh (skip cache read)
-  - Used by: orphan detection, allocation state transitions, budget checks
-  - Still updates cache after fetch for subsequent non-critical reads
-
-## Cache Staleness Risks
-
-TTL-based caching creates staleness windows where decisions may use stale data:
-
-**Staleness Window:** Up to 30s for instance state (TTL default)
-
-**Risk Scenarios:**
-1. Instance terminates during TTL window → allocation may claim terminated instance
-2. Spot interruption during TTL window → workflow may not detect state change
-3. Manual provider changes during TTL window → orphan detection misses resources
-
-**Mitigations:**
-1. Critical operations use `bypassCache=true` (orphan detection, allocation claims)
-2. State transition hooks call `invalidateInstanceCache()` on known changes
-3. Workflow nodes verify state before destructive actions (terminate checks if alive first)
-4. Grace periods (10min orphan detection) exceed max staleness window
-
-**Trade-offs:**
-- Cache: Reduced provider API calls, lower latency, rate limit protection
-- Bypass: Guaranteed fresh state, higher API cost, potential rate limits
-
-## Error Handling
-- Cache read failure → fetch fresh
-- Cache write failure → non-critical (fetch again next time)
-- Cache cleared on restart (memory-only, not persisted)
+## Materialization
+In-memory Map, cleared on restart.

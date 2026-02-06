@@ -7,7 +7,7 @@ import { getDatabase, queryOne, transaction } from '../material/db';
 import { TIMING } from '../../../../shared/src/config/timing';
 ```
 
-## Canonical TransitionResult Pattern
+## CanonicalTransitionResultPattern
 
 The TransitionResult type is the canonical pattern for all state transitions.
 It enables callers to distinguish between different failure modes:
@@ -42,7 +42,7 @@ export function transitionFailure<T>(
 }
 ```
 
-## Two-Phase CAS Pattern
+## TwoPhaseCASPattern
 
 All state transitions use two-phase compare-and-swap (CAS):
 
@@ -113,7 +113,7 @@ export async function atomicTransition<T extends { id: number; status: string; u
 }
 ```
 
-## Allocation State Machine Types
+## AllocationStateMachineTypes
 
 ```typescript
 export type AllocationStatus = 'AVAILABLE' | 'CLAIMED' | 'ACTIVE' | 'COMPLETE' | 'FAILED';
@@ -140,7 +140,7 @@ const ALLOCATION_TRANSITIONS: Record<AllocationStatus, AllocationStatus[]> = {
 };
 ```
 
-## Allocation Transition Functions
+## AllocationTransitionFunctions
 
 ### claimAllocation (AVAILABLE -> CLAIMED)
 
@@ -314,7 +314,7 @@ export async function failAllocationAnyState(
 }
 ```
 
-## Manifest State Machine
+## ManifestStateMachine
 
 ```typescript
 export type ManifestStatus = 'DRAFT' | 'SEALED';
@@ -346,7 +346,7 @@ export async function sealManifest(
 }
 ```
 
-## Workflow State Machine
+## WorkflowStateMachine
 
 ```typescript
 export type WorkflowStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'rolling_back';
@@ -452,7 +452,7 @@ export async function startRollback(
 }
 ```
 
-## Node State Machine
+## NodeStateMachine
 
 ```typescript
 export type NodeStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
@@ -621,7 +621,7 @@ export async function skipNode(
 }
 ```
 
-## Usage Examples
+## UsageExamples
 
 ### Handling TransitionResult
 

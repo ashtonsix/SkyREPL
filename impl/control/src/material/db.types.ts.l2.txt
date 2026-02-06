@@ -4,7 +4,7 @@
 # - Primitives from @skyrepl/shared types.ts.l2.txt (ID, TimestampMs, AllocationStatus, ManifestStatus)
 # - Materialized types from @skyrepl/shared resources.ts.l2.txt (Instance, Run, etc.)
 
-## Record Types (Database Rows)
+## RecordTypes
 
 ```typescript
 import type { ID, TimestampMs, AllocationStatus, ManifestStatus } from '@skyrepl/shared';
@@ -195,7 +195,7 @@ export interface UsageRecordDb {
 }
 ```
 
-## Record to Materialized Converters
+## RecordToMaterializedConverters
 
 ```typescript
 import type {
@@ -362,7 +362,7 @@ export function recordToFeatureInstallation(
 }
 ```
 
-## Type Guards
+## TypeGuards
 
 ```typescript
 // =============================================================================

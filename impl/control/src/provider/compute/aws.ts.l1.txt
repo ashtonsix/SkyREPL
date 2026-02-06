@@ -1,162 +1,30 @@
-# aws.ts - AWS Provider
+# aws.ts - AWS Provider (Ch8)
 
-Reference implementation with deepest integration.
-Supports all capabilities including provider-specific workflows.
+Reference implementation with deepest integration. Supports all capabilities including provider-specific workflows.
+See L2 for spawn idempotency protocol, bootstrap generation, materialization/projection, lifecycle hooks, provider workflows.
 
 ## Capabilities
+snapshots: true (AMI), spot: true, gpu: true, multiRegion: true, persistentVolumes: true, warmVolumes: true, hibernation: true, costExplorer: true, idempotentSpawn: true (ClientToken, 24-hour dedup)
 
-- snapshots: true (AMI creation)
-- spot: true (spot instances, spot fleet)
-- gpu: true (P4, G5, etc.)
-- multiRegion: true
-- persistentVolumes: true (EBS)
-- warmVolumes: true (pre-created EBS pool)
-- hibernation: true
-- costExplorer: true
-- idempotentSpawn: true (ClientToken, 24-hour deduplication)
+## Two-Phase Spawn Protocol
+- Phase 1: Reserve in DB (workflow_state='spawn:pending', empty provider_id)
+- Phase 2: Execute spawn (call EC2 RunInstances with ClientToken, update provider_id)
+- Reconciliation: Find stale spawn:pending, query EC2 by tag, update or mark failed
 
-## AWSProvider implements Provider<AWSInstance, AWSSnapshot>
+## Materialization & Projection
+- MATERIALIZATION: Generic Instance → AWSInstance (enhanced with AZ, VPC, security groups, volumes)
+- PROJECTION: AWSInstance → Generic Instance (strip AWS-specific fields)
+- Happens at provider-specific workflow boundaries
 
-### spawn(options)
+## Lifecycle Hooks
+- onStartup: Verify credentials, ensure security groups/IAM roles, warm spot price cache
+- onHeartbeat: Refresh caches, maintain warm pools, reconcile drift
+- onSpotInterruption: Submit emergency-checkpoint + resume-interrupted-run workflows
+- onBudgetThreshold: Cleanup non-essential instances
 
-- Build EC2 RunInstances params:
-  - ImageId: Latest Ubuntu 22.04 AMI or options.snapshotId
-  - InstanceType: from options.spec
-  - UserData: Base64-encoded cloud-init from generateBootstrap()
-  - ClientToken: options.clientRequestId (enables idempotency)
-  - TagSpecifications: skyrepl:manifest_id, skyrepl:run_id, skyrepl:spawn_key
-  - InstanceMarketOptions: Spot config if options.spot=true
-- Call EC2 RunInstances
-- Return AWSInstance with availability zone, VPC, security groups
+## Provider Workflows
+- aws:warm-volume-pool: Pre-create EBS volumes for fast attachment
+- aws:spot-fleet: Request spot fleet across multiple AZs (PFO pattern)
 
-### terminate(providerId)
-
-- Call EC2 TerminateInstances
-- Idempotent (already terminated = no-op)
-
-### list(filter?)
-
-- EC2 DescribeInstances
-- Filter by tag:skyrepl:manifest_id (only SkyREPL instances)
-- Client-side filter for createdAfter, createdBefore, status
-- Return AWSInstance[]
-
-### get(providerId)
-
-- EC2 DescribeInstances by instance ID
-- Return AWSInstance or null
-
-### generateBootstrap(config)
-
-- Format: cloud-init YAML
-- Sections: package_update, packages, write_files, runcmd
-- Packages: curl, python3, tailscale
-- Downloads agent from config.agentUrl
-- Registers with control plane using config.registrationToken
-- Runs config.initScript if provided
-- Return: { content: YAML, format: 'cloud-init', checksum: SHA256 }
-
-### createSnapshot(providerId, options)
-
-- EC2 CreateImage (creates AMI)
-- NoReboot=false for consistency
-- Tags: skyrepl:snapshot_name, user tags
-- Return { requestId: imageId, providerSnapshotId: imageId }
-
-### getSnapshotStatus(requestId)
-
-- EC2 DescribeImages
-- Map state: pending -> 'creating', available -> 'available', failed -> 'failed'
-
-### deleteSnapshot(providerSnapshotId)
-
-- EC2 DeregisterImage
-- Also delete underlying EBS snapshots
-
-### requestSpotInstance(options)
-
-- Call spawn() with spot=true
-- RunInstances handles spot via InstanceMarketOptions
-- Return SpotRequest with instance ID
-
-### getSpotPrices(spec, regions?)
-
-- EC2 DescribeSpotPriceHistory
-- Last 24 hours, all AZs
-- Cached via getWithCache (5 min TTL)
-
-## AWS Lifecycle Hooks
-
-### onStartup()
-
-- Verify credentials: STS GetCallerIdentity
-- Ensure security group exists (skyrepl-default-sg: SSH 22, Tailscale 41641)
-- Ensure IAM role exists (skyrepl-instance-role: CloudWatch, SSM)
-- Warm spot price cache
-
-### onReconcile(context)
-
-- Compare DB instances vs EC2 DescribeInstances
-- Detect orphans: instances in EC2 with skyrepl:* tags but not in DB
-- Detect drift: DB status vs EC2 status mismatch
-- Return recommendations (don't auto-execute)
-
-### onSpotInterruption(notice)
-
-- Triggered by EventBridge spot interruption event
-- Submit handle-spot-interruption workflow
-- Lightweight: do not do checkpoint here
-
-### onBudgetThreshold(threshold)
-
-- Triggered by Cost Explorer integration
-- Submit cleanup or alert workflow
-
-### onHeartbeat()
-
-- Refresh spot price cache if stale
-- Check warm volume pool levels
-- Cleanup expired cached state
-
-## AWS Provider Workflows
-
-Provider-specific workflows registered with control plane.
-Control plane treats as black boxes.
-
-### aws:warm-volume-pool
-
-Purpose: Pre-create EBS volumes for fast attachment
-Input: { count, sizeGb, volumeType, availabilityZone }
-Output: { volumeIds: string[], availabilityZone }
-Constraint: maxDurationMs=300_000
-
-Compensation: Delete created volumes on failure
-
-### aws:spot-fleet
-
-Purpose: Request spot fleet across multiple AZs
-Input: { spec, count, regions }
-Output: { instanceIds: string[], fleetRequestId }
-Constraint: maxDurationMs=600_000
-
-Uses Parallel-Fan-Out pattern internally for multi-AZ requests.
-
-## Error Mapping
-
-| AWS Error | Provider Error |
-|-----------|----------------|
-| InsufficientInstanceCapacity | CapacityError |
-| Unsupported | InvalidSpecError |
-| UnauthorizedOperation | AuthError |
-| RequestLimitExceeded | RateLimitError |
-| InstanceLimitExceeded | QuotaExceededError |
-| InvalidInstanceID.NotFound | NotFoundError |
-| SpotInstanceInterruption (EventBridge) | SpotInterruptedError |
-
-## Cache TTL
-
-- 'aws:spot_prices:*': 300_000 (5 min)
-- 'aws:capacity:*': 60_000 (1 min)
-- 'aws:instance:*': 30_000 (30s)
-- 'aws:warm_volumes': No TTL, explicitly managed
-- 'aws:cost_data': 21_600_000 (6 hours)
+## Exports
+AWSProvider, materializeAWSInstance, projectToGenericInstance, awsLifecycleHooks

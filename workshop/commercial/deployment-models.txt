@@ -1,0 +1,17 @@
+# Deployment Models
+
+Extracted from spec/15_OPERATIONS.txt §15.6
+
+## Self-Managed
+
+User runs control plane on own VPS. Full control over data and configuration. User
+responsible for updates and maintenance. Suitable for organizations with existing
+infrastructure and DevOps capacity.
+
+## Managed
+
+Multi-tenant control plane pilots user-connected clouds. NEVER runs user code
+directly (liability, AML/ATF/content concerns). Provisions infrastructure on user
+behalf, but users run code on their machines. Clear separation of control plane
+orchestration from execution environment. Managed deployments handle updates,
+monitoring, and availability automatically.

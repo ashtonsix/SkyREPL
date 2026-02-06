@@ -5,7 +5,7 @@
 2. Start threads: heartbeat, log_flusher, spot_monitor (AWS only)
 3. Connect to SSE command stream
 
-## Main Loop
+## MainLoop
 Read SSE commands, dispatch: start_run, cancel_run, capture_artifacts, trigger_tailscale
 
 ## Shutdown Triggers

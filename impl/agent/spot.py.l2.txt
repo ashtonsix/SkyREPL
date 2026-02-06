@@ -152,7 +152,7 @@ def get_artifact_urls() -> List[ArtifactUrl]:
     ]
 ```
 
-## Comparison: Spot vs Heartbeat Panic
+## SpotVsHeartbeatPanicComparison
 
 | Aspect               | Spot Interruption         | Heartbeat Panic           |
 |----------------------|---------------------------|---------------------------|

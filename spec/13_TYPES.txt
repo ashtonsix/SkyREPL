@@ -4,14 +4,7 @@
 
 ## Purpose
 
-Type definitions for all SkyREPL entities, organized by layer to avoid circular
-dependencies. Three distinct type categories:
-
-- **Record types** (db.types.ts): Raw database rows, snake_case, primitive types
-- **Materialized types** (types.ts): Rich domain objects, camelCase, with relationships
-- **API types** (api/*.types.ts): HTTP request/response shapes
-
-Goals: No `any` types, clear separation between layers, proper use of generics.
+See docs/design/rationale-interface.txt for type organization purpose and goals.
 
 ## 13.1 File Organization
 
@@ -230,33 +223,7 @@ materialization depth — presence means the data was fetched):
 
 ### 13.1.5 Type Placement Decision Tree
 
-Follow this decision tree when adding a new type:
-
-```
-Is this type a database row representation?
-  YES --> db.types.ts
-  NO  |
-      v
-Is this type an API request/response shape?
-  YES --> api/{resource}.types.ts or api/workflows.types.ts
-  NO  |
-      v
-Is this type provider-specific?
-  YES --> providers/provider.types.ts
-  NO  |
-      v
-Is this type workflow engine internals?
-  YES --> workflows/engine.types.ts
-  NO  |
-      v
-Is this type specific to a single module (foo.ts)?
-  YES --> foo.types.ts (create if doesn't exist)
-  NO  |
-      v
-Is this type used by 3+ files across src/?
-  YES --> types.ts
-  NO  --> types.ts (cross-cutting by elimination)
-```
+See docs/reference/type-conventions.txt for the type placement decision tree.
 
 ## 13.2 Core Types
 
@@ -312,7 +279,7 @@ for completed/detached resources.
 ownership, not stored. Returns true when workflowState ends with ':complete'
 AND currentManifestId is null.
 
-> See also: impl/shared/src/types.ts.l2.txt §Status Enums
+> See also: impl/shared/src/types.ts.l2.txt §StatusEnums
 
 ### 13.2.4 API Envelopes
 
@@ -342,8 +309,8 @@ Standard request/response wrappers for API consistency.
 - Timeout: REQUEST_TIMEOUT, OPERATION_TIMEOUT
 - Internal: INTERNAL_ERROR, DATABASE_ERROR
 
-> See also: impl/shared/src/errors.ts.l2.txt §Error Codes by Category
-> See also: impl/shared/src/api/resources.ts.l2.txt §Request Envelopes
+> See also: impl/shared/src/errors.ts.l2.txt §ErrorCodesByCategory
+> See also: impl/shared/src/api/resources.ts.l2.txt §RequestEnvelopes
 
 ## 13.3 Resource Types
 
@@ -362,17 +329,20 @@ Converters MUST map between Record and Materialized types preserving all fields.
 Conversion rules:
 - snake_case Record fields MUST map to camelCase Materialized fields
 - SQLite boolean (number 0|1) MUST map to TypeScript boolean
-- JSON string columns (input_json, output_json, error_json, tags_json) MUST be
+- JSON string columns (input_json, output_json, error_json, metadata_json) MUST be
   parsed to structured objects
 - Provider string fields MUST be cast to ProviderName union
 - Relationship fields (features, logs, etc.) are NOT populated by converters;
   they are populated separately based on materialization depth
+- Object-backed types (Snapshot, Artifact, FeatureInstallation) MUST extract
+  materialized fields by parsing the metadata_json column of the objects table
+  rather than from dedicated SQL columns
 
 Converter functions: recordToInstance(), instanceToRecord(), recordToRun(),
 recordToAllocation(), recordToWorkflow(), recordToSnapshot(), recordToArtifact(),
 recordToFeatureInstallation().
 
-> See also: impl/control/src/material/db.types.ts.l2.txt §Record <-> Materialized Converters
+> See also: impl/control/src/material/db.types.ts.l2.txt §RecordToMaterializedConverters
 
 ### 13.3.3 API Request/Response Types
 
@@ -394,7 +364,7 @@ Other request/response types follow CRUD patterns per resource. Full shapes
 for Instances, Runs, Allocations, Workflows, Manifests, Snapshots, and
 Artifacts APIs.
 
-> See also: impl/shared/src/api/resources.ts.l2.txt §API Request/Response Types
+> See also: impl/shared/src/api/resources.ts.l2.txt §RequestEnvelopes
 
 ### 13.3.4 Distinction: Record vs Materialized vs API Types
 
@@ -494,7 +464,7 @@ timeout?, retryPolicy?, compensation? (compensation node type)
 - maxBranches? — for parallel-fan-out
 - maxRetries? — for retry-with-alternative
 
-> See also: impl/shared/src/api/workflows.ts.l2.txt §Workflow Definition (Blueprints)
+> See also: impl/shared/src/api/workflows.ts.l2.txt §WorkflowEngineTypes
 
 ### 13.4.2 Instance Types (Runtime State)
 
@@ -515,7 +485,7 @@ WorkflowEventType union:
   pattern_applied | subworkflow_started | subworkflow_completed |
   resource_emitted | resource_claimed
 
-> See also: impl/shared/src/api/workflows.ts.l2.txt §Workflow Instance (Runtime)
+> See also: impl/shared/src/api/workflows.ts.l2.txt §WorkflowRuntimeTypes
 
 ### 13.4.3 NodeContext Interface
 
@@ -557,7 +527,7 @@ Utilities: sleep(ms), checkCancellation() (throws if workflow cancelled)
 need full workflow orchestration (DAG, patterns, compensation). Provides
 resource tracking and logging only.
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §NodeContext Interface
+> See also: impl/shared/src/api/workflows.ts.l2.txt §NodeContextInterface
 
 ### 13.4.4 Pattern Types and WorkflowEngine
 
@@ -588,7 +558,7 @@ resource tracking and logging only.
 - subscribe(workflowId, callback) -> unsubscribe function
 
 > See also: impl/control/src/workflow/patterns.ts.l2.txt §PatternTypes
-> See also: impl/control/src/workflow/engine.ts.l2.txt §WorkflowEngine Interface
+> See also: impl/control/src/workflow/engine.ts.l2.txt §WorkflowEngineInterface
 
 ### 13.4.5 Intent-Specific Input/Output Types
 
@@ -604,7 +574,7 @@ API contract types in shared/src/api/workflows.ts instead.
 - **CleanupManifestInput** — manifestId
 - **CleanupManifestOutput** — resourcesDeleted, s3ObjectsDeleted, instancesTerminated, errors (CleanupError[])
 
-> See also: impl/shared/src/api/workflows.ts.l2.txt §Intent-Specific Input/Output Types
+> See also: impl/shared/src/api/workflows.ts.l2.txt §IntentSpecificIOTypes
 
 ## 13.5 Type Relationship Diagram
 
@@ -689,95 +659,7 @@ OWNERSHIP RELATIONSHIPS
 
 ## 13.6 Guidance: Where to Put New Types
 
-### Adding a New Resource Type
-
-1. Define the materialized type in `types.ts`:
-   ```typescript
-   export interface NewResource {
-     id: ID;
-     // ... fields
-   }
-   ```
-
-2. Define the record type in `db.types.ts`:
-   ```typescript
-   export interface NewResourceRecord {
-     id: ID;
-     // ... snake_case fields
-   }
-   ```
-
-3. Add converters in `db.types.ts`:
-   ```typescript
-   export function recordToNewResource(record: NewResourceRecord): NewResource;
-   export function newResourceToRecord(resource: NewResource): NewResourceRecord;
-   ```
-
-4. Add API types in `api/resources.types.ts`:
-   ```typescript
-   export interface CreateNewResourceRequest { ... }
-   export type GetNewResourceResponse = ApiResponse<NewResource>;
-   ```
-
-### Adding a New Workflow Type
-
-1. Create `workflows/workflow-{name}.types.ts`:
-   ```typescript
-   export interface {Name}WorkflowInput { ... }
-   export interface {Name}WorkflowOutput { ... }
-   ```
-
-2. Add to `WorkflowType` union in `engine.types.ts`:
-   ```typescript
-   export type WorkflowType =
-     | 'launch-run'
-     | 'new-workflow'  // Add here
-     | string;
-   ```
-
-3. Define blueprint in `workflows/workflow-{name}.ts`
-
-### Adding Provider-Specific Types
-
-Provider-specific types live in `providers/provider.types.ts`. Core provider
-types like SpawnOptions are defined there and referenced by workflow types.
-
-**SpawnOptions** — key fields with semantic constraints:
-- spec: string — Instance type (g5.xlarge, A100x1, etc). MUST match provider catalog.
-- region?: string — Target region/zone
-- spot?: boolean — Use spot/preemptible pricing
-- maxSpotPrice?: number — Maximum spot price ($/hour)
-- initChecksum?: string — Init script checksum for warm pool matching
-- tags?: Record<string, string>
-- bootstrap: BootstrapConfig — Bootstrap configuration. MUST be provided.
-- snapshotId?: string — Spawn from snapshot
-- clientRequestId?: string — Client-provided request ID for idempotency
-
-**Adding custom provider types:**
-
-1. Add to `providers/provider.types.ts`:
-   ```typescript
-   export interface AWSInstanceExtension {
-     availabilityZone: string;
-     spotRequestId: string | null;
-   }
-   ```
-
-2. Use type intersection for provider-specific resources:
-   ```typescript
-   type AWSInstance = Instance & AWSInstanceExtension;
-   ```
-
-### Adding Pattern/Feature/Heartbeat Types
-
-All live in `providers/provider.types.ts`:
-
-- **New pattern**: Add to `PatternType` union, define config interface, add to `PatternConfig` discriminated union
-- **New feature provider**: Define config/state types, implement `FeatureProvider<TConfig, TState>`, add to `FeatureProviderName` union
-- **New heartbeat task**: Add to `HeartbeatTask.type` union, use `TaskReceipt` for completions
-
-**Note:** Remote agent communication types (Ch11) live in `api/agent.types.ts`.
-Don't confuse provider heartbeats with agent heartbeats.
+See docs/reference/type-conventions.txt for type placement rules and organization guidance.
 
 ## 13.7 Feature Provider Types
 
@@ -799,7 +681,7 @@ Feature providers enable cross-provider capabilities like Tailscale VPN integrat
 
 Tailscale types: TailscaleConfig, TailscaleState (implementation-specific)
 
-> See also: impl/control/src/provider/types.ts.l2.txt §Feature Provider Types
+> See also: impl/control/src/provider/types.ts.l2.txt §FeatureProviderInterface
 
 ## 13.8 Provider Heartbeat Types
 
@@ -815,27 +697,8 @@ Types for heartbeat expectations model between control plane and providers.
   spot_interruption | budget_threshold | drift_detected | provider_event.
   Optional context.
 
-> See also: impl/control/src/provider/types.ts.l2.txt §Provider Heartbeat Types
+> See also: impl/control/src/provider/extensions.ts.l2.txt §HeartbeatExpectationsModel
 
 ## 13.9 Type Naming Conventions and Anti-Patterns
 
-| Type Category     | Naming Pattern              | Example                    |
-|-------------------|-----------------------------|----------------------------|
-| Materialized      | `{Resource}`                | `Instance`, `Run`          |
-| Database record   | `{Resource}Record`          | `InstanceRecord`           |
-| API request       | `{Action}{Resource}Request` | `CreateRunRequest`         |
-| API response      | `{Action}{Resource}Response`| `ListInstancesResponse`    |
-| Workflow input    | `{Workflow}Input`           | `LaunchRunInput`           |
-| Workflow output   | `{Workflow}Output`          | `LaunchRunOutput`          |
-| Status enum       | `{Resource}Status`          | `AllocationStatus`         |
-| Config type       | `{Feature}Config`           | `HoldDurationConfig`       |
-| Options type      | `{Feature}Options`          | `MaterializationOptions`   |
-
-### Anti-Patterns to Avoid
-
-1. **Mixed concern types** - Don't put API shapes in db.types.ts
-2. **any usage** - Use generics or unknown with type guards
-3. **Inline complex types** - Extract to named interfaces
-4. **Circular imports** - Use type-only imports: `import type { X } from`
-5. **Overly generic types** - Prefer specific types with discriminated unions
-6. **String enums for status** - Use union types with const assertions
+See docs/reference/type-conventions.txt for naming conventions and anti-patterns.

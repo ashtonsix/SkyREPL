@@ -1,145 +1,36 @@
-# launch-run.ts - Launch Run Intent
+# launch-run.ts - Launch Run Intent (Ch7)
 
-## Exports
+Acquire instance (warm pool or spawn), sync files, execute command, collect artifacts.
+See L2 for workflow node handlers, warm pool fallback logic, and pattern applications.
 
-```typescript
-export interface LaunchRunInput {
-  runId: string;
-  command: string;
-  env?: Record<string, string>;
-  files?: { path: string; checksum: string }[];
-  spec: InstanceSpec;
-  preferWarmPool?: boolean;        // Default: true
-  allowSpotFallback?: boolean;     // Default: true
-  artifactPatterns?: string[];
-  holdDuration?: number;           // Default: 300000 (5 min)
-  createSnapshot?: boolean;        // Default: false
-  idempotencyKey?: string;
-}
+## Inputs
+runId, command, env, files, spec, preferWarmPool, allowSpotFallback, artifactPatterns, holdDuration, createSnapshot, idempotencyKey
 
-export interface LaunchRunOutput {
-  workflowId: string;
-  runId: string;
-  instanceId: string;
-  allocationId: string;
-  fromWarmPool: boolean;
-  artifacts?: { id: string; path: string }[];
-  snapshotId?: string;
-}
+## Outputs
+workflowId, runId, instanceId, allocationId, fromWarmPool, artifacts, snapshotId
 
-// Entry point
-export async function launchRun(input: LaunchRunInput): Promise<Workflow>;
+## Workflow Nodes
+check-budget, resolve-instance, claim-warm-allocation, spawn-instance, wait-for-boot, create-allocation, sync-files, await-completion, finalize-run
 
-// Workflow definition
-export const launchRunWorkflow: WorkflowDefinition;
-```
+## PatternApplications
+- CB at resolve-instance: warm pool vs spawn decision
+- CB at claim-warm-allocation: try-fallback on race loss
+- IAR at wait-for-boot: feature installation (Tailscale, GPU drivers)
+- CB at finalize-run: conditional snapshot creation
 
-## Purpose
-Acquire instance (warm pool or spawn), sync files, execute command, collect artifacts
+## Key Behaviors
+- Warm pool prefers matching init_checksum (snapshot-based restart)
+- File sync bypasses batching via flush_and_send (critical for timeout)
+- Sync failure transitions allocation CLAIMED→FAILED
+- Successful sync transitions CLAIMED→ACTIVE
+- Snapshot-only mode: skip command execution if create_snapshot=true and no command
+- Finalize: ACTIVE→COMPLETE, set debug_hold_until, warm pool replenishment, seal manifest
 
-## Workflow Graph
+## ResourceEmissions
+- instance (priority 50, at spawn-instance)
+- allocation (priority 90, at create-allocation)
+- run (priority 80, at create-allocation)
+- object (priority 10, at finalize-run if snapshot created)
 
-```
-                    ┌─────────────────┐
-                    │ resolve-instance │ (conditional-branch)
-                    └────────┬────────┘
-                             │
-              ┌──────────────┴──────────────┐
-              │                             │
-    (warm pool available)          (no warm allocation)
-              │                             │
-              ▼                             ▼
-    ┌─────────────────┐           ┌─────────────────┐
-    │ claim-allocation │           │ spawn-instance  │
-    └────────┬────────┘           └────────┬────────┘
-              │                             │
-              │                    ┌────────┴────────┐
-              │                    │create-allocation│
-              │                    └────────┬────────┘
-              │                             │
-              └──────────────┬──────────────┘
-                             │
-                    ┌────────▼────────┐
-                    │   sync-files    │
-                    └────────┬────────┘
-                             │
-                    ┌────────▼────────┐
-                    │    start-run    │ (waits for sync_complete, CLAIMED→ACTIVE)
-                    └────────┬────────┘
-                             │
-                    ┌────────▼────────┐
-                    │ wait-completion │
-                    └────────┬────────┘
-                             │
-                    ┌────────▼────────┐
-                    │collect-artifacts│
-                    └────────┬────────┘
-                             │
-                    ┌────────▼────────┐
-                    │    finalize     │ (ACTIVE→COMPLETE, warm pool replenishment, seal manifest, optional snapshot)
-                    └─────────────────┘
-```
-
-## Nodes
-
-1. **resolve-instance**: Check warm pool via db.findWarmAllocation(spec)
-   - If found: route to claim-allocation branch
-   - If not found: route to spawn-instance branch
-   - Uses conditional-branch pattern
-
-2. **spawn-instance**: Two-phase spawn (DB then cloud)
-   - Phase 1: Create instance record in DB
-   - Phase 2: Call provider.spawn()
-   - Compensation: Terminate instance if provider_id exists
-
-3. **claim-allocation**: Atomic claim of AVAILABLE allocation
-   - Uses optimistic locking (db.claimAllocation)
-   - Returns null if race lost → falls back to spawn-instance
-
-4. **create-allocation**: Create allocation record (after spawn only)
-   - Creates allocation with status='CLAIMED'
-
-5. **sync-files**: Download files to instance
-   - Sends file URLs to agent via SSE
-   - No wait (start-run handles sync confirmation)
-
-6. **start-run**: Send command via SSE, wait for sync_complete
-   - Waits for agent sync_complete event
-   - Control plane transitions allocation: CLAIMED → ACTIVE
-   - Sets run.started_at timestamp
-
-7. **wait-completion**: Wait for run_complete or timeout
-   - Polls for run completion (24hr default)
-   - Captures exit_code
-
-8. **collect-artifacts**: Upload matching files
-   - Sends artifact collection request to agent
-   - Agent uploads to presigned URLs
-
-9. **finalize**: ACTIVE → COMPLETE, seal manifest, create snapshot if requested
-   - Transition allocation: ACTIVE → COMPLETE
-   - Set debug_hold_until if configured (for debugging)
-   - Warm pool replenishment: create new AVAILABLE allocation if eligible
-   - Calls db.sealManifest()
-   - Optional provider.createSnapshot()
-
-## Warm Pool Fallback Flow
-
-When preferWarmPool=true (default):
-1. resolve-instance checks db.findWarmAllocation(spec, initChecksum)
-2. If AVAILABLE allocation found matching spec:
-   - Route to claim-allocation
-   - Atomic claim via optimistic locking
-   - If claim fails (race): fall back to spawn-instance
-3. If no matching allocation:
-   - Route directly to spawn-instance
-
-When preferWarmPool=false:
-- Skip warm pool check, always spawn new instance
-
-## Error Handling
-
-See engine.ts for retry strategy. Key behaviors:
-- CAPACITY_UNAVAILABLE: retry-with-alternative (different region)
-- PROVIDER_API_ERROR: retry with exponential backoff
-- Spawn failure: compensate (terminate partial instance)
+## Materialization
+Workflow record in DB. Triggers instance spawn, allocation creation, and manifest sealing.

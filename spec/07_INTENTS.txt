@@ -135,7 +135,7 @@ LEGEND:
 - `await-completion`: Block until run_complete message received
 - `finalize-run`: Transition allocation to COMPLETE, trigger snapshot if requested
 
-> See also: impl/control/src/intent/launch-run.ts.l2.txt §Entry Point
+> See also: impl/control/src/intent/launch-run.ts.l2.txt §EntryPoint
 
 **syncFiles handler details:**
 
@@ -207,7 +207,7 @@ This reduces cold start time (e.g., from minutes to seconds) for repeat runs wit
 │  └─────────┬─────────┘     └──────────────────┘     └────────┬─────────┘    │
 │            │                                                 │              │
 │            │◄────────────────────────────────────────────────┘              │
-│            │                  (ssh_drain_grace_period, then force)         │
+│            │                  (drain_timeout_ms, then force)               │
 │            ▼                                                                │
 │  ┌──────────────────┐                                                       │
 │  │ cleanup-features │ ─────────────► PFO: Parallel teardown by feature      │
@@ -235,7 +235,7 @@ This reduces cold start time (e.g., from minutes to seconds) for repeat runs wit
 
 1. **VALIDATE**: Verify instance exists, acquire termination lock
 2. **DRAIN-ALLOCATIONS**: Archive ACTIVE allocations, notify agent
-3. **DRAIN-SSH**: Notify users, wait ssh_drain_grace_period, force disconnect
+3. **DRAIN-SSH**: Notify users, wait drain_timeout_ms, force disconnect
 4. **CLEANUP-FEATURES**: Parallel teardown of all FeatureInstallations (Tailscale,
    GPU drivers, monitoring). Uses Parallel-Fan-Out; partial failures don't block.
 5. **TERMINATE-PROVIDER**: Call provider.terminate(), wait for confirmation
@@ -255,11 +255,11 @@ Each feature MAY provide optional teardownHandler invoked during cleanup-feature
 
 1. Query allocations WHERE instance_id=X AND status='COMPLETE' AND debug_hold_until>now
 2. Broadcast termination warning via instance SSH
-3. Wait ssh_drain_grace_period (configurable)
+3. Wait drain_timeout_ms (configurable)
 4. Force-disconnect remaining sessions
 5. Return count of forced disconnects
 
-> See also: impl/control/src/intent/terminate.ts.l2.txt §Entry Point
+> See also: impl/control/src/intent/terminate.ts.l2.txt §EntryPoint
 
 ## 7.3 create-snapshot Intent
 
@@ -322,11 +322,11 @@ interface SnapshotCapability {
 
 **register-snapshot-object node** MUST:
 1. Insert object record with type='snapshot'
-2. Store provider_id, spec, init_checksum, name in tags_json
+2. Store provider_id, spec, init_checksum, name in metadata_json
 3. Call ctx.emitResource('object', objectId, priority=10)
 4. Return snapshotObjectId for workflow output
 
-> See also: impl/control/src/intent/snapshot.ts.l2.txt §Entry Point
+> See also: impl/control/src/intent/snapshot.ts.l2.txt §EntryPoint
 
 ## 7.4 cleanup-manifest Intent
 

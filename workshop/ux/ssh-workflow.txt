@@ -1,0 +1,27 @@
+================================================================================
+SSH WORKFLOW DESIGN
+================================================================================
+
+Source: spec/05_ALLOCATIONS.txt (Chapter 5, §5.4)
+Extracted: 2026-02-06
+
+This document captures the UX design rationale and workflow properties for SSH
+integration with allocations.
+
+================================================================================
+
+## Allocation SSH Properties
+
+Each allocation has three SSH-related properties:
+- `instance_id`: which physical instance hosts this allocation
+- `user`: Unix user for SSH (default: platform native like "ubuntu", "runpod", etc.)
+- `workdir`: isolated working directory (e.g., `/home/ubuntu/work_1`, `work_2`, ...)
+
+**Workdir Isolation:**
+Unique workdir per allocation (counter increments per instance). Previous workdirs
+persist until instance termination, enabling SSH to old allocations while new work
+executes. Cleanup timing: instance termination, not allocation completion.
+
+Workdirs provide path isolation only---not process or filesystem isolation.
+Allocations share user home, /tmp, IOPS, CPU, and memory. Pre-claim disk space
+checks are advisory (warnings, not blockers) to preserve warm pool efficiency.

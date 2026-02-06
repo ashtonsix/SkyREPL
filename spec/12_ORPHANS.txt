@@ -55,13 +55,7 @@ repl-v2a1b2c3-none-2j3k
 repl-v2a1b2c3-3l4m-4n5o
 ```
 
-### Why This Matters
-
-With total database loss, resource names still enable: control plane identification
-("did I create this?"), instance matching (via slug), manifest correlation, uniqueness.
-
-The control_id (version_tag + random_env persisted to ~/.repl/control.env) uniquely
-identifies a control plane installation.
+> Why naming matters rationale extracted to docs/design/rationale-resources.txt
 
 ### Implementation
 
@@ -76,7 +70,7 @@ instanceSlug is the base-36 encoding of instanceId.
 The system MUST parse names matching the regex `^repl-([a-z0-9]+)-([a-z0-9]+|none)-([a-z0-9]+)$`
 and return the parsed components, or null if the name does not match.
 
-> See also: impl/control/src/orphan/scanner.ts.l2.txt §Detection Algorithm
+> See also: impl/control/src/orphan/scanner.ts.l2.txt §ProviderOrphanDetection
 
 ### Tailscale Naming
 
@@ -119,7 +113,7 @@ STEPS:
      Record as missing (informational only)
 ```
 
-> See also: impl/control/src/orphan/scanner.ts.l2.txt §Detection Algorithm
+> See also: impl/control/src/orphan/scanner.ts.l2.txt §ProviderOrphanDetection
 
 **Each orphaned resource record MUST include:**
 - providerId, resourceType (instance | volume | snapshot | tailscale_machine), provider
@@ -135,7 +129,7 @@ query the objects table for tracked tailscale_machine entries, and report any
 untracked machines as orphans. Tailscale orphan records MUST include machineId,
 machineName, tailscaleIp, inferred instanceIdSlug, lastSeen time, and age.
 
-> See also: impl/control/src/orphan/scanner.ts.l2.txt §Tailscale Orphan Detection
+> See also: impl/control/src/orphan/scanner.ts.l2.txt §TailscaleOrphanDetection
 
 ## 12.3 Session-Based Classification
 
@@ -155,7 +149,7 @@ For each orphan:
     -> classify as 'otherSessions'
 ```
 
-> See also: impl/control/src/orphan/classifier.ts.l2.txt §Session-Based Classification
+> See also: impl/control/src/orphan/classifier.ts.l2.txt §SessionBasedClassification
 
 ### Severity Levels
 
@@ -213,114 +207,11 @@ The system MUST support the following whitelist operations:
 - **getUnacknowledgedOrphans()**: Return detected orphans excluding those matched
   by active whitelist entries (filtered by provider:providerId pair).
 
-> See also: impl/control/src/orphan/whitelist.ts.l2.txt §Whitelist Operations
+> See also: impl/control/src/orphan/whitelist.ts.l2.txt §WhitelistOperations
 
 ## 12.5 CLI Commands
 
-### List Orphans
-
-```bash
-# List all orphans
-repl orphans list
-
-# List orphans for specific provider
-repl orphans list --provider aws
-
-# Include whitelisted orphans
-repl orphans list --include-whitelisted
-
-# Output as JSON for scripting
-repl orphans list --json
-```
-
-**Output Format:**
-
-```
-Orphaned Resources (3 found)
-
-CURRENT SESSION (WARNING):
-  [aws] i-0abc123def456  repl-v2a1b2c3-9ix-1h2i
-        Age: 15m | Est. Cost: $1.23/hr | Type: instance
-
-OTHER SESSIONS (INFO):
-  [aws] i-0xyz789abc012  repl-v2a1b2c3-none-2j3k
-        Age: 2d 4h | Est. Cost: $0.45/hr | Type: instance
-
-  [aws] vol-0123456789   repl-v2a1b2c3-3l4m-4n5o
-        Age: 5d | Est. Cost: $0.02/hr | Type: volume
-
-TAILSCALE:
-  [ts] repl-v2a1b2c3-5p6q
-       IP: 100.64.0.15 | Last Seen: 3h ago
-
-Run 'repl orphans inspect <provider_id>' for details.
-Run 'repl orphans whitelist <provider_id> --reason "..."' to acknowledge.
-```
-
-### Inspect Orphan
-
-```bash
-repl orphans inspect i-0abc123def456
-```
-
-**Output:**
-
-```
-Orphan Details: i-0abc123def456
-
-Provider:     aws
-Resource:     EC2 Instance
-Name:         repl-v2a1b2c3-9ix-1h2i
-Created:      2024-01-31 14:32:15 UTC (15 minutes ago)
-Status:       running
-Instance Type: g5.xlarge
-Region:       us-east-1
-Est. Cost:    $1.23/hr ($29.52/day)
-
-Inferred Information:
-  Control ID: v2a1b2c3 (matches current installation)
-  Manifest ID slug: 9ix
-  Instance ID slug: 1h2i
-
-Possible Matches in DB:
-  inst-1h2i (workflow_state: terminate:complete) - 95% confidence
-
-Actions:
-  repl orphans whitelist i-0abc123def456 --reason "..."
-  repl orphans open i-0abc123def456   # Open in AWS Console
-```
-
-### Whitelist Orphan
-
-```bash
-# Add to whitelist with reason (required)
-repl orphans whitelist i-0abc123def456 --reason "Test instance for debugging"
-
-# Add with expiry
-repl orphans whitelist i-0abc123def456 \
-  --reason "Temporary keep for investigation" \
-  --expires "2024-02-07"
-
-# Add with notes
-repl orphans whitelist i-0abc123def456 \
-  --reason "Production backup" \
-  --notes "Contact ops@example.com before removing"
-```
-
-### Remove from Whitelist
-
-```bash
-repl orphans unwhitelist i-0abc123def456
-```
-
-### Open in Provider Console
-
-`repl orphans open <id>` opens appropriate provider console URL (AWS, RunPod;
-Lambda not supported).
-
-### Scan Command
-
-`repl orphans scan [--provider aws] [--verbose]` forces immediate orphan scan.
+See docs/guides/orphan-management.txt for orphan detection CLI commands and usage.
 
 ## 12.6 Preflight Warnings
 
@@ -334,19 +225,15 @@ MUST query unacknowledged orphans, classify them by session, and return warnings
 CLI MUST display warnings before proceeding (see Ch10 for preflight display format).
 Preflight checks MUST NOT block operations -- they are advisory only.
 
-> See also: impl/control/src/orphan/scanner.ts.l2.txt §Detection Algorithm
+> See also: impl/control/src/orphan/scanner.ts.l2.txt §ProviderOrphanDetection
 
 ## 12.7 Safety Constraints
 
-**CRITICAL: NEVER auto-terminate cloud resources.** All termination must be
-explicitly user-requested and documented. Rationale: false positives destroy
-workloads; DB recovery may reveal orphans are tracked; users may have created
-resources outside SkyREPL; accidental termination cost exceeds orphan cost.
+**CRITICAL: NEVER auto-terminate cloud resources.**
 
-**Grace period (minAgeMs)**: Orphan detection excludes resources younger than
-ORPHAN_MIN_AGE (see Ch15 §15.9). This prevents terminating in-progress spawns
-where the DB record hasn't been created yet or reconciliation is still running.
-(Value chosen to allow typical spawn workflows to complete.)
+> Safety constraints rationale extracted to docs/design/rationale-resources.txt
+
+**Grace period (minAgeMs)**: ORPHAN_MIN_AGE (see Ch15 §15.9).
 
 **Allowed automatic actions:** Detect, report, notify, update tracking records,
 expire whitelist entries.
@@ -360,7 +247,7 @@ Spawn errors classified by orphan risk:
 
 **SpawnErrorClassification**: orphanRisk (boolean), confidenceNoResource (high | medium | low), action (none | scan_immediately | scan_delayed).
 
-> See also: impl/control/src/orphan/classifier.ts.l2.txt §Failed Spawn Detection
+> See also: impl/control/src/orphan/classifier.ts.l2.txt §SpawnErrorClassification
 
 | Error Type                  | Orphan Risk | Confidence No Resource | Action           |
 |-----------------------------|-------------|------------------------|------------------|
@@ -446,6 +333,4 @@ $ repl orphans terminate i-0abc123def456 --confirm
 # Control plane verifies confirmation and terminates
 ```
 
-**Design rationale:** Conservative approach prevents accidental termination. False
-positives would destroy workloads, so human verification is required. The 1-hour
-interval balances cost monitoring with system load.
+> Design rationale extracted to docs/design/rationale-resources.txt

@@ -1,163 +1,26 @@
-# compensation.ts - Compensation Handling
+# compensation.ts - Compensation Framework (Ch6)
 
-# Note: Timing constants import from ../../../shared/src/config/timing.ts.l2.txt
-# - COMPENSATION_TIMEOUT_MS (5m)
-
-## Exports
-
-```typescript
-export interface NodeExecutionContext {
-  workflowId: string;
-  nodeId: string;
-  manifestId: string;
-  input: Record<string, unknown>;
-  attempt: number;
-  db: Database;
-  emitResource(type: string, id: string): void;
-  getProvider(name: string): Promise<Provider>;
-  sendSSE(instanceId: string, message: AgentMessage): Promise<void>;
-}
-
-export interface NodeOutput {
-  [key: string]: unknown;
-}
-
-export interface NodeExecutor<TInput = unknown, TOutput extends NodeOutput = NodeOutput> {
-  execute(ctx: NodeExecutionContext, input: TInput): Promise<TOutput>;
-  compensate?(ctx: NodeExecutionContext, input: TInput): Promise<void>;
-  idempotent?: boolean;
-}
-
-export interface CompensationResult {
-  success: boolean;
-  error?: Error;
-  skippedReason?: 'no_handler' | 'resource_transferred' | 'already_compensated';
-}
-
-// Main compensation function
-export async function compensateFailedNode(
-  workflowId: string,
-  failedNodeId: string,
-  ctx: NodeExecutionContext
-): Promise<CompensationResult>;
-
-// Registry for node executors
-export function registerNodeExecutor(nodeType: string, executor: NodeExecutor): void;
-export function getNodeExecutor(nodeType: string): NodeExecutor | undefined;
-```
+Single-node compensation for failed workflow nodes. Two-phase spawn protocol prevents orphans.
+See L2 for retry logic, timeout handling, two-phase spawn implementation, reconciliation.
 
 ## Core Principle
-- Compensate ONE node only - the failed node
-- NO cascade through completed nodes
-- Manifest policies handle broader cleanup
+Compensate ONE node only (the failed node). NO cascade through completed nodes. Manifest policies handle broader cleanup.
 
 ## Compensation vs Teardown
 - COMPENSATION: error correction DURING workflow (single node)
 - TEARDOWN: scheduled cleanup AFTER workflow (manifest expiry)
 
-## compensateFailedNode Implementation
+## Two-Phase Spawn
+- Phase 1: Create DB record + manifest entry BEFORE cloud API call
+- Phase 2: Execute cloud API call, update DB with provider_id
+- Property: Kill at any step → no orphans
+- Reconciliation finds instances if DB update fails after cloud call
 
-```
-async function compensateFailedNode(workflowId, failedNodeId, ctx): Promise<CompensationResult>
-  1. Load node from DB, verify node.status === 'failed'
-  2. Check if node.compensated === true → return { success: true, skippedReason: 'already_compensated' }
-  3. Check if resource transferred to another workflow (ownership check)
-     → If transferred: return { success: true, skippedReason: 'resource_transferred' }
-  4. Get executor for node.type
-  5. If !executor.compensate → return { success: true, skippedReason: 'no_handler' }
-  6. Try:
-     - await executor.compensate(ctx, node.input)
-     - Mark node.compensated = true in DB
-     - return { success: true }
-  7. Catch error:
-     - Log compensation failure (non-fatal)
-     - return { success: false, error }
-```
+## Compensation Timeout and Retry
+- COMPENSATION_TIMEOUT_MS: 5 minutes per handler (from timing.ts)
+- Retry up to 3 times for retryable errors (RATE_LIMITED, NETWORK_ERROR, PROVIDER_API_ERROR)
+- Non-retryable errors fail immediately (VALIDATION_ERROR, NOT_FOUND)
+- Backoff schedule: 1s, 2s, 4s
 
-## Example: Spawn Node Compensation
-
-```typescript
-const spawnInstanceExecutor: NodeExecutor<SpawnInput, SpawnOutput> = {
-  async execute(ctx, input) {
-    // ... spawn logic
-  },
-
-  async compensate(ctx, input) {
-    const instance = await ctx.db.getInstance(input.instanceId);
-    if (!instance) return; // Already gone
-
-    // A1: Handle null provider_id (Phase 1 completed, Phase 2 crashed)
-    if (instance.provider_id) {
-      const provider = await ctx.getProvider(instance.provider);
-      try {
-        await provider.terminate(instance.provider_id);
-      } catch (e) {
-        // Handle NOT_FOUND gracefully (already terminated)
-        if (!isNotFoundError(e)) throw e;
-      }
-    } else {
-      // Provider resource never created, only DB record exists
-      // Skip provider.terminate(), just clean up DB record
-      // Orphan scan will not find this (no provider_id to match)
-    }
-
-    await ctx.db.updateInstance(instance.id, {
-      workflow_state: 'spawn:error'
-    });
-  },
-
-  idempotent: false // Spawn is not idempotent
-};
-```
-
-## Error Handling During Compensation
-
-- Compensation errors are logged but don't fail the workflow (it's already failed)
-- Orphan scanner catches resources that compensation missed
-- Manifest cleanup handles resources not explicitly compensated
-
-## Compensation Timeout and Retry (H9/H10)
-
-- H9: COMPENSATION_TIMEOUT_MS (5 minutes per handler, from timing.ts)
-- H10: Retry up to 3 times for retryable errors with exponential backoff
-- H10: Retryable errors: RATE_LIMITED, NETWORK_ERROR, PROVIDER_API_ERROR
-- H10: Non-retryable errors fail immediately: VALIDATION_ERROR, NOT_FOUND
-- H10: Backoff schedule: 1s, 2s, 4s
-- If all retries exhausted, log error and trigger orphan scan
-- Implementation: Combine timeout and retry logic
-
-```typescript
-import { TIMING } from '../../../shared/src/config/timing';
-const MAX_COMPENSATION_RETRIES = 3; // H10
-
-async function compensateWithTimeoutAndRetry(handler, ctx, input) {
-  for (let attempt = 0; attempt < MAX_COMPENSATION_RETRIES; attempt++) {
-    try {
-      // H9: Wrap each attempt with timeout
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('COMPENSATION_TIMEOUT')), TIMING.COMPENSATION_TIMEOUT_MS)
-      );
-
-      await Promise.race([handler(ctx, input), timeoutPromise]);
-      return { success: true };
-
-    } catch (e) {
-      // H10: Determine if error is retryable
-      const isRetryable = ['RATE_LIMITED', 'NETWORK_ERROR', 'PROVIDER_API_ERROR'].includes(e.code);
-      const isLastAttempt = attempt === MAX_COMPENSATION_RETRIES - 1;
-
-      if (!isRetryable || isLastAttempt) {
-        log.error('Compensation failed', { attempt, error: e, ctx, input });
-        if (e.message === 'COMPENSATION_TIMEOUT') {
-          log.error('Compensation timeout - orphan scan will handle cleanup');
-        }
-        return { success: false, error: e };
-      }
-
-      // H10: Exponential backoff: 1s, 2s, 4s
-      const delay = Math.pow(2, attempt) * 1000;
-      await sleep(delay);
-    }
-  }
-}
-```
+## Exports
+NodeExecutionContext, NodeExecutor, CompensationResult, compensateFailedNode, registerNodeExecutor, getNodeExecutor

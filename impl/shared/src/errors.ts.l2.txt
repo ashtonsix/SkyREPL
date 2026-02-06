@@ -5,7 +5,7 @@
 # - ErrorCode, ErrorCodeType, ApiError from ./api/resources.ts.l2.txt
 # - WorkflowError, NodeError from ./resources.ts.l2.txt
 
-## Error Category to HTTP Status Mapping
+## ErrorCategoryToHTTPStatusMapping
 
 ```typescript
 import type { ErrorCategory } from './resources';
@@ -32,7 +32,7 @@ export function httpStatusForCategory(category: ErrorCategory): number {
 }
 ```
 
-## Error Codes by Category
+## ErrorCodesByCategory
 
 ```typescript
 // =============================================================================
@@ -83,7 +83,7 @@ export const ERROR_CODES_BY_CATEGORY: Record<ErrorCategory, string[]> = {
 };
 ```
 
-## Error Factory Functions
+## ErrorFactoryFunctions
 
 ```typescript
 import type { ApiError, ErrorCodeType } from './api/resources';

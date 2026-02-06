@@ -14,7 +14,7 @@
 import type { ProviderName, Checksum, TimestampMs } from '../../../../shared/src/types';
 ```
 
-## Provider Interface
+## ProviderInterface
 
 ```typescript
 /**
@@ -126,7 +126,7 @@ interface Provider<
 type ProviderName = 'aws' | 'lambda' | 'runpod' | 'orbstack';
 ```
 
-## Capability Flags
+## CapabilityFlags
 
 ```typescript
 interface ProviderCapabilities {
@@ -223,7 +223,7 @@ const PROVIDER_CAPABILITIES: Record<ProviderName, ProviderCapabilities> = {
 };
 ```
 
-## Core Method Types
+## CoreMethodTypes
 
 ```typescript
 // ============================================================
@@ -308,7 +308,7 @@ type ProviderInstanceStatus =
   | 'error';       // Instance in error state
 ```
 
-## List Filter
+## ListFilter
 
 ```typescript
 interface ListFilter {
@@ -332,7 +332,7 @@ interface ListFilter {
 }
 ```
 
-## Bootstrap Configuration
+## BootstrapConfiguration
 
 ```typescript
 interface BootstrapConfig {
@@ -376,7 +376,7 @@ interface BootstrapScript {
 }
 ```
 
-## Snapshot Types
+## SnapshotTypes
 
 ```typescript
 interface CreateSnapshotOptions {
@@ -442,7 +442,7 @@ interface ProviderSnapshot {
 }
 ```
 
-## Spot Types
+## SpotTypes
 
 ```typescript
 interface SpotOptions extends SpawnOptions {
@@ -491,7 +491,7 @@ interface SpotPriceInfo {
 }
 ```
 
-## Provider-Specific Enhanced Types
+## ProviderSpecificEnhancedTypes
 
 ```typescript
 // ============================================================
@@ -648,7 +648,7 @@ interface OrbStackInstance extends ProviderInstance {
 }
 ```
 
-## Feature Provider Interface
+## FeatureProviderInterface
 
 ```typescript
 /**
@@ -718,7 +718,7 @@ interface FeatureReconcileContext {
 }
 ```
 
-## Feature Lifecycle Integration
+## FeatureLifecycleIntegration
 
 ```typescript
 // SpawnOptions includes feature configuration

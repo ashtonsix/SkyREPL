@@ -23,7 +23,7 @@ import { getProviderClient } from '../provider/registry';
 import { generateUUID } from '../util/id';
 ```
 
-## Entry Point
+## EntryPoint
 
 ```typescript
 export async function createSnapshot(input: CreateSnapshotInput): Promise<Workflow> {
@@ -33,7 +33,7 @@ export async function createSnapshot(input: CreateSnapshotInput): Promise<Workfl
 }
 ```
 
-## Workflow Definition
+## WorkflowDefinition
 
 ```typescript
 export const createSnapshotWorkflow: WorkflowDefinition = {
@@ -55,7 +55,7 @@ export const createSnapshotWorkflow: WorkflowDefinition = {
 };
 ```
 
-## Blueprint Structure
+## BlueprintStructure
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -94,7 +94,7 @@ export const createSnapshotWorkflow: WorkflowDefinition = {
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Provider Abstraction
+## ProviderAbstraction
 
 ```typescript
 interface SnapshotCapability {
@@ -130,7 +130,7 @@ interface SnapshotStatus {
 // OrbStack: VM snapshot
 ```
 
-## Node Handlers
+## NodeHandlers
 
 ### validate-snapshot-request
 
@@ -342,18 +342,17 @@ async function registerSnapshotObject(
   ctx.log('info', 'Registering snapshot object', { providerSnapshotId });
 
   const db = getDatabase();
-  const objectId = generateUUID();
   const now = Date.now();
 
-  db.prepare(`
-    INSERT INTO objects (id, type, blob_id, provider, provider_object_id, metadata_json, created_at, accessed_at)
-    VALUES (?, 'snapshot', ?, ?, ?, ?, ?, NULL)
+  const result = db.prepare(`
+    INSERT INTO objects (type, blob_id, provider, provider_object_id, metadata_json, created_at, accessed_at)
+    VALUES ('snapshot', ?, ?, ?, ?, ?, NULL)
   `).run(
-    objectId,
     0,  // Snapshots are provider-managed, no blob payload — placeholder blob_id
     provider,
     providerSnapshotId,
     JSON.stringify({
+      provider_id: provider,
       run_id: input.runId,
       spec: instance.spec,
       init_checksum: input.initChecksum,
@@ -362,6 +361,8 @@ async function registerSnapshotObject(
     }),
     now
   );
+
+  const objectId = result.lastInsertRowid;
 
   // Emit resource to manifest
   ctx.emitResource('object', objectId, 10);

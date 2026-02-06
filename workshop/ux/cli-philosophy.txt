@@ -1,0 +1,152 @@
+# CLI Design Philosophy
+
+Extracted from spec/10_CLI.txt §10.1-10.2
+
+## Purpose
+
+The CLI is the primary user interface to SkyREPL. It submits workflow requests
+to the control plane and displays progress - a thin display layer rather than
+an orchestrator. This section specifies command structure, configuration
+management, progress display, and SSH integration.
+
+## 10.1 Architectural Role
+
+### CLI Responsibilities
+
+1. **Configuration parsing** - Read repl.toml, resolve profiles
+2. **Workflow submission** - Construct and submit workflow requests
+3. **Progress display** - Render SSE stream as human-readable output
+4. **SSH integration** - Maintain ~/.repl/ssh_config for native SSH access
+5. **Artifact retrieval** - Download artifacts via presigned URLs
+6. **Control plane lifecycle** - Start/stop local control plane (dev)
+7. **Provider setup** - Configure cloud credentials and verify connectivity
+8. **Install wizard** - Interactive setup via `repl init` for first-time users
+9. **Preflight warnings** - Display warnings before operations (orphans, budget, credential expiry)
+10. **Authentication** - Token-based auth with control plane
+11. **Auto-updates** - Check for and apply CLI updates
+12. **Feedback collection** - Submit bug reports and feedback to developers
+
+### File Organization
+
+CLI code is organized in cli/src/:
+
+```
+cli/src/
+├── main.ts              # Entry point, argument parsing
+├── config.ts            # repl.toml parsing, profile resolution
+├── client.ts            # HTTP client to control plane
+├── preflight.ts         # Pre-operation checks
+├── ssh.ts               # SSH config management
+├── process.ts           # Process management (local control plane)
+├── ui/                  # Output formatting
+│   ├── formatters.ts    # Resource formatting
+│   ├── progress.ts      # Progress bars, spinners
+│   └── prompts.ts       # Interactive prompts
+└── commands/            # One file per command
+    ├── run.ts           # repl run
+    ├── logs.ts          # repl logs
+    ├── list.ts          # repl list
+    ├── cancel.ts        # repl cancel
+    ├── extend.ts        # repl extend
+    ├── artifact.ts      # repl artifact
+    ├── instance.ts      # repl instance
+    ├── snapshot.ts      # repl snapshot
+    ├── orphan.ts        # repl orphan
+    ├── usage.ts         # repl usage
+    ├── control.ts       # repl control
+    └── setup.ts         # repl init/setup
+```
+
+> See also: impl/cli/src/commands/run.ts.l2.txt §RunCommandHandler
+
+### Not CLI Responsibilities
+
+These belong to the control plane, not the CLI:
+- Instance polling and state management
+- Retry logic for spawn failures
+- Direct provider API calls
+- Debug hold management (debug_hold_until via allocations - see Ch5)
+- Warm pool decision making
+
+## 10.2 Command Reference
+
+### Command Hierarchy
+
+```
+repl
+  init                       # Interactive setup wizard
+  run [profile]              # Submit launch-run workflow
+  run status <run-id>        # Get run status
+  logs <run-id>              # Stream run logs
+  list                       # List runs
+  cancel <run-id>            # Cancel run/workflow
+  extend <allocation-id>     # Extend allocation hold
+
+  artifact
+    list [--run <id>]        # List artifacts
+    pull <run-id> [--dest]   # Download artifacts
+
+  instance
+    list                     # List instances
+    terminate <id>           # Submit terminate workflow
+
+  snapshot
+    list                     # List snapshots
+
+  orphan
+    list                     # List orphaned resources
+    whitelist <id>           # Mark as intentionally unmanaged
+
+  usage [period]             # Usage and cost reporting
+
+  control
+    start                    # Start local control plane
+    stop                     # Stop local control plane
+    status                   # Control plane health
+
+  setup-provider <provider>  # Configure provider credentials
+  verify-setup               # Verify all provider connectivity
+
+  auth
+    login                    # Authenticate with control plane
+    logout                   # Clear authentication
+    status                   # Check authentication status
+
+  update                     # Check for and apply CLI updates
+  feedback                   # Submit feedback or report bug
+
+  help [command]             # Show help
+```
+
+### Top-Level Shortcuts
+
+For common operations, shortcuts bypass the subcommand hierarchy:
+
+| Shortcut         | Equivalent               | Notes                      |
+|------------------|--------------------------|----------------------------|
+| `repl run`       | `repl run default`       | Uses default profile       |
+| `repl status`    | `repl control status`    | Control plane health       |
+| `repl logs <id>` | Streams logs for run     | Direct log access          |
+
+### Global Flags
+
+All commands accept:
+
+```
+--json           Output JSON (machine-readable)
+--quiet          Suppress non-essential output
+--no-color       Disable ANSI colors
+--config PATH    Path to repl.toml (default: search upward)
+--profile NAME   Profile to use (default: "default" or single profile)
+```
+
+### ID Display Format
+
+**Slugs** are base-36 alphanumeric representations of integer IDs, displayed
+for brevity (e.g., ID 12345 → slug "9ix"):
+- `run-9ix` (maps to integer ID 12345)
+- `inst-1h2i` (maps to integer ID 67890)
+- `alloc-xyz`
+
+CLI accepts slug format only. Tab completion resolves prefixes. API responses
+include both `id` (integer) and `slug` fields; JSON output shows both.

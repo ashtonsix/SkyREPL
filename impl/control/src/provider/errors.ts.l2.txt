@@ -10,7 +10,7 @@
 import type { ProviderName } from '../../../../shared/src/types';
 ```
 
-## ProviderError Base Class
+## ProviderErrorBaseClass
 
 ```typescript
 /**
@@ -59,7 +59,7 @@ type ProviderErrorCategory =
   | 'internal';    // Provider internal error
 ```
 
-## Specific Error Classes
+## SpecificErrorClasses
 
 ```typescript
 /**
@@ -220,7 +220,7 @@ class NotFoundError extends ProviderError {
 }
 ```
 
-## Error Handling Helpers
+## ErrorHandlingHelpers
 
 ```typescript
 /**

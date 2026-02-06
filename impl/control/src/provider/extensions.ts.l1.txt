@@ -1,243 +1,45 @@
 # extensions.ts - Extension Framework
 
-# Note: Timing constants import from ../../../shared/src/config/timing.ts.l2.txt
-# Base cache TTLs (providers can override):
-# - CACHE_SPOT_PRICES_TTL_MS (5m)
-# - CACHE_CAPACITY_TTL_MS (1m)
-# - CACHE_INSTANCE_STATE_TTL_MS (30s)
-# - CACHE_INSTANCE_TYPES_TTL_MS (1h)
-
 Hooks, caching, and event bridges for provider-specific behavior.
-Hooks are lightweight (<1s) - they trigger workflows, don't do work themselves.
+See L2 for in-memory cache, lifecycle hooks, heartbeat expectations model, TTL configuration, cache invalidation integration.
 
 ## ProviderLifecycleHooks
 
-Interface for provider lifecycle events. All methods optional.
+onStartup(): Initialize provider, verify credentials, warm caches
+onShutdown(): Flush metrics, cleanup state
+onHeartbeat(expectations): Unified heartbeat with tasks and receipts
 
-### onStartup() -> Promise<void>
-- Called when control plane starts
-- Initialize provider, verify credentials
-- Warm caches (spot prices, capacity info)
-- Ensure resources exist (security groups, IAM roles)
+## HeartbeatExpectationsModel
 
-### onShutdown() -> Promise<void>
-- Called on graceful shutdown
-- Flush metrics, cleanup state
-- No new operations after this
+HeartbeatExpectations: tasks (HeartbeatTask[]), deadline (timestamp)
+HeartbeatTask: type (reconcile | health_check | cache_refresh | pool_maintenance), priority, lastRun?, params?
+HeartbeatReceipts: receipts (TaskReceipt[]), providerTasks?, workflowsLaunched?, nextHeartbeat?
+TaskReceipt: type, status (completed | skipped | deferred | failed), result?, reason?
+WorkflowLaunchReport: workflowId, workflowType, trigger, context?
 
-### onHeartbeat(expectations: HeartbeatExpectations) -> Promise<HeartbeatReceipts>
-- Unified heartbeat with expectations/receipts model
-- Core sends tasks to perform; provider returns completion receipts
-- Replaces separate onHeartbeat/onReconcile hooks
-- Called every heartbeat interval (30s default, provider can suggest different)
+## HookRegistry
 
-HeartbeatExpectations:
-- tasks: HeartbeatTask[] (tasks to perform this cycle)
-- deadline: number (timestamp when this must complete)
+registerProviderHooks(provider, hooks), invokeHook(provider, hook, ...args), invokeAllHooks(hook, ...args)
+Hooks should not crash control plane (errors caught and logged)
 
-HeartbeatTask:
-- type: 'reconcile' | 'health_check' | 'cache_refresh' | 'pool_maintenance'
-- priority: 'high' | 'normal' | 'low'
-- lastRun?: number (timestamp of last successful run)
-- params?: Record<string, unknown> (task-specific parameters)
+## InMemoryCache
 
-HeartbeatReceipts:
-- receipts: TaskReceipt[] (results for requested tasks)
-- providerTasks?: ProviderTaskReport[] (provider-initiated tasks)
-- workflowsLaunched?: WorkflowLaunchReport[] (async event handling)
-- nextHeartbeat?: { preferredInterval: number } (suggest different cadence)
+getWithCache<T>(key, ttlMs, fetcher, options?) - Return cached or fetch
+CacheOptions: bypassCache? (skip cache read, always fetch fresh)
+invalidateCache(pattern), invalidateInstanceCache(instanceId), clearProviderCache(provider)
 
-TaskReceipt:
-- type: string (matches HeartbeatTask.type)
-- status: 'completed' | 'skipped' | 'deferred' | 'failed'
-- result?: unknown (task-specific result data)
-- reason?: string (explanation for skipped/deferred/failed)
+## TTLConfiguration
 
-WorkflowLaunchReport:
-- workflowId: string
-- workflowType: string
-- trigger: 'spot_interruption' | 'budget_threshold' | 'drift_detected' | 'provider_event'
-- context?: Record<string, unknown> (event details)
-
-ProviderTaskReport:
-- taskType: string
-- status: string
-- details?: unknown
-
-Task Types:
-- 'reconcile': Compare DB vs provider state, detect orphans/drift/missing
-- 'health_check': Verify provider API responsiveness
-- 'cache_refresh': Update spot prices, capacity info, instance types
-- 'pool_maintenance': Check warm pool levels, warm volumes
-
-Note: Reconciliation findings (orphans, drift) are returned in TaskReceipt.result.
-Orphan termination requires human approval (via CLI), not auto-executed.
-
-### onSpotInterruption(notice: SpotInterruptionNotice) -> Promise<void>
-- Called when spot instance interrupted
-- Lightweight: trigger checkpoint/retry workflow
-- Do NOT do work here, just submit workflow
-
-SpotInterruptionNotice:
-- instanceId: number
-- providerId: string
-- interruptionTime: number
-- reason: 'capacity' | 'price' | 'termination-notice'
-
-### onBudgetThreshold(threshold: BudgetThreshold) -> Promise<void>
-- Called when spending threshold crossed
-- Trigger cleanup or alert workflow
-
-BudgetThreshold:
-- level: 'warning' | 'critical' | 'exceeded'
-- currentSpend: number
-- limit: number
-- period: 'daily' | 'weekly' | 'monthly'
-
-## Hook Registry
-
-registerProviderHooks(provider: ProviderName, hooks: ProviderLifecycleHooks) -> void
-- Register hooks for provider at startup
-- Called by provider module initialization
-
-invokeHook(provider: ProviderName, hook: keyof ProviderLifecycleHooks, ...args) -> Promise<void>
-- Invoke specific hook for provider
-- No-op if hook not registered
-- Catches and logs errors (hooks should not crash control plane)
-
-invokeAllHooks(hook: keyof ProviderLifecycleHooks, ...args) -> Promise<void>
-- Invoke hook for all registered providers
-- Parallel execution, wait for all to complete
-
-## In-Memory Cache
-
-Ephemeral cache for provider data with TTL.
-Not persisted - re-fetched on restart.
-
-### getWithCache<T>(key: string, ttlMs: number, fetcher: () -> Promise<T>, options?: CacheOptions) -> Promise<T>
-- Return cached value if not expired
-- Otherwise call fetcher, cache result, return
-- Cache key should include provider name
-- options.bypassCache: If true, skip cache read and always fetch fresh (still updates cache)
-
-interface CacheOptions {
-  bypassCache?: boolean;  // Skip cache read, always fetch fresh (for critical operations)
-}
-
-### invalidateCache(pattern: string) -> void
-- Invalidate all keys matching pattern
-- Used when data known to be stale
-- Pattern matching: 'instance:*', 'aws:*', etc.
-
-### invalidateInstanceCache(instanceId: number) -> void
-- Clear cached state for specific instance
-- Called by: spawn completion, terminate completion, allocation state transitions
-- Ensures subsequent reads see fresh state
-
-### clearProviderCache(provider: ProviderName) -> void
-- Clear all cached data for provider
-- Used on provider reconfiguration or test isolation
-
-## TTL Configuration by Provider
-
-AWS:
-- 'aws:spot_prices:*': CACHE_SPOT_PRICES_TTL_MS (5 min, base default)
-- 'aws:capacity:*': CACHE_CAPACITY_TTL_MS (1 min, base default)
-- 'aws:instance:*': CACHE_INSTANCE_STATE_TTL_MS (30s, base default)
-- 'aws:warm_volumes': No TTL, explicitly managed
-
-Lambda Labs:
-- 'lambda:instance_types': CACHE_INSTANCE_TYPES_TTL_MS (1 hour, base default, rarely changes)
-- 'lambda:instance:*': CACHE_INSTANCE_STATE_TTL_MS (30s, base default)
-
-RunPod:
-- 'runpod:gpu_types': CACHE_INSTANCE_TYPES_TTL_MS (1 hour, base default)
-- 'runpod:pod:*': CACHE_INSTANCE_STATE_TTL_MS (30s, base default)
-
-OrbStack:
-- 'orbstack:vm:*': getProviderTiming('CACHE_INSTANCE_STATE_TTL_MS', 'orbstack') (10s, provider override)
-
-## Event Types
-
-### SpotInterruptionNotice
-(defined above in onSpotInterruption)
-
-### BudgetThreshold
-(defined above in onBudgetThreshold)
-
-### ProviderHealthStatus
-- provider: ProviderName
-- healthy: boolean
-- lastCheck: number
-- latencyMs: number
-- errors?: string[]
+Base defaults from timing.ts:
+CACHE_SPOT_PRICES_TTL_MS (5m), CACHE_CAPACITY_TTL_MS (1m), CACHE_INSTANCE_STATE_TTL_MS (30s), CACHE_INSTANCE_TYPES_TTL_MS (1h)
+Providers can override per-key via byPrefix patterns
 
 ## Cache Invalidation Integration
 
-Cache invalidation hooks are called on known state changes to prevent stale reads:
-
-### State Transition Triggers
-
-```typescript
-// After spawn completes
-async function onSpawnComplete(instanceId: number) {
-  invalidateInstanceCache(instanceId);
-  // Subsequent allocation claims will see fresh state
-}
-
-// After terminate completes
-async function onTerminateComplete(instanceId: number) {
-  invalidateInstanceCache(instanceId);
-  // Subsequent orphan scans won't see terminated instance
-}
-
-// After allocation state change
-async function onAllocationStateChange(allocationId: number, instanceId: number) {
-  invalidateInstanceCache(instanceId);
-  // Workflow nodes see updated allocation state immediately
-}
-```
-
-### Cache Bypass for Critical Operations
-
-Operations requiring guaranteed fresh state use bypassCache flag:
-
-```typescript
-// Orphan detection
-const instances = await getWithCache(
-  `${provider}:instances`,
-  30000,
-  () => provider.list(),
-  { bypassCache: true }  // Always fetch fresh for orphan detection
-);
-
-// Allocation claim (verify instance still available)
-const instance = await getWithCache(
-  `instance:${instanceId}:external`,
-  30000,
-  () => provider.get(providerId),
-  { bypassCache: true }  // Verify instance exists before claiming
-);
-
-// Budget threshold checks
-const currentSpend = await getWithCache(
-  `${provider}:spend:${period}`,
-  30000,
-  () => provider.getSpend(period),
-  { bypassCache: true }  // Accurate spend for budget alerts
-);
-```
+State transitions invalidate cache: spawn complete, terminate complete, allocation state change
+Critical operations use bypassCache: orphan detection, allocation claim, budget threshold checks
 
 ## Hooks vs Workflows
 
-Hooks:
-- Event-driven, synchronous
-- Lightweight (<1s execution)
-- Trigger workflows, don't do work
-- Example: onSpotInterruption submits handle-spot-interruption workflow
-
-Workflows:
-- Task-driven, asynchronous
-- Long-running (seconds to minutes)
-- Create/modify resources
-- Use pattern library (IAR, CB, PFO, RWA)
+Hooks: Event-driven, synchronous, lightweight (<1s), trigger workflows
+Workflows: Task-driven, asynchronous, long-running, use pattern library

@@ -8,7 +8,7 @@
 - SSE client for event streaming
 
 ## Launch-Run Tests
-- POST /api/v2/launch-run creates workflow
+- POST /v1/workflows/launch-run creates workflow
   - Request body: {command, spec, files, init_checksum}
   - Returns 202 Accepted
   - Response includes workflow_id
@@ -29,7 +29,7 @@
   - Connection closed after complete
 
 ## Terminate Tests
-- POST /api/v2/terminate-instance
+- POST /v1/workflows/terminate-instance
   - Request body: {instance_id, force: false}
   - Returns 202 with workflow_id
   - Creates termination workflow
@@ -49,7 +49,7 @@
   - Faster completion
 
 ## Snapshot Tests
-- POST /api/v2/create-snapshot
+- POST /v1/workflows/create-snapshot
   - Request body: {instance_id, name, tags}
   - Returns 202 with workflow_id
   - Creates snapshot workflow
@@ -65,7 +65,7 @@
   - Provider metadata stored
 
 ## Extend Debug Hold Tests
-- POST /api/v2/extend-debug-hold
+- POST /v1/workflows/extend-hold
   - Request body: {allocation_id, duration_minutes}
   - Returns 202 with workflow_id
   - Updates debug_hold_until timestamp
@@ -78,7 +78,7 @@
   - Cannot extend beyond absolute limit
 
 ## Cancel Tests
-- POST /api/v2/cancel
+- POST /v1/workflows/cancel
   - Request body: {workflow_id}
   - Returns 202 Accepted
   - Workflow status → CANCELLED
@@ -91,13 +91,13 @@
   - Resources cleaned up
 
 ## Status/Stream Tests
-- GET /api/v2/status/:workflow_id
+- GET /v1/workflows/:id/status
   - Returns workflow status
   - Includes progress (completed/total nodes)
   - Includes current node
   - Includes elapsed time
   - 404 if workflow not found
-- GET /api/v2/stream/:workflow_id
+- GET /v1/workflows/:id/stream
   - Returns SSE stream
   - Delivers historical events if workflow started
   - Delivers live events as they occur
@@ -105,7 +105,7 @@
   - Reconnect delivers events since last position
 
 ## Preflight Tests
-- GET /api/v2/preflight
+- GET /v1/preflight
   - Query params: spec_checksum, estimated_duration
   - Returns preflight response
   - No side effects (read-only)

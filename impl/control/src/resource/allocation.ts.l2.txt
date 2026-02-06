@@ -23,11 +23,11 @@ import { AllocationStatus, TailscaleStatus } from '../../../../shared/src/types'
 import { logger } from '../logger';
 ```
 
-## Core Schema
+## CoreSchema
 
 ```typescript
 interface Allocation {
-  id: string;
+  id: number;
   run_id: string | null;           // NULL = AVAILABLE state
   instance_id: string;
   status: AllocationStatus;
@@ -40,7 +40,7 @@ interface Allocation {
 }
 ```
 
-## Valid Transitions Map
+## ValidTransitionsMap
 
 ```typescript
 const VALID_TRANSITIONS: Record<AllocationStatus, AllocationStatus[]> = {
@@ -67,7 +67,7 @@ const TRANSITION_TRIGGERS = {
 // - Fatal agent error (agent crash, OOM, unrecoverable error)
 ```
 
-## State Validation
+## StateValidation
 
 ```typescript
 function validateAllocationTransition(
@@ -99,7 +99,7 @@ function isInWarmPool(status: AllocationStatus): boolean {
 }
 ```
 
-## Race Condition: ACTIVE->COMPLETE vs ACTIVE->FAILED
+## RaceConditionActiveComplete
 
 Both handlers use `UPDATE ... WHERE status = 'ACTIVE'` (first-write-wins CAS).
 Only one succeeds; loser sees `changes === 0` and logs warning.
@@ -109,7 +109,7 @@ Key properties:
 - Agent wins race -> COMPLETE; timeout handler sees COMPLETE, returns
 - Timeout wins race -> FAILED; workflow finds run_complete event, treats as success
 
-## Warm Pool Operations
+## WarmPoolOperations
 
 ### createAvailableAllocation
 
@@ -241,7 +241,7 @@ async function claimWarmPoolAllocation(
 }
 ```
 
-## ACTIVE->COMPLETE Transition with Debug Hold and Replenishment
+## ActiveCompleteTransition
 
 ```typescript
 async function transitionToComplete(
@@ -309,7 +309,7 @@ async function checkReplenishmentEligibility(
 }
 ```
 
-## Debug Hold Extension (SSH Activity)
+## DebugHoldExtension
 
 Called from heartbeat handler when agent reports active SSH sessions.
 
@@ -353,7 +353,7 @@ async function extendAllocationDebugHold(
 }
 ```
 
-## Heartbeat Processing (SSH extension trigger)
+## HeartbeatProcessing
 
 ```typescript
 async function handleHeartbeat(req: HeartbeatRequest): Promise<void> {
@@ -372,7 +372,7 @@ async function handleHeartbeat(req: HeartbeatRequest): Promise<void> {
 }
 ```
 
-## Termination Blocking
+## TerminationBlocking
 
 ```typescript
 async function canTerminateInstance(instanceId: string): Promise<boolean> {
@@ -406,7 +406,7 @@ async function terminateInstance(instanceId: string): Promise<void> {
 }
 ```
 
-## Background Reconciliation: CLAIMED Timeout
+## BackgroundReconciliationClaimedTimeout
 
 Runs as part of the reconciliation cycle (see `../background/reconciliation.ts.l2.txt`).
 
@@ -432,7 +432,7 @@ async function reconcileClaimedAllocations(): Promise<void> {
 }
 ```
 
-## Hold Expiry Background Task
+## HoldExpiryBackgroundTask
 
 Clears expired debug_hold_until timestamps. Does NOT transition allocation state.
 See `../background/hold-expiry.ts.l1.txt` for task scheduling details.
@@ -469,7 +469,11 @@ async function holdExpiryTask(): Promise<void> {
 setInterval(holdExpiryTask, TIMING.HOLD_EXPIRY_CHECK_INTERVAL_MS);
 ```
 
-## Tailscale Ensure Endpoint (control plane)
+## TailscaleEnsureEndpoint
+
+Tailscale state is stored as TailscaleMachine objects in the objects table (see Ch03),
+NOT as columns on the instances table. Queries use object_tags to find the
+tailscale_machine object for a given instance.
 
 ```typescript
 // POST /api/v1/instances/:id/tailscale-ensure
@@ -479,27 +483,72 @@ interface TailscaleStatusResponse {
   ip?: string;  // Tailscale IP when status is 'ready'
 }
 
+// Helper: get Tailscale state from objects table
+async function getTailscaleState(instanceId: string): Promise<{ status: TailscaleStatus; ip: string | null }> {
+  const row = await db.queryOne(`
+    SELECT o.metadata_json
+    FROM objects o
+    JOIN object_tags ot ON o.id = ot.object_id
+    WHERE o.type = 'tailscale_machine'
+      AND ot.tag = ?
+  `, [`instance_id:${instanceId}`]);
+
+  if (!row) {
+    return { status: 'not_installed', ip: null };
+  }
+
+  const metadata = JSON.parse(row.metadata_json);
+  return {
+    status: metadata.tailscale_status ?? 'not_installed',
+    ip: metadata.tailscale_ip ?? null,
+  };
+}
+
+// Helper: update Tailscale state in objects table
+async function updateTailscaleStatus(instanceId: string, status: TailscaleStatus): Promise<void> {
+  const existing = await db.queryOne(`
+    SELECT o.id, o.metadata_json
+    FROM objects o
+    JOIN object_tags ot ON o.id = ot.object_id
+    WHERE o.type = 'tailscale_machine'
+      AND ot.tag = ?
+  `, [`instance_id:${instanceId}`]);
+
+  if (existing) {
+    const metadata = JSON.parse(existing.metadata_json);
+    metadata.tailscale_status = status;
+    await db.execute(`UPDATE objects SET metadata_json = ?, updated_at = ? WHERE id = ?`,
+      [JSON.stringify(metadata), Date.now(), existing.id]);
+  } else {
+    // Create new tailscale_machine object
+    const objectId = await db.insertObject({
+      type: 'tailscale_machine',
+      metadata_json: JSON.stringify({ tailscale_status: status, tailscale_ip: null }),
+    });
+    await db.execute(`INSERT INTO object_tags (object_id, tag) VALUES (?, ?)`,
+      [objectId, `instance_id:${instanceId}`]);
+  }
+}
+
 app.post('/api/v1/instances/:id/tailscale-ensure', async (req, res) => {
-  const instance = await materializeInstance(req.params.id);
+  const instanceId = req.params.id;
+  const tsState = await getTailscaleState(instanceId);
 
   // Return current status if already installing or ready
-  if (instance.tailscale_status === 'installing' || instance.tailscale_status === 'ready') {
+  if (tsState.status === 'installing' || tsState.status === 'ready') {
     return res.json({
-      status: instance.tailscale_status,
-      ip: instance.tailscale_ip ?? undefined,
+      status: tsState.status,
+      ip: tsState.ip ?? undefined,
     });
   }
 
   // If not installed, trigger installation
-  if (!instance.tailscale_status || instance.tailscale_status === 'not_installed') {
-    // Update status to 'installing'
-    await db.updateInstance(instance.id, {
-      tailscale_status: 'installing',
-      updated_at: Date.now(),
-    });
+  if (!tsState.status || tsState.status === 'not_installed') {
+    // Update status to 'installing' in objects table
+    await updateTailscaleStatus(instanceId, 'installing');
 
     // Enqueue message to instance agent
-    await enqueueInstanceMessage(instance.id, {
+    await enqueueInstanceMessage(instanceId, {
       type: 'trigger_tailscale',
       timestamp: Date.now(),
     });
@@ -509,8 +558,8 @@ app.post('/api/v1/instances/:id/tailscale-ensure', async (req, res) => {
 
   // Handle 'failed' status - return as-is but allow retry if explicitly requested
   res.json({
-    status: instance.tailscale_status,
-    ip: instance.tailscale_ip ?? undefined,
+    status: tsState.status,
+    ip: tsState.ip ?? undefined,
   });
 });
 ```

@@ -5,7 +5,7 @@
 - `getDevice(instanceId): TailscaleDevice | null` - Query device by tag
 - `deleteDevice(deviceId): void` - Deregister device from Tailnet
 
-## JIT Installation
+## JITInstallation
 - `triggerTailscaleInstall(instanceId, allocationId): void`
   - Generate auth key
   - Send SSE command to agent with key
@@ -14,7 +14,7 @@
   - Query TailscaleMachine object and API
   - Update status based on device.online
 
-## SSH Config Generation
+## SSHConfigGeneration
 - `generateSSHConfig(allocations): string`
   - For each ACTIVE allocation or COMPLETE allocation with debug_hold_until > NOW
   - Generate SSH config entry with Tailscale IP

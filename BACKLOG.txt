@@ -1,7 +1,7 @@
 ================================================================================
 TODO: Active Backlog
 ================================================================================
-Last updated: 2026-02-05
+Last updated: 2026-02-08
 
 ================================================================================
 VERIFICATION ONLY (No design work needed)
@@ -15,7 +15,7 @@ L2/A.2: In-flight blob deduplication
   Action: Verify storage.ts.l2.txt documents this as intentional
 
 ================================================================================
-DEFERRED (from WS3 legacy gap analysis)
+DEFERRED (from WS3 gap analysis)
 ================================================================================
 
 WS3.1: Circuit breaker — cross-request failure aggregation
@@ -34,6 +34,187 @@ WS3.2: Budget enforcement — per-user quotas
     code defined (Ch9§9.3.10), AWS budget alert handling (Ch8§8.3). Missing:
     per-user/per-manifest budget quotas and mid-execution cost controls.
   When: Post-MVP — single-user system initially, quotas needed for multi-tenancy.
+
+================================================================================
+DEFERRED (from sharp-edge gap analysis)
+================================================================================
+
+SE1: Tailscale container mode (userspace networking)
+  Status: DEFERRED
+  Severity: HIGH — RunPod instances are containers, Tailscale SSH fails without this
+  Context: Legacy agent detects container env (RunPod or missing /dev/net/tun)
+    and uses `--tun=userspace-networking` with custom socket `/tmp/tailscale.sock`.
+    SkyREPL's tailscale.py.l2.txt has standard tailscaled startup only.
+  When: L3 (implementation phase) — add container detection to tailscale.py.
+  Ref: audit findings §L, Gap 1
+
+SE2: Tailscale device limit tracking
+  Status: DEFERRED
+  Severity: MEDIUM — operational surprise at 100-device free-tier limit
+  Context: Legacy tracks device count and warns at 80% utilization.
+    Tailscale logout on shutdown mitigates but doesn't eliminate risk under
+    high concurrency.
+  When: Post-MVP — single-user initially, becomes important at scale.
+  Ref: audit findings §L, Gap 2
+
+SE3: Tailscale Funnel port-based routing constraint
+  Status: DEFERRED
+  Severity: LOW-MEDIUM — affects local development mode only
+  Context: Path-based Funnel breaks S3 presigned URL signature verification.
+    Must use port-based routing. Needs annotation in spec/10_CLI.txt.
+  When: When implementing local development mode (Funnel support).
+  Ref: audit findings §L, Gap 4
+
+SE4: CLI local services preflight
+  Status: DEFERRED
+  Severity: LOW — UX issue (cryptic ECONNREFUSED vs actionable messages)
+  Context: Legacy checks MinIO/control-plane reachability before operations.
+    SkyREPL has status command but no automatic preflight.
+  When: CLI polish pass.
+  Ref: audit findings §L, Gap 5
+
+SE5: S3/MinIO connection diagnostics
+  Status: DEFERRED
+  Severity: LOW — developer experience during local development
+  Context: Legacy catches ECONNREFUSED, NoSuchBucket with fix suggestions.
+    SkyREPL has generic error handling only.
+  When: CLI polish pass.
+  Ref: audit findings §L, Gap 6
+
+SE6: WAL checkpoint before database backup
+  Status: DEFERRED
+  Severity: LOW — well-known SQLite practice, will be caught at impl time
+  Context: PRAGMA wal_checkpoint(TRUNCATE) before uploading SQLite to S3.
+    Not specified in SkyREPL.
+  When: L3 (implementation phase).
+  Ref: audit findings §L, Gap 7
+
+================================================================================
+FIX BEFORE L3 (architecture coherence issues)
+================================================================================
+
+AC1: workflow_state string mismatch between spec and impl
+  Status: FIX BEFORE L3
+  Severity: HIGH — would cause real bugs at implementation time
+  Context: launch-run.ts.l2.txt uses 'run:timeout', 'run:complete',
+    'launch:spawning', 'launch:booting'. Spec (Ch03§Resources lines 586-598,
+    Ch05§Allocations) defines these as 'launch-run:timeout', 'launch-run:complete',
+    'spawn:pending', 'launch-run:provisioning'.
+  Action: Align impl to spec (spec naming is more explicit/correct).
+  Ref: architecture coherence review, 2026-02-06
+
+AC2: AVAILABLE→FAILED allocation transition missing from spec
+  Status: FIX BEFORE L3
+  Severity: MEDIUM — impl is correct, spec is stale
+  Context: state-transitions.ts.l2.txt (line 135) allows AVAILABLE→FAILED for
+    cleanup/termination paths. spec/05_ALLOCATIONS.txt (line 147) only lists
+    transitions from AVAILABLE→CLAIMED. The impl is more correct — you need
+    this for warm-pool cleanup when instances become unhealthy.
+  Action: Add AVAILABLE→FAILED to spec/05_ALLOCATIONS.txt state machine.
+  Ref: architecture coherence review, 2026-02-06
+
+AC3: DAG dependency persistence after dynamic pattern application
+  Status: FIX BEFORE L3
+  Severity: MEDIUM — under-specified crash recovery for modified DAGs
+  Context: workflow_nodes table (spec/02_MATERIAL.txt) has no dependency column.
+    engine.ts.l2.txt (line 270) acknowledges the gap in a comment. When patterns
+    dynamically modify the DAG (e.g., Conditional-Branch inserts nodes), there is
+    no specified mechanism for persisting the new dependency graph. A crash after
+    pattern application but before completion would lose the modified topology.
+  Action: Add depends_on column to workflow_nodes or a separate workflow_edges
+    table. Spec and impl both need updating.
+  Ref: architecture coherence review, 2026-02-06
+
+================================================================================
+FIX DURING L3 (from D15 behavior traces, 2026-02-08)
+================================================================================
+
+BT1: cleanup-manifest DDL schema mismatch (5 issues)
+  Status: FIX DURING L3
+  Severity: HIGH (blocks cleanup-manifest L3, not MVK)
+  Issues:
+    a. manifest_cleanup_state DDL columns (status, current_step, progress_json,
+       finished_at) don't match impl (last_completed_priority,
+       last_completed_resource_id). Impl design is better for crash recovery.
+    b. manifest_resources DDL missing owner_type, owner_id columns used by impl.
+    c. manifest_resources DDL missing cleanup_processed_at; impl queries
+       nonexistent `id` column.
+    d. cleanup-objects filters on sub-types ('artifact','log') instead of 'object'.
+    e. cleanup-snapshots filters on 'snapshot' instead of objects WHERE type='snapshot'.
+  Fix: Update DDL to match impl for (a). Add columns for (b,c). Fix type
+    filtering logic for (d,e).
+  Ref: D15c cleanup-manifest trace
+
+BT2: completed_at omitted from FAILED transitions (4 locations)
+  Status: FIX DURING L3
+  Severity: MEDIUM — terminal states should record when they happened
+  Locations:
+    a. allocation.ts.l2.txt:262 — transitionToComplete omits completed_at
+    b. state-transitions.ts.l2.txt:286 — failAllocation omits completed_at
+    c. launch-run.ts.l2.txt:556 — sync-files failure omits completed_at
+    d. allocation.ts.l2.txt:421 — reconcileClaimedAllocations omits completed_at
+  Fix: Add `completed_at: Date.now()` to all terminal transitions (COMPLETE+FAILED).
+  Ref: D15d allocation SM trace
+
+BT3: cleanup-manifest progress tracking not wired
+  Status: FIX DURING L3
+  Severity: MEDIUM — defined but never called, crash recovery incomplete
+  Context: updateCleanupProgress() defined at cleanup-manifest.ts.l2.txt:720
+    but no cleanup node ever calls it. Resume logic also missing.
+  Fix: Wire progress updates into each cleanup node; add resume logic to
+    loadResources that skips already-processed resources.
+  Ref: D15c cleanup-manifest trace
+
+BT4: cleanup-manifest secondary issues (3 items)
+  Status: FIX DURING L3
+  Severity: MEDIUM
+  Issues:
+    a. ManifestResource.resource_id typed as number, should be string.
+    b. Expiry scanner missing LIMIT 10 (spec requirement).
+    c. json_extract path may be wrong ($.manifest_id vs $.manifestId).
+  Ref: D15c cleanup-manifest trace
+
+BT5: Warm pool scoring incomplete in db.ts
+  Status: FIX DURING L3
+  Severity: MEDIUM
+  Context: db.ts.l2.txt:868 findWarmAllocation missing 100/50/0 scoring
+    algorithm and excludes vanilla instances (no snapshot). allocation.ts.l2.txt
+    has the correct scoring logic.
+  Fix: Align db.ts with allocation.ts scoring, or consolidate into one location.
+  Ref: D15d allocation SM trace
+
+BT6: State transition duplication (3-4 files)
+  Status: FIX DURING L3
+  Severity: MEDIUM — causes behavioral drift
+  Context: Allocation transitions implemented in state-transitions.ts, allocation.ts,
+    launch-run.ts, and db.ts with slightly different patterns (CAS vs status-only).
+  Fix: Consolidate to single canonical source (state-transitions.ts), other files
+    call it. Natural L3 refactoring.
+  Ref: D15d allocation SM trace
+
+BT7: ID type inconsistency (string vs number)
+  Status: FIX DURING L3
+  Severity: MEDIUM — DDL uses INTEGER, some interfaces use string
+  Context: allocation.ts.l2.txt uses `id: string` (fixed for Allocation, but
+    other files may have similar issues). Shared types use `ID` alias.
+  Fix: Grep for `id: string` in L2 files and fix to match DDL INTEGER.
+  Ref: D15d allocation SM trace, D15a launch-run trace
+
+BT8: launch-run manifest sealed without expires_at
+  Status: FIX DURING L3
+  Severity: MEDIUM
+  Context: launch-run.ts.l2.txt:699 seals manifest without setting expires_at.
+    Without expiry, manifest won't be auto-cleaned by the expiry scanner.
+  Fix: Set expires_at = now + DEFAULT_MANIFEST_RETENTION_MS on seal.
+  Ref: D15a launch-run trace
+
+BT9: WorkflowDefinition format mismatch
+  Status: FIX DURING L3
+  Severity: MEDIUM
+  Context: launch-run.ts.l2.txt:43 defines WorkflowDefinition as array+handlers;
+    engine.ts.l2.txt expects WorkflowBlueprint with Record<string, NodeDefinition>.
+  Fix: Align at L3 when building the real workflow registration.
+  Ref: D15a launch-run trace
 
 ================================================================================
 DEFERRED (Low urgency / edge cases)

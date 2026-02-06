@@ -41,11 +41,7 @@ Three distinct channels, all agent-initiated:
     ╰─────────────────────────────────────────────────────────────────────────╯
 ```
 
-### Why Agent-Initiated
-
-All connections originate from agent: instances may be behind NAT/VPCs; simpler
-firewall rules (outbound only); control plane doesn't need instance IPs; load
-balancer compatible without sticky sessions.
+> Why agent-initiated rationale extracted to docs/design/rationale-execution.txt
 
 ### Channel Purposes
 
@@ -73,8 +69,9 @@ information. See Ch6 for state format.
 **workflow_state** in HeartbeatMessage: Control plane knows instance lifecycle
 phase without polling.
 
-**active_ssh_sessions**: Reports total sessions across all allocations; control
-plane uses debug_hold_until (Ch5) for per-allocation tracking.
+**active_allocations**: Array of {allocation_id, has_ssh_sessions} objects
+reporting per-allocation SSH state. Control plane uses this for per-allocation
+debug hold extension (Ch5). Replaces the previous active_ssh_sessions count.
 
 ## 11.3 Message Types
 
@@ -227,10 +224,10 @@ interface SpotInterruptCompleteMessage {
 // POST: heartbeat
 interface HeartbeatMessage {
   tailscale_ip: string | null;
-  active_ssh_sessions: number;   // NOTE: SSH is per-allocation, not per-instance.
-                                  // This field reports total sessions across all allocations.
-                                  // Control plane uses allocation debug_hold_until (see Chapter 5)
-                                  // to track per-allocation SSH usage.
+  active_allocations: Array<{    // Per-allocation SSH state for debug hold management (see Ch5).
+    allocation_id: number;        // Allocation being served by this agent.
+    has_ssh_sessions: boolean;    // True if allocation has active SSH sessions.
+  }>;
   tailscale_status: 'not_installed' | 'installing' | 'ready' | 'failed';
   workflow_state: string;         // Instance lifecycle state (e.g., 'launch-run:sync',
                                   // 'launch-run:running', 'idle'). See Chapter 6 for format.
@@ -418,31 +415,11 @@ with different timeout budget: 5m for panic vs 90s for spot. Environment variabl
 
 ### Byte-by-Byte Reading
 
-**Problem:** Python HTTP libraries use 8KB internal buffers. `read(n)` and `readline()` block until buffer fills or connection closes. SSE messages are ~150 bytes and infrequent, causing indefinite blocking.
+Agent MUST use `read(1)` syscall to bypass Python HTTP library buffering.
 
-**Solution:** Agent MUST use `read(1)` syscall to bypass buffering.
+> Byte-by-byte reading rationale and pseudocode extracted to docs/design/rationale-execution.txt
 
-**Spec Pseudocode:**
-```
-FUNCTION read_lines(response):
-  WHILE NOT shutting_down:
-    line = empty_buffer
-    WHILE TRUE:
-      byte = response.read(1)  // Single-byte syscall
-      IF byte is empty:
-        RETURN  // Stream closed
-      IF byte == newline:
-        BREAK
-      line.append(byte)
-
-    text = decode_utf8(line)
-    IF text not empty:
-      YIELD text
-```
-
-**Trade-off:** Syscall overhead negligible for low-frequency control signaling (agent spends 99.9% of time blocked on read(1)).
-
-> See also: impl/agent/agent.py.l2.txt §SSE Byte-by-Byte Reader
+> See also: impl/agent/sse.py.l2.txt §LowLevelByteReading
 
 ### Connection Management
 
@@ -453,32 +430,32 @@ Agent MUST:
 4. Parse each line as JSON command message
 5. On error: log and reconnect with exponential backoff (2s initial, 64s max, 10 retries)
 
-> See also: impl/agent/agent.py.l2.txt §SSE Connection Management
+> See also: impl/agent/sse.py.l2.txt §ConnectionManagement
 
 ## 11.7 Agent Configuration
 
 ### Timing Constants
 
 Configurable via environment variables (cloud-init user data). Constraints:
-HEARTBEAT_INTERVAL < HEARTBEAT_DEGRADED < HEARTBEAT_TIMEOUT < STALE_DETECTION
+HEARTBEAT_INTERVAL_MS < HEARTBEAT_DEGRADED_MS < HEARTBEAT_ACK_TIMEOUT_MS < STALE_DETECTION_MS
 (control plane, see Ch15). RECONNECT_BASE < RECONNECT_MAX.
 
 | Constant                | Default | Env Variable                  | Purpose                       |
 |-------------------------|---------|-------------------------------|-------------------------------|
 | HEARTBEAT_INTERVAL_MS   | 10000   | REPL_HEARTBEAT_INTERVAL_MS    | Agent -> control heartbeat    |
 | HEARTBEAT_DEGRADED_MS   | 120000  | REPL_HEARTBEAT_DEGRADED_MS    | Degraded state threshold (2m) |
-| HEARTBEAT_TIMEOUT_MS    | 900000  | REPL_HEARTBEAT_TIMEOUT_MS     | Panic/shutdown trigger (15m)  |
-| PANIC_CHECKPOINT_MS     | 300000  | REPL_PANIC_CHECKPOINT_MS      | Checkpoint budget during panic|
-| LOG_FLUSH_INTERVAL_MS   | 100     | REPL_LOG_FLUSH_INTERVAL_MS    | Batched log upload            |
-| SPOT_CHECK_INTERVAL_MS  | 5000    | REPL_SPOT_CHECK_INTERVAL_MS   | AWS metadata polling          |
-| SHUTDOWN_GRACE_PERIOD_S | 5       | REPL_SHUTDOWN_GRACE_PERIOD_S  | Delay before self-termination |
+| HEARTBEAT_ACK_TIMEOUT_MS | 900000  | REPL_HEARTBEAT_ACK_TIMEOUT    | Panic/shutdown trigger (15m)  |
+| PANIC_CHECKPOINT_BUDGET_MS | 300000  | REPL_PANIC_CHECKPOINT_BUDGET  | Checkpoint budget during panic|
+| LOG_LOCAL_BUFFER_MS     | 100     | REPL_LOG_LOCAL_BUFFER         | Batched log upload            |
+| SPOT_CHECK_INTERVAL_MS  | 5000    | REPL_SPOT_CHECK_INTERVAL      | AWS metadata polling          |
+| AGENT_SHUTDOWN_GRACE_MS | 5000    | REPL_AGENT_SHUTDOWN_GRACE     | Delay before self-termination (5s) |
 | SSE_RECONNECT_BASE_S    | 2       | REPL_SSE_RECONNECT_BASE_S     | Initial reconnect delay       |
 | SSE_RECONNECT_MAX_S     | 64      | REPL_SSE_RECONNECT_MAX_S      | Maximum reconnect delay       |
 | SSE_MAX_RETRIES         | 10      | REPL_SSE_MAX_RETRIES          | Reconnects before shutdown    |
 
 **Heartbeat Timeout Constraint:** Agent self-terminates after 15m without heartbeat
-acknowledgment (HEARTBEAT_TIMEOUT_MS = 900000). Control plane force-terminates
-instances after 25m without heartbeat (see Ch15 §15.9 for INSTANCE_STALE_THRESHOLD_MS).
+acknowledgment (HEARTBEAT_ACK_TIMEOUT_MS = 900000). Control plane force-terminates
+instances after 25m without heartbeat (see Ch15 §15.9 for STALE_DETECTION_MS).
 This 10-minute gap ensures agent-initiated cleanup completes before provider-initiated
 termination, reducing false positives for long-running jobs while maintaining safety.
 
@@ -503,7 +480,7 @@ write_files:
   - path: /etc/environment
     content: |
       REPL_HEARTBEAT_INTERVAL_MS=15000
-      REPL_HEARTBEAT_TIMEOUT_MS=45000
+      REPL_HEARTBEAT_ACK_TIMEOUT=45000
     append: true
 ```
 
@@ -511,7 +488,7 @@ write_files:
 
 Agent MUST acquire exclusive lock `/tmp/repl-agent.lock` on startup to prevent duplicate agents on warm pool reuse. Use `fcntl.flock(LOCK_EX | LOCK_NB)` for non-blocking exclusive lock. If lock fails, agent MUST exit immediately with FATAL log.
 
-> See also: impl/agent/agent.py.l2.txt §Lock Acquisition
+> See also: impl/agent/agent.py.l2.txt §LockAcquisition
 
 ## 11.9 Spot Interruption Handling
 
@@ -556,7 +533,7 @@ FUNCTION check_spot_interruption():
 - Output: Streamed as regular logs
 - Termination: Killed if exceeds timeout, then proceeds with artifact upload
 
-**Polling Interval:** Configurable via REPL_SPOT_CHECK_INTERVAL_MS (default 5s, see Ch15 §15.9). Balances responsiveness with metadata API rate limits.
+**Polling Interval:** Configurable via REPL_SPOT_CHECK_INTERVAL (default 5s, see Ch15 §15.9). Balances responsiveness with metadata API rate limits.
 
 ## 11.10 Workdir Cleanup
 
@@ -564,7 +541,7 @@ Agent MUST clean workdir at start of `start_run` before downloading files. Criti
 
 **Protocol:** If workdir exists, change cwd to home directory, then recursively remove workdir. Log warning on failure but continue (best effort).
 
-> See also: impl/agent/executor.py.l2.txt §Workdir Cleanup
+> See also: impl/agent/executor.py.l2.txt §WorkdirCleanup
 
 ## 11.11 Presigned URL Abstraction
 
@@ -574,7 +551,7 @@ Control plane MUST generate presigned URLs for all file operations. Agent uses i
 
 Agent implementation: `urllib.request.Request(url, data=file_data, method="PUT")`. See Ch2 for 64KB threshold rationale.
 
-> See also: impl/agent/artifacts.py.l2.txt §Artifact Upload
+> See also: impl/agent/artifacts.py.l2.txt §ArtifactUpload
 
 ## 11.12 JIT Tailscale Installation
 
@@ -584,7 +561,7 @@ Tailscale MUST be installed on-demand (when SSH requested or instance enters war
 
 **Protocol:** Check existing status → detect existing IP → if not found, download static binary → start daemon → authenticate.
 
-> See also: impl/agent/tailscale.py.l2.txt §JIT Installation
+> See also: impl/agent/tailscale.py.l2.txt §JITInstallation
 
 ## 11.13 Error Handling Philosophy
 
@@ -613,7 +590,7 @@ Agent SHOULD send best-effort diagnostics to `/v1/instances/:id/panic` before sh
 - Failures: Expected and acceptable (log warning, continue shutdown)
 - Success rate target: 70-90% (supplements normal logging)
 
-> See also: impl/agent/agent.py.l2.txt §Panic Diagnostics
+> See also: impl/agent/agent.py.l2.txt §PanicDiagnostics
 
 **Shutdown Sequence:** Set flag → send diagnostics (2s timeout) → Tailscale logout → terminate run → flush logs → grace period → self-terminate.
 

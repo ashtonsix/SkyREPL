@@ -1,281 +1,53 @@
-# cleanup-manifest.ts - Cleanup Manifest Intent (Ch7)
+# cleanup-manifest.ts - Cleanup Manifest Intent
+
+Clean up all resources owned by a manifest in priority order.
+See L2 for per-provider fan-out, atomic allocation transitions with IN clause, B21 cleanup_processed_at protection, feature cleanup orphaning.
 
 ## Exports
 
-```typescript
-export interface CleanupManifestInput {
-  manifestId: number;                // Manifest to cleanup
-  force?: boolean;                   // Skip expiry check (default: false)
-  idempotencyKey?: string;
-}
+cleanupManifest(input), cleanupManifestWorkflow (WorkflowDefinition)
 
-export interface CleanupManifestOutput {
-  workflowId: number;
-  manifestId: number;
-  resourcesCleaned: number;
-  errors: Array<{ resourceType: string; resourceId: number; error: string }>;
-  completedAt: number;
-}
+## Input/Output
 
-// Entry point
-export async function cleanupManifest(input: CleanupManifestInput): Promise<Workflow>;
+CleanupManifestInput: manifestId, force?, idempotencyKey?
+CleanupManifestOutput: workflowId, manifestId, resourcesCleaned, errors, completedAt
 
-// Workflow definition
-export const cleanupManifestWorkflow: WorkflowDefinition;
-```
+## Workflow Pattern
 
-## Purpose
-Clean up all resources owned by a manifest in priority order.
-Called when manifest expires or workflow requests explicit cleanup.
+Parallel-Fan-Out by Priority Group (highest to lowest)
 
-## Workflow Graph (Parallel-Fan-Out Pattern)
+## Priority Order
 
-```
-┌─────────────────────────┐
-│    validate-manifest    │ Check manifest exists, is SEALED, is expired
-└───────────┬─────────────┘
-            │
-┌───────────▼─────────────┐
-│    load-resources       │ Load all manifest_resources ordered by priority DESC
-└───────────┬─────────────┘
-            │
-            │  ┌──────────────────────────────────────────────────────────┐
-            │  │            Parallel-Fan-Out by Priority Group            │
-            │  │                                                          │
-            │  │  Priority 90: ┌─────────────────────┐                    │
-            │  │               │ cleanup-allocations │                    │
-            │  │               └──────────┬──────────┘                    │
-            │  │                          │                               │
-            │  │  Priority 80: ┌──────────▼──────────┐                    │
-            │  │               │   cleanup-runs      │                    │
-            │  │               └──────────┬──────────┘                    │
-            │  │                          │                               │
-            │  │  Priority 70: ┌──────────▼──────────┐                    │
-            │  │               │ cleanup-artifacts   │                    │
-            │  │               └──────────┬──────────┘                    │
-            │  │                          │                               │
-            │  │  Priority 65: ┌──────────▼──────────┐                    │
-            │  │               │  cleanup-features   │ (Tailscale, etc.)  │
-            │  │               └──────────┬──────────┘                    │
-            │  │                          │                               │
-            │  │  Priority 60: ┌──────────▼──────────┐                    │
-            │  │               │  cleanup-objects    │                    │
-            │  │               └──────────┬──────────┘                    │
-            │  │                          │                               │
-            │  │  Priority 50: ┌──────────▼──────────┐                    │
-            │  │               │ cleanup-instances   │                    │
-            │  │               └──────────┬──────────┘                    │
-            │  │                          │                               │
-            │  │  Priority 10: ┌──────────▼──────────┐                    │
-            │  │               │ cleanup-snapshots   │                    │
-            │  │               └──────────┬──────────┘                    │
-            │  └──────────────────────────────────────────────────────────┘
-            │
-┌───────────▼─────────────┐
-│   delete-manifest       │ Delete manifest record
-└───────────┬─────────────┘
-            │
-┌───────────▼─────────────┐
-│       finalize          │ Complete workflow
-└─────────────────────────┘
-```
-
-## Priority Order (Highest to Lowest)
-
-| Priority | Resource Type | Cleanup Action |
-|----------|---------------|----------------|
-| 90       | Allocations   | Transition to COMPLETE if not already |
-| 80       | Runs          | Mark as cleaned, retain record |
-| 70       | Artifacts     | Delete object records (GC handles blob cleanup) |
-| 65       | Features      | Detach feature installations (Tailscale logout, etc.) |
-| 60       | Objects       | Delete object records (GC handles blob cleanup) |
-| 50       | Instances     | Terminate via provider if still running |
-| 10       | Snapshots     | Delete from provider and DB |
+90: Allocations (transition to COMPLETE, atomic with IN clause)
+80: Runs (mark cleaned)
+70: Artifacts (delete with B21 protection)
+65: Features (detach, best-effort)
+60: Objects (delete with B21 protection, explicit S3 cleanup)
+50: Instances (terminate via provider)
+10: Snapshots (delete from provider and DB)
 
 ## Nodes
 
-1. **validate-manifest**: Validate manifest state
-   - Load manifest by ID
-   - Check status='SEALED' (cannot cleanup DRAFT manifests)
-   - Check expires_at < NOW (unless force=true)
-   - Returns: { manifest, canCleanup: boolean }
-
-2. **load-resources**: Load resources for cleanup
-   - Query: SELECT * FROM manifest_resources WHERE manifest_id=? ORDER BY cleanup_priority DESC
-   - Group by priority for parallel processing
-   - Returns: { resourcesByPriority: Map<number, ManifestResource[]> }
-
-3. **cleanup-allocations** (Priority 90): Clean allocation records
-   - For each allocation: Use atomic UPDATE with IN clause for all source statuses
-     - Pattern: UPDATE allocations SET status='COMPLETE', completed_at=NOW, updated_at=NOW
-               WHERE id=? AND status IN ('AVAILABLE', 'CLAIMED', 'ACTIVE')
-     - If 0 rows affected: already COMPLETE or FAILED, skip (idempotent)
-   - Does NOT delete records (history preserved)
-   - Errors: Log and continue (skip_and_continue policy)
-
-4. **cleanup-runs** (Priority 80): Clean run records
-   - Mark runs as cleaned (set workflow_state='cleanup:complete')
-   - Does NOT delete records (history preserved)
-   - Errors: Log and continue
-
-5. **cleanup-artifacts** (Priority 70): Clean artifact references
-   - B21: Check cleanup_processed_at before processing:
-     - Query: SELECT cleanup_processed_at FROM manifest_resources WHERE id=?
-     - If cleanup_processed_at IS NOT NULL: skip (already processed)
-   - In transaction:
-     - Delete artifact object records (simple DELETE FROM objects WHERE id IN ...)
-     - No reference counting needed (background GC handles blob cleanup)
-     - UPDATE manifest_resources SET cleanup_processed_at=NOW WHERE id=?
-   - B21: This prevents double-processing if crash occurs
-   - Note: DB cascade (ON DELETE RESTRICT) prevents blob deletion while objects reference it
-   - Background GC finds orphaned blobs later (24h grace period)
-   - Errors: Log and continue
-
-6. **cleanup-features** (Priority 65): Detach feature installations
-   - For Tailscale: Call provider.detach(instanceId) to logout machine
-   - For other features: Provider-specific cleanup
-   - Parallel fanout enabled by priority ordering (all features at same priority cleanup in parallel)
-   - Errors: Log and continue (feature cleanup is best-effort)
-   - On failure: Log warning with machine ID for manual cleanup or scheduled retry
-   - Example: "Failed to detach Tailscale machine ts-xyz from instance 123: network timeout"
-   - Note: Feature orphans handled separately by orphan-cleanup background task
-
-7. **cleanup-objects** (Priority 60): Clean generic objects
-   - B21: Check cleanup_processed_at before processing (same pattern as artifacts)
-   - In transaction:
-     - Delete object records (simple DELETE FROM objects WHERE id IN ...)
-     - Object types: logs, run_files, snapshots (NOT 'blob' - blobs are separate table)
-     - No reference counting needed (background GC handles blob cleanup)
-     - UPDATE manifest_resources SET cleanup_processed_at=NOW WHERE id=?
-   - Note: DB cascade prevents blob deletion while objects reference it
-   - Background GC finds orphaned blobs later (24h grace period)
-   - Errors: Log and continue
-
-8. **cleanup-instances** (Priority 10): Terminate instances
-   - For each instance: If workflow_state != 'terminate:complete':
-     - Call provider.terminate(providerId)
-     - Update workflow_state='terminate:complete'
-   - Errors: Log but retry (instances are expensive, retry_then_skip policy)
-   - Note: Same priority as snapshots enables parallel execution
-
-9. **cleanup-snapshots** (Priority 10): Delete snapshots
-   - For each snapshot:
-     - Call provider.deleteSnapshot(providerSnapshotId)
-     - Delete object record
-   - Errors: Log and continue (snapshots are low priority)
-   - Note: Same priority as instances enables parallel execution
-
-10. **delete-manifest**: Remove manifest record
-    - Delete from manifest_resources (cascades)
-    - Delete from manifests
-    - Returns: { deleted: true }
-
-11. **finalize**: Complete workflow
-    - Log cleanup summary
-    - Emit metrics
+validate-manifest, load-resources, cleanup-allocations, cleanup-runs, cleanup-artifacts, cleanup-features, cleanup-objects, cleanup-instances, cleanup-snapshots, delete-manifest, finalize
 
 ## Error Handling Policies
 
-```typescript
-const CLEANUP_ERROR_HANDLING: Record<string, ErrorHandlingPolicy> = {
-  'allocations': 'skip_and_continue',     // Allocations are soft state
-  'runs': 'skip_and_continue',            // Runs are soft state
-  'artifacts': 'skip_and_continue',       // Artifacts can be orphaned
-  'features': 'skip_and_continue',        // Features are best-effort
-  'objects': 'skip_and_continue',         // Objects can be orphaned
-  'instances': 'retry_then_skip',         // Instances are expensive, retry
-  'snapshots': 'log_and_continue',        // Snapshots are low priority
-  'manifest': 'fail_workflow',            // Manifest deletion must succeed
-};
-```
+skip_and_continue: allocations, runs, artifacts, features, objects, snapshots
+retry_then_skip: instances (expensive)
+fail_workflow: manifest deletion
 
-## Per-Provider Orchestration
+## B21 Cleanup Processing
 
-For manifests with resources across multiple providers:
-
-```
-1. Group resources by provider
-2. For each provider (parallel):
-   - Create sub-manifest with provider's resources
-   - Run cleanup for that provider's resources
-   - Aggregate results
-3. Delete manifest after all providers complete
-```
-
-This prevents cross-provider dependencies and enables partial cleanup on failure.
+Uses cleanup_processed_at flag to prevent double-processing during crash recovery
+Check flag before processing, set flag after completion in transaction
 
 ## Feature Cleanup Orphaning
 
-Feature detachment (Priority 65) uses skip_and_continue policy - failures are logged but workflow continues.
+Feature detach failures logged but workflow continues (skip_and_continue)
+Orphans handled by background reconciliation (FeatureProvider.reconcile())
+Common failures: network timeout, instance terminated, partial cleanup
 
-**Common Failure Scenarios:**
+## PerProviderOrchestration
 
-1. **Network Timeout:** Feature provider API unreachable
-   - Example: Tailscale API down during detach call
-   - Result: Machine remains in Tailscale control plane
-   - Mitigation: Orphan scanner detects via FeatureProvider.reconcile()
-
-2. **Instance Already Terminated:** Feature detach requires instance access
-   - Example: Tailscale logout requires SSH to instance
-   - Result: Machine stays in tailnet (offline)
-   - Mitigation: Ephemeral auth keys auto-expire after inactivity
-
-3. **Partial Cleanup:** Feature partially removed
-   - Example: Tailscale uninstalled but machine still registered
-   - Result: Inactive machine in control plane
-   - Mitigation: Reconciliation identifies inactive machines for cleanup
-
-**Handling Strategy:**
-
-```typescript
-try {
-  await featureProvider.detach(instanceId);
-} catch (error) {
-  logger.warn('feature_detach_failed', {
-    featureType: 'tailscale',
-    instanceId,
-    machineId: tailscaleState?.machineId,
-    error: error.message,
-    recoveryNote: 'Will be detected by orphan scanner reconciliation'
-  });
-  // Continue with manifest cleanup (don't block other resources)
-}
-```
-
-Feature orphans are handled by:
-1. Orphan-cleanup background task (calls FeatureProvider.reconcile())
-2. Manual cleanup via `repl orphan list --features`
-3. Provider-specific auto-cleanup (e.g., Tailscale ephemeral machines auto-remove)
-
-## Compensation for Partial Cleanup
-
-Track cleanup progress to enable safe restart after crash:
-
-```sql
-CREATE TABLE manifest_cleanup_state (
-  manifest_id INTEGER PRIMARY KEY,
-  last_completed_priority INTEGER,
-  last_completed_resource_id INTEGER,
-  started_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
-);
-```
-
-On restart:
-- Load manifest_cleanup_state for manifestId
-- Resume from last_completed_priority + 1
-- Skip resources WHERE id <= last_completed_resource_id at same priority
-
-## Notes
-
-- Cleanup is idempotent (safe to retry)
-- Records are retained for audit (soft delete pattern)
-- B21: Object deletion uses cleanup_processed_at flag to prevent double-processing
-- No reference counting needed - DB cascade (ON DELETE RESTRICT) prevents blob deletion
-- Background GC handles blob cleanup after 24h grace period (finds blobs with no referencing objects)
-- GC is needed because DB cascade can't reach S3 (S3 deletion requires explicit API calls)
-- Instance termination is the most critical step (cost implications)
-- Snapshot cleanup is lowest priority (already paid for storage)
-- Feature cleanup failures logged with machine IDs for manual cleanup or scheduled retry
-- Feature orphans handled separately from compute orphans (different reconciliation)
-- Manifest immutability: SEALED manifests reject addResource (except A13 recovery path)
+Resources grouped by provider, cleanup proceeds independently per provider
+Cross-provider failures don't block unrelated providers

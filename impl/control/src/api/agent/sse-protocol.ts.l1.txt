@@ -32,7 +32,7 @@
 - stream values: 'stdout' | 'stderr' | 'sync_complete'
 - sync_complete triggers CLAIMED→ACTIVE transition
 
-## Connection Management
+## ConnectionManagement
 - Auto-reconnect: exponential backoff SSE_RECONNECT_BASE_MS (2s) → SSE_RECONNECT_MAX_MS (64s), max SSE_MAX_RETRIES (10) retries
 - Heartbeat timeout: HEARTBEAT_ACK_TIMEOUT_MS (30s) no ack → agent shutdown
 - Panic diagnostics: POST /v1/instances/:id/panic (best-effort, PANIC_DIAGNOSTICS_TIMEOUT_MS / 2s timeout)

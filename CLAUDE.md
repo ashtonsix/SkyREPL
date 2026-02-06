@@ -4,7 +4,7 @@
 
 SkyREPL: cloud compute orchestration for lifecycle management and reproducibility. Control plane (VPS) + CLI client + Python agent (on instances).
 
-**Current phase:** L2/B completion. Active worklogs: `WORKLOG_L2B_COMPLETION.txt` (action plan), `WORKLOG_SPEC_AUDIT.txt` (reference). Status: `STATUS.txt`.
+**Current phase:** L2/B complete, ready for L3. No active worklog. Completed: `worklogs/011_WORKLOG_L2B_COMPLETION.txt`. Status: `STATUS.txt`. Backlog: `BACKLOG.txt`.
 
 ## Dispatch
 
@@ -24,14 +24,14 @@ Agent teams (experimental): multiple independent sessions with shared task lists
 
 ## Specification
 
-~11,500 lines across 15 chapters in `spec/`. **Don't read spec chapters directly** — spawn subagents to extract what you need.
+~9,500 lines across 15 chapters in `spec/`. **Don't read spec chapters directly** — spawn subagents to extract what you need.
 
 - Ch01-04: Foundation (Introduction, Material, Resources, Manifest)
 - Ch05-07: Execution (Allocations, Workflows, Intents)
 - Ch08-11: Interface (Providers, API, CLI, Agent)
 - Ch12-15: Operations (Orphans, Types, Implementation, Operations)
 
-Spec is mostly normative (MUST/SHOULD/MAY) with some non-normative content flagged for redistribution (see WORKLOG_SPEC_AUDIT.txt D4).
+Spec is normative (MUST/SHOULD/MAY). **No-regrowth policy:** new non-normative content goes to `docs/` or `workshop/`, not `spec/`. Spec gets a one-line pointer ("See docs/reference/X.txt"), never the content itself.
 
 ## Architecture
 

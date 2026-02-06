@@ -1,0 +1,94 @@
+================================================================================
+Provider Implementation Complexity Tiers
+================================================================================
+
+Source: spec/08_PROVIDERS.txt §8.5.12
+Extracted: 2024-02-06
+
+This document categorizes provider implementations by complexity level and
+requirements. Use this as a guide when implementing new providers.
+
+================================================================================
+
+TESTING & CHAOS PROVIDER (OrbStack)
+-----------------------------------
+OrbStack is the foundation of contract-based testing.
+
+Intent contracts (SpawnInstanceContract, TerminateInstanceContract, etc.) define
+provider-agnostic behavior. OrbStack implements these contracts identically to
+cloud providers, plus chaos injection for failure scenarios.
+
+Key insight: We're not testing "OrbStack works therefore AWS works." We're testing
+"the control plane handles intent contracts correctly, and any provider implementing
+those contracts gets the same behavior."
+
+Chaos capabilities:
+- Fault injection (network timeouts, API errors, spot interruptions)
+- Resource constraints (capacity errors, quota limits)
+- Drift simulation (instances disappearing, IPs changing)
+- Contract compliance verification under failure conditions
+
+Requirements: Provider interface core methods, chaos/fault injection hooks,
+controlled failure scenarios, error taxonomy mapping.
+
+Example Implementation Size: ~600 lines (including chaos features)
+
+
+ADDITIONAL PROVIDERS (Lambda, RunPod, future: SLURM, GCP, CoreWeave)
+---------------------------------------------------------------------
+Requirements:
+- Implement Provider interface core methods
+- Implement basic lifecycle hooks (onStartup, onShutdown, onHeartbeat)
+- Handle 'health_check' and 'reconcile' heartbeat task types
+- Map provider errors to error taxonomy
+
+Optional:
+- Implement optional interface methods (snapshots, spot) based on capabilities
+- Use in-memory caching
+
+Not Needed:
+- Custom workflows
+- Custom workflow contracts
+- Complex hooks (onSpotInterruption, etc.)
+
+Example Implementation Size: ~500 lines
+
+Note: Simpler providers aren't forced into complex cloud platform integration.
+Each provider implements the capabilities that make sense for its platform.
+
+
+REFERENCE IMPLEMENTATION (AWS - first detailed integration)
+------------------------------------------------------------
+Requirements:
+- Everything from Additional Providers
+
+Plus:
+- Enhanced types (AWSInstance, AWSSnapshot)
+- Materialization/projection functions
+- Custom workflows for optimization:
+  - Warm volume pool management
+  - Spot fleet orchestration
+  - Multi-AZ capacity probing
+- Full lifecycle hooks:
+  - Full heartbeat expectations handling (all task types)
+  - Workflow launch reporting (spot interruptions, budget thresholds)
+  - Sophisticated reconciliation with drift detection
+- Provider-specific workflow contracts
+
+Advanced:
+- Cost Explorer integration
+- Capacity Advisor integration
+- Reserved instance utilization tracking
+
+Example Implementation Size: ~3000 lines
+
+AWS happened to be the first provider with deep integration. When SLURM,
+GCP, or CoreWeave are added, they will receive the same depth of integration
+where appropriate. AWS is not inherently superior - it's just the reference
+implementation that established patterns for advanced provider features.
+
+
+The key difference: Advanced providers use the extension framework to
+implement optimizations that are invisible to the control plane. The
+control plane submits workflows and receives generic outputs. All
+provider-specific complexity is encapsulated.

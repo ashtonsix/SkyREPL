@@ -18,11 +18,6 @@
   - Special: stream="sync_complete" with sync_success=false triggers CLAIMED→FAILED
   - Critical path: sync_complete bypasses batching via flush_and_send() for low latency
 
-- `POST /v1/agent/run-complete` - Run completion notification
-  - Body: RunCompleteMessage with run_id, allocation_id, exit_code, workflow_state
-  - Updates: run.exit_code, run.finished_at, run.workflow_state
-  - Triggers: wait-completion node unblocks, artifact collection starts
-  - Returns: { acknowledged: true }
 
 - `POST /v1/agent/spot-interrupt-start` - Spot interruption detected (Phase 1)
   - Body: SpotInterruptStartMessage with run_id, time_remaining_ms
@@ -49,6 +44,18 @@
   - Body: PrepareSnapshotAckMessage with instance_id, success, error
   - Signals that agent has synced filesystems and cleared temp files
   - Unblocks prepare-instance node in snapshot workflow
+  - Returns: { acknowledged: true }
+
+- `POST /v1/agent/heartbeat-panic-start` - Heartbeat panic start (Phase 1)
+  - Body: HeartbeatPanicStartMessage with run_id, time_since_ack_ms
+  - Signals: Heartbeat timeout detected, starting panic checkpoint
+  - Updates: run.workflow_state='heartbeat-panic:checkpointing'
+  - Returns: { acknowledged: true }
+
+- `POST /v1/agent/heartbeat-panic-complete` - Heartbeat panic complete (Phase 2)
+  - Body: HeartbeatPanicCompleteMessage with run_id, checkpoint_exit_code, artifacts_uploaded
+  - Signals: Panic checkpoint done
+  - Updates: run.workflow_state based on checkpoint success
   - Returns: { acknowledged: true }
 
 - `POST /v1/instances/:id/panic` - Emergency diagnostics (best-effort)
@@ -83,11 +90,11 @@
 - `HeartbeatAckMessage` - Keep-alive ping
 
 ## Authentication
-- Agent token (JWT) in Authorization header
-- Token includes instance_id, expires in 7 days
-- Refresh via POST /v1/agent/refresh-token
+- Agent token (hash-based) in x-instance-token header
+- Token stored as auth_token_hash in instances table
+- Token validated by querying instances WHERE auth_token_hash = ?
 
-## Error Handling
+## ErrorHandling
 - Agent retries with exponential backoff (1s → 32s max)
 - Heartbeats and logs are idempotent
 - SSE reconnects with Last-Event-ID on disconnect

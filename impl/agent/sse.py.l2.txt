@@ -66,9 +66,7 @@ def get_last_message_time() -> Optional[float]:
     return last_message_time
 
 
-# -----------------------------------------------------------------------------
-# Low-Level Byte Reading
-# -----------------------------------------------------------------------------
+## LowLevelByteReading
 
 def read_line(response) -> Optional[bytes]:
     """
@@ -201,9 +199,7 @@ def parse_sse_events(response) -> Generator[SSEMessage, None, None]:
         log("DEBUG", f"Unknown SSE line format: {line[:50]}")
 
 
-# -----------------------------------------------------------------------------
-# Connection Management
-# -----------------------------------------------------------------------------
+## ConnectionManagement
 
 def get_connection(url: str):
     """

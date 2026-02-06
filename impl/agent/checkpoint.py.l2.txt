@@ -246,7 +246,7 @@ def upload_to_url(local_path: str, presigned_url: str) -> bool:
         return False
 ```
 
-## Failover URL Design
+## FailoverURLDesign
 
 URLs are generated at workflow start (StartRunMessage) with 4h TTL:
 - Primary: First presigned URL for the blob
@@ -262,7 +262,7 @@ This provides resilience against:
 - Presigned URL expiration edge cases
 - S3 endpoint regional failures
 
-## Timing Budgets
+## TimingBudgets
 
 Spot Interruption (2m total):
 - Checkpoint: 90s max

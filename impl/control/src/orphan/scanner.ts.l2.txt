@@ -49,7 +49,7 @@ interface RecoveryHint {
 }
 ```
 
-## Provider Orphan Detection
+## ProviderOrphanDetection
 
 ```typescript
 /**
@@ -125,7 +125,7 @@ async function detectOrphans(
 }
 ```
 
-## Tailscale Orphan Detection
+## TailscaleOrphanDetection
 
 ```typescript
 /**
@@ -169,7 +169,7 @@ async function detectTailscaleOrphans(): Promise<TailscaleOrphan[]> {
 }
 ```
 
-## Whitelist Filtering
+## WhitelistFiltering
 
 ```typescript
 /**
@@ -207,7 +207,7 @@ async function detectAllOrphans(): Promise<OrphanedResource[]> {
 }
 ```
 
-## Background Scan Loop
+## BackgroundScanLoop
 
 ```typescript
 /**
@@ -239,11 +239,11 @@ async function backgroundOrphanScan(): Promise<void> {
 }
 
 function startOrphanScanLoop(): void {
-  setInterval(backgroundOrphanScan, 60 * 60 * 1000); // 1 hour
+  setInterval(backgroundOrphanScan, TIMING.ORPHAN_SCAN_INTERVAL_MS);
 }
 ```
 
-## Database Recovery Hints
+## DatabaseRecoveryHints
 
 ```typescript
 /**

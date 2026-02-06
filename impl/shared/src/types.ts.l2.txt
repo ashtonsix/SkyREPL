@@ -26,7 +26,7 @@ export type ProviderName = 'aws' | 'lambda' | 'runpod' | 'orbstack';
 export type FeatureProviderName = 'tailscale' | string;
 ```
 
-## Semantic ID Aliases
+## SemanticIDAliases
 
 ```typescript
 // All INTEGER PRIMARY KEY, but semantically distinct
@@ -43,7 +43,7 @@ export type ProviderId = string;    // i-xxxxx, pod-xxxxx, etc.
 export type ProviderSnapshotId = string;  // ami-xxxxx, snap-xxxxx, etc.
 ```
 
-## ID Utilities
+## IDUtilities
 
 ```typescript
 /** Convert integer ID to base-36 slug for display */
@@ -75,7 +75,7 @@ export interface InstanceSpec {
 }
 ```
 
-## Status Enums
+## StatusEnums
 
 ```typescript
 /**
@@ -129,7 +129,7 @@ export type TailscaleStatus =
   | 'failed';
 ```
 
-## WorkflowState Parsing and Building
+## WorkflowStateParsing
 
 ```typescript
 /** Status parsing result */
@@ -178,7 +178,7 @@ export function isAvailable(resource: { workflowState: WorkflowState; currentMan
 }
 ```
 
-## Pre-defined WorkflowState Builders
+## WorkflowStateBuilders
 
 ```typescript
 // Pre-defined workflow_state builders for instances
@@ -217,7 +217,7 @@ export const RunWorkflowState = {
 } as const;
 ```
 
-## Timestamp Utilities
+## TimestampUtilities
 
 ```typescript
 /** Timestamp utilities */
@@ -230,7 +230,7 @@ export const Timestamp = {
 } as const;
 ```
 
-## Duration Utilities
+## DurationUtilities
 
 ```typescript
 /** Duration constants and utilities */

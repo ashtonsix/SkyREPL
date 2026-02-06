@@ -1,0 +1,1110 @@
+================================================================================
+WORKLOG: L2/B Audit Findings
+================================================================================
+Status: REFERENCE (raw findings for L2B completion planning)
+Date: 2026-02-06
+Previous: worklogs/010_WORKLOG_SPEC_AUDIT.txt (folded into this file)
+Context: 12 agents (10 audit + 2 legacy), plus WS2 verification audit findings.
+Organized by strategic phase: Distribution → Structure → Correctness →
+Transition Planning.
+
+================================================================================
+PROVENANCE: Spec Hardening Verification (from WS2 audit)
+================================================================================
+
+12 samples audited across REWRITE/REPLACE/CONDENSE treatments post-hardening.
+Results: 10 PASS, 2 PARTIAL PASS, 0 FAIL.
+
+  PASS  Ch08 §8.1.1 Spawn idempotency          (REWRITE)  22/22
+  PASS  Ch08 §8.1.6 generateBootstrap()        (REPLACE)  11/12
+  PART  Ch08 §8.5.6 Heartbeat handlers         (REPLACE)  13/16 (3 minor gaps)
+  PART  Ch13 §13.3.2 Materializer converters   (REPLACE)   7/10 (3 minor gaps)
+  PASS  Ch13 §13.1.4 Cross-cutting types       (CONDENSE) 20/20
+  PASS  Ch05 §5.3 queryWarmPool/claimWarmPool  (REWRITE)  17/17
+  PASS  Ch06 §6.2 Execution loop               (REWRITE)  28/28
+  PASS  Ch04 §4.2 claimWarmInstance            (REWRITE)  19/19
+  PASS  Ch12 §12.2 Detection algorithm         (REWRITE)  16/16
+  PASS  Ch11 §11.9 Spot interruption           (REWRITE)  20/20
+  PASS  Ch03 §3.2.2 Instance materialization   (REPLACE)  11/11
+  PASS  Ch07 §7.2 cleanupFeatures              (REPLACE)  16/16
+
+6 gaps (all LOW) → captured in §I below.
+
+
+================================================================================
+A. OUT-OF-SCOPE REDISTRIBUTION (→ Distribution phase)
+================================================================================
+
+A1. Workshop/Docs Directory Structure Proposal
+-----------------------------------------------
+
+Existing files:
+  docs/design/timeouts.md.l2.txt   (timeout constraint chain analysis)
+  workshop/pitch.txt               (elevator pitch / positioning)
+
+Proposed structure (24 files, 8 directories):
+
+  docs/
+    design/
+      timeouts.txt               [EXISTS as timeouts.md.l2.txt — rename]
+      core-principles.txt        Project-level "why" (Ch01 core insight, ~20L)
+      implementation-phases.txt  Rollout strategy (Ch14, ~257L)
+      extensibility.txt          Extension points (Ch15, ~22L)
+      rationale-material.txt     Material layer rationale (Ch02 x3, ~38L)
+      rationale-resources.txt    Resource layer rationale (Ch04,05,06,12 x2, ~32L)
+      rationale-execution.txt    Execution layer rationale (Ch08 x2,Ch11 x2, ~65L)
+      rationale-interface.txt    Interface layer rationale (Ch10,Ch13, ~37L)
+    guides/
+      api-overview.txt           API purpose + communication (Ch09, ~91L)
+      operations.txt             Observability, CI, DB migrations (Ch15, ~80L)
+      orphan-management.txt      Orphan detection guide (Ch12, ~105L)
+      security.txt               Security model (Ch15, ~27L)
+    reference/
+      cli-commands.txt           Full CLI command reference (Ch10, ~918L)
+      error-codes.txt            API error codes (Ch09, ~45L)
+      provider-tiers.txt         Provider complexity spectrum (Ch08, ~85L)
+      timing-configuration.txt   Config parameters + defaults (Ch15, ~272L)
+      type-conventions.txt       Type placement + naming (Ch13 x2, ~139L)
+
+  workshop/
+    commercial/
+      deployment-models.txt      Deployment topologies (Ch15, ~17L)
+      licensing-strategy.txt     License, pricing, enforcement (Ch15, ~68L)
+      pitch.txt                  [EXISTS] Elevator pitch
+    product/
+      positioning.txt            Competitive positioning (Ch01, ~9L)
+      target-users.txt           Target user segments (Ch01, ~6L)
+    ux/
+      cli-philosophy.txt         CLI design principles (Ch10, ~62L)
+      observability-features.txt Topology signatures (Ch06, ~23L)
+      ssh-workflow.txt           SSH + workdir isolation (Ch05, ~40L)
+      tailscale-jit.txt          JIT Tailscale installation (Ch05, ~145L)
+
+Key decisions:
+  - 17 LOW-priority items (2-20 lines each) MERGED into 4 rationale-*.txt files
+    rather than 17 individual files. Each becomes ~30-65 lines.
+  - File extension: .txt (project convention; fidelity ladder doesn't apply to docs)
+  - Naming: purely topical, no chapter numbers (content merges across chapters)
+  - Existing timeouts.md.l2.txt → rename to timeouts.txt (fidelity suffix misapplied)
+  - Don't pre-create future directories (tutorials/, releases/, branding/) — create on first use
+
+A2. D4 Item → File Mapping (all 41 items)
+------------------------------------------
+
+HIGH PRIORITY (10 items, ~1,927 lines):
+  Ch10 S10.3-10.8 Command Reference       ~918L → docs/reference/cli-commands.txt
+  Ch15 S15.9 Timing Configuration          ~272L → docs/reference/timing-configuration.txt
+  Ch14 entire chapter                      ~257L → docs/design/implementation-phases.txt
+  Ch05 S5.4 JIT Tailscale                  ~145L → workshop/ux/tailscale-jit.txt
+  Ch13 S13.1.5+S13.6.1-6.4 Type Placement ~115L → docs/reference/type-conventions.txt
+  Ch12 S12.5 CLI Orphan Commands           ~105L → docs/guides/orphan-management.txt
+  Ch15 S15.1-15.3 Observability/CI/DB       ~80L → docs/guides/operations.txt
+  Ch08 S8.5.12 Provider Spectrum            ~85L → docs/reference/provider-tiers.txt
+  Ch15 S15.4-15.5 License and Billing       ~68L → workshop/commercial/licensing-strategy.txt
+  Ch09 S9.1+S9.4.1 API Purpose              ~91L → docs/guides/api-overview.txt
+
+MEDIUM PRIORITY (8 items, ~233 lines):
+  Ch05 S5.4 SSH Properties + Workdir        ~40L → workshop/ux/ssh-workflow.txt
+  Ch10 S10.1-10.2 CLI Purpose/Architecture  ~62L → workshop/ux/cli-philosophy.txt
+  Ch09 S9.6.1 Error Codes Reference         ~45L → docs/reference/error-codes.txt
+  Ch06 S6.9 Topology Signatures             ~23L → workshop/ux/observability-features.txt
+  Ch15 S15.7 Security                       ~27L → docs/guides/security.txt
+  Ch15 S15.8 Extensibility & Future         ~22L → docs/design/extensibility.txt
+  Ch15 S15.6 Deployment Models              ~17L → workshop/commercial/deployment-models.txt
+  Ch13 S13.9 Naming Conventions             ~24L → docs/reference/type-conventions.txt (merge)
+
+LOW PRIORITY (17 items, ~172 lines total — merged into 5 files):
+  Ch01 Target users              ~6L → workshop/product/target-users.txt
+  Ch01 Positioning vs SkyPilot   ~9L → workshop/product/positioning.txt
+  Ch01 Core Insight             ~20L → docs/design/core-principles.txt
+  Ch02 Design principles        ~11L → docs/design/rationale-material.txt
+  Ch02 ID scheme rationale        ~6L → docs/design/rationale-material.txt
+  Ch02 SBO 64KB threshold       ~21L → docs/design/rationale-material.txt
+  Ch04 Join table rationale       ~5L → docs/design/rationale-resources.txt
+  Ch05 Timestamp principles       ~4L → docs/design/rationale-resources.txt
+  Ch06 Why workflow_nodes          ~4L → docs/design/rationale-resources.txt
+  Ch08 Provider key principles   ~10L → docs/design/rationale-execution.txt
+  Ch08 Kill-at-any-step         ~24L → docs/design/rationale-execution.txt
+  Ch10 Thin client principle     ~23L → docs/design/rationale-interface.txt
+  Ch11 Why agent-initiated        ~5L → docs/design/rationale-execution.txt
+  Ch11 Byte-by-byte reading      ~26L → docs/design/rationale-execution.txt
+  Ch12 Why naming matters          ~8L → docs/design/rationale-resources.txt
+  Ch12 Safety constraints        ~11L → docs/design/rationale-resources.txt
+  Ch13 Type organization          ~14L → docs/design/rationale-interface.txt
+
+
+================================================================================
+B. CROSS-REFERENCE VERIFICATION (→ Structure phase)
+================================================================================
+
+Total confirmed broken: 51 (not 36 as originally audited).
+  Audit false positives: 3 (refs flagged as broken that actually match)
+  Audit correction errors: 7 (audit suggested wrong fix target)
+  Newly discovered: 13 (not in original audit)
+
+B1. Mechanical Renames in Spec (36 edits)
+-----------------------------------------
+
+manifest.ts.l2.txt compressed § convention (9 refs):
+  spec/04_MANIFEST.txt:122  §Seal Manifest          → §SealManifest
+  spec/04_MANIFEST.txt:135  §Manifest Expiry Check  → §ExpiryCheck
+  spec/04_MANIFEST.txt:157  §Claim Resource         → §ResourceClaiming
+  spec/04_MANIFEST.txt:199  §Claim Resource         → §ResourceClaiming
+  spec/04_MANIFEST.txt:220  §Claim Resource Atomic  → §AtomicClaim
+  spec/04_MANIFEST.txt:248  §Subworkflow Independence → §SubworkflowManifest
+  spec/04_MANIFEST.txt:280  §Retention Policy       → §RetentionPolicy
+  spec/04_MANIFEST.txt:329  §Expiry Scanner         → §ExpiryScanner
+  spec/04_MANIFEST.txt:338  §Cost Attribution       → §CostAttribution
+
+engine.ts.l2.txt compressed § convention (9 refs):
+  spec/06_WORKFLOWS.txt:74   §Retry Semantics       → §Retry
+  spec/06_WORKFLOWS.txt:108  §Execution Loop        → §ExecuteLoop
+  spec/06_WORKFLOWS.txt:124  §Node Execution Model  → §ExecuteNode
+  spec/06_WORKFLOWS.txt:354  §Subworkflow Handling  → §Subworkflows
+  spec/06_WORKFLOWS.txt:502  §Error Mapping         → §ErrorMapping
+  spec/06_WORKFLOWS.txt:550  §Cancellation Protocol → §Cancellation
+  spec/06_WORKFLOWS.txt:57   §Core Interface        → WorkflowEngine Interface
+  spec/06_WORKFLOWS.txt:447  §Error Handling        → §RetryStrategy
+  spec/13_TYPES.txt:560      engine.ts §NodeContext  → shared/src/api/workflows.ts §NodeContext
+
+scanner.ts.l2.txt heading drift (3 refs):
+  spec/12_ORPHANS.txt:79   §Detection Algorithm → §Provider Orphan Detection
+  spec/12_ORPHANS.txt:122  §Detection Algorithm → §Provider Orphan Detection
+  spec/12_ORPHANS.txt:337  §Detection Algorithm → §Provider Orphan Detection
+
+allocation.ts.l2.txt heading drift (3 refs):
+  spec/05_ALLOCATIONS.txt:578  §CLAIMED Reconciliation   → §Background Reconciliation: CLAIMED Timeout
+  spec/05_ALLOCATIONS.txt:679  §Warm Pool Replenishment  → §ACTIVE->COMPLETE Transition with Debug Hold and Replenishment
+  spec/05_ALLOCATIONS.txt:692  §Debug Hold Expiry        → §Hold Expiry Background Task
+
+ssh.ts.l2.txt heading drift (3 refs):
+  spec/05_ALLOCATIONS.txt:652  §Extend Command       → §CLI Command: `repl extend`
+  spec/10_CLI.txt:291          §Extend Command       → §CLI Command: `repl extend`
+  spec/05_ALLOCATIONS.txt:715  §Release Command      → §CLI Command: `repl release`
+
+compensation.ts.l2.txt heading drift (1 ref):
+  spec/06_WORKFLOWS.txt:180  §Two-Phase Spawn → §TwoPhaseSpawn
+
+patterns.ts.l2.txt heading drift (4 refs):
+  spec/06_WORKFLOWS.txt:235  §Insert-and-Reconverge  → §InsertAndReconverge
+  spec/06_WORKFLOWS.txt:277  §Conditional-Branch     → §ConditionalBranch
+  spec/06_WORKFLOWS.txt:303  §Parallel-Fan-Out       → §ParallelFanOut
+  spec/06_WORKFLOWS.txt:329  §Retry-with-Alternative → §RetryWithAlternative
+
+types.ts.l2.txt (resource) heading drift (1 ref):
+  spec/03_RESOURCES.txt:465  §Simple Object Materialization → §Object Parsers
+
+db.types.ts.l2.txt heading drift (1 ref):
+  spec/13_TYPES.txt:375  §Record <-> Materialized Converters → §Record to Materialized Converters
+
+middleware.ts.l2.txt wrong section (1 ref):
+  spec/09_API.txt:2559  §Auth Middleware → §Idempotency Middleware
+
+classifier.ts.l2.txt heading drift (1 ref):
+  spec/12_ORPHANS.txt:363  §Failed Spawn Detection → §Spawn Error Classification
+
+B2. Structural Fixes (7 edits — wrong file or missing section)
+--------------------------------------------------------------
+
+agent/agent.py → sse.py redirect (2 refs):
+  spec/11_AGENT.txt:445  agent.py §SSE Byte-by-Byte Reader → sse.py §Low-Level Byte Reading
+  spec/11_AGENT.txt:456  agent.py §SSE Connection Management → sse.py §Connection Management
+
+cli/client.ts missing heading (1 ref):
+  spec/10_CLI.txt:851  §SSE Stream Rendering → §Utility Functions (or add sub-heading)
+
+manifest.ts → cleanup-manifest.ts redirect (2 refs):
+  spec/04_MANIFEST.txt:301  manifest.ts §Cleanup Execution → cleanup-manifest.ts §Node Handlers
+  spec/04_MANIFEST.txt:143  manifest.ts §Trigger Cleanup → cleanup-manifest.ts §Entry Point
+
+provider/types.ts → extensions.ts redirect (1 ref):
+  spec/13_TYPES.txt:818  types.ts §Provider Heartbeat Types → extensions.ts §Heartbeat Expectations Model
+
+provider/types.ts heading mismatch (1 ref):
+  spec/13_TYPES.txt:802  §Feature Provider Types → §Feature Provider Interface
+
+B3. Newly Discovered Broken Refs (8 unique, not in original audit)
+------------------------------------------------------------------
+
+  spec/03_RESOURCES.txt:506  types.ts §Reconciliation → §Instance Reconciliation
+  spec/03_RESOURCES.txt:549  types.ts §State Validation → §State Transition Validation
+  spec/02_MATERIAL.txt:1105  external.ts §TTL Cache → §Core Cache Function
+  spec/10_CLI.txt:210        run.ts §Run Status → §Run Status Subcommand
+  spec/05_ALLOCATIONS.txt:435 ssh.ts §ProxyCommand JIT Installation → §ProxyCommand Script (shell)
+  spec/13_TYPES.txt:497      workflows.ts §Workflow Definition (Blueprints) → §Workflow Engine Types (Blueprints)
+  spec/13_TYPES.txt:518      workflows.ts §Workflow Instance (Runtime) → §Workflow Runtime Types
+  spec/04_MANIFEST.txt:318   cleanup-manifest.ts §Cleanup Workflow Blueprint → §Workflow Definition
+
+B4. Audit False Positives (3 refs wrongly flagged as broken)
+------------------------------------------------------------
+
+  spec/12_ORPHANS.txt:138  §Tailscale Orphan Detection — MATCHES exactly
+  spec/05_ALLOCATIONS.txt:703  §Termination Blocking — MATCHES exactly
+  spec/06_WORKFLOWS.txt:569  §CompensateWithRetry — MATCHES exactly
+
+B5. Audit Correction Errors (7 cases where audit suggested wrong fix)
+---------------------------------------------------------------------
+
+  §Warm Pool Replenishment: audit said → ## Warm Pool Maintenance
+    ACTUAL: → ## ACTIVE->COMPLETE Transition with Debug Hold and Replenishment
+  §Debug Hold Expiry: audit said → ## Debug Hold Expiry Check
+    ACTUAL: → ## Hold Expiry Background Task
+  §Termination Blocking: audit said → ## Termination Blocking Logic
+    ACTUAL: ## Termination Blocking (MATCHES — not broken)
+  §Two-Phase Spawn: audit said → ## Two-Phase Spawn Protocol
+    ACTUAL: → ## §TwoPhaseSpawn
+  §CompensateWithRetry: audit said → ## Compensation Retry
+    ACTUAL: ## §CompensateWithRetry (MATCHES — not broken)
+  §Idempotency Protocol: audit said wrong spec text
+    ACTUAL spec text: §Auth Middleware; actual heading: ## Idempotency Middleware
+  §Tailscale Orphan Detection: audit said case match issue
+    ACTUAL: matches exactly (not broken)
+
+
+================================================================================
+C. L1 FIDELITY BASELINE (→ Structure phase)
+================================================================================
+
+C1. Summary Statistics
+----------------------
+
+  Total L1 files: 131
+  L1 files with L2 counterpart: 48
+  L1 files without L2 counterpart: 83
+
+  Line count distribution (L1 files WITH L2 counterpart):
+    <=50 lines (near target):  16 files (33%)
+    51-100 lines:               8 files (17%)
+    101-200 lines:             14 files (29%)
+    201-300 lines:              6 files (13%)
+    300+ lines:                 4 files  (8%)
+
+  Total lines across 48 files: 6,048. Mean: 126. Median: 92.5.
+  Files needing substantive trimming: 32 (those >50 lines)
+  Estimated lines to remove: ~4,636 (reducing 6,048 → ~1,460)
+
+C2. Trimming Template
+----------------------
+
+Target per file: 20-50 lines containing:
+  - Purpose line (file responsibility)
+  - "See L2 for [behavior list]"
+  - Exports (names only, not full interfaces)
+  - Key invariants (3-5 bullets)
+  - Fields/types (compact)
+  - Materialization line
+
+Example (allocation.ts trimmed from 77 → 22 lines):
+
+  # allocation.ts - Allocation State Machine (Ch5)
+
+  Run-to-instance binding. AVAILABLE allocations ARE the warm pool.
+  See L2 for state transition logic, replenishment behavior, and debug hold semantics.
+
+  ## Status Enum
+  AVAILABLE | CLAIMED | ACTIVE | COMPLETE | FAILED
+
+  ## State Transitions
+  - AVAILABLE -> CLAIMED (claim-allocation node)
+  - CLAIMED -> ACTIVE (sync_complete) | FAILED (sync timeout)
+  - ACTIVE -> COMPLETE (finalize node) | FAILED (heartbeat loss, spot interrupt)
+
+  ## Key Invariants
+  - At most ONE ACTIVE allocation per instance (single-tenant)
+  - COMPLETE can have debug_hold_until (blocks termination, max 24h)
+  - Warm pool replenishment: ACTIVE->COMPLETE creates NEW AVAILABLE allocation
+  - Each run gets its own allocation record (never reused)
+
+  ## Fields
+  - instance_id, run_id (NULL=AVAILABLE), status, workdir
+  - debug_hold_until, created_at, updated_at, completed_at
+
+  ## Materialization
+  DB record. Belongs to Instance (required), Run (optional), Manifest (optional).
+
+C3. Recommendation
+-------------------
+
+Sonnet batch with template prompt. No per-file judgment needed.
+Pattern is fully mechanical: strip pseudocode/code blocks, keep header, exports,
+invariants, fields. L2 is the safety net — zero information loss risk.
+
+16 files already <=50 lines need only a light touch (add "see L2" pointers).
+
+
+================================================================================
+D. DDL SCHEMA AUDIT (→ Correctness phase)
+================================================================================
+
+45 issues total. 33 HIGH severity. Organized by root cause.
+
+D1. Root Cause: db.ts.l2.txt Legacy Holdover (~12 issues)
+----------------------------------------------------------
+
+File: impl/control/src/material/db.ts.l2.txt
+
+This file defines LOCAL interfaces and SQL that predate the spec-normative schema.
+
+Wrong column names used:
+  instances:  instance_type (should be spec), manifest_id (should be current_manifest_id)
+  runs:       manifest_id (should be current_manifest_id)
+  objects:    object_type (should be type), name (doesn't exist)
+  workflows:  input/output/error (should be input_json/output_json/error_json)
+  workflow_nodes: name (should be node_id), input/output/error (should be *_json)
+  manifest_resources: id (doesn't exist — composite PK), created_at (should be added_at)
+
+Missing fields in local interfaces:
+  instances:  ip, workflow_error, spawn_idempotency_key, is_spot, spot_request_id, init_checksum
+  runs:       workdir, max_duration_ms, workflow_error, init_checksum, create_snapshot, spot_interrupted, started_at, finished_at
+  workflows:  parent_workflow_id, depth, current_node, trace_id, idempotency_key, timeout_ms, timeout_at
+  workflow_nodes: node_type, retry_reason, created_at
+  manifests:  workflow_id, default_cleanup_priority, retention_ms, released_at
+  objects:    provider, provider_object_id, metadata_json, current_manifest_id, accessed_at
+  blobs:      checksum_bytes, payload
+
+Ghost columns (don't exist in DDL):
+  instances:  updated_at
+  runs:       updated_at
+  workflows:  updated_at
+  manifests:  updated_at
+  manifest_resources: id, owner_type, owner_id, cleanup_processed_at
+  objects:    name
+
+object_tags schema mismatch:
+  db.ts uses (key, value) two-column model with ON CONFLICT (object_id, key)
+  DDL uses single tag column: (object_id, tag) where tag = "key:value"
+
+orphan_whitelist schema mismatch:
+  db.ts INSERT omits: provider, resource_type, acknowledged_by, acknowledged_at
+  db.ts ON CONFLICT (provider_id) but DDL UNIQUE is (provider, provider_id)
+
+D2. Root Cause: Ghost updated_at (~15 files)
+---------------------------------------------
+
+Only the allocations table has updated_at. All other tables lack it.
+
+Files writing ghost updated_at:
+  agent.ts.l2.txt         instances UPDATE
+  reconciliation.ts.l2.txt instances UPDATE (lines 133,184,258,336,347,401)
+  launch-run.ts.l2.txt    instances INSERT, runs UPDATE, manifests UPDATE
+  terminate.ts.l2.txt     instances UPDATE, usage_records UPDATE
+  cleanup-manifest.ts.l2.txt runs UPDATE
+  engine.ts.l2.txt        workflows INSERT, workflow_nodes
+  storage.ts.l2.txt       blobs UPDATE (lines 140,165,270)
+  db.ts.l2.txt            all INSERTs/UPDATEs
+
+D3. Root Cause: owner_type/owner_id on manifest_resources
+----------------------------------------------------------
+
+These columns are referenced in L2 code but DON'T EXIST in DDL.
+Decision needed: add to DDL (spec Ch04 defines them) or refactor L2 code.
+
+Files depending on owner_type/owner_id:
+  db.types.ts.l2.txt       ManifestResourceRecord interface (lines 123-131)
+  manifest.ts.l2.txt       INSERTs (lines 110-112, 399-402, 471-475)
+  db.ts.l2.txt             ManifestResource interface + addResourceToManifest()
+  resources.ts.l2.txt      ManifestResource interface (shared, lines 243-251)
+
+D4. Root Cause: Pre-Objects-Table Patterns
+------------------------------------------
+
+Several L2 files reference old-style dedicated tables instead of objects+object_tags:
+
+  agent.ts.l2.txt:95       INSERT INTO run_logs — TABLE DOESN'T EXIST
+  agent.ts.l2.txt:303      SELECT FROM run_files — TABLE DOESN'T EXIST
+  reconciliation.ts.l2.txt:282  SELECT FROM agent_messages — TABLE DOESN'T EXIST
+  reconciliation.ts.l2.txt:297  JOIN run_artifacts — TABLE DOESN'T EXIST
+  cleanup-manifest.ts.l2.txt:535 SELECT FROM snapshots — TABLE DOESN'T EXIST
+
+These should use objects table with type='log'/'run_file'/'artifact'/'snapshot'.
+
+D5. Root Cause: Missing Supporting Tables
+------------------------------------------
+
+Tables referenced in L2 code with no DDL definition:
+
+  api_keys               middleware.ts.l2.txt:42,56
+  rate_limit_log         middleware.ts.l2.txt:219-253
+  orphan_scans           db.ts.l2.txt:902
+  manifest_cleanup_state cleanup-manifest.ts.l2.txt:644-651
+
+Decision: add to migration DDL or redesign as objects/in-memory.
+
+D6. Other HIGH Issues (per-file)
+--------------------------------
+
+launch-run.ts.l2.txt:
+  instances INSERT: ghost status, updated_at; missing last_heartbeat, provider_id
+  instances UPDATE: ghost status = 'booting'
+  allocations UPDATE: ghost claimed_at, activated_at
+  runs UPDATE: ghost completed_at (should be finished_at), updated_at
+  manifests UPDATE: ghost sealed_at (should be released_at), updated_at
+
+terminate.ts.l2.txt:
+  instances UPDATE: ghost status, terminated_at, updated_at
+  usage_records UPDATE: ended_at (should be finished_at), ghost updated_at
+
+engine.ts.l2.txt:
+  workflows INSERT: ghost priority, updated_at
+  workflows UPDATE: ghost retry_of_workflow_id, cancel_reason
+  workflows UPDATE: status='cancelling' — invalid (DDL: pending/running/completed/failed/cancelled/rolling_back)
+  workflow_nodes INSERT: ghost dependencies_json
+
+snapshot.ts.l2.txt:
+  objects INSERT: id = generateUUID() but objects.id is INTEGER PK AUTOINCREMENT
+
+storage.ts.l2.txt:
+  objects INSERT: manifest_id (should be current_manifest_id), metadata (should be metadata_json)
+
+middleware.ts.l2.txt:
+  instances: ghost auth_token_hash
+
+operations.ts.l2.txt:
+  workflow_nodes: ghost error_code, error_message (column is error_json)
+
+
+================================================================================
+E. TIMING CONSTANTS AUDIT (→ Correctness phase)
+================================================================================
+
+E1. Defined Constants (56 in timing.ts.l2.txt)
+-----------------------------------------------
+
+HEARTBEAT_INTERVAL_MS         10,000   (10s)
+HEARTBEAT_DEGRADED_MS        120,000   (2m)
+HEARTBEAT_ACK_TIMEOUT_MS     900,000   (15m)
+STALE_DETECTION_MS          1,500,000  (25m)
+DEFAULT_HOLD_MS              300,000   (5m)
+SSH_EXTENSION_MS             300,000   (5m)
+MAX_SSH_EXTENSION_MS       7,200,000   (2h)
+DEFAULT_EXPLICIT_EXTENSION_MS 1,800,000 (30m)
+MAX_EXPLICIT_EXTENSION_MS  28,800,000  (8h)
+ABSOLUTE_MAX_HOLD_MS      86,400,000   (24h)
+HEARTBEAT_CHECK_INTERVAL_MS   60,000   (60s)
+HOLD_EXPIRY_CHECK_INTERVAL_MS 60,000   (60s)
+RECONCILIATION_INTERVAL_MS    60,000   (60s)
+MANIFEST_CLEANUP_INTERVAL_MS 300,000   (5m)
+ORPHAN_SCAN_INTERVAL_MS    3,600,000   (1h)
+BLOB_GC_INTERVAL_MS       86,400,000   (24h)
+DEFAULT_NODE_TIMEOUT_MS      300,000   (5m)
+DEFAULT_WORKFLOW_TIMEOUT_MS 3,600,000  (60m)
+COMPENSATION_TIMEOUT_MS      300,000   (5m)
+CANCEL_VERIFICATION_MS        90,000   (90s)
+SPAWN_TIMEOUT_MS             600,000   (10m)
+SPAWN_POLL_INTERVAL_MS         5,000   (5s)
+TERMINATE_TIMEOUT_MS         300,000   (5m)
+SNAPSHOT_TIMEOUT_MS        1,800,000   (30m)
+SNAPSHOT_POLL_INTERVAL_MS     30,000   (30s)
+DRAIN_TIMEOUT_MS              60,000   (60s)
+CLAIMED_TIMEOUT_MS           600,000   (10m)
+SSH_ACTIVITY_SLACK_MS         60,000   (60s)
+ORPHAN_MIN_AGE_MS            600,000   (10m)
+BLOB_GRACE_PERIOD_MS      86,400,000   (24h)
+RECENT_SESSION_THRESHOLD_MS 3,600,000  (1h)
+RETRY_BASE_DELAY_MS            2,000   (2s)
+RETRY_MAX_DELAY_MS            60,000   (60s)
+RETRY_MAX_ATTEMPTS                 5   (count)
+SSE_RECONNECT_BASE_MS          2,000   (2s)
+SSE_RECONNECT_MAX_MS          64,000   (64s)
+SSE_MAX_RETRIES                   10   (count)
+LOG_LOCAL_BUFFER_MS              100   (100ms)
+LOG_NETWORK_BATCH_MS           5,000   (5s)
+SPOT_CHECK_INTERVAL_MS         5,000   (5s)
+SPOT_CHECKPOINT_BUDGET_MS     90,000   (90s)
+PANIC_CHECKPOINT_BUDGET_MS   300,000   (5m)
+COMMAND_ACK_TIMEOUT_MS        30,000   (30s)
+AGENT_SHUTDOWN_GRACE_MS        5,000   (5s)
+PANIC_DIAGNOSTICS_TIMEOUT_MS   2,000   (2s)
+PRESIGNED_URL_TTL_MS      14,400,000   (4h)
+SYNC_TIMEOUT_MS              600,000   (10m)
+ARTIFACT_COLLECTION_TIMEOUT_MS 1,800,000 (30m)
+CLI_DEFAULT_TIMEOUT_MS     3,600,000   (1h)
+CLI_API_TIMEOUT_MS            30,000   (30s)
+COMPLETION_CACHE_TTL_MS       30,000   (30s)
+COMPLETION_API_TIMEOUT_MS        200   (200ms)
+CACHE_SPOT_PRICES_TTL_MS     300,000   (5m)
+CACHE_CAPACITY_TTL_MS         60,000   (1m)
+CACHE_INSTANCE_STATE_TTL_MS   30,000   (30s)
+CACHE_INSTANCE_TYPES_TTL_MS 3,600,000  (1h)
+
+E2. Missing Constants (16 — referenced but not defined)
+-------------------------------------------------------
+
+Truly missing (need new definitions):
+  PENDING_WORKFLOW_TIMEOUT_MS      engine.ts:35,552        suggested: 1,800,000 (30m)
+  DEFAULT_MANIFEST_RETENTION_MS    manifest.ts:181         suggested: TBD
+  INSTANCE_BOOT_TIMEOUT_MS         launch-run.ts:400       suggested: 600,000 (10m)
+  BOOT_POLL_INTERVAL_MS            launch-run.ts:401       suggested: 5,000 (5s)
+  SNAPSHOT_PREPARE_TIMEOUT_MS      snapshot.ts:208          suggested: 300,000 (5m)
+  PENDING_SPAWN_STALE_THRESHOLD_MS aws.ts:179              suggested: TBD
+  CACHE_REFRESH_MIN_INTERVAL       aws.ts:878              suggested: TBD
+  RESOURCE_CACHE_TTL               types.ts:34,121         suggested: TBD
+  SNAPSHOT_CACHE_TTL               types.ts:307            suggested: TBD
+
+Name mismatches (same concept, different name):
+  PRESIGNED_URL_EXPIRY_MS    launch-run.ts:514   = PRESIGNED_URL_TTL_MS
+  FILE_SYNC_TIMEOUT_MS       launch-run.ts:544   = SYNC_TIMEOUT_MS
+  CANCEL_VERIFICATION_TIMEOUT_MS terminate.ts:181 = CANCEL_VERIFICATION_MS
+  CURRENT_SESSION_THRESHOLD  classifier.ts:135   = RECENT_SESSION_THRESHOLD_MS
+  SPAWN_MAX_DURATION_MS      contracts.ts:98     = SPAWN_TIMEOUT_MS
+  TERMINATE_MAX_DURATION_MS  contracts.ts:127    = TERMINATE_TIMEOUT_MS
+  SNAPSHOT_MAX_DURATION_MS   contracts.ts:153    = SNAPSHOT_TIMEOUT_MS
+
+E3. Inline Hardcoded Values (drift risks)
+------------------------------------------
+
+  agent.ts.l2.txt:186        300000  → TIMING.DEFAULT_HOLD_MS
+  operations.ts.l2.txt:46    300000  → TIMING.DEFAULT_HOLD_MS
+  operations.ts.l2.txt:82     60000  → TIMING.DRAIN_TIMEOUT_MS
+  aws.ts.l2.txt:760           30000  → derive from TIMING.HEARTBEAT_INTERVAL_MS
+  scanner.ts.l2.txt:242   3,600,000  → TIMING.ORPHAN_SCAN_INTERVAL_MS
+  logs.py.l2.txt:30  env REPL_LOG_FLUSH_INTERVAL_MS default 100 → naming mismatch with REPL_LOG_LOCAL_BUFFER
+
+E4. Spec Naming Divergences
+----------------------------
+
+  Spec Ch11 HEARTBEAT_TIMEOUT_MS        → timing.ts HEARTBEAT_ACK_TIMEOUT_MS
+  Spec Ch11 PANIC_CHECKPOINT_MS         → timing.ts PANIC_CHECKPOINT_BUDGET_MS
+  Spec Ch11 LOG_FLUSH_INTERVAL_MS       → timing.ts LOG_LOCAL_BUFFER_MS
+  Spec Ch11 SHUTDOWN_GRACE_PERIOD_S     → timing.ts AGENT_SHUTDOWN_GRACE_MS (unit mismatch too)
+  Spec Ch11 SPOT_CHECK_INTERVAL_MS env  → timing.ts REPL_SPOT_CHECK_INTERVAL (no _MS)
+  Spec Ch11 INSTANCE_STALE_THRESHOLD_MS → not defined (= STALE_DETECTION_MS?)
+  Spec Ch09 PANIC_LOG_RETENTION         → not defined anywhere
+
+
+================================================================================
+F. SPEC / L1 / L2 CONSISTENCY (→ Correctness phase)
+================================================================================
+
+F1. HIGH Severity (5 issues)
+-----------------------------
+
+Heartbeat payload mismatch:
+  Spec Ch05:533 — HeartbeatRequest has active_allocations (array of allocation IDs)
+  Spec Ch11:229 + agent/heartbeat.py.l2.txt:69 — uses active_ssh_sessions (count)
+  allocation.ts.l2.txt:366 — expects req.active_allocations (iterable)
+  Resolution: Ch05 model (array) needed for per-allocation debug hold. Ch11 + agent need update.
+
+manifest_resources missing owner_type/owner_id in DDL:
+  Spec Ch04:45-46 — defines owner_type, owner_id columns
+  Spec Ch02 DDL + migration — NO such columns
+  manifest.ts.l2.txt:42-44 — ManifestResourceRow assumes they exist
+  Resolution: Add to DDL (both spec Ch02 and migration).
+
+L1 allocation heartbeat threshold: 30s vs 25m:
+  allocation.ts.l1.txt:19 — "heartbeat >30s"
+  Spec + timing.ts — STALE_DETECTION_MS = 25m
+  Resolution: L1 is stale. Will be fixed during L1 correction sweep.
+
+PENDING_WORKFLOW_TIMEOUT_MS not defined:
+  engine.ts.l2.txt:35,552 — references TIMING.PENDING_WORKFLOW_TIMEOUT_MS (30m)
+  timing.ts.l2.txt — constant doesn't exist
+  Resolution: Add to timing.ts.
+
+L1 engine subworkflow inheritance:
+  engine.ts.l1.txt:125 — "Child inherits parent's manifestId"
+  Spec Ch06:340 — "Subworkflows are independent... release their own manifests"
+  engine.ts.l2.txt:660-668 — correctly implements independent manifests
+  Resolution: L1 is wrong. Will be fixed during L1 correction sweep.
+
+F2. MEDIUM Severity (10 issues)
+--------------------------------
+
+  ssh_drain_grace_period naming (Ch07 + terminate.l2) — should align with DRAIN_TIMEOUT_MS
+  HEARTBEAT_TIMEOUT ambiguity in spec Ch05 (means STALE_DETECTION_MS, not ACK_TIMEOUT)
+  L1 scanner orphan interval: 60s vs 1h
+  L1 allocation SSH auto-extend: says NO, spec says YES
+  L1 MAX_PARALLEL_BRANCHES: 10 vs 16
+  L1 manifest cleanup priorities: stale (instances 40→50, snapshots 30→10)
+  L1 manifest retention defaults: stale (1h/24h vs 30m/indefinite)
+  Heartbeat constraint chain inconsistent across Ch05, Ch11, Ch15
+  DEFAULT_MANIFEST_RETENTION_MS not defined in timing.ts
+  allocations.completed_at exists in DDL but spec Ch05 says "two timestamps only"
+
+F3. Tailscale fields architectural question
+---------------------------------------------
+
+  allocation.ts.l2.txt references instance.tailscale_status/tailscale_ip
+  DDL has no such columns on instances
+  Spec Ch03 says "Tailscale state stored in TailscaleMachine object, not instances table"
+  Resolution: L2 should query objects table, not instances table
+
+F4. tags_json vs metadata_json naming inconsistency
+----------------------------------------------------
+
+  Spec Ch03 (8 occurrences) + Ch13:365 — uses "tags_json"
+  Spec Ch02 DDL + migration + all L2 code — uses "metadata_json"
+  Resolution: Rename tags_json → metadata_json in Ch03 (8 edits) + Ch13 (1 edit)
+
+
+================================================================================
+G. L1 vs L2 EXHAUSTIVE CONTRADICTION SWEEP (→ Correctness phase)
+================================================================================
+
+61 total findings: 7 HIGH, 17 MEDIUM, 17 LOW.
+L2 correct in 55/61 cases. 4 cases where L1 has useful detail absent from L2.
+
+G1. HIGH (7 findings)
+----------------------
+
+  patterns.ts: MAX_PARALLEL_BRANCHES 10 (L1) vs 16 (L2/spec)
+  state-transitions.ts: Heartbeat check interval 30s (L1) vs 60s (timing.ts)
+  state-transitions.ts: Heartbeat timeout 30s (L1) vs 15m (timing.ts)
+  types.ts (provider): FeatureProvider methods getState/healthCheck vs status/onInstanceHeartbeat
+  errors.ts (provider): Error code names diverged across the board
+  hold-expiry.ts: SSH auto-extend YES (L1) vs NO (spec) — repeats allocation.ts finding
+  api/workflows.ts: Backpressure protocol defined in L1, denied in L2
+
+G2. MEDIUM (17 findings)
+--------------------------
+
+  aws.ts: Cost data cache TTL 6h (L1) vs 1h (L2)
+  aws.ts: Warm-volume-pool output fields differ (volumeIds plural vs singular+snapshotId)
+  types.ts (provider): customNetworking capability missing in L1
+  types.ts (provider): FeatureProvider method names differ
+  extensions.ts: ProviderTaskReport field names taskType/details vs type/result
+  classifier.ts: OrphanResourceType 'network' (L1) vs 'tailscale_machine' (L2)
+  executor.py: URL refresh for large files in L1, absent from L2
+  executor.py: Multipart URLs for files >100MB in L1, absent from L2
+  routes.ts: Middleware stack order differs
+  agent.ts (API): Token model differs (7-day JWT vs hash-based)
+  agent.ts (API): POST /v1/agent/run-complete in L1, absent from L2
+  agent.ts (API): Heartbeat panic endpoints in L2, absent from L1
+  terminate.ts: Workflow node names differ significantly
+  terminate.ts: TerminateOutput fields differ
+  resources.ts: MAX_PAGE_LIMIT 3-way inconsistency (1000/100/500)
+  resources.ts: DELETE soft vs hard delete
+  db.types.ts: AllocationRecord.completed_at missing from L2
+
+G3. L1 Details Worth Backporting to L2
+---------------------------------------
+
+  executor.py L1:30 — URL refresh for large files (transfer >10 min)
+  executor.py L1:71 — Multipart URLs with 1h TTL for files >100MB
+  resources.ts L1:37 — CURSOR_TTL_MS = 3,600,000 with expired cursor → 400
+  workflows.ts L1:20-24 — WebSocket backpressure protocol (subscribe/ready messages)
+
+
+================================================================================
+H. INTENT CONTRACT AUDIT (→ Correctness phase)
+================================================================================
+
+H1. launch-run — Mostly Clean
+-------------------------------
+
+  9/9 nodes MATCH
+  4/4 pattern applications MATCH
+  Blueprint diagram MATCH (character-for-character)
+
+  Issues:
+    Run resource emission point: spec says "workflow start", L2 emits at create-allocation
+    L2 adds input fields not in spec: holdDurationMs, env, workdir, artifactPatterns
+    L2 output missing L1 type fields: workflowId, fromWarmPool, artifacts
+    LaunchRunInput.files shape: L1 has {path,checksum}, L2 has {path,checksum,sizeBytes}
+
+H2. terminate-instance — Clean with Gaps
+------------------------------------------
+
+  6/6 nodes MATCH
+  Blueprint diagram MATCH
+  SSH drain protocol MATCH (5/5 steps)
+
+  Issues:
+    ssh_drain_grace_period sourcing: spec uses config name, L2 takes as input parameter
+    L2 adds output fields not in spec: forcedSshDisconnects, tailscaleDeregistered
+    Spec Ch07 lacks error handling table for terminate (L2 fills gap reasonably)
+
+H3. create-snapshot — Clean with Minor Drift
+----------------------------------------------
+
+  5/5 nodes MATCH
+  Blueprint diagram MATCH
+  3/3 SnapshotCapability methods MATCH
+
+  Issues:
+    register-snapshot-object: spec says tags_json, L2 uses metadata_json
+    L2 omits provider_id from snapshot metadata (spec requires it)
+    L2 adds run_id, size_bytes to metadata (not in spec)
+    L2 output richer than spec (providerSnapshotId, sizeBytes)
+    L1 types have createdAt, L2 does not return it
+
+H4. cleanup-manifest — Most Troubled
+--------------------------------------
+
+  CRITICAL issues:
+    1. errorHandling keys use 'allocations' instead of 'cleanup-allocations' — WON'T MATCH
+    2. Missing per-provider scoping — spec MUST, L2 runs single workflow
+    3. Missing S3 deletion in cleanup-objects — spec requires it
+    4. L1 types describe WRONG OPERATION (orphan cleanup, not manifest cleanup)
+
+  Structural divergence:
+    Spec: PFO pattern (parallel fan-out by type)
+    L2: Sequential chain by priority (mostly)
+    Spec: Single load node + sort node + PFO
+    L2: validate-manifest + load-resources + 7 typed cleanup nodes + finalize
+
+  Cleanup priority order MATCHES (90→80→70→65→60→50→10)
+
+  Missing from L2:
+    Per-provider scoping (MUST level)
+    Background expiry scanner (MUST level)
+    S3 object deletion (only does DB delete)
+    EXPIRED derived manifest status (L2 hard-deletes)
+
+  L2 exceeds spec:
+    B21 double-processing protection with cleanup_processed_at
+    ManifestCleanupState for crash recovery
+
+
+================================================================================
+I. BEHAVIORAL GAP FIXES (→ Correctness phase)
+================================================================================
+
+I1. Gap 1: Unknown heartbeat task types
+-----------------------------------------
+
+  File: spec/08_PROVIDERS.txt
+  Section: 8.5.6 Heartbeat Task Handlers (lines 821-835)
+  Insert after: line 833 (last task-specific bullet, pool_maintenance)
+  Insert before: line 835 (See also stub)
+
+  Drafted text:
+    - **unknown types**: Providers MUST return a 'skipped' receipt with reason
+      'unknown_task_type' for any task type not recognized by the provider.
+
+  Notes: Audit suggested SHOULD but MUST matches impl and section convention.
+
+I2. Gap 2: Provider-initiated maintenance
+-------------------------------------------
+
+  File: spec/08_PROVIDERS.txt
+  Insert after: gap 1 text
+
+  Drafted text:
+    Providers MAY include provider-initiated maintenance results (e.g., stale volume
+    cleanup) in the providerTasks array of the heartbeat response.
+
+I3. Gap 3: nextHeartbeat.preferredInterval
+--------------------------------------------
+
+  File: spec/08_PROVIDERS.txt
+  Insert after: gap 2 text
+
+  Drafted text:
+    The heartbeat response MAY include nextHeartbeat.preferredInterval (milliseconds)
+    to request adaptive scheduling from the control plane.
+
+I4. Gaps 4-6: Object-backed types metadata_json extraction
+------------------------------------------------------------
+
+  File: spec/13_TYPES.txt
+  Section: 13.3.2 Materialized Types (lines 359-375)
+  Insert after: line 369 (last conversion rule bullet)
+
+  Drafted text:
+    - Object-backed types (Snapshot, Artifact, FeatureInstallation) MUST extract
+      materialized fields by parsing the metadata_json column of the objects table
+      rather than from dedicated SQL columns
+
+  Notes: Single statement covers all 3 sub-gaps. Uses metadata_json (not tags_json).
+
+I5. Bonus: tags_json → metadata_json rename
+---------------------------------------------
+
+  9 edits across 2 spec files:
+    spec/03_RESOURCES.txt lines 227, 247, 263, 281, 299, 315, 334, 351 — all "tags_json" → "metadata_json"
+    spec/13_TYPES.txt line 365 — "tags_json" → "metadata_json"
+
+  All mechanical find-and-replace. DDL (Ch02) and all impl code already use metadata_json.
+
+I6. Assessment
+---------------
+
+  All 6+1 fixes can be done in a single mechanical pass (~10 minutes).
+  No contradictions with existing spec content.
+
+
+================================================================================
+J. FOOD-FOR-THOUGHT VALIDATION (→ Strategy input)
+================================================================================
+
+J1. Healthy Signals — All CONFIRMED
+-------------------------------------
+
+  Fork model + no-deletions: CONFIRMED (spec chapters are self-contained)
+  Treatment taxonomy: CONFIRMED (auditable, granular, repeatable)
+  Code-shaped spec kept: REFINED (mostly correct; Ch08 8.5.12 is 85L non-normative still in spec)
+  Audits admit PARTIAL: CONFIRMED (no false completeness claims)
+
+J2. Risks — All CONFIRMED
+---------------------------
+
+  Cross-ref drift: CONFIRMED + worse than thought (51 not 36, audit itself had errors)
+  Mechanical surface area debt: CONFIRMED (53/120 L2 = 44%, but corrected to ~55% excluding non-targets)
+
+J3. Sequencing Refinement
+---------------------------
+
+  Original food-for-thought:
+    1. Cross-refs → 2. Fidelity reduction → 3. Mechanical completeness → 4. Out-of-scope redistribution
+
+  Validation finding:
+    Out-of-scope redistribution has NO dependency on cross-refs — can run in parallel or first.
+    Moving it earlier cleans spec before fidelity reduction (fewer lines to touch = less risk).
+    Workflow node ordering should be: nodes → CLI → background → tests (not CLI first).
+
+  Updated recommendation: see strategy section.
+
+J4. "Done" Definition — Amended
+---------------------------------
+
+  Original (4 criteria) expanded to 9 (see strategy section).
+  Key additions: schema consistency, timing completeness, intent contract fixes,
+  no-regrowth policy.
+
+J5. Deliverable Mapping
+-------------------------
+
+  Step 1 → D1 (cross-refs) + D2 (integrity invariant)
+  Step 1.5 → D5 (redistribution, parallel-safe)
+  Step 2 → D4 (L1 trimming, blocked on Step 1)
+  Step 3 → D7 (mechanical plan, internal order: nodes→CLI→bg→resources→tests)
+  Unsequenced → D3 (behavioral gaps), D6 (CLAUDE.md)
+
+
+================================================================================
+K. LEGACY GHOST REMNANTS (→ Correctness phase D13)
+================================================================================
+
+29 actionable items found across the codebase. Classified as REMOVE (delete
+entirely), RENAME (mechanical find-replace), REWRITE (needs new wording), or
+KEEP (no action — legitimate current-system usage or archived worklog).
+
+K1. REMOVE (4 items — delete entirely)
+----------------------------------------
+
+  TODO.txt lines 30-44: entire "Exorcising SkyREPL-Legacy" section (Solution
+    Mining + Ghost Remnants Removal subsections). Task descriptions to be
+    removed once executed.
+  TODO.txt line 9: already-completed rename task ("Dispatch Haiku to rename
+    L2.x to L2/A.x").
+  spec/02_MATERIAL.txt line 211: "Grace period replaced by allocation
+    debug_hold_until field (Chapter 5)." — migration note readers can't follow.
+  spec/14_IMPLEMENTATION.txt line 131: "Remove grace_period from run input
+    (or keep with deprecation warning)" — migration note for nonexistent param.
+
+K2. RENAME (12 items — mechanical find-replace)
+-------------------------------------------------
+
+  ssh_drain_grace_period → drain_timeout_ms (4 occurrences):
+    spec/07_INTENTS.txt lines 210, 238, 258
+    impl/control/src/intent/terminate.ts.l2.txt line 82
+    Note: spec Ch09 already uses drain_timeout_ms (line 946), Ch15 uses
+    REPL_DRAIN_TIMEOUT (line 349), impl uses DRAIN_TIMEOUT_MS in timing.ts.l2.
+
+  /api/v2/ → /v1/workflows/ (8 occurrences in single file):
+    impl/tests/control/integration/api-workflows.test.ts.l1.txt
+    lines 11, 32, 52, 68, 81, 94, 100, 108
+    All wrong API version prefix. Correct paths from spec/09_API.txt:
+      /api/v2/launch-run       → /v1/workflows/launch-run
+      /api/v2/terminate-instance → /v1/workflows/terminate-instance
+      /api/v2/create-snapshot   → /v1/workflows/create-snapshot
+      /api/v2/extend-debug-hold → /v1/workflows/extend-hold
+      /api/v2/cancel            → /v1/workflows/cancel
+      /api/v2/status/:id        → /v1/workflows/:id/status
+      /api/v2/stream/:id        → /v1/workflows/:id/stream
+      /api/v2/preflight         → /v1/preflight
+
+K3. REWRITE (9 items — needs new wording)
+-------------------------------------------
+
+  spec/14_IMPLEMENTATION.txt line 10:
+    "Run new code alongside legacy until stable"
+    → "Implement incrementally; validate each phase before proceeding"
+
+  spec/14_IMPLEMENTATION.txt line 159:
+    "legacy code removed" → "all components integrated"
+
+  spec/14_IMPLEMENTATION.txt line 166:
+    "Legacy code paths removed" → "Deprecated code paths removed"
+
+  spec/14_IMPLEMENTATION.txt line 223:
+    "legacy code path usage" → "deprecated code path usage"
+
+  BACKLOG.txt line 18:
+    "from WS3 legacy gap analysis" → "from WS3 gap analysis"
+
+  spec/03_RESOURCES.txt line 132:
+    "Run-to-instance binding with its own lifecycle. Replaces grace_period."
+    → "Run-to-instance binding with its own lifecycle."
+
+  spec/02_MATERIAL.txt line 264:
+    "-- Debug Hold Mechanism (replaces grace_period)"
+    → "-- Debug Hold Mechanism"
+
+  spec/02_MATERIAL.txt line 302:
+    "`debug_hold_until` replaces grace period. When set..."
+    → "`debug_hold_until` controls debug holds. When set..."
+
+  impl/control/migrations/001_initial.sql.l2.txt line 127:
+    "-- Debug Hold Mechanism (replaces grace_period)"
+    → "-- Debug Hold Mechanism"
+
+  spec/01_INTRODUCTION.txt line 40:
+    "replaces vague \"grace periods\" with explicit timestamps"
+    → "uses explicit timestamps for debug holds and cleanup delays"
+
+  spec/09_API.txt line 945:
+    "Grace period for SSH users" → "Drain timeout for SSH users"
+
+  TODO.txt line 24:
+    "`impl/` (formerly `v2/`)" → "`impl/`"
+
+K4. KEEP (20+ items — no action needed)
+-----------------------------------------
+
+  All archived worklog references (worklogs/007_WORKLOG_L2B_ENTRY.txt) —
+    historical record of work done.
+  All /v1/ API paths — current API versioning, not legacy.
+  All generic "grace period" uses in current contexts:
+    blob GC grace period (spec/02, spec/07, impl/garbage-collection)
+    orphan detection min age (spec/12, docs/design/timeouts)
+    agent shutdown grace period (spec/11, impl/agent)
+    cancel grace period (impl/agent/executor)
+  "old version"/"previous version" refs to SkyREPL's own deployment rollback.
+  Active audit findings worklog entries tracking the same issues.
+  Forward-looking TODOs in impl/ (e.g., sse.py.l2.txt line 502).
+
+
+================================================================================
+L. SHARP-EDGE GAP VERIFICATION (→ BACKLOG.txt)
+================================================================================
+
+Cross-referenced all sharp-edge point solutions from ~/SkyREPL-legacy against
+SkyREPL spec/ and impl/. 7 gaps found, 20+ confirmed covered.
+
+L1. Confirmed Gaps
+--------------------
+
+  Gap 1: Tailscale container mode (userspace networking) — HIGH
+    Legacy: agent.py detects container env (RunPod or missing /dev/net/tun)
+    and uses --tun=userspace-networking with custom socket path.
+    SkyREPL: tailscale.py.l2.txt has standard tailscaled startup only.
+    RunPod instances are containers — Tailscale SSH will not work without this.
+
+  Gap 2: Tailscale device limit tracking — MEDIUM
+    Legacy: Tracks free-tier 100-device limit, warns at 80% utilization.
+    SkyREPL: No device limit awareness. Tailscale logout on shutdown mitigates
+    but doesn't eliminate risk under high concurrency.
+
+  Gap 3: Artifact upload HEAD verification — LOW-MEDIUM
+    Legacy: Generates separate presigned HEAD URL to verify upload landed in S3.
+    SkyREPL: Uses failover_url + HTTP 200/204 check instead. Arguably obviated
+    by different resilience strategy.
+
+  Gap 4: Tailscale Funnel port constraint — LOW-MEDIUM
+    Legacy: Documents that path-based Funnel breaks S3 presigned URL signatures.
+    SkyREPL: spec/10_CLI.txt mentions Funnel but not the port-based constraint.
+    Will cause debugging time during local-mode implementation.
+
+  Gap 5: CLI local services preflight — LOW
+    Legacy: Checks MinIO/control-plane reachability before operations.
+    SkyREPL: Has status command but no preflight validation of local infra.
+
+  Gap 6: S3 MinIO-specific diagnostics — LOW
+    Legacy: Catches ECONNREFUSED, NoSuchBucket with MinIO-specific fix messages.
+    SkyREPL: Generic error handling only.
+
+  Gap 7: WAL checkpoint before backup — LOW
+    Legacy: PRAGMA wal_checkpoint(TRUNCATE) before SQLite upload to S3.
+    SkyREPL: Not specified. Well-known practice, will be caught at impl time.
+
+L2. Confirmed Covered (20+ items)
+-----------------------------------
+
+  SSE byte-by-byte reading, warm pool atomic claim, OrbStack cloud-init bypass,
+  SSH proxy command, workdir cleanup, agent lock (fcntl.flock), artifact
+  checksum verification, JIT Tailscale installation, pessimistic termination
+  extensions, content-addressable sync, spawn idempotency keys, SSE reconnect
+  with exponential backoff, Tailscale logout on shutdown, initial heartbeat
+  before sleep, Tailscale credential expiry check, spot interruption handling
+  (IMDSv2), terminate-already-gone handling, apt-daily disabling,
+  chaos/fault injection, AWS eventual consistency errors, failover URL for
+  upload resilience (new in SkyREPL).
+
+L3. Disposition
+-----------------
+
+  Gap 1 + Gap 2 → add to BACKLOG.txt (real gaps)
+  Gap 3 → no action (obviated by design)
+  Gap 4 → annotate in spec/10_CLI.txt during Correctness 1
+  Gaps 5-7 → defer to implementation time (capture in BACKLOG.txt as LOW)
+
+
+================================================================================
+M. L2 FILE INVENTORY (→ Transition planning)
+================================================================================
+
+53 L2 files, 22,309 total lines. No L3 files.
+
+Per-directory:
+  control/  34 files  16,031 lines  (72%)
+  agent/     9 files   2,894 lines  (13%)
+  shared/    7 files   2,100 lines   (9%)
+  cli/       3 files   1,284 lines   (6%)
+  tests/     0 files       0 lines
+
+67 L1 files without L2 counterparts, by category:
+
+  Structural flattening (8 — content merged into consolidated L2 files):
+    control/src/api/agent/agent.ts         → api/agent.ts.l2.txt
+    control/src/api/agent/sse-protocol.ts  → api/sse-protocol.ts.l2.txt
+    control/src/api/middleware/*.ts (3)     → api/middleware.ts.l2.txt
+    control/src/api/operations/workflows.ts → api/operations.ts.l2.txt
+    control/src/api/resources/resources.ts → api/routes.ts.l2.txt
+    control/src/workflow/engine.types.ts   → engine.ts.l2.txt
+
+  Workflow nodes (10 — primary L2 extraction targets):
+    nodes/{spawn-instance, sync-files, claim-allocation, create-allocation,
+    resolve-instance, start-run, collect-artifacts, finalize,
+    wait-completion, transition-hold}.ts
+    Pseudo-code exists in Ch06+Ch07. Highest-priority L2 targets.
+
+  Orphan nodes (4):
+    nodes/{find-orphans, match-to-manifest, expire-allocations,
+    terminate-orphans}.ts
+    Ch12 has detection/classification pseudo-code but not per-node.
+
+  Resource modules (4):
+    resource/{artifact, instance, run, snapshot}.ts
+    Materialization logic in types.ts.l2.txt. L2 only if business logic
+    exists beyond materialization.
+
+  Background jobs (3):
+    background/{hold-expiry, manifest-cleanup, orphan-cleanup}.ts
+    Likely thin wrappers — logic exists in other L2 files.
+
+  CLI commands (10 of 12):
+    commands/{artifact, cancel, control, extend, instance, list,
+    logs, orphan, setup, snapshot, usage}.ts
+    Only run.ts has L2. Mechanical (parse args, call API, format output).
+
+  Test files (11):
+    Entire tests/ directory L1-only. Tests typically written at L3/L4.
+    L1 outlines serve as test plan.
+
+  Config/scaffolding (8):
+    Package.json (4), tsconfig (2), .env, README. Not meaningful L2 targets.
+
+
+================================================================================
+CROSS-REFERENCES
+================================================================================
+
+Source agents: 12 background agents (10 audit + 2 legacy), 2026-02-06
+Incorporates: worklogs/010_WORKLOG_SPEC_AUDIT.txt (WS2 verification, folded in)
+Preceding: WORKLOG_L2B_COMPLETION.txt
+Spec: spec/01_INTRODUCTION.txt through spec/15_OPERATIONS.txt
+Impl: impl/**/*.l2.txt (53 files), impl/**/*.l1.txt (131 files)
+DDL: spec/02_MATERIAL.txt, impl/control/migrations/001_initial.sql.l2.txt
+Legacy: ~/SkyREPL-legacy (sharp-edge source, not long-lived)

@@ -57,7 +57,7 @@ async function execute(ctx, input): Promise<SyncFilesOutput>
 - Workdir will be wiped on next run via warm pool reuse
 - Partial downloads are overwritten on retry
 
-## Error Handling
+## ErrorHandling
 
 | Error | Source | Response | L1 Documented |
 |-------|--------|----------|---------------|

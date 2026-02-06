@@ -44,7 +44,7 @@ interface MaterializationOptions {
 }
 ```
 
-## ResourceMaterializer Interface
+## ResourceMaterializerInterface
 
 ```typescript
 interface ResourceMaterializer<T> {
@@ -69,7 +69,7 @@ interface ResourceMaterializer<T> {
 }
 ```
 
-## In-Memory Cache
+## InMemoryCache
 
 ```typescript
 // Simple in-memory cache with TTL. See Ch2 S2.4 for caching approach.
@@ -108,7 +108,7 @@ function cacheInvalidatePrefix(prefix: string): void {
 }
 ```
 
-## Instance Materialization
+## InstanceMaterialization
 
 Instances are the most complex resource to materialize: base record + object-backed
 relationships (features, tailscale) + external provider state with TTL caching.
@@ -195,7 +195,7 @@ async function materializeInstance(
 }
 ```
 
-## Run Materialization
+## RunMaterialization
 
 Runs combine record data with related files, logs, artifacts, and allocation.
 
@@ -285,7 +285,7 @@ async function materializeRun(
 }
 ```
 
-## Snapshot Materialization
+## SnapshotMaterialization
 
 Simple object-backed resources unwrap from objects table with optional external state.
 
@@ -336,7 +336,7 @@ async function materializeSnapshot(
 }
 ```
 
-## Object Parsers
+## ObjectParsers
 
 Helper functions to parse object records into typed resources.
 
@@ -380,7 +380,7 @@ function parseArtifact(obj: any): Artifact {
 }
 ```
 
-## Instance Reconciliation
+## InstanceReconciliation
 
 Reconciliation ensures control plane state matches external provider state.
 Fetch both, compare, decide action. Standalone function, not method on materializers.
@@ -454,7 +454,7 @@ function mapProviderStatus(status: string): string {
 }
 ```
 
-## Resource Availability Helper
+## ResourceAvailabilityHelper
 
 ```typescript
 /**
@@ -467,7 +467,7 @@ function isAvailable(resource: { workflowState?: string; currentManifestId?: num
 }
 ```
 
-## State Transition Validation
+## StateTransitionValidation
 
 ```typescript
 // Valid instance workflow_state transitions (workflow:phase format)

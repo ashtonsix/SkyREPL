@@ -52,7 +52,7 @@ CREATE INDEX idx_whitelist_expires ON orphan_whitelist(expires_at);
 CREATE INDEX idx_whitelist_provider ON orphan_whitelist(provider, resource_type);
 ```
 
-## Whitelist Operations
+## WhitelistOperations
 
 ```typescript
 /**

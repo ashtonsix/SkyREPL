@@ -1,157 +1,36 @@
-# contracts.ts - Intent Contracts
+# contracts.ts - Provider Workflow Contracts (Ch8)
 
-Intent contracts are compile-time specifications defining what workflows must achieve.
-Not runtime objects - used for type checking and testing generalization.
+Compile-time specifications defining what workflows must achieve. Not runtime objects.
+See L2 for contract validation, registry, constraint enforcement.
 
-## IntentContract<TInput, TOutput>
+## ProviderWorkflowConstraints
+maxDurationMs, requiredOutputFields, inputSchema, emittableResources, canSpawnSubworkflows, maxSubworkflowDepth
 
-Base type for all intent contracts:
-- input: TInput - What the operation receives
-- output: TOutput - What the operation must produce
-- phases: string[] - Status phases for CLI consistency (e.g., 'spawning' -> 'provisioning' -> 'ready')
-- emittableResources: ResourceType[] - What resources this operation can emit to manifest
-- constraints: { maxDurationMs, canSpawnSubworkflows, maxSubworkflowDepth? }
+## AbstractContracts
 
-## SpawnInstanceContract
+### SpawnInstanceContract
+- Input: spec, region, spot, bootstrap
+- Output: instanceId, providerId, ip, status
+- Constraints: maxDurationMs=SPAWN_TIMEOUT_MS, emittableResources=['instance']
 
-Purpose: Create instance and bind to run
+### TerminateInstanceContract
+- Input: providerId, gracePeriodMs
+- Output: terminated, finalStatus
+- Constraints: maxDurationMs=TERMINATE_TIMEOUT_MS, emittableResources=[]
 
-Input:
-- provider: ProviderName
-- spec: InstanceSpec (type, region, resources)
-- manifestId: number
-- runId: number
-- region?: string (override default)
-- spot?: boolean
-- snapshotId?: number (restore from snapshot)
-- clientRequestId?: string (idempotency token)
-- bootstrap: BootstrapConfig
+### CreateSnapshotContract
+- Input: providerId, name, spec, initChecksum
+- Output: snapshotId, providerSnapshotId, sizeBytes
+- Constraints: maxDurationMs=SNAPSHOT_TIMEOUT_MS, emittableResources=['object']
 
-Output:
-- instanceId: number (our DB ID)
-- providerId: string (provider's instance ID)
-- ip: string | null
-- status: WorkflowState
+### CleanupManifestContract
+- Input: manifestId
+- Output: resourcesCleaned, failures
+- Constraints: maxDurationMs=600_000, canSpawnSubworkflows=true
+- Cleanup order (by priority): Allocations (90) → Runs (80) → Artifacts (70) → Objects (60) → Instances (50) → Snapshots (10)
 
-Phases: ['spawning', 'provisioning', 'booting', 'ready']
-Emittable: ['instance']
-Constraints: maxDurationMs=600_000, canSpawnSubworkflows=false
+## Provider Workflow Registry
+registerProviderWorkflow, validateInput, compensate
 
-## TerminateInstanceContract
-
-Purpose: Graceful instance shutdown
-
-Input:
-- provider: ProviderName
-- instanceId: number
-- providerId: string
-- gracePeriodMs?: number (default 60_000)
-
-Output:
-- terminated: boolean
-- finalStatus: 'terminated' | 'failed'
-
-Phases: ['draining', 'terminating', 'cleaning', 'complete']
-Emittable: [] (no new resources)
-Constraints: maxDurationMs=300_000, canSpawnSubworkflows=false
-
-## CreateSnapshotContract
-
-Purpose: Create provider snapshot for fast restart
-
-Input:
-- provider: ProviderName
-- instanceId: number
-- providerId: string
-- name: string
-- tags?: Record<string, string>
-
-Output:
-- snapshotId: number (our DB ID)
-- providerSnapshotId: string
-- status: 'available' | 'pending' | 'failed'
-
-Phases: ['preparing', 'creating', 'registering', 'complete']
-Emittable: ['object'] (snapshot stored as object)
-Constraints: maxDurationMs=1_800_000 (30 min), canSpawnSubworkflows=false
-
-## CleanupManifestContract
-
-Purpose: Delete all resources owned by manifest
-
-Input:
-- provider: ProviderName
-- manifestId: number
-
-Output:
-- resourcesCleaned: number
-- failures: { resourceId, error }[]
-
-Phases: ['loading', 'cleaning', 'complete']
-Emittable: [] (only deletes)
-Constraints: maxDurationMs=600_000, canSpawnSubworkflows=true, maxSubworkflowDepth=1
-
-Per-provider scoping:
-Each provider cleans only resources it manages. Control plane orchestrates cleanup
-across all providers with resources in the manifest.
-
-Cleanup order (by priority, descending):
-1. Allocations (90) - Release instance slots
-2. Runs (80) - Delete files, logs
-3. Artifacts (70) - Delete S3 objects
-4. Other Objects (60) - Features, Tailscale machines
-5. Instances (50) - Terminate via provider
-6. Snapshots (10) - Last, may be reused
-
-## Provider Workflow Contracts
-
-Providers can register custom workflows that must satisfy these contracts.
-Control plane treats them as black boxes - validates output, doesn't understand internals.
-
-ProviderWorkflowContract:
-- type: string (e.g., 'aws:warm-volume-pool')
-- provider: ProviderName
-- constraints: same as IntentContract
-- validateInput(input): ValidationResult
-- compensate(ctx): Cleanup on failure
-
-Example: AWS warm-volume-pool workflow
-- type: 'aws:warm-volume-pool'
-- output: { volumeId, availabilityZone }
-- Control plane submits workflow, receives output, never sees EC2 details
-
-## =============================================================================
-## FEATURE PROVIDER CONTRACTS
-## =============================================================================
-
-/**
- * Feature providers enable cross-provider capabilities (Tailscale, WandB, etc.)
- * They attach to existing instances rather than creating compute resources.
- */
-
-## AttachFeatureContract
-
-Purpose: Attach feature to existing instance
-
-Input:
-- instanceId: string
-- config: unknown
-
-Output:
-- featureState: unknown
-
-Phases: ['attaching', 'configuring', 'ready']
-Constraints: maxDurationMs=120_000
-
-## DetachFeatureContract
-
-Purpose: Detach feature from instance
-
-Input:
-- instanceId: string
-
-Output:
-- detached: boolean
-
-Phases: ['detaching', 'complete']
-Constraints: maxDurationMs=60_000
+## Exports
+ProviderWorkflowContract, ProviderWorkflowConstraints, SpawnInstanceContract, TerminateInstanceContract, CreateSnapshotContract, CleanupManifestContract

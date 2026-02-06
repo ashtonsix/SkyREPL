@@ -1,108 +1,32 @@
-# garbage-collection.ts - Garbage Collection Task
+# garbage-collection.ts - Garbage Collection Task (Ch15)
 
-# Note: Timing constants import from ../../../../shared/src/config/timing.ts.l2.txt
-# - BLOB_GC_INTERVAL_MS (24h)
-# - BLOB_GRACE_PERIOD_MS (24h)
+Background task to clean up orphaned blobs, merge duplicates, and expire objects/keys.
+See L2 for incremental execution, CAS-guarded dedup merger, and S3 deletion logic.
 
 ## Purpose
-Background task to clean up blobs that have no referencing objects.
-DB cascade (ON DELETE RESTRICT) can't reach S3, so GC is needed for S3 cleanup.
+DB cascade can't reach S3, so GC is needed for S3 cleanup. Runs every 24h.
 
-## Blob GC (Primary Task)
+## Primary Task: Blob GC
+- Find orphaned blobs: no referencing objects, last_referenced_at < now - 24h
+- Delete from S3 (if s3_key exists), then DELETE FROM blobs
+- Batch size: 500 blobs/cycle
+- Update last_referenced_at for recently accessed blobs (prevents premature deletion)
 
-### Find Orphaned Blobs
-- Query:
-  ```sql
-  SELECT b.id, b.s3_key, b.s3_bucket, b.size_bytes
-  FROM blobs b
-  WHERE b.last_referenced_at < NOW - BLOB_GRACE_PERIOD_MS
-    AND NOT EXISTS (
-      SELECT 1 FROM objects o WHERE o.blob_id = b.id
-    )
-  LIMIT 500
-  ```
-- BLOB_GRACE_PERIOD_MS (24h) grace period prevents premature deletion during workflow execution
-- Batch size: 500 blobs/cycle to prevent lock contention
+## Secondary Task: Dedup Merger
+- Find duplicate blobs (same bucket + checksum) for dedupable buckets (run-files, artifacts)
+- Merge: keep oldest, UPDATE objects to point to kept blob, DELETE duplicates
+- CAS guard: re-verify duplicate set in transaction to prevent concurrent merge corruption
 
-### Delete Blobs
-- For each orphaned blob:
-  - If s3_key IS NOT NULL: Call deleteFromS3(blobId) to remove from S3
-  - DELETE FROM blobs WHERE id=?
-- S3 deletion is the reason GC exists (DB cascade can't reach S3)
-- Inline blobs (s3_key IS NULL): Just DELETE from DB
+## Tertiary Task: Object Expiry
+- Find expired objects (expires_at < now), DELETE FROM objects
+- Blobs cleaned by primary GC task (grace period applies)
 
-### Update Last Referenced
-- Touch last_referenced_at when objects are created/accessed:
-  ```sql
-  UPDATE blobs SET last_referenced_at = NOW WHERE id IN (
-    SELECT blob_id FROM objects WHERE accessed_at > NOW - 1h
-  )
-  ```
-- Prevents GC from deleting recently-used blobs
+## Quaternary Task: Idempotency Key Expiry
+- Find expired idempotency keys (expires_at < now), DELETE FROM idempotency_keys
+- Prevents unbounded table growth
 
-## Dedup Merger (Secondary Task)
+## Metrics
+blobs_deleted, s3_objects_deleted, bytes_freed, duplicates_merged, objects_expired, idempotency_keys_deleted
 
-### Find Duplicate Blobs
-- For dedupable buckets (e.g., 'run-files', 'artifacts'):
-  ```sql
-  SELECT bucket, checksum, COUNT(*) as count, MIN(id) as keep_id
-  FROM blobs
-  WHERE bucket IN ('run-files', 'artifacts')
-    AND checksum IS NOT NULL
-  GROUP BY bucket, checksum
-  HAVING count > 1
-  ```
-
-### Merge Duplicates
-- For each duplicate group:
-  - Keep oldest blob (MIN(id))
-  - In transaction with CAS guard for concurrent modification:
-    ```sql
-    BEGIN TRANSACTION;
-    -- Re-verify the duplicate set hasn't changed (CAS guard)
-    SELECT id FROM blobs
-    WHERE bucket = ? AND checksum = ?
-    FOR UPDATE;
-    -- Only proceed if count matches original query
-    UPDATE objects SET blob_id = keep_id WHERE blob_id IN (duplicate_ids);
-    DELETE FROM blobs WHERE id IN (duplicate_ids) AND id != keep_id;
-    COMMIT;
-    ```
-  - If blob count changed since query: skip this group (another merge in progress)
-  - Log: "Merged ${count} duplicate blobs for checksum ${checksum}"
-- Handles race condition duplicates from concurrent uploads
-- Preserves S3 objects (only updates DB references)
-- CAS guard prevents: concurrent merges corrupting references, objects pointing to deleted blobs
-
-## Object Expiry (Tertiary Task)
-
-### Find Expired Objects
-- Query: SELECT id FROM objects WHERE expires_at < NOW LIMIT 500
-- Delete expired objects (blobs cleaned by primary GC task)
-
-## Idempotency Key Expiry (Quaternary Task)
-
-### Purpose
-Clean up expired idempotency keys to prevent unbounded table growth.
-Idempotency keys ensure API requests are processed exactly once, but must be GC'd after expiry.
-
-### Find Expired Keys
-- Query:
-  ```sql
-  SELECT key FROM idempotency_keys
-  WHERE expires_at < NOW
-  LIMIT 500
-  ```
-- Batch size: 500 keys/cycle to prevent lock contention
-
-### Delete Expired Keys
-- DELETE FROM idempotency_keys WHERE key IN (expired_keys)
-- No external dependencies (pure DB cleanup)
-- Metrics: idempotency_keys_deleted
-
-## Incremental Execution
-
-- Run every BLOB_GC_INTERVAL_MS (24h)
-- Batch size: 500 items/cycle
-- Prevents API throttling and lock contention
-- Metrics: blobs_deleted, s3_objects_deleted, duplicates_merged
+## Materialization
+Background loop (setInterval). Updates blobs, objects, idempotency_keys tables and deletes from S3.

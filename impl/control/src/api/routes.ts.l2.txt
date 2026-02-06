@@ -26,7 +26,7 @@ import { createApiError } from '../../../../shared/src/errors';
 import { httpStatusForCategory } from '../../../../shared/src/errors';
 ```
 
-## Server Setup
+## ServerSetup
 
 ```typescript
 // =============================================================================
@@ -61,7 +61,7 @@ interface ServerConfig {
 }
 ```
 
-## Common Pagination Helper
+## CommonPaginationHelper
 
 ```typescript
 // =============================================================================
@@ -139,7 +139,7 @@ function buildPaginationMeta<T extends { id: number }>(
 }
 ```
 
-## Layer 1: Resource CRUD Routes
+## ResourceCRUDRoutes
 
 ```typescript
 // =============================================================================
@@ -569,7 +569,7 @@ function registerResourceRoutes(app: Elysia): void {
 }
 ```
 
-## Filter Builders
+## FilterBuilders
 
 ```typescript
 // =============================================================================
@@ -654,7 +654,7 @@ function buildObjectFilters(query: any): { where: string; values: unknown[] } {
 }
 ```
 
-## Utility Functions
+## UtilityFunctions
 
 ```typescript
 // =============================================================================

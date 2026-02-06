@@ -58,9 +58,7 @@ lock_fd = None  # File lock descriptor
 executor: Optional[RunExecutor] = None
 
 
-# =============================================================================
-# Lock Acquisition (spec 11.8)
-# =============================================================================
+## LockAcquisition
 
 def acquire_lock() -> Optional[int]:
     """
@@ -99,9 +97,7 @@ def setup_signal_handlers():
     signal.signal(signal.SIGINT, signal_handler)
 
 
-# =============================================================================
-# Panic Diagnostics (spec 11.14)
-# =============================================================================
+## PanicDiagnostics
 
 def send_panic_diagnostics(reason: str):
     """
@@ -307,12 +303,12 @@ if __name__ == "__main__":
     main()
 ```
 
-## Tailscale Integration (spec 11.12)
+## TailscaleIntegration
 
 Tailscale IP detection during startup and JIT installation are in tailscale.py.
 See tailscale.py.l2.txt for detect_tailscale_ip() and install_tailscale_jit().
 
-## Thread Summary
+## ThreadSummary
 
 | Thread        | Interval | Module        | Purpose                    |
 |---------------|----------|---------------|----------------------------|

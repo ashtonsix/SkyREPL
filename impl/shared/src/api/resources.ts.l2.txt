@@ -5,7 +5,7 @@
 # - Resource interfaces from ../resources.ts.l2.txt (Instance, Run, Allocation, etc.)
 # - Error types from ../errors.ts.l2.txt
 
-## Request Envelopes
+## RequestEnvelopes
 
 ```typescript
 import type { ID, TimestampMs, ErrorCategory } from '../types';
@@ -47,7 +47,7 @@ export interface ListRequest extends PaginationParams, SortParams {
 }
 ```
 
-## Response Envelopes
+## ResponseEnvelopes
 
 ```typescript
 // =============================================================================
@@ -84,7 +84,7 @@ export interface PaginationMeta {
 }
 ```
 
-## Error Envelope
+## ErrorEnvelope
 
 ```typescript
 // =============================================================================
@@ -117,7 +117,7 @@ export function createApiError(
 }
 ```
 
-## Error Codes
+## ErrorCodes
 
 ```typescript
 // =============================================================================
@@ -169,7 +169,7 @@ export const ErrorCode = {
 export type ErrorCodeType = typeof ErrorCode[keyof typeof ErrorCode];
 ```
 
-## Resource CRUD Types
+## ResourceCRUDTypes
 
 ```typescript
 import type {

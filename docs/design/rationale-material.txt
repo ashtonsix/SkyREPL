@@ -1,0 +1,46 @@
+# Material Layer Design Rationale
+
+## Design Principles (Ch02 S2.1)
+
+- Avoid table proliferation. Objects table + object_tags handles flexible storage.
+- Simple caching. In-memory TTL only, no multi-layer schemes.
+
+When to use each pattern:
+- Records: High-frequency queries, complex joins, FK constraints
+- Objects: Flexible schemas, varied resource types, tag-based filtering
+
+Objects eliminate schema migrations for new resource types. Before: separate
+tables for snapshots, artifacts, logs, blobs (4+ tables). After: objects table
++ type tag (1 table, consistent query patterns).
+
+## ID Scheme (Ch02 S2.1)
+
+Primary keys use INTEGER AUTOINCREMENT (faster joins, smaller indexes, better
+SQLite performance). Sequential IDs cluster by access pattern. Future: can
+migrate to Snowflake IDs if multi-node needed.
+
+User-facing IDs display as base-36 slugs: `id.toString(36)` (e.g., 12345 ->
+"9ix"). Parse back: `parseInt(slug, 36)`. Benefits: shorter than UUIDs,
+sortable, human-friendly.
+
+## Small-Blob Optimization Threshold (Ch02 S2.3)
+
+Large objects (>64KB threshold) offload to S3 to keep DB manageable.
+
+Material decision:
+- Blobs <=64KB: Stored inline in `blobs.payload` column (small buffer optimization)
+- Blobs >64KB: Stored in S3, `blobs.payload` NULL, `blobs.s3_key`/`s3_bucket` populated
+- Blobs with `reservation` > 64KB: Go directly to S3 (skip inline)
+
+Threshold rationale (64KB default, configurable):
+- SQLite handles BLOBs up to ~100KB efficiently (especially with `incremental_vacuum`)
+- S3 adds latency (~50-200ms TTFB) plus per-request cost (~$0.0004/1K)
+- Below 64KB, SQLite wins on speed and cost
+- Adjust based on workload: lower for write-heavy, higher for read-heavy
+
+Reservation field:
+`reservation` column allows pre-declaring expected object size. Invariant:
+`reservation >= size_bytes`. Use cases:
+- Logs expected to grow: set `reservation` to expected max size (e.g., 1MB)
+- Streaming uploads: reserve space in S3 before content arrives
+- Avoids migration from inline -> S3 when object grows past 64KB

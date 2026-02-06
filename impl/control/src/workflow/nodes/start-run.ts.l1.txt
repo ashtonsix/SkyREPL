@@ -99,7 +99,7 @@ async function compensate(ctx, input): Promise<void>
      - Allocation cleanup handled by transition-hold or failure path
 ```
 
-## Error Handling
+## ErrorHandling
 
 | Error | Source | Response |
 |-------|--------|----------|

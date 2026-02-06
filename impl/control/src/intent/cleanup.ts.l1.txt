@@ -131,7 +131,7 @@ Uses shared finalize node, logs cleanup stats.
 5. **Mandatory grace period:** minAgeMs defaults to 600000 (10 minutes)
 6. **Audit log:** All terminations logged with reason and timestamp
 
-## Error Handling
+## ErrorHandling
 
 | Node | Error | Response |
 |------|-------|----------|

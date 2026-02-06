@@ -19,7 +19,7 @@ import type { ID, TimestampMs, ManifestStatus } from '../../../../shared/src/typ
 import type { Manifest, ManifestResource } from '../../../../shared/src/resources';
 ```
 
-## Core Schema (DB row shape)
+## CoreSchemaDBRow
 
 ```typescript
 interface ManifestRow {
@@ -44,7 +44,7 @@ interface ManifestResourceRow {
 }
 ```
 
-## Manifest States
+## ManifestStates
 
 ```typescript
 // Only two stored states; EXPIRED is derived

@@ -1,0 +1,27 @@
+# Security Guide
+
+Extracted from spec/15_OPERATIONS.txt §15.7
+
+## Authentication
+
+Bearer tokens initially (single-user, VPS-deployed). OAuth integration encouraged
+after >3 seats (GitHub, Google, corporate SSO). Tokens stored hashed in database,
+never logged in plaintext.
+
+## Authorization
+
+Basic role system: Admin (all operations), User (run jobs, view own resources),
+Viewer (read-only). Workflow permissions checked upfront before execution, not
+lazily during execution. Prevents partial execution followed by auth failure.
+
+## API Security
+
+Rate limiting per user (100 req/min default). API keys scoped to specific operations
+(run-only keys for CI, admin keys for control plane management). Token rotation
+encouraged via expiry warnings (90-day default).
+
+## Secrets Management
+
+Run environment variables encrypted at rest. Agent decrypts on instance startup
+using ephemeral key from control plane. Secrets never logged or stored in workflow
+traces. Audit log tracks secret access: who, when, which run.

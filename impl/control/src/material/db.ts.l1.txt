@@ -1,240 +1,78 @@
 # db.ts - Database Layer
 
-## Exports
-
-```typescript
-// Connection management
-export function initDatabase(path: string): Database;
-export function getDatabase(): Database;
-export function closeDatabase(): void;
-
-// Migrations
-export function runMigrations(): void;
-export function getMigrationVersion(): number;
-
-// Query helpers
-export function queryOne<T>(sql: string, params?: unknown[]): T | null;
-export function queryMany<T>(sql: string, params?: unknown[]): T[];
-export function execute(sql: string, params?: unknown[]): void;
-export function transaction<T>(fn: () => T): T;
-```
+SQLite database layer with WAL mode, migrations, and query helpers.
+See L2 for connection management, query helpers, transaction retry with jittered backoff, CAS claim pattern, blob GC operations.
 
 ## Connection
 
-- `initDatabase(path: string): Database` - Open SQLite with WAL mode, foreign keys enabled
-- `getDatabase(): Database` - Get singleton instance
-- `closeDatabase(): void` - Close connection
+initDatabase(path), getDatabase(), closeDatabase()
+WAL mode, foreign keys enabled, busy_timeout 5000ms
 
 ## Migrations
 
-- `runMigrations(): void` - Apply schema migrations from version files
-- `getMigrationVersion(): number` - Current schema version
+runMigrations(), getMigrationVersion()
+Apply schema migrations from version files
 
-## Query Helpers
+## QueryHelpers
 
-- `queryOne<T>(sql, params): T | null` - Single row with JSON parsing
-- `queryMany<T>(sql, params): T[]` - Multiple rows
-- `execute(sql, params): void` - Non-query statements
-- `transaction<T>(fn): T` - Atomic transaction
+queryOne<T>(sql, params), queryMany<T>(sql, params), execute(sql, params), transaction<T>(fn, retries?)
+Transaction retry with SQLITE_BUSY handling using calculateBackoff() for jittered exponential backoff
 
-## Instance Operations
+## InstanceOperations
 
-- `getInstance(id): Instance | null`
-- `getInstanceByProviderId(provider, providerId): Instance | null`
-- `createInstance(data): Instance`
-- `updateInstance(id, updates): Instance`
-- `listInstances(filter?): Instance[]`
+getInstance(id), getInstanceByProviderId(provider, providerId), createInstance(data), updateInstance(id, updates), listInstances(filter?)
 
-## Run Operations
+## RunOperations
 
-- `getRun(id): Run | null`
-- `createRun(data): Run`
-- `updateRun(id, updates): Run`
-- `listRuns(filter?): Run[]`
+getRun(id), createRun(data), updateRun(id, updates), listRuns(filter?)
 
-## Allocation Operations
+## AllocationOperations
 
-- `getAllocation(id): Allocation | null`
-- `createAllocation(data): Allocation`
-- `updateAllocationStatus(id, status): Allocation`
-- `claimAllocation(id, runId): Allocation | null` - Atomic claim with race protection
-- `findAvailableAllocation(spec): Allocation | null`
+getAllocation(id), createAllocation(data), updateAllocationStatus(id, status), claimAllocation(id, runId), findAvailableAllocation(spec)
 
-### claimAllocation Concurrency
+claimAllocation concurrency: Two-phase CAS pattern (SELECT with updated_at, UPDATE with WHERE updated_at = original)
+Returns null if claim fails (not found, wrong state, or race lost)
 
-CONCURRENCY: Optimistic locking strategy for allocation claims.
-Multiple workflows may attempt to claim the same allocation simultaneously.
-This function ensures exactly one succeeds using a compare-and-swap approach.
+## WorkflowOperations
 
-**Implementation:**
-1. SELECT allocation WHERE id = ? AND status = 'AVAILABLE' AND run_id IS NULL
-   - Read current state including updated_at timestamp
-   - If not found or status/run_id mismatch, return null immediately (claim failed)
+getWorkflow(id), createWorkflow(data), updateWorkflow(id, updates), getWorkflowNodes(workflowId), createWorkflowNode(data), updateWorkflowNode(id, updates)
 
-2. UPDATE allocations
-   SET run_id = ?, status = 'CLAIMED', updated_at = <current_timestamp>
-   WHERE id = ? AND updated_at = <original_updated_at>
-   - The WHERE clause includes the original updated_at value from step 1
-   - This ensures the UPDATE only succeeds if no other transaction modified the row
+## ManifestOperations
 
-3. Check UPDATE result (rows affected)
-   - If 0 rows affected: Another transaction won the race, return null (claim failed)
-   - If 1 row affected: Claim succeeded, return updated allocation
+getManifest(id), createManifest(workflowId, options?), sealManifest(id), addResourceToManifest(manifestId, resourceType, resourceId, options?), getManifestResources(manifestId), deleteManifest(id), listExpiredManifests(cutoffTime)
 
-**Race conditions handled:**
-- Two workflows claim same allocation: First UPDATE wins, second gets 0 rows affected
-- Allocation deleted between SELECT and UPDATE: 0 rows affected, claim fails gracefully
-- Allocation status changed (e.g., FAILED): 0 rows affected, claim fails
+addResourceToManifest invariant: Throws if manifest.status !== 'DRAFT' (except A13 recovery with allowRecovery=true)
+ownerType/ownerId track provenance: 'workflow' | 'user' | 'system'
 
-**Performance notes:**
-- SQLite's default isolation (SERIALIZABLE) ensures atomicity
-- Index on (status, run_id) enables fast AVAILABLE allocation queries
-- updated_at index (idx_allocations_updated) enables efficient race detection
+## B21 Cleanup Processed Tracking
 
-## Workflow Operations
+manifest_resources.cleanup_processed_at prevents double-processing of blob reference decrements
 
-- `getWorkflow(id): Workflow | null`
-- `createWorkflow(data): Workflow`
-- `updateWorkflow(id, updates): Workflow`
-- `getWorkflowNodes(workflowId): WorkflowNode[]`
-- `createWorkflowNode(data): WorkflowNode`
-- `updateWorkflowNode(id, updates): WorkflowNode`
+## BlobOperations
 
-## Manifest Operations
+getBlob(id), createBlob(data), findBlobByChecksum(bucket, checksum), updateBlobLastReferenced(id)
+CAS dedup is OPTIONAL (opt-in per bucket): 'run-files', 'artifacts' dedupable; 'logs' always create new
 
-- `getManifest(id): Manifest | null`
-- `createManifest(type): Manifest` - Create in DRAFT state
-- `sealManifest(id): void` - DRAFT → SEALED (throws if already SEALED)
-- `addResourceToManifest(manifestId, resourceType, resourceId, options?): void`
-  - **Invariant:** Throws MANIFEST_SEALED_ERROR if manifest.status !== 'DRAFT'
-  - **Exception:** A13 recovery path can update provider_id for orphan matching (special flag: allowRecovery=true)
-  - Options: { ownerType?, ownerId?, cleanupPriority?, allowRecovery? }
-  - ownerType: 'workflow' | 'user' | 'system' - Source that created resource
-  - ownerId: number - ID of the owner (workflowId, userId, etc.)
-- `getManifestResources(manifestId): ManifestResource[]`
-- `deleteManifest(id): void` - Delete manifest and all manifest_resources (cascade)
-- `listExpiredManifests(cutoffTime): Manifest[]` - Get manifests where expires_at < cutoffTime
+## ObjectOperations
 
-## B21: Cleanup Processed Tracking
-
-Schema addition to manifest_resources:
-```sql
-ALTER TABLE manifest_resources ADD COLUMN cleanup_processed_at INTEGER;
-CREATE INDEX idx_manifest_resources_cleanup ON manifest_resources(manifest_id, cleanup_processed_at);
-```
-
-This timestamp prevents double-processing of blob reference decrements during cleanup.
-
-## Blob Operations
-
-- `getBlob(id): Blob | null`
-- `createBlob(data): Blob`
-  - CAS dedup is OPTIONAL (opt-in per bucket)
-  - For dedupable buckets: Check idx_blobs_dedup first, return existing if found
-  - For non-dedupable buckets (e.g., logs): Always create new blob
-  - No UNIQUE constraint on checksum - multiple blobs can have same checksum
-- `findBlobByChecksum(bucket, checksum): Blob | null` - Deduplication helper
-- `updateBlobLastReferenced(id): void` - Touch last_referenced_at for GC
-
-## Object Operations
-
-- `getObject(id): Object | null`
-- `createObject(data): Object` - Creates object with blob_id reference
-  - All objects require blob_id (NOT NULL)
-  - Object types: 'artifact', 'snapshot', 'log', 'run_file' (NOT 'blob')
-- `addObjectTag(objectId, key, value): void`
-- `findObjectByTag(key, value): Object | null`
+getObject(id), createObject(data), addObjectTag(objectId, key, value), findObjectByTag(key, value)
+All objects require blob_id (NOT NULL)
 
 ## Warm Pool
 
-- `findWarmAllocation(spec, initChecksum?): Allocation | null` - Match spec and optional init script
-- `getWarmPoolStats(): { available: number, bySpec: Record<string, number> }`
+findWarmAllocation(spec, initChecksum?), getWarmPoolStats()
 
-## Orphan Operations
+## OrphanOperations
 
-- `getTrackedInstanceIds(): Set<number>` - All instance IDs in database
-- `getActiveManifestIds(): Set<number>` - Manifests that are DRAFT or unexpired SEALED
-- `recordOrphanScan(result: OrphanScanResult): void` - Log scan for audit
-- `addToWhitelist(providerId: string, reason: string): void` - Exclude from future orphan detection
-- `isWhitelisted(providerId: string): boolean` - Check whitelist status
+getTrackedInstanceIds(), getActiveManifestIds(), recordOrphanScan(result), addToWhitelist(providerId, reason), isWhitelisted(providerId)
 
-## Delete Operations
+## DeleteOperations
 
-- `deleteInstance(id): void` - Delete instance record (only if no active allocations)
-- `deleteRun(id): void` - Delete run record (only if completed/failed)
-- `deleteAllocation(id): void` - Delete allocation (only if COMPLETE or FAILED)
-- `deleteObject(id): void` - Delete object record (blob cleanup handled by background GC)
-- `deleteBlob(id): void` - Delete blob record (used by GC only, not directly)
-- `deleteWorkflow(id): void` - Delete workflow and all workflow_nodes (cascade)
+deleteInstance(id), deleteRun(id), deleteAllocation(id), deleteObject(id), deleteBlob(id), deleteWorkflow(id)
+Validation: instance (no active allocations), run (completed/failed), allocation (COMPLETE/FAILED), blob (no referencing objects)
 
-## Error Handling
+## BackgroundBlobGC
 
-All database operations can throw these errors:
-
-| Error | Cause | Handling |
-|-------|-------|----------|
-| DATABASE_CONNECTION_ERROR | SQLite file locked, disk full, permissions | Fail immediately, log details |
-| DATABASE_QUERY_ERROR | Invalid SQL, type mismatch | Fail immediately (bug) |
-| CONSTRAINT_VIOLATION | Foreign key, unique constraint | Fail immediately with constraint name |
-| MIGRATION_ERROR | Schema version mismatch, invalid migration | Fail on startup, require manual fix |
-| TRANSACTION_ERROR | Deadlock, timeout (rare in SQLite) | Retry once, then fail |
-
-### Connection Error Handling
-
-```
-function getDatabase(): Database
-  if (!connection) throw DATABASE_CONNECTION_ERROR('Database not initialized')
-  if (!connection.open) throw DATABASE_CONNECTION_ERROR('Database connection closed')
-  return connection
-```
-
-### Constraint Violation Handling
-
-```
-function createAllocation(data): Allocation
-  try:
-    return execute(INSERT...)
-  catch (e):
-    if (e.code === 'SQLITE_CONSTRAINT_FOREIGNKEY'):
-      throw CONSTRAINT_VIOLATION('Instance or Run not found')
-    if (e.code === 'SQLITE_CONSTRAINT_UNIQUE'):
-      throw CONSTRAINT_VIOLATION('Allocation already exists for this run')
-    throw e
-```
-
-### Migration Error Handling
-
-```
-function runMigrations(): void
-  const current = getMigrationVersion()
-  const target = getLatestMigrationVersion()
-
-  if (current > target):
-    throw MIGRATION_ERROR(`Database version ${current} is newer than code version ${target}`)
-
-  for each migration from current+1 to target:
-    try:
-      transaction(() => {
-        executeMigrationSQL(migration)
-        setMigrationVersion(migration.version)
-      })
-    catch (e):
-      throw MIGRATION_ERROR(`Migration ${migration.version} failed: ${e.message}`)
-```
-
-### Transaction Retry
-
-```
-# Note: Uses calculateBackoff from ../../../../shared/src/config/timing.ts.l2.txt
-# calculateBackoff provides exponential backoff with ±10% jitter to prevent thundering herd
-
-function transaction<T>(fn: () => T, retries = 1): T
-  for attempt in 0..retries:
-    try:
-      return db.transaction(fn)
-    catch (e):
-      if (e.code === 'SQLITE_BUSY' && attempt < retries):
-        sleep(calculateBackoff(attempt))  // Jittered exponential backoff
-        continue
-      throw TRANSACTION_ERROR(e.message)
-```
+findOrphanedBlobs(cutoff24hAgo) - No referencing objects + 24h grace period
+deleteBlobBatch(blobIds) - Delete after S3 cleanup
+GC required because DB CASCADE cannot reach S3

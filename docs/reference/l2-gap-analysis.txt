@@ -1,0 +1,63 @@
+# L1-to-L2 Gap Analysis
+
+83 L1 files without L2 counterparts. 4,198 total lines.
+
+## Summary
+
+| # | Category              | Files | Lines | Status                |
+|---|----------------------|-------|-------|-----------------------|
+| a | Workflow nodes       | 10    | 657   | Execution-critical    |
+| b | Provider modules     | 3     | 382   | Lambda/RunPod + types |
+| c | Orphan nodes         | 4     | 148   | Completes orphan wf   |
+| d | Background jobs      | 3     | 258   | GC/reconciliation     |
+| e | Resource modules     | 4     | 108   | Thin CRUD wrappers    |
+| f | API modules          | 8     | 385   | Route handlers        |
+| g | CLI commands         | 14    | 314   | Thin API wrappers     |
+| h | Intent/types/util    | 10    | 182   | As needed             |
+| i | Tests                | 11    | 1,164 | Skip L2, go to L3     |
+| j | Structural/config    | 16    | 413   | Skip L2, finalize L4  |
+
+## MVK Subset (~17 files, ~1,023 lines)
+
+For first L3 implementation (launch-run + OrbStack):
+  Workflow nodes: resolve-instance, spawn-instance, create-allocation,
+    claim-allocation, start-run, wait-completion, finalize (7 of 10)
+  Resource modules: instance.ts, run.ts (2 of 4)
+  Background: hold-expiry.ts (1 of 3)
+  Provider: OrbStack already has L2
+
+## Priority Order
+
+1. Workflow nodes (a): 10 files, 657 lines — HIGHEST
+   claim-allocation (45), collect-artifacts (28), create-allocation (25),
+   finalize (37), resolve-instance (92), spawn-instance (167),
+   start-run (117), sync-files (89), transition-hold (30, DEPRECATED),
+   wait-completion (27)
+
+2. Provider modules (b): 3 files, 382 lines — HIGH
+   lambda.ts (95), runpod.ts (122), type-boundaries.ts (165)
+
+3. Orphan nodes (c): 4 files, 148 lines — MEDIUM
+   expire-allocations (29), find-orphans (38), match-to-manifest (27),
+   terminate-orphans (54)
+
+4. Background jobs (d): 3 files, 258 lines — MEDIUM
+   hold-expiry (43), manifest-cleanup (23), orphan-cleanup (192)
+
+5. Resource modules (e): 4 files, 108 lines — LOW-MEDIUM
+   artifact (22), instance (33), run (35), snapshot (18)
+
+6. API modules (f): 8 files, 385 lines — LOW-MEDIUM
+   agent.ts (100), sse-protocol (42), auth (23), errors (146),
+   idempotency (22), workflows (57), resources (52)
+
+7. CLI commands (g): 14 files, 314 lines — LOW
+   artifact (15), cancel (15), control (17), extend (19), instance (18),
+   list (16), logs (15), orphan (27), setup (22), snapshot (12),
+   usage (17), main (68), preflight (33), process (33)
+
+8. Intent/types/util (h): 10 files, 182 lines — AS NEEDED
+
+9. Tests (i): 11 files, 1,164 lines — SKIP L2
+
+10. Structural/config (j): 16 files, 413 lines — SKIP L2

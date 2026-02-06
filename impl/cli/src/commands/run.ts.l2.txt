@@ -26,7 +26,7 @@ import type { WorkflowSubmission, WorkflowEvent, LaunchRunInput, FileManifestEnt
 import type { ProfileConfig, FilesConfig, OutputMode } from '../config';
 ```
 
-## Run Command Options
+## RunCommandOptions
 
 ```typescript
 interface RunCommandOptions {
@@ -48,7 +48,7 @@ interface RunCommandOptions {
 }
 ```
 
-## Run Command Handler
+## RunCommandHandler
 
 ```typescript
 // =============================================================================
@@ -222,7 +222,7 @@ async function runCommand(profileName: string | undefined, opts: RunCommandOptio
 }
 ```
 
-## Profile Override Resolution
+## ProfileOverrideResolution
 
 ```typescript
 function applyOverrides(profile: ProfileConfig, opts: RunCommandOptions): ProfileConfig {
@@ -259,7 +259,7 @@ function parseEnvFlags(envFlags?: string[]): Record<string, string> | undefined 
 }
 ```
 
-## File Collection and Upload
+## FileCollectionAndUpload
 
 ```typescript
 async function uploadMissingBlobs(
@@ -301,7 +301,7 @@ async function uploadMissingBlobs(
 }
 ```
 
-## Run Status Subcommand
+## RunStatusSubcommand
 
 ```typescript
 // =============================================================================

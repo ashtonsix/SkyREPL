@@ -14,7 +14,7 @@ import type { ProviderWorkflowContract } from './contracts';
 import type { ProviderLifecycleHooks } from './extensions';
 ```
 
-## Compute Provider Registry
+## ComputeProviderRegistry
 
 ```typescript
 /**
@@ -40,7 +40,7 @@ export type ProviderName = keyof typeof providerRegistry;
 const providerCache = new Map<ProviderName, Provider>();
 ```
 
-## Runtime Access
+## RuntimeAccess
 
 ```typescript
 /**
@@ -86,7 +86,7 @@ export function clearProviderCache(): void {
 }
 ```
 
-## Dynamic Provider Registration
+## DynamicProviderRegistration
 
 ```typescript
 /**
@@ -142,7 +142,7 @@ export function unregisterProvider(name: string): void {
 }
 ```
 
-## Feature Provider Registry
+## FeatureProviderRegistry
 
 ```typescript
 // Lazy-load feature providers (networking, logging, remote development, etc.)
@@ -192,7 +192,7 @@ export function clearFeatureProviderCache(): void {
 }
 ```
 
-## Test Utilities
+## TestUtilities
 
 ```typescript
 /**
@@ -254,7 +254,7 @@ export function getTestableFeatureProviders(): FeatureProviderName[] {
 }
 ```
 
-## Contract Testing Pattern (Vitest)
+## ContractTestingPattern
 
 ```typescript
 /**

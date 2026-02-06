@@ -7,11 +7,11 @@
 - Workflow: id, type, status, currentNode, input, output, error, manifestId
 - Manifest: id, workflowId, status, retentionMs, expiresAt
 
-## Object-Backed Resources
+## ObjectBackedResources
 - Snapshot, Artifact, FeatureInstallation, TailscaleMachine
 
-## Supporting Types
+## SupportingTypes
 - RunFile, RunLogEntry, UsageRecord, WorkflowNode, ManifestResource
 
-## Status Enums
+## StatusEnums
 - AllocationStatus, WorkflowExecutionStatus, ManifestStatus, NodeStatus

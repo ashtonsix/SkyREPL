@@ -7,17 +7,14 @@
 SkyREPL makes cloud compute access feel as natural as local development by
 treating resource lifecycle - not just compute - as a first-class problem.
 
-Target users: ML researchers and engineers who value reproducibility and
-cost-efficiency - those with a "forgot to terminate an instance" horror story.
+Target users: see workshop/product/target-users.txt
 
 The system consists of three components:
 - A control plane deployed on a VPS
 - A CLI client for user interaction
 - A Python agent that runs on remote instances
 
-**Positioning:** SkyREPL is part of the Sky Computing ecosystem. SkyPilot focuses
-on cluster management and job scheduling; SkyREPL takes a complementary approach,
-emphasizing lifecycle management and reproducibility for development workflows.
+**Positioning:** see workshop/product/positioning.txt
 
 **Providers:** The architecture abstracts provider-specific details behind a
 unified interface. See Chapter 8 for the provider abstraction design.
@@ -29,23 +26,7 @@ Target ecosystem: +GCP, Azure, CoreWeave, Vast.ai, SLURM.
 1.2 THE CORE INSIGHT
 --------------------
 
-Cloud compute orchestration isn't fundamentally a compute problem - it's a
-lifecycle chaos problem. Everyone can spin up instances. The hard part is
-tracking what's running, ensuring cleanup on failure, and avoiding cost
-surprises. This spec crystallizes around three concepts:
-
-1. **ALLOCATIONS AS LIFECYCLE PRIMITIVE** (Chapter 5)
-   Every run-to-instance binding has a clear state machine. The warm pool is a
-   query (`WHERE status='AVAILABLE'`), not a separate system. debug_hold_until
-   replaces vague "grace periods" with explicit timestamps.
-
-2. **MANIFESTS AS OWNERSHIP BOUNDARIES** (Chapter 4)
-   Every resource has a clear owner. When a workflow fails, its manifest
-   identifies exactly what needs cleanup. No orphaned resources.
-
-3. **WORKFLOWS AS EXPLICIT STATE MACHINES** (Chapter 6)
-   Visible DAGs replace implicit state. Fixed pattern library (4 patterns).
-   Each step has compensation actions for rollback.
+> Design rationale extracted to docs/design/core-principles.txt
 
 
 1.3 TABLE OF CONTENTS

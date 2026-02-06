@@ -37,7 +37,7 @@ const MAX_PARALLEL_BRANCHES = 16;
 // - TIMING.RETRY_MAX_DELAY_MS (60000)
 ```
 
-## WorkflowEngine Interface
+## WorkflowEngineInterface
 
 ```typescript
 interface WorkflowEngine {
@@ -104,9 +104,9 @@ async function submit(request: WorkflowSubmission): Promise<WorkflowSubmissionRe
 
   // Create DRAFT manifest for resource tracking
   const manifest = db.prepare(`
-    INSERT INTO manifests (status, created_at, updated_at)
-    VALUES ('DRAFT', ?, ?)
-  `).run(Date.now(), Date.now());
+    INSERT INTO manifests (workflow_id, status, created_at)
+    VALUES (?, 'DRAFT', ?)
+  `).run(workflowId, Date.now());
 
   // Create workflow record
   const now = Date.now();
@@ -115,19 +115,18 @@ async function submit(request: WorkflowSubmission): Promise<WorkflowSubmissionRe
   const result = db.prepare(`
     INSERT INTO workflows (
       type, status, input_json, manifest_id, idempotency_key,
-      parent_workflow_id, priority, timeout_ms, timeout_at,
-      created_at, updated_at
-    ) VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      parent_workflow_id, timeout_ms, timeout_at,
+      created_at
+    ) VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?)
   `).run(
     request.type,
     JSON.stringify(request.input),
     manifest.lastInsertRowid,
     request.idempotencyKey ?? null,
     request.parentWorkflowId ?? null,
-    request.priority ?? 'normal',
     request.timeout ?? TIMING.DEFAULT_WORKFLOW_TIMEOUT_MS,
     timeoutAt,
-    now, now
+    now
   );
 
   const workflowId = result.lastInsertRowid;
@@ -137,12 +136,11 @@ async function submit(request: WorkflowSubmission): Promise<WorkflowSubmissionRe
   for (const [nodeId, nodeDef] of Object.entries(blueprint.nodes)) {
     db.prepare(`
       INSERT INTO workflow_nodes (
-        workflow_id, node_id, node_type, status, dependencies_json,
+        workflow_id, node_id, node_type, status,
         input_json, attempt, created_at
-      ) VALUES (?, ?, ?, 'pending', ?, ?, 0, ?)
+      ) VALUES (?, ?, ?, 'pending', ?, 0, ?)
     `).run(
       workflowId, nodeId, nodeDef.type,
-      JSON.stringify(nodeDef.dependencies ?? []),
       JSON.stringify(nodeDef.inputSchema ?? {}),
       now
     );
@@ -185,9 +183,9 @@ async function retry(workflowId: string): Promise<string> {
     timeout: originalWorkflow.timeout_ms,
   });
 
-  // Link for audit trail
+  // Link for audit trail (store in error_json for reference)
   await db.execute(`
-    UPDATE workflows SET retry_of_workflow_id = ? WHERE id = ?
+    UPDATE workflows SET error_json = json_set(COALESCE(error_json, '{}'), '$.retry_of_workflow_id', ?) WHERE id = ?
   `, [workflowId, newWorkflowId]);
 
   return newWorkflowId;
@@ -267,7 +265,9 @@ function findReadyNodes(nodes: WorkflowNode[]): WorkflowNode[] {
 
   return nodes.filter(n => {
     if (n.status !== 'pending') return false;
-    const deps = JSON.parse(n.dependencies_json) as string[];
+    // Dependencies come from blueprint, not stored per-node
+    // Would need to fetch from blueprint or store separately
+    const deps = getNodeDependencies(n.node_id);
     return deps.every(depId => completedOrSkipped.has(depId));
   });
 }
@@ -497,10 +497,10 @@ async function cancelWorkflow(workflowId: string, reason: string): Promise<void>
     });
   }
 
-  // Mark workflow as cancelling
+  // Mark workflow as cancelled (store reason in error_json)
   await db.updateWorkflow(workflowId, {
-    status: 'cancelling',
-    cancel_reason: reason,
+    status: 'cancelled',
+    error_json: JSON.stringify({ code: 'CANCELLED', reason }),
   });
 
   // If agent alive: receives cancel -> stops run -> emits run_complete -> workflow completes

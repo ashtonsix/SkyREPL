@@ -1,0 +1,24 @@
+# Observability Features
+
+## Topology Signatures (Ch06 S6.9)
+
+Topology signatures are useful for Grafana dashboards but are NOT part of the
+core workflow engine. They are computed on-demand or by an observability
+sidecar, not stored in the workflows table. The signature is emitted as a span
+attribute on workflow completion, enabling grouping queries without polluting
+the core schema.
+
+Use cases (all served via Grafana/Loki queries):
+- "Show all workflows with same topology"
+- "Which topology has highest failure rate?"
+- "Has this topology been seen before?"
+
+OTel/Loki handles observability, not the core database. The workflow itself is
+the audit trail: nodes emit OpenTelemetry spans/events, pattern applications
+emit as span events, and the workflow_nodes table provides execution history.
+
+The core database focuses on operational state. OTel provides auditability
+without polluting the schema. Span schema details (attribute names, event
+structures) will be finalized based on observability tooling requirements.
+
+For production observability deployment, see Chapter 15.1 Observability.

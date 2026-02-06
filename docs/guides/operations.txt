@@ -1,0 +1,104 @@
+# Operations Guide
+
+Extracted from spec/15_OPERATIONS.txt §15.1-15.4
+
+## 15.1 Observability
+
+### Telemetry Stack
+
+OpenTelemetry for structured logging and traces, Loki for log aggregation, Grafana
+for visualization. Workflows tagged with runtime topology signatures (provider,
+region, instance type) enable grouping and comparison across similar executions.
+
+### Error Reporting
+
+Self-managed deployments have opt-in error reporting (Sentry or similar). Managed
+instances have mandatory telemetry for operational support. Users control attached
+metadata (stripped PII by default).
+
+### Workflow Observability
+
+Each workflow execution creates a trace showing step timing, decisions, retries,
+and resource allocations. Topology signatures enable queries like "show all
+Lambda Labs launch failures in us-west" or "compare P99 latency for warm vs cold
+starts on AWS."
+
+## 15.2 CI/CD and Testing
+
+### OrbStack Generalization
+
+OrbStack provider serves as local testing backend. All control plane logic is
+testable without cloud credentials. CI runs full workflow test suite against
+OrbStack in isolated environments.
+
+**Contract-based testing philosophy:**
+
+Intent contracts (Chapter 7) define provider-agnostic behavior: required inputs,
+guaranteed outputs, allowed phases, cleanup priorities. The contract is the unit
+of trust. Tests validate that the control plane handles contract-compliant behavior
+correctly (retry logic, compensation, state transitions). Any provider implementing
+the same contracts inherits the validated behavior - the shared 80% tests once
+via OrbStack, not repeated per provider.
+
+### Fault Injection
+
+Chaos testing via controlled provider failures (timeouts, capacity errors, network
+partitions). OrbStack implements fault injection hooks simulating real-world
+failures while maintaining contract compliance. Example: simulated timeout during
+provision_instance respects contract cleanup priorities and required outputs.
+
+### Contract Compliance Testing
+
+Each provider must pass a contract compliance test suite verifying correct
+implementation. Separate from integration testing:
+
+- Registry-based parametric testing (Chapter 8) runs the same suite against all providers
+- Capability-gated tests skip when provider lacks a capability (e.g., snapshot creation)
+- Explicitly verifies required fields, phase transitions, idempotency, error handling
+- Passing compliance means OrbStack-validated control plane behavior applies
+
+### Property-Based Testing
+
+Core invariant: "Kill workflow at any step -> no orphaned resources." fast-check
+generates random kill points and verifies cleanup succeeds. Additional properties
+validate allocation state transitions and manifest lifecycle. Each intent's
+required outputs and cleanup priorities (Chapter 7) provide test specifications.
+
+## 15.3 Database Migrations
+
+### Migration Files
+
+Numbered SQL files in control/migrations/ directory: 001_initial.sql,
+002_idempotency_keys.sql, etc. Applied sequentially on control plane startup.
+Migration state tracked in schema_migrations table (number, applied_at, checksum).
+
+### Rollback Support
+
+Consider .up.sql / .down.sql pairs for reversible migrations. Critical for multi-user
+deployments where downtime requires fast recovery. Not all migrations are reversible
+(data transformations may be lossy).
+
+### Migration Testing
+
+CI validates migrations apply cleanly against empty database and realistic fixtures.
+Property test: apply all migrations then rollback all → database state matches fresh init.
+
+## 15.4 Auto-Updates
+
+### Update Mechanism
+
+Control plane checks for updates on startup (opt-out via config). Updates download
+new binary and restart service. Preflight validates migration compatibility and
+database backup before applying.
+
+### Multi-User Authorization
+
+Single-user deployments auto-update by default. Multi-user deployments (>1 active
+user in last 30 days) require admin authorization. Preflight shows changelog and
+estimated downtime before proceeding.
+
+### Rollback Safety
+
+Previous version binary retained for emergency rollback. Database migrations log
+applied SQL for manual reversal. Critical failures during update trigger automatic
+rollback to last known-good state.

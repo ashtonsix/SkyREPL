@@ -13,7 +13,7 @@ import type { BootstrapConfig } from './types';
 import * as timing from '../../../../shared/src/config/timing';
 ```
 
-## Provider Workflow Constraints
+## ProviderWorkflowConstraints
 
 ```typescript
 /**
@@ -84,7 +84,7 @@ function registerProviderWorkflow(contract: ProviderWorkflowContract): void {
 }
 ```
 
-## Abstract Contracts
+## AbstractContracts
 
 ```typescript
 /**
@@ -95,7 +95,7 @@ interface SpawnInstanceContract extends ProviderWorkflowContract {
   type: 'spawn-instance';
 
   constraints: {
-    maxDurationMs: timing.SPAWN_MAX_DURATION_MS;
+    maxDurationMs: timing.SPAWN_TIMEOUT_MS;
     requiredOutputFields: ['instanceId', 'providerId', 'ip'];
     emittableResources: ['instance'];
     canSpawnSubworkflows: false;
@@ -124,7 +124,7 @@ interface TerminateInstanceContract extends ProviderWorkflowContract {
   type: 'terminate-instance';
 
   constraints: {
-    maxDurationMs: timing.TERMINATE_MAX_DURATION_MS;
+    maxDurationMs: timing.TERMINATE_TIMEOUT_MS;
     requiredOutputFields: ['terminated'];
     emittableResources: [];
     canSpawnSubworkflows: false;
@@ -150,7 +150,7 @@ interface CreateSnapshotContract extends ProviderWorkflowContract {
   type: 'create-snapshot';
 
   constraints: {
-    maxDurationMs: timing.SNAPSHOT_MAX_DURATION_MS;
+    maxDurationMs: timing.SNAPSHOT_TIMEOUT_MS;
     requiredOutputFields: ['snapshotId', 'providerSnapshotId'];
     emittableResources: ['object'];
     canSpawnSubworkflows: false;

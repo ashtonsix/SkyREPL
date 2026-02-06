@@ -21,108 +21,136 @@ import {
 ```typescript
 interface Instance {
   id: number;
-  manifest_id: number;
   provider: string;
   provider_id: string;
-  instance_type: string;
+  spec: string;
   region: string;
+  ip: string | null;
   workflow_state: string;
-  last_heartbeat: number;
+  workflow_error: string | null;
+  current_manifest_id: number | null;
+  spawn_idempotency_key: string | null;
+  is_spot: number;
+  spot_request_id: string | null;
+  init_checksum: string | null;
   created_at: number;
-  updated_at: number;
+  last_heartbeat: number;
 }
 
 interface Run {
   id: number;
-  manifest_id: number;
   command: string;
-  exit_code: number | null;
+  workdir: string;
+  max_duration_ms: number;
   workflow_state: string;
+  workflow_error: string | null;
+  current_manifest_id: number | null;
+  exit_code: number | null;
+  init_checksum: string | null;
+  create_snapshot: number;
+  spot_interrupted: number;
   created_at: number;
-  updated_at: number;
+  started_at: number | null;
+  finished_at: number | null;
 }
 
 interface Allocation {
   id: number;
-  instance_id: number;
   run_id: number | null;
+  instance_id: number;
   status: 'AVAILABLE' | 'CLAIMED' | 'ACTIVE' | 'COMPLETE' | 'FAILED';
+  current_manifest_id: number | null;
+  user: string;
   workdir: string;
-  completed_at: number | null;
   debug_hold_until: number | null;
   created_at: number;
   updated_at: number;
+  completed_at: number | null;
 }
 
 interface Manifest {
   id: number;
+  workflow_id: number;
   status: 'DRAFT' | 'SEALED';
-  expires_at: number | null;
+  default_cleanup_priority: number;
+  retention_ms: number | null;
   created_at: number;
-  updated_at: number;
+  released_at: number | null;
+  expires_at: number | null;
 }
 
 interface ManifestResource {
-  id: number;
   manifest_id: number;
   resource_type: string;
-  resource_id: number;
-  owner_type: string | null;
-  owner_id: number | null;
-  cleanup_priority: number;
-  cleanup_processed_at: number | null;
-  created_at: number;
+  resource_id: string;
+  cleanup_priority: number | null;
+  added_at: number;
 }
 
 interface Blob {
   id: number;
   bucket: string;
-  checksum: string | null;
+  checksum: string;
+  checksum_bytes: number | null;
   s3_key: string | null;
   s3_bucket: string | null;
+  payload: Buffer | null;
   size_bytes: number;
-  last_referenced_at: number;
   created_at: number;
+  last_referenced_at: number;
 }
 
 interface Object {
   id: number;
+  type: 'snapshot' | 'artifact' | 'log' | 'run_file';
   blob_id: number;
-  object_type: 'artifact' | 'snapshot' | 'log' | 'run_file';
-  name: string;
+  provider: string | null;
+  provider_object_id: string | null;
+  metadata_json: string | null;
   expires_at: number | null;
+  current_manifest_id: number | null;
   created_at: number;
+  accessed_at: number | null;
 }
 
 interface Workflow {
   id: number;
-  manifest_id: number;
   type: string;
+  parent_workflow_id: number | null;
+  depth: number;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'rolling_back';
-  input: Record<string, unknown>;
-  output: Record<string, unknown> | null;
-  error: string | null;
+  current_node: string | null;
+  input_json: string;
+  output_json: string | null;
+  error_json: string | null;
+  manifest_id: number | null;
+  trace_id: string | null;
+  idempotency_key: string | null;
+  timeout_ms: number | null;
+  timeout_at: number | null;
+  created_at: number;
   started_at: number | null;
   finished_at: number | null;
-  created_at: number;
-  updated_at: number;
 }
 
 interface WorkflowNode {
   id: number;
   workflow_id: number;
-  name: string;
+  node_id: string;
+  node_type: string;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
-  input: Record<string, unknown>;
-  output: Record<string, unknown> | null;
-  error: string | null;
+  input_json: string;
+  output_json: string | null;
+  error_json: string | null;
   attempt: number;
+  retry_reason: string | null;
+  created_at: number;
   started_at: number | null;
   finished_at: number | null;
 }
 ```
 
-## Connection Management
+## ConnectionManagement
 
 ```typescript
 let connection: Database | null = null;
@@ -204,7 +232,7 @@ export function runMigrations(): void {
 }
 ```
 
-## Query Helpers
+## QueryHelpers
 
 ```typescript
 export function queryOne<T>(sql: string, params: unknown[] = []): T | null {
@@ -256,7 +284,7 @@ export function transaction<T>(fn: () => T, retries = 3): T {
 }
 ```
 
-## Instance Operations
+## InstanceOperations
 
 ```typescript
 export function getInstance(id: number): Instance | null {
@@ -273,25 +301,30 @@ export function getInstanceByProviderId(provider: string, providerId: string): I
   );
 }
 
-export function createInstance(data: Omit<Instance, 'id' | 'created_at' | 'updated_at'>): Instance {
+export function createInstance(data: Omit<Instance, 'id' | 'created_at'>): Instance {
   const now = Date.now();
   const db = getDatabase();
 
   const stmt = db.prepare(`
-    INSERT INTO instances (manifest_id, provider, provider_id, instance_type, region, workflow_state, last_heartbeat, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO instances (provider, provider_id, spec, region, ip, workflow_state, workflow_error, current_manifest_id, spawn_idempotency_key, is_spot, spot_request_id, init_checksum, created_at, last_heartbeat)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const result = stmt.run(
-    data.manifest_id,
     data.provider,
     data.provider_id,
-    data.instance_type,
+    data.spec,
     data.region,
+    data.ip,
     data.workflow_state,
-    data.last_heartbeat,
+    data.workflow_error,
+    data.current_manifest_id,
+    data.spawn_idempotency_key,
+    data.is_spot,
+    data.spot_request_id,
+    data.init_checksum,
     now,
-    now
+    data.last_heartbeat
   );
 
   return getInstance(result.lastInsertRowid as number)!;
@@ -299,14 +332,13 @@ export function createInstance(data: Omit<Instance, 'id' | 'created_at' | 'updat
 
 export function updateInstance(id: number, updates: Partial<Instance>): Instance {
   const db = getDatabase();
-  const now = Date.now();
 
   const fields = Object.keys(updates).filter(k => k !== 'id');
   const setClause = fields.map(f => `${f} = ?`).join(', ');
   const values = fields.map(f => updates[f as keyof Instance]);
 
-  db.prepare(`UPDATE instances SET ${setClause}, updated_at = ? WHERE id = ?`)
-    .run(...values, now, id);
+  db.prepare(`UPDATE instances SET ${setClause} WHERE id = ?`)
+    .run(...values, id);
 
   return getInstance(id)!;
 }
@@ -328,7 +360,7 @@ export function listInstances(filter?: { provider?: string; workflow_state?: str
 }
 ```
 
-## Allocation Operations
+## AllocationOperations
 
 ```typescript
 export function getAllocation(id: number): Allocation | null {
@@ -341,17 +373,19 @@ export function createAllocation(data: Omit<Allocation, 'id' | 'created_at' | 'u
 
   try {
     const stmt = db.prepare(`
-      INSERT INTO allocations (instance_id, run_id, status, workdir, completed_at, debug_hold_until, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO allocations (run_id, instance_id, status, current_manifest_id, user, workdir, debug_hold_until, completed_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const result = stmt.run(
-      data.instance_id,
       data.run_id,
+      data.instance_id,
       data.status,
+      data.current_manifest_id,
+      data.user,
       data.workdir,
-      data.completed_at,
       data.debug_hold_until,
+      data.completed_at,
       now,
       now
     );
@@ -417,14 +451,14 @@ export function claimAllocation(id: number, runId: number): Allocation | null {
   })();
 }
 
-export function findAvailableAllocation(spec: { instance_type: string; region?: string }): Allocation | null {
+export function findAvailableAllocation(spec: { spec: string; region?: string }): Allocation | null {
   let sql = `
     SELECT a.* FROM allocations a
     JOIN instances i ON a.instance_id = i.id
     WHERE a.status = 'AVAILABLE' AND a.run_id IS NULL
-      AND i.instance_type = ?
+      AND i.spec = ?
   `;
-  const params: unknown[] = [spec.instance_type];
+  const params: unknown[] = [spec.spec];
 
   if (spec.region) {
     sql += ' AND i.region = ?';
@@ -437,29 +471,36 @@ export function findAvailableAllocation(spec: { instance_type: string; region?: 
 }
 ```
 
-## Run Operations
+## RunOperations
 
 ```typescript
 export function getRun(id: number): Run | null {
   return queryOne<Run>('SELECT * FROM runs WHERE id = ?', [id]);
 }
 
-export function createRun(data: Omit<Run, 'id' | 'created_at' | 'updated_at'>): Run {
+export function createRun(data: Omit<Run, 'id' | 'created_at'>): Run {
   const now = Date.now();
   const db = getDatabase();
 
   const stmt = db.prepare(`
-    INSERT INTO runs (manifest_id, command, exit_code, workflow_state, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO runs (command, workdir, max_duration_ms, workflow_state, workflow_error, current_manifest_id, exit_code, init_checksum, create_snapshot, spot_interrupted, created_at, started_at, finished_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const result = stmt.run(
-    data.manifest_id,
     data.command,
-    data.exit_code,
+    data.workdir,
+    data.max_duration_ms,
     data.workflow_state,
+    data.workflow_error,
+    data.current_manifest_id,
+    data.exit_code,
+    data.init_checksum,
+    data.create_snapshot,
+    data.spot_interrupted,
     now,
-    now
+    data.started_at,
+    data.finished_at
   );
 
   return getRun(result.lastInsertRowid as number)!;
@@ -467,25 +508,24 @@ export function createRun(data: Omit<Run, 'id' | 'created_at' | 'updated_at'>): 
 
 export function updateRun(id: number, updates: Partial<Run>): Run {
   const db = getDatabase();
-  const now = Date.now();
 
   const fields = Object.keys(updates).filter(k => k !== 'id');
   const setClause = fields.map(f => `${f} = ?`).join(', ');
   const values = fields.map(f => updates[f as keyof Run]);
 
-  db.prepare(`UPDATE runs SET ${setClause}, updated_at = ? WHERE id = ?`)
-    .run(...values, now, id);
+  db.prepare(`UPDATE runs SET ${setClause} WHERE id = ?`)
+    .run(...values, id);
 
   return getRun(id)!;
 }
 
-export function listRuns(filter?: { manifest_id?: number; workflow_state?: string }): Run[] {
+export function listRuns(filter?: { current_manifest_id?: number; workflow_state?: string }): Run[] {
   let sql = 'SELECT * FROM runs WHERE 1=1';
   const params: unknown[] = [];
 
-  if (filter?.manifest_id) {
-    sql += ' AND manifest_id = ?';
-    params.push(filter.manifest_id);
+  if (filter?.current_manifest_id) {
+    sql += ' AND current_manifest_id = ?';
+    params.push(filter.current_manifest_id);
   }
   if (filter?.workflow_state) {
     sql += ' AND workflow_state = ?';
@@ -496,34 +536,38 @@ export function listRuns(filter?: { manifest_id?: number; workflow_state?: strin
 }
 ```
 
-## Manifest Operations
+## ManifestOperations
 
 ```typescript
 export function getManifest(id: number): Manifest | null {
   return queryOne<Manifest>('SELECT * FROM manifests WHERE id = ?', [id]);
 }
 
-export function createManifest(type: string): Manifest {
+export function createManifest(workflowId: number, options?: { default_cleanup_priority?: number; retention_ms?: number }): Manifest {
   const now = Date.now();
   const db = getDatabase();
 
   const stmt = db.prepare(`
-    INSERT INTO manifests (status, expires_at, created_at, updated_at)
-    VALUES ('DRAFT', NULL, ?, ?)
+    INSERT INTO manifests (workflow_id, status, default_cleanup_priority, retention_ms, created_at, released_at, expires_at)
+    VALUES (?, 'DRAFT', ?, ?, ?, NULL, NULL)
   `);
 
-  const result = stmt.run(now, now);
+  const result = stmt.run(
+    workflowId,
+    options?.default_cleanup_priority ?? 50,
+    options?.retention_ms ?? null,
+    now
+  );
   return getManifest(result.lastInsertRowid as number)!;
 }
 
 export function sealManifest(id: number): void {
   const db = getDatabase();
-  const now = Date.now();
 
   const result = db.prepare(`
-    UPDATE manifests SET status = 'SEALED', updated_at = ?
+    UPDATE manifests SET status = 'SEALED'
     WHERE id = ? AND status = 'DRAFT'
-  `).run(now, id);
+  `).run(id);
 
   if (result.changes === 0) {
     const manifest = getManifest(id);
@@ -537,8 +581,6 @@ export function sealManifest(id: number): void {
 }
 
 interface AddResourceOptions {
-  ownerType?: 'workflow' | 'user' | 'system';
-  ownerId?: number;
   cleanupPriority?: number;
   allowRecovery?: boolean;
 }
@@ -546,7 +588,7 @@ interface AddResourceOptions {
 export function addResourceToManifest(
   manifestId: number,
   resourceType: string,
-  resourceId: number,
+  resourceId: string,
   options: AddResourceOptions = {}
 ): void {
   const db = getDatabase();
@@ -564,15 +606,13 @@ export function addResourceToManifest(
   }
 
   db.prepare(`
-    INSERT INTO manifest_resources (manifest_id, resource_type, resource_id, owner_type, owner_id, cleanup_priority, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO manifest_resources (manifest_id, resource_type, resource_id, cleanup_priority, added_at)
+    VALUES (?, ?, ?, ?, ?)
   `).run(
     manifestId,
     resourceType,
     resourceId,
-    options.ownerType ?? null,
-    options.ownerId ?? null,
-    options.cleanupPriority ?? 50,
+    options.cleanupPriority ?? null,
     now
   );
 }
@@ -602,33 +642,39 @@ export function listExpiredManifests(cutoffTime: number): Manifest[] {
 }
 ```
 
-## Workflow Operations
+## WorkflowOperations
 
 ```typescript
 export function getWorkflow(id: number): Workflow | null {
   return queryOne<Workflow>('SELECT * FROM workflows WHERE id = ?', [id]);
 }
 
-export function createWorkflow(data: Omit<Workflow, 'id' | 'created_at' | 'updated_at'>): Workflow {
+export function createWorkflow(data: Omit<Workflow, 'id' | 'created_at'>): Workflow {
   const now = Date.now();
   const db = getDatabase();
 
   const stmt = db.prepare(`
-    INSERT INTO workflows (manifest_id, type, status, input, output, error, started_at, finished_at, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO workflows (type, parent_workflow_id, depth, status, current_node, input_json, output_json, error_json, manifest_id, trace_id, idempotency_key, timeout_ms, timeout_at, created_at, started_at, finished_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const result = stmt.run(
-    data.manifest_id,
     data.type,
+    data.parent_workflow_id,
+    data.depth,
     data.status,
-    JSON.stringify(data.input),
-    data.output ? JSON.stringify(data.output) : null,
-    data.error,
-    data.started_at,
-    data.finished_at,
+    data.current_node,
+    data.input_json,
+    data.output_json,
+    data.error_json,
+    data.manifest_id,
+    data.trace_id,
+    data.idempotency_key,
+    data.timeout_ms,
+    data.timeout_at,
     now,
-    now
+    data.started_at,
+    data.finished_at
   );
 
   return getWorkflow(result.lastInsertRowid as number)!;
@@ -636,20 +682,13 @@ export function createWorkflow(data: Omit<Workflow, 'id' | 'created_at' | 'updat
 
 export function updateWorkflow(id: number, updates: Partial<Workflow>): Workflow {
   const db = getDatabase();
-  const now = Date.now();
 
   const fields = Object.keys(updates).filter(k => k !== 'id');
-  const values = fields.map(f => {
-    const val = updates[f as keyof Workflow];
-    if (f === 'input' || f === 'output') {
-      return val ? JSON.stringify(val) : null;
-    }
-    return val;
-  });
   const setClause = fields.map(f => `${f} = ?`).join(', ');
+  const values = fields.map(f => updates[f as keyof Workflow]);
 
-  db.prepare(`UPDATE workflows SET ${setClause}, updated_at = ? WHERE id = ?`)
-    .run(...values, now, id);
+  db.prepare(`UPDATE workflows SET ${setClause} WHERE id = ?`)
+    .run(...values, id);
 
   return getWorkflow(id)!;
 }
@@ -661,22 +700,26 @@ export function getWorkflowNodes(workflowId: number): WorkflowNode[] {
   );
 }
 
-export function createWorkflowNode(data: Omit<WorkflowNode, 'id'>): WorkflowNode {
+export function createWorkflowNode(data: Omit<WorkflowNode, 'id' | 'created_at'>): WorkflowNode {
   const db = getDatabase();
+  const now = Date.now();
 
   const stmt = db.prepare(`
-    INSERT INTO workflow_nodes (workflow_id, name, status, input, output, error, attempt, started_at, finished_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO workflow_nodes (workflow_id, node_id, node_type, status, input_json, output_json, error_json, attempt, retry_reason, created_at, started_at, finished_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const result = stmt.run(
     data.workflow_id,
-    data.name,
+    data.node_id,
+    data.node_type,
     data.status,
-    JSON.stringify(data.input),
-    data.output ? JSON.stringify(data.output) : null,
-    data.error,
+    data.input_json,
+    data.output_json,
+    data.error_json,
     data.attempt,
+    data.retry_reason,
+    now,
     data.started_at,
     data.finished_at
   );
@@ -688,14 +731,8 @@ export function updateWorkflowNode(id: number, updates: Partial<WorkflowNode>): 
   const db = getDatabase();
 
   const fields = Object.keys(updates).filter(k => k !== 'id');
-  const values = fields.map(f => {
-    const val = updates[f as keyof WorkflowNode];
-    if (f === 'input' || f === 'output') {
-      return val ? JSON.stringify(val) : null;
-    }
-    return val;
-  });
   const setClause = fields.map(f => `${f} = ?`).join(', ');
+  const values = fields.map(f => updates[f as keyof WorkflowNode]);
 
   db.prepare(`UPDATE workflow_nodes SET ${setClause} WHERE id = ?`)
     .run(...values, id);
@@ -704,7 +741,7 @@ export function updateWorkflowNode(id: number, updates: Partial<WorkflowNode>): 
 }
 ```
 
-## Blob Operations
+## BlobOperations
 
 ```typescript
 export function getBlob(id: number): Blob | null {
@@ -735,18 +772,20 @@ export function createBlob(data: Omit<Blob, 'id' | 'created_at'>): Blob {
   }
 
   const stmt = db.prepare(`
-    INSERT INTO blobs (bucket, checksum, s3_key, s3_bucket, size_bytes, last_referenced_at, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO blobs (bucket, checksum, checksum_bytes, s3_key, s3_bucket, payload, size_bytes, created_at, last_referenced_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const result = stmt.run(
     data.bucket,
     data.checksum,
+    data.checksum_bytes,
     data.s3_key,
     data.s3_bucket,
+    data.payload,
     data.size_bytes,
-    data.last_referenced_at,
-    now
+    now,
+    data.last_referenced_at
   );
 
   return getBlob(result.lastInsertRowid as number)!;
@@ -768,7 +807,7 @@ export function updateBlobLastReferenced(id: number): void {
 }
 ```
 
-## Object Operations
+## ObjectOperations
 
 ```typescript
 export function getObject(id: number): Object | null {
@@ -780,16 +819,20 @@ export function createObject(data: Omit<Object, 'id' | 'created_at'>): Object {
   const db = getDatabase();
 
   const stmt = db.prepare(`
-    INSERT INTO objects (blob_id, object_type, name, expires_at, created_at)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO objects (type, blob_id, provider, provider_object_id, metadata_json, expires_at, current_manifest_id, created_at, accessed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const result = stmt.run(
+    data.type,
     data.blob_id,
-    data.object_type,
-    data.name,
+    data.provider,
+    data.provider_object_id,
+    data.metadata_json,
     data.expires_at,
-    now
+    data.current_manifest_id,
+    now,
+    data.accessed_at
   );
 
   // Touch blob last_referenced_at
@@ -800,38 +843,40 @@ export function createObject(data: Omit<Object, 'id' | 'created_at'>): Object {
 
 export function addObjectTag(objectId: number, key: string, value: string): void {
   const db = getDatabase();
+  const tag = `${key}:${value}`;
 
   db.prepare(`
-    INSERT INTO object_tags (object_id, key, value)
-    VALUES (?, ?, ?)
-    ON CONFLICT (object_id, key) DO UPDATE SET value = excluded.value
-  `).run(objectId, key, value);
+    INSERT INTO object_tags (object_id, tag)
+    VALUES (?, ?)
+    ON CONFLICT (object_id, tag) DO NOTHING
+  `).run(objectId, tag);
 }
 
 export function findObjectByTag(key: string, value: string): Object | null {
+  const tag = `${key}:${value}`;
   return queryOne<Object>(`
     SELECT o.* FROM objects o
     JOIN object_tags t ON o.id = t.object_id
-    WHERE t.key = ? AND t.value = ?
-  `, [key, value]);
+    WHERE t.tag = ?
+  `, [tag]);
 }
 ```
 
-## Warm Pool Operations
+## WarmPoolOperations
 
 ```typescript
 export function findWarmAllocation(
-  spec: { instance_type: string; region?: string },
+  spec: { spec: string; region?: string },
   initChecksum?: string
 ): Allocation | null {
   let sql = `
     SELECT a.* FROM allocations a
     JOIN instances i ON a.instance_id = i.id
     WHERE a.status = 'AVAILABLE' AND a.run_id IS NULL
-      AND i.instance_type = ?
+      AND i.spec = ?
       AND i.workflow_state LIKE '%:complete'
   `;
-  const params: unknown[] = [spec.instance_type];
+  const params: unknown[] = [spec.spec];
 
   if (spec.region) {
     sql += ' AND i.region = ?';
@@ -839,7 +884,7 @@ export function findWarmAllocation(
   }
 
   if (initChecksum) {
-    sql += ' AND a.init_checksum = ?';
+    sql += ' AND i.init_checksum = ?';
     params.push(initChecksum);
   }
 
@@ -856,7 +901,7 @@ export function getWarmPoolStats(): { available: number; bySpec: Record<string, 
   );
 
   const bySpec = queryMany<{ spec: string; count: number }>(`
-    SELECT i.instance_type || ':' || i.region as spec, COUNT(*) as count
+    SELECT i.spec || ':' || i.region as spec, COUNT(*) as count
     FROM allocations a
     JOIN instances i ON a.instance_id = i.id
     WHERE a.status = 'AVAILABLE'
@@ -870,7 +915,7 @@ export function getWarmPoolStats(): { available: number; bySpec: Record<string, 
 }
 ```
 
-## Orphan Operations
+## OrphanOperations
 
 ```typescript
 export function getTrackedInstanceIds(): Set<number> {
@@ -908,27 +953,33 @@ export function recordOrphanScan(result: OrphanScanResult): void {
   );
 }
 
-export function addToWhitelist(providerId: string, reason: string): void {
+export function addToWhitelist(
+  provider: string,
+  providerId: string,
+  resourceType: string,
+  reason: string,
+  acknowledgedBy: string
+): void {
   const db = getDatabase();
   const now = Date.now();
 
   db.prepare(`
-    INSERT INTO orphan_whitelist (provider_id, reason, created_at)
-    VALUES (?, ?, ?)
-    ON CONFLICT (provider_id) DO UPDATE SET reason = excluded.reason
-  `).run(providerId, reason, now);
+    INSERT INTO orphan_whitelist (provider, provider_id, resource_type, reason, acknowledged_by, acknowledged_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT (provider, provider_id) DO UPDATE SET reason = excluded.reason, acknowledged_by = excluded.acknowledged_by, acknowledged_at = excluded.acknowledged_at
+  `).run(provider, providerId, resourceType, reason, acknowledgedBy, now);
 }
 
-export function isWhitelisted(providerId: string): boolean {
+export function isWhitelisted(provider: string, providerId: string): boolean {
   const result = queryOne<{ provider_id: string }>(
-    'SELECT provider_id FROM orphan_whitelist WHERE provider_id = ?',
-    [providerId]
+    'SELECT provider_id FROM orphan_whitelist WHERE provider = ? AND provider_id = ?',
+    [provider, providerId]
   );
   return result !== null;
 }
 ```
 
-## Delete Operations
+## DeleteOperations
 
 ```typescript
 export function deleteInstance(id: number): void {
@@ -1000,7 +1051,7 @@ export function deleteWorkflow(id: number): void {
 }
 ```
 
-## Usage Record Operations
+## UsageRecordOperations
 
 ```typescript
 interface UsageRecord {
@@ -1081,7 +1132,7 @@ export function getActiveUsageRecords(): UsageRecord[] {
 }
 ```
 
-## Background Blob GC Operations
+## BackgroundBlobGCOperations
 
 ```typescript
 /**
@@ -1121,20 +1172,20 @@ export function deleteBlobBatch(blobIds: number[]): void {
 }
 ```
 
-## Manifest Cleanup Operations
+## ManifestCleanupOperations
 
 ```typescript
 /**
  * Get all object IDs owned by a manifest (for cleanup).
  */
-export function getManifestObjectIds(manifestId: number): number[] {
+export function getManifestObjectIds(manifestId: number): string[] {
   const rows = queryMany<{ resource_id: string }>(`
     SELECT resource_id FROM manifest_resources
     WHERE manifest_id = ?
       AND resource_type = 'object'
   `, [manifestId]);
 
-  return rows.map(r => parseInt(r.resource_id, 10));
+  return rows.map(r => r.resource_id);
 }
 
 /**

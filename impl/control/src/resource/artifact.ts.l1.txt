@@ -12,7 +12,7 @@
 - ≤64KB: inline in blobs.payload (SBO)
 - >64KB: S3, referenced via blobs.s3_key/s3_bucket
 
-## Presigned URLs
+## PresignedURLs
 - Generate for download regardless of storage location
 - Same HTTP GET interface for both inline and S3
 

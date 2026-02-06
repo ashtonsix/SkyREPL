@@ -26,7 +26,7 @@ import { getProviderClient } from '../provider/registry';
 import { generatePresignedUrls } from '../material/object-store';
 ```
 
-## Entry Point
+## EntryPoint
 
 ```typescript
 export async function launchRun(input: LaunchRunInput): Promise<Workflow> {
@@ -37,7 +37,7 @@ export async function launchRun(input: LaunchRunInput): Promise<Workflow> {
 }
 ```
 
-## Workflow Definition
+## WorkflowDefinition
 
 ```typescript
 export const launchRunWorkflow: WorkflowDefinition = {
@@ -70,7 +70,7 @@ export const launchRunWorkflow: WorkflowDefinition = {
 };
 ```
 
-## Blueprint Structure
+## BlueprintStructure
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -135,7 +135,7 @@ export const launchRunWorkflow: WorkflowDefinition = {
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Pattern Applications
+## PatternApplications
 
 ### CB at resolve-instance: Warm pool vs spawn decision
 
@@ -184,7 +184,7 @@ ctx.applyPattern('conditional-branch', {
 });
 ```
 
-## Node Handlers
+## NodeHandlers
 
 ### check-budget
 
@@ -276,9 +276,9 @@ async function claimWarmAllocation(
 
   const result = db.prepare(`
     UPDATE allocations
-    SET status = 'CLAIMED', run_id = ?, claimed_at = ?, updated_at = ?
+    SET status = 'CLAIMED', run_id = ?, updated_at = ?
     WHERE id = ? AND status = 'AVAILABLE'
-  `).run(input.runId, now, now, input.warmAllocationId);
+  `).run(input.runId, now, input.warmAllocationId);
 
   if (result.changes === 0) {
     throw new Error('Warm allocation claim failed (race lost or status changed)');
@@ -315,9 +315,9 @@ async function spawnInstance(
 
   // Phase 1: Create instance record in DB
   const instanceResult = db.prepare(`
-    INSERT INTO instances (provider, region, spec, status, workflow_state, init_checksum, created_at, updated_at)
-    VALUES (?, ?, ?, 'provisioning', 'launch:spawning', ?, ?, ?)
-  `).run(input.provider, input.region, input.spec, input.initChecksum, now, now);
+    INSERT INTO instances (provider, region, spec, workflow_state, init_checksum, created_at)
+    VALUES (?, ?, ?, 'launch:spawning', ?, ?)
+  `).run(input.provider, input.region, input.spec, input.initChecksum, now);
 
   const instanceId = instanceResult.lastInsertRowid as number;
   ctx.emitResource('instance', instanceId, 50);
@@ -333,7 +333,7 @@ async function spawnInstance(
 
   // Update instance with provider ID
   db.prepare(`
-    UPDATE instances SET provider_id = ?, ip = ?, status = 'booting', workflow_state = 'launch:booting', updated_at = ?
+    UPDATE instances SET provider_id = ?, ip = ?, workflow_state = 'launch:booting', last_heartbeat = ?
     WHERE id = ?
   `).run(providerResult.providerId, providerResult.ip, Date.now(), instanceId);
 
@@ -360,9 +360,9 @@ async function compensateSpawnInstance(
   }
 
   getDatabase().prepare(`
-    UPDATE instances SET status = 'terminated', workflow_state = 'launch:compensated', updated_at = ?
+    UPDATE instances SET workflow_state = 'launch:compensated'
     WHERE id = ?
-  `).run(Date.now(), output.instanceId);
+  `).run(output.instanceId);
 }
 
 /**
@@ -408,7 +408,7 @@ async function waitForBoot(
     if (status === 'running') {
       // Update instance status
       getDatabase().prepare(`
-        UPDATE instances SET status = 'running', workflow_state = 'launch:running', updated_at = ?
+        UPDATE instances SET workflow_state = 'launch:running', last_heartbeat = ?
         WHERE id = ?
       `).run(Date.now(), instanceId);
 
@@ -469,14 +469,19 @@ async function createAllocation(
   const now = Date.now();
 
   const result = db.prepare(`
-    INSERT INTO allocations (instance_id, run_id, status, created_at, claimed_at, updated_at)
+    INSERT INTO allocations (instance_id, run_id, status, workdir, created_at, updated_at)
     VALUES (?, ?, 'CLAIMED', ?, ?, ?)
-  `).run(instanceId, input.runId, now, now, now);
+  `).run(instanceId, input.runId, input.workdir, now, now);
 
   const allocationId = result.lastInsertRowid as number;
   ctx.emitResource('allocation', allocationId, 90);
 
-  // Emit run resource
+  // Emit run resource.
+  // NOTE: Spec says the run resource is emitted at "workflow start", but we emit
+  // it here at create-allocation because the run needs an allocation binding
+  // (run-to-instance) before it's meaningful as a manifest resource. Emitting
+  // earlier would register a run resource with no instance backing, which would
+  // complicate cleanup-manifest (no instance to terminate on failure).
   ctx.emitResource('run', input.runId, 80);
 
   ctx.log('info', 'Allocation created', { allocationId, instanceId, runId: input.runId });
@@ -511,7 +516,7 @@ async function syncFiles(
   const fileUrls = await generatePresignedUrls(
     input.files.map(f => f.checksum),
     'GET',
-    TIMING.PRESIGNED_URL_EXPIRY_MS
+    TIMING.PRESIGNED_URL_TTL_MS
   );
 
   const filesWithUrls = input.files.map((file, i) => ({
@@ -541,15 +546,15 @@ async function syncFiles(
 
   // 3-4. Wait for agent sync_complete event
   const syncResult = await waitForAgentEvent(instance!.ip, 'sync_complete', {
-    timeout: TIMING.FILE_SYNC_TIMEOUT_MS,
+    timeout: TIMING.SYNC_TIMEOUT_MS,
     runId: input.runId
   });
 
   if (!syncResult.success) {
     // Transition allocation to FAILED
     getDatabase().prepare(`
-      UPDATE allocations SET status = 'FAILED', updated_at = ? WHERE id = ?
-    `).run(Date.now(), allocationId);
+      UPDATE allocations SET status = 'FAILED' WHERE id = ?
+    `).run(allocationId);
     throw new Error(`File sync failed: ${syncResult.error}`);
   }
 
@@ -557,9 +562,9 @@ async function syncFiles(
   const db = getDatabase();
   const now = Date.now();
   const transitionResult = db.prepare(`
-    UPDATE allocations SET status = 'ACTIVE', activated_at = ?, updated_at = ?
+    UPDATE allocations SET status = 'ACTIVE', updated_at = ?
     WHERE id = ? AND status = 'CLAIMED'
-  `).run(now, now, allocationId);
+  `).run(now, allocationId);
 
   if (transitionResult.changes === 0) {
     throw new Error('Allocation transition CLAIMED→ACTIVE failed (unexpected state)');
@@ -567,8 +572,8 @@ async function syncFiles(
 
   // Update run started_at
   db.prepare(`
-    UPDATE runs SET started_at = ?, updated_at = ? WHERE id = ?
-  `).run(now, now, input.runId);
+    UPDATE runs SET started_at = ? WHERE id = ?
+  `).run(now, input.runId);
 
   ctx.log('info', 'File sync complete, allocation ACTIVE', {
     allocationId,
@@ -614,9 +619,9 @@ async function awaitCompletion(
     const db = getDatabase();
     const now = Date.now();
     db.prepare(`
-      UPDATE runs SET exit_code = -1, workflow_state = 'run:timeout', completed_at = ?, updated_at = ?
+      UPDATE runs SET exit_code = -1, workflow_state = 'run:timeout', finished_at = ?
       WHERE id = ?
-    `).run(now, now, input.runId);
+    `).run(now, input.runId);
 
     return { exitCode: -1, spotInterrupted: false };
   }
@@ -628,9 +633,9 @@ async function awaitCompletion(
   const db = getDatabase();
   const now = Date.now();
   db.prepare(`
-    UPDATE runs SET exit_code = ?, workflow_state = 'run:complete', completed_at = ?, updated_at = ?
+    UPDATE runs SET exit_code = ?, workflow_state = 'run:complete', finished_at = ?
     WHERE id = ?
-  `).run(exitCode, now, now, input.runId);
+  `).run(exitCode, now, input.runId);
 
   ctx.log('info', 'Run completed', { runId: input.runId, exitCode, spotInterrupted });
 
@@ -667,8 +672,8 @@ async function finalizeRun(
   if (input.holdDurationMs > 0) {
     const holdUntil = now + input.holdDurationMs;
     db.prepare(`
-      UPDATE allocations SET debug_hold_until = ?, updated_at = ? WHERE id = ?
-    `).run(holdUntil, now, allocationId);
+      UPDATE allocations SET debug_hold_until = ? WHERE id = ?
+    `).run(holdUntil, allocationId);
   }
 
   // CB: Conditional snapshot creation
@@ -692,9 +697,9 @@ async function finalizeRun(
 
   // Seal manifest
   db.prepare(`
-    UPDATE manifests SET status = 'SEALED', sealed_at = ?, updated_at = ?
+    UPDATE manifests SET status = 'SEALED', released_at = ?
     WHERE id = ? AND status = 'DRAFT'
-  `).run(now, now, ctx.manifestId);
+  `).run(now, ctx.manifestId);
 
   ctx.log('info', 'Run finalized', {
     runId: input.runId,
@@ -715,7 +720,7 @@ async function finalizeRun(
 }
 ```
 
-## Resource Emissions
+## ResourceEmissions
 
 | Node              | Resource   | Cleanup Priority | Example Call                                       |
 |-------------------|------------|------------------|----------------------------------------------------|
@@ -726,7 +731,7 @@ async function finalizeRun(
 
 *Only if createSnapshot=true and exitCode=0
 
-## Snapshot-Based Restart
+## SnapshotBasedRestart
 
 When a snapshot exists (initChecksum is non-null):
 - **resolve-instance** warm pool query prefers instances with matching init_checksum

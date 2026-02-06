@@ -1,120 +1,31 @@
-# classifier.ts - Orphan Classification
+# classifier.ts - Orphan Classification (Ch12)
+
+Classify orphans by origin session and severity. Enables preflight warnings and prioritized investigation.
+See L2 for session-based classification logic and preflight warning generation.
+
+## Severity Levels
+WARNING (current session), INFO (other sessions), CAUTION (unknown origin)
 
 ## Exports
-
-```typescript
-export type OrphanSeverity = 'WARNING' | 'INFO' | 'CAUTION';
-
-export interface Orphan {
-  id: string;
-  name: string;
-  provider: string;
-  providerId: string;
-  resourceType: 'instance' | 'volume' | 'snapshot' | 'network';
-  createdAt: Date;
-  parsedManifestId?: string;
-  parsedInstanceId?: string;
-}
-
-export interface ClassifiedOrphan extends Orphan {
-  severity: OrphanSeverity;
-  reason: string;
-  ageMs: number;
-}
-
-export interface OrphanClassification {
-  currentSession: ClassifiedOrphan[];
-  otherSessions: ClassifiedOrphan[];
-  unknown: ClassifiedOrphan[];
-  stats: {
-    total: number;
-    byProvider: Record<string, number>;
-    bySeverity: Record<OrphanSeverity, number>;
-  };
-}
-
-// Main classification function
-export function classifyOrphans(
-  orphans: Orphan[],
-  sessionStartTime: Date,
-  thresholdMs?: number  // Default: 3600000 (1 hour)
-): OrphanClassification;
-
-// Helper to parse resource names
-export function parseOrphanName(name: string): {
-  manifestId?: string;
-  instanceId?: string;
-  controlId?: string;
-} | null;
-```
+classifyOrphans, parseResourceName, generateResourceName, preflightOrphanCheck
 
 ## Classification Rules
+- Current session: created after sessionStartTime OR age < threshold (default 1h) → WARNING
+- Other sessions: age >= threshold, parseable name → INFO
+- Unknown: unparseable name (doesn't match repl-* pattern) → CAUTION
 
-### Current Session (WARNING)
-- Created after sessionStartTime, OR
-- Age < thresholdMs (default 1 hour)
-- Reason: "Created during current session" or "Recent orphan (< 1 hour old)"
-- Action: May indicate active workflow failure, investigate immediately
+## Resource Name Format
+repl-{controlId}-{manifestSlug}-{instanceSlug}
+Tailscale: repl-{controlId}-{instanceSlug}
 
-### Other Sessions (INFO)
-- Age >= thresholdMs
-- Has parseable name with manifest/instance IDs
-- Reason: "Orphan from previous session"
-- Action: Safe to terminate, likely from crashed workflow
+## OrphanClassification Structure
+currentSession, otherSessions, unknown, stats (total, byProvider, bySeverity)
 
-### Unknown (CAUTION)
-- Unparseable name (doesn't match repl-* pattern)
-- Reason: "Unknown resource (name doesn't match expected pattern)"
-- Action: Manual review recommended, may not be SkyREPL resource
-
-## classifyOrphans Implementation
-
-```
-function classifyOrphans(orphans, sessionStartTime, thresholdMs = 3600000):
-  const result = { currentSession: [], otherSessions: [], unknown: [], stats: {...} }
-
-  for each orphan in orphans:
-    const ageMs = Date.now() - orphan.createdAt.getTime()
-    const parsed = parseOrphanName(orphan.name)
-
-    if (!parsed):
-      // Unparseable name
-      result.unknown.push({
-        ...orphan,
-        severity: 'CAUTION',
-        reason: 'Unknown resource (name doesn\'t match expected pattern)',
-        ageMs
-      })
-    else if (orphan.createdAt > sessionStartTime || ageMs < thresholdMs):
-      // Current session or recent
-      result.currentSession.push({
-        ...orphan,
-        severity: 'WARNING',
-        reason: orphan.createdAt > sessionStartTime
-          ? 'Created during current session'
-          : `Recent orphan (${Math.floor(ageMs / 60000)} minutes old)`,
-        ageMs,
-        parsedManifestId: parsed.manifestId,
-        parsedInstanceId: parsed.instanceId
-      })
-    else:
-      // Old orphan from previous session
-      result.otherSessions.push({
-        ...orphan,
-        severity: 'INFO',
-        reason: 'Orphan from previous session',
-        ageMs,
-        parsedManifestId: parsed.manifestId,
-        parsedInstanceId: parsed.instanceId
-      })
-
-  // Compute stats
-  result.stats = computeStats(result)
-  return result
-```
+## Preflight Warnings
+Check for orphans before launch-run, terminate-all, cleanup operations. Return warnings for CLI display.
 
 ## Use Cases
-- Preflight warnings before operations
-- Prioritize investigation of recent orphans
-- Filter by severity in CLI output
-- Inform automatic cleanup decisions (INFO = safe to terminate)
+Preflight warnings, prioritize recent orphans, filter by severity, inform automatic cleanup decisions (INFO = safe to terminate)
+
+## Materialization
+Classification is computed on-demand. Orphan data sourced from provider APIs and DB.

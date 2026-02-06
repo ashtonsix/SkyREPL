@@ -11,7 +11,7 @@
 import type { ProviderName } from '../../../../shared/src/types';
 ```
 
-## In-Memory Cache
+## InMemoryCache
 
 ```typescript
 /**
@@ -41,7 +41,7 @@ const spotPrices = await getWithCache(
 );
 ```
 
-## Lifecycle Hooks Interface
+## LifecycleHooksInterface
 
 ```typescript
 /**
@@ -70,7 +70,7 @@ interface ProviderLifecycleHooks {
 }
 ```
 
-## Heartbeat Expectations Model
+## HeartbeatExpectationsModel
 
 ```typescript
 /**
@@ -166,7 +166,7 @@ interface ProviderTaskReport {
 }
 ```
 
-## TTL Configuration
+## TTLConfiguration
 
 ```typescript
 /**
@@ -226,7 +226,7 @@ async function setWithAutoTTL<T>(
 }
 ```
 
-## Hook Registry
+## HookRegistry
 
 ```typescript
 /**

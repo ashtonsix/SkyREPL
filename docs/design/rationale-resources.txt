@@ -1,0 +1,55 @@
+================================================================================
+RESOURCE LAYER DESIGN RATIONALE
+================================================================================
+
+Source: Various spec chapters
+Extracted: 2026-02-06
+
+This document captures design rationale and principles for the resource layer.
+
+================================================================================
+
+## Timestamp Design Principles (Ch05 §5.1)
+
+PRINCIPLES:
+- Two timestamps (created_at, updated_at)---no per-state timestamps
+- Detailed timeline derived from workflow nodes if needed
+- Allocation is the lifecycle primitive---keep it clean
+
+Source: spec/05_ALLOCATIONS.txt lines 29-32
+
+## Join Table Rationale (Ch04 S4.1)
+
+The join table enables:
+1. Per-resource cleanup_priority (cleanup order within a manifest)
+2. "Find manifests containing resource X" queries (useful for debugging)
+3. Per-resource ownership tracking (owner_type/owner_id)
+
+## Why workflow_nodes Is a Separate Table (Ch06 S6.2)
+
+Concurrent node updates on a JSON blob create read-modify-write races.
+Separate rows = separate updates = no races.
+
+## Why Naming Matters (Ch12 S12.1)
+
+With total database loss, resource names still enable: control plane
+identification ("did I create this?"), instance matching (via slug), manifest
+correlation, uniqueness.
+
+The control_id (version_tag + random_env persisted to ~/.repl/control.env)
+uniquely identifies a control plane installation.
+
+## Safety Constraints Rationale (Ch12 S12.7)
+
+CRITICAL: NEVER auto-terminate cloud resources. All termination must be
+explicitly user-requested and documented. Rationale: false positives destroy
+workloads; DB recovery may reveal orphans are tracked; users may have created
+resources outside SkyREPL; accidental termination cost exceeds orphan cost.
+
+Grace period (minAgeMs): Orphan detection excludes resources younger than
+ORPHAN_MIN_AGE. This prevents terminating in-progress spawns where the DB
+record hasn't been created yet or reconciliation is still running.
+
+Conservative approach prevents accidental termination. False positives would
+destroy workloads, so human verification is required. The 1-hour interval
+balances cost monitoring with system load.

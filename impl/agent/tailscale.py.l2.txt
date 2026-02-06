@@ -86,9 +86,7 @@ def detect_tailscale_ip() -> Optional[str]:
     return None
 
 
-# =============================================================================
-# JIT Installation (triggered via SSE command)
-# =============================================================================
+## JITInstallation
 
 def install_tailscale_jit() -> bool:
     """

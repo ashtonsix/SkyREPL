@@ -23,7 +23,7 @@ import { logger } from '../logger';
 import { getProviderClient } from '../provider/registry';
 ```
 
-## Entry Point
+## EntryPoint
 
 ```typescript
 export async function terminateInstance(input: TerminateInstanceInput): Promise<Workflow> {
@@ -33,7 +33,7 @@ export async function terminateInstance(input: TerminateInstanceInput): Promise<
 }
 ```
 
-## Workflow Definition
+## WorkflowDefinition
 
 ```typescript
 export const terminateInstanceWorkflow: WorkflowDefinition = {
@@ -57,7 +57,7 @@ export const terminateInstanceWorkflow: WorkflowDefinition = {
 };
 ```
 
-## Blueprint Structure
+## BlueprintStructure
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -79,7 +79,7 @@ export const terminateInstanceWorkflow: WorkflowDefinition = {
 │  └─────────┬─────────┘     └──────────────────┘     └────────┬─────────┘    │
 │            │                                                 │              │
 │            │◄────────────────────────────────────────────────┘              │
-│            │                  (ssh_drain_grace_period, then force)         │
+│            │                  (drain_timeout_ms, then force)               │
 │            ▼                                                                │
 │  ┌──────────────────┐                                                       │
 │  │ cleanup-features │ ─────────────► PFO: Parallel teardown by feature      │
@@ -103,7 +103,7 @@ export const terminateInstanceWorkflow: WorkflowDefinition = {
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Node Handlers
+## NodeHandlers
 
 ### validate-instance
 
@@ -132,9 +132,9 @@ async function validateInstance(
   // Acquire termination lock (prevents concurrent terminate workflows)
   const db = getDatabase();
   const lockResult = db.prepare(`
-    UPDATE instances SET workflow_state = 'terminate:draining', updated_at = ?
+    UPDATE instances SET workflow_state = 'terminate:draining'
     WHERE id = ? AND workflow_state NOT LIKE 'terminate:%'
-  `).run(Date.now(), input.instanceId);
+  `).run(input.instanceId);
 
   if (lockResult.changes === 0) {
     throw new ConflictError('Instance already being terminated');
@@ -168,7 +168,9 @@ async function drainAllocations(
 
   for (const allocation of allocations) {
     try {
-      // For ACTIVE allocations: send cancel command to agent first
+      const now = Date.now();
+
+      // For ACTIVE allocations: send cancel command to agent first, then transition to COMPLETE
       if (allocation.status === 'ACTIVE') {
         await sendAgentMessage(instance.ip, {
           type: 'cancel_run',
@@ -178,19 +180,32 @@ async function drainAllocations(
 
         // Wait for run_complete or timeout (best-effort)
         await waitForAgentEvent(instance.ip, 'run_complete', {
-          timeout: TIMING.CANCEL_VERIFICATION_TIMEOUT_MS,
+          timeout: TIMING.CANCEL_VERIFICATION_MS,
           runId: allocation.run_id
         }).catch(() => {
           ctx.log('warn', 'Cancel verification timed out', { allocationId: allocation.id });
         });
-      }
 
-      // Transition to COMPLETE
-      const now = Date.now();
-      db.prepare(`
-        UPDATE allocations SET status = 'COMPLETE', completed_at = ?, updated_at = ?
-        WHERE id = ? AND status IN ('AVAILABLE', 'CLAIMED', 'ACTIVE')
-      `).run(now, now, allocation.id);
+        // Transition ACTIVE -> COMPLETE
+        db.prepare(`
+          UPDATE allocations SET status = 'COMPLETE', completed_at = ?, updated_at = ?
+          WHERE id = ? AND status = 'ACTIVE'
+        `).run(now, now, allocation.id);
+      } else {
+        // For AVAILABLE and CLAIMED allocations: transition to FAILED (invalid to go to COMPLETE)
+        db.prepare(`
+          UPDATE allocations SET status = 'FAILED',
+            error_json = ?,
+            completed_at = ?,
+            updated_at = ?
+          WHERE id = ? AND status IN ('AVAILABLE', 'CLAIMED')
+        `).run(
+          JSON.stringify({ code: 'INSTANCE_TERMINATED', message: 'Instance terminated before allocation could complete' }),
+          now,
+          now,
+          allocation.id
+        );
+      }
 
       drained++;
     } catch (error) {
@@ -359,18 +374,15 @@ async function cleanupRecords(
   // Update instance to terminal state
   db.prepare(`
     UPDATE instances SET
-      status = 'terminated',
-      workflow_state = 'terminate:complete',
-      terminated_at = ?,
-      updated_at = ?
+      workflow_state = 'terminate:complete'
     WHERE id = ?
-  `).run(now, now, input.instanceId);
+  `).run(input.instanceId);
 
   // Close any open usage records
   db.prepare(`
-    UPDATE usage_records SET ended_at = ?, updated_at = ?
-    WHERE instance_id = ? AND ended_at IS NULL
-  `).run(now, now, input.instanceId);
+    UPDATE usage_records SET finished_at = ?
+    WHERE instance_id = ? AND finished_at IS NULL
+  `).run(now, input.instanceId);
 
   // Count forced SSH disconnects from drain step
   const drainResult = ctx.getNodeOutput('drain-ssh-sessions') as { forcedDisconnects: number } | null;

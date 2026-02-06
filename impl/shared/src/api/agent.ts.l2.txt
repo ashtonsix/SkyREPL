@@ -4,7 +4,7 @@
 # - Primitives from ../types.ts.l2.txt (ID, TimestampMs)
 # - TailscaleStatus from ../types.ts.l2.txt
 
-## Control -> Agent Messages (SSE)
+## ControlToAgentMessages
 
 ```typescript
 import type { ID, TimestampMs, TailscaleStatus } from '../types';
@@ -88,7 +88,7 @@ export type ControlToAgentMessage =
   | PrepareSnapshotAckMessage;
 ```
 
-## Agent -> Control Messages (HTTP POST)
+## AgentToControlMessages
 
 ```typescript
 // =============================================================================
@@ -180,7 +180,7 @@ export type AgentToControlMessage =
   | PanicRequest;
 ```
 
-## Command Acknowledgment Protocol
+## CommandAcknowledgmentProtocol
 
 ```typescript
 // =============================================================================

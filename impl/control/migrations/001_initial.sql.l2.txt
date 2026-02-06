@@ -124,7 +124,7 @@ CREATE TABLE allocations (
     user TEXT NOT NULL DEFAULT 'ubuntu',    -- Unix user (platform-dependent)
     workdir TEXT NOT NULL,                  -- Working directory path
 
-    -- Debug Hold Mechanism (replaces grace_period)
+    -- Debug Hold Mechanism
     debug_hold_until INTEGER,               -- Unix timestamp ms (null if no hold)
                                             -- Blocks termination if > NOW, enables SSH when COMPLETE
 
@@ -191,6 +191,7 @@ CREATE TABLE workflows (
     created_at INTEGER NOT NULL,            -- Unix timestamp ms
     started_at INTEGER,                     -- Unix timestamp ms
     finished_at INTEGER,                    -- Unix timestamp ms
+    updated_at INTEGER NOT NULL,            -- Unix timestamp ms
 
     -- Foreign Keys
     FOREIGN KEY (parent_workflow_id) REFERENCES workflows(id),
@@ -232,6 +233,7 @@ CREATE TABLE workflow_nodes (
     created_at INTEGER NOT NULL,            -- Unix timestamp ms
     started_at INTEGER,                     -- Unix timestamp ms
     finished_at INTEGER,                    -- Unix timestamp ms
+    updated_at INTEGER NOT NULL,            -- Unix timestamp ms
 
     -- Foreign Keys
     FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
@@ -350,6 +352,7 @@ CREATE TABLE manifests (
     created_at INTEGER NOT NULL,            -- Unix timestamp ms
     released_at INTEGER,                    -- When workflow released ownership
     expires_at INTEGER,                     -- When eligible for cleanup
+    updated_at INTEGER NOT NULL,            -- Unix timestamp ms
 
     -- Foreign Keys
     FOREIGN KEY (workflow_id) REFERENCES workflows(id)
@@ -482,3 +485,55 @@ CREATE TABLE orphan_whitelist (
 
 CREATE INDEX idx_whitelist_expires ON orphan_whitelist(expires_at);
 CREATE INDEX idx_whitelist_provider ON orphan_whitelist(provider, resource_type);
+
+-- api_keys Table (referenced in middleware.ts.l2.txt)
+CREATE TABLE api_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_hash TEXT NOT NULL,                -- SHA-256 hash of the API key
+    name TEXT NOT NULL,                    -- Human-readable key name
+    permissions TEXT NOT NULL DEFAULT 'all', -- Permission scope
+    created_at INTEGER NOT NULL,           -- Unix timestamp ms
+    last_used_at INTEGER,                  -- Unix timestamp ms
+    expires_at INTEGER,                    -- Unix timestamp ms (null = never)
+    revoked_at INTEGER,                    -- Unix timestamp ms (null = active)
+    UNIQUE(key_hash)
+);
+
+CREATE INDEX idx_api_keys_hash ON api_keys(key_hash) WHERE revoked_at IS NULL;
+
+-- rate_limit_log Table (referenced in middleware.ts.l2.txt)
+CREATE TABLE rate_limit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL,                     -- Rate limit key (e.g., "api_key:123" or "ip:1.2.3.4")
+    endpoint TEXT NOT NULL,                -- API endpoint
+    timestamp INTEGER NOT NULL,            -- Unix timestamp ms
+    window_ms INTEGER NOT NULL             -- Rate limit window size
+);
+
+CREATE INDEX idx_rate_limit_key ON rate_limit_log(key, endpoint, timestamp);
+CREATE INDEX idx_rate_limit_cleanup ON rate_limit_log(timestamp);
+
+-- orphan_scans Table (referenced in db.ts.l2.txt)
+CREATE TABLE orphan_scans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,                -- Provider scanned
+    scanned_at INTEGER NOT NULL,           -- Unix timestamp ms
+    orphans_found INTEGER NOT NULL,        -- Count of orphans detected
+    orphan_ids TEXT NOT NULL,              -- JSON array of provider IDs
+    created_at INTEGER NOT NULL            -- Unix timestamp ms
+);
+
+CREATE INDEX idx_orphan_scans_provider ON orphan_scans(provider, scanned_at DESC);
+
+-- manifest_cleanup_state Table (referenced in cleanup-manifest.ts.l2.txt)
+CREATE TABLE manifest_cleanup_state (
+    manifest_id INTEGER PRIMARY KEY,       -- References manifests(id)
+    status TEXT NOT NULL,                  -- in_progress, completed, failed
+    current_step TEXT,                     -- Current cleanup step
+    progress_json TEXT,                    -- Cleanup progress details (JSON)
+    started_at INTEGER NOT NULL,           -- Unix timestamp ms
+    updated_at INTEGER NOT NULL,           -- Unix timestamp ms
+    finished_at INTEGER,                   -- Unix timestamp ms
+
+    FOREIGN KEY (manifest_id) REFERENCES manifests(id)
+);

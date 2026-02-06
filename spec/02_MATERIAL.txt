@@ -10,31 +10,15 @@ Three material types:
 - **OBJECTS**: Flexible blob storage with tags
 - **EXTERNAL**: Provider state cached in-memory only (not persisted)
 
-**Design Principles:**
-- Avoid table proliferation. Objects table + object_tags handles flexible storage.
-- Simple caching. In-memory TTL only, no multi-layer schemes.
-
-**When to Use Each Pattern:**
-- Records: High-frequency queries, complex joins, FK constraints
-- Objects: Flexible schemas, varied resource types, tag-based filtering
-
-Objects eliminate schema migrations for new resource types. Before: separate
-tables for snapshots, artifacts, logs, blobs (4+ tables). After: objects table
-+ type tag (1 table, consistent query patterns).
+> Design principles and pattern guidance extracted to docs/design/rationale-material.txt
 
 ## 2.1 Records Schema (Dedicated Tables)
 
 Records handle high-frequency query patterns requiring complex joins, indexes,
 and foreign key relationships.
 
-**ID Scheme:**
-Primary keys use INTEGER AUTOINCREMENT (faster joins, smaller indexes, better
-SQLite performance). Sequential IDs cluster by access pattern. Future: can
-migrate to Snowflake IDs if multi-node needed.
-
-**Slug Display Format:**
-User-facing IDs display as base-36 slugs: `id.toString(36)` (e.g., 12345 -> "9ix").
-Parse back: `parseInt(slug, 36)`. Benefits: shorter than UUIDs, sortable, human-friendly.
+**ID Scheme:** INTEGER AUTOINCREMENT primary keys; user-facing as base-36 slugs.
+> ID scheme rationale extracted to docs/design/rationale-material.txt
 
 **Exception:** Objects table uses INTEGER AUTOINCREMENT (not TEXT checksum) for
 multi-tenant support. Checksums stored in a dedicated column for deduplication.
@@ -100,7 +84,7 @@ CREATE UNIQUE INDEX idx_instances_spawn_key ON instances(spawn_idempotency_key)
     WHERE spawn_idempotency_key IS NOT NULL;
 ```
 
-> See also: impl/control/src/material/db.types.ts.l2.txt §Record Types
+> See also: impl/control/src/material/db.types.ts.l2.txt §RecordTypes
 
 **Key Design Decisions:**
 
@@ -198,7 +182,7 @@ CREATE INDEX idx_runs_created ON runs(created_at DESC);
 CREATE INDEX idx_runs_duration ON runs(started_at, finished_at);
 ```
 
-> See also: impl/control/src/material/db.types.ts.l2.txt §Record Types
+> See also: impl/control/src/material/db.types.ts.l2.txt §RecordTypes
 
 **Key Design Decisions:**
 
@@ -261,7 +245,7 @@ CREATE TABLE allocations (
     user TEXT NOT NULL DEFAULT 'ubuntu',    -- Unix user (platform-dependent)
     workdir TEXT NOT NULL,                  -- Working directory path
 
-    -- Debug Hold Mechanism (replaces grace_period)
+    -- Debug Hold Mechanism
     debug_hold_until INTEGER,               -- Unix timestamp ms (null if no hold)
                                             -- Blocks termination if > NOW, enables SSH when COMPLETE
 
@@ -289,7 +273,7 @@ CREATE INDEX idx_allocations_available ON allocations(instance_id, status, workd
     WHERE status = 'AVAILABLE';
 ```
 
-> See also: impl/control/src/material/db.types.ts.l2.txt §Record Types
+> See also: impl/control/src/material/db.types.ts.l2.txt §RecordTypes
 
 **Key Design Decisions:**
 
@@ -299,9 +283,9 @@ CREATE INDEX idx_allocations_available ON allocations(instance_id, status, workd
 - `user` and `workdir` enable per-allocation isolation. Each allocation gets
   unique workdir (`/home/ubuntu/work_1`, `work_2`, etc.) and SSH entry.
 
-- `debug_hold_until` replaces grace period. When set on COMPLETE allocations,
-  blocks termination and enables SSH access until timestamp expires. Simpler than
-  explicit state for debugging.
+- `debug_hold_until`: When set on COMPLETE allocations, blocks termination and
+  enables SSH access until timestamp expires. Simpler than explicit state for
+  debugging.
 
 - Two timestamps only (created_at, updated_at). Detailed timeline from workflow
   nodes if needed.
@@ -485,7 +469,7 @@ CREATE INDEX idx_workflow_nodes_status ON workflow_nodes(workflow_id, status);
 CREATE INDEX idx_workflow_nodes_type ON workflow_nodes(node_type, status);
 ```
 
-> See also: impl/control/src/material/db.types.ts.l2.txt §Record Types
+> See also: impl/control/src/material/db.types.ts.l2.txt §RecordTypes
 
 **Key Design Decisions:**
 
@@ -591,7 +575,7 @@ CREATE TABLE object_tags (
 CREATE INDEX idx_object_tags_tag ON object_tags(tag);
 ```
 
-> See also: impl/control/src/material/db.types.ts.l2.txt §Record Types
+> See also: impl/control/src/material/db.types.ts.l2.txt §RecordTypes
 
 **Key Design Decisions:**
 
@@ -643,7 +627,7 @@ CREATE INDEX idx_blobs_s3 ON blobs(s3_bucket, s3_key)
     WHERE s3_key IS NOT NULL;
 ```
 
-> See also: impl/control/src/material/db.types.ts.l2.txt §Record Types
+> See also: impl/control/src/material/db.types.ts.l2.txt §RecordTypes
 
 **Key Fields:**
 - `id`: Integer primary key (allows multiple blobs with same checksum - logs may transiently match then diverge on append)
@@ -670,7 +654,7 @@ For mutable content (e.g., logs):
 
 The system MUST provide a mechanism to check for existing blobs by checksum before uploading. The system MUST return distinct lists of existing and missing checksums when queried with a bucket identifier and list of checksums. The system MUST support batch deduplication queries to minimize round-trips. The system SHOULD use the blobs table index on (bucket, checksum) for efficient lookups.
 
-> See also: impl/control/src/material/storage.ts.l2.txt §Blob Deduplication
+> See also: impl/control/src/material/storage.ts.l2.txt §BlobDeduplication
 
 **Manifest Cleanup (Simplified):**
 
@@ -745,7 +729,7 @@ Objects reference blobs by checksum. Deduplication is decided per-upload:
 
 See implementation for full SQL patterns (inline vs S3, dedup vs no-dedup variants).
 
-> See also: impl/control/src/material/storage.ts.l2.txt §Presigned URLs
+> See also: impl/control/src/material/storage.ts.l2.txt §PresignedURLs
 
 **Multi-Tenant Isolation:** Blobs scoped by bucket for clean tenant deletion,
 cost attribution, and security isolation. Trade-off: storage duplication across tenants.
@@ -861,25 +845,7 @@ ORDER BY o.accessed_at;
 
 Large objects (>64KB threshold) offload to S3 to keep DB manageable.
 
-**Material decision:**
-
-- Blobs ≤64KB: Stored inline in `blobs.payload` column (small buffer optimization)
-- Blobs >64KB: Stored in S3, `blobs.payload` NULL, `blobs.s3_key`/`s3_bucket` populated
-- Blobs with `reservation` > 64KB: Go directly to S3 (skip inline)
-
-**Threshold rationale (64KB default, configurable):**
-- SQLite handles BLOBs up to ~100KB efficiently (especially with `incremental_vacuum`)
-- S3 adds latency (~50-200ms TTFB) plus per-request cost (~$0.0004/1K)
-- Below 64KB, SQLite wins on speed and cost
-- Adjust based on workload: lower for write-heavy, higher for read-heavy
-
-**Reservation field:**
-
-`reservation` column allows pre-declaring expected object size. Invariant: `reservation >= size_bytes`.
-Use cases:
-- Logs expected to grow: set `reservation` to expected max size (e.g., 1MB)
-- Streaming uploads: reserve space in S3 before content arrives
-- Avoids migration from inline → S3 when object grows past 64KB
+> SBO material decision, threshold rationale, and reservation field extracted to docs/design/rationale-material.txt
 
 **Presigned URL abstraction:**
 
@@ -992,7 +958,7 @@ CREATE INDEX idx_manifest_resources_lookup ON manifest_resources(resource_type, 
 CREATE INDEX idx_manifest_resources_priority ON manifest_resources(manifest_id, cleanup_priority);
 ```
 
-> See also: impl/control/src/material/db.types.ts.l2.txt §Record Types
+> See also: impl/control/src/material/db.types.ts.l2.txt §RecordTypes
 
 **Key Design Decisions:**
 
@@ -1058,7 +1024,7 @@ CREATE INDEX idx_usage_records_time ON usage_records(started_at, finished_at);
 CREATE INDEX idx_usage_records_cost ON usage_records(estimated_cost_usd DESC);
 ```
 
-> See also: impl/control/src/material/db.types.ts.l2.txt §Record Types
+> See also: impl/control/src/material/db.types.ts.l2.txt §RecordTypes
 
 **Key Design Decisions:**
 
@@ -1102,5 +1068,5 @@ only - not persisted to database.
 
 EXTERNAL material state MUST use in-memory time-to-live (TTL) caching only. The system MUST NOT persist cache entries to disk or database. The system MUST evict cache entries when their TTL expires. The system MUST support configurable TTL values per cache key. Default TTL SHOULD be 5 minutes for spot prices and capacity information. The system MUST fetch fresh data from provider APIs when cache entries are missing or expired.
 
-> See also: impl/control/src/material/external.ts.l2.txt §TTL Cache
+> See also: impl/control/src/material/external.ts.l2.txt §CoreCacheFunction
 

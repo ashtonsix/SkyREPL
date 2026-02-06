@@ -1,0 +1,22 @@
+# Extensibility & Future
+
+Extracted from spec/15_OPERATIONS.txt §15.8
+
+## Runbooks
+
+scripts/extra/ pattern for diagnostics and custom integrations. User-contributed
+scripts for common tasks live outside core codebase, easily modified without
+affecting system stability. Encourages community contributions without mainline code
+quality concerns.
+
+## AI Agent Piloting (Future)
+
+Workflow observability creates datasets for agent-assisted debugging. Structured
+logs with topology signatures enable ML-based anomaly detection. Example: "P99
+latency spike on Lambda Labs us-west correlates with weekend spot market dynamics."
+
+## Profiling
+
+Covered by chaos testing + property-based tests. No separate profiling infrastructure
+needed initially. Performance characteristics emerge from observability data during
+normal operations. If bottlenecks appear, add targeted per-component profiling.

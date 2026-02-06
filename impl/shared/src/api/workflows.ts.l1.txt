@@ -1,71 +1,28 @@
-# workflows.types.ts - Layer 2 API Types
+# workflows.ts - Workflow API Types
 
-## Launch Run
+Workflow engine types: blueprints, runtime state, node execution context, pattern configs.
+See L2 for blueprint schema, node executor interface, pattern configuration, context methods.
 
-### LaunchRunRequest
-- command: string
-- spec: InstanceSpec
-- provider: string
-- region?: string
-- files?: Array<{ path: string, content: string }>
-- env?: Record<string, string>
-- artifacts?: number[]
-- hold_duration_ms?: number
-- create_snapshot?: boolean
+## Workflow Types
+WorkflowType: launch-run | terminate-instance | create-snapshot | cleanup-manifest | extensible
 
-### LaunchRunResponse
-- workflow_id: number
-- run_id: number
-- status_url: string
-- stream_url: string
+## Blueprint Components
+WorkflowBlueprint, NodeDefinition, RetryPolicy, AllowedPattern, PatternConstraints, JsonSchema
 
-## Terminate
+## Runtime Types
+WorkflowSubmission, WorkflowSubmissionResult, WorkflowProgress, WorkflowEvent, NodeExecutionState
 
-### TerminateRequest
-- instance_id: number
-- force?: boolean
-- drain_timeout_ms?: number
+## Node Context
+NodeContext provides: identity, input/output, resource management, pattern application, subworkflow spawning, node communication, logging, utilities
 
-### TerminateResponse
-- workflow_id: number
+## Pattern Configs
+InsertAndReconvergeConfig, ConditionalBranchConfig, ParallelFanOutConfig, RetryWithAlternativeConfig, InlineNodeDef
 
-## Snapshot
+## Executor Interface
+NodeExecutor with execute, compensate, validate methods
 
-### CreateSnapshotRequest
-- instance_id: number
-- name: string
-- run_id?: number
+## Intent Types
+LaunchRunInput/Output, TerminateInstanceInput/Output, CreateSnapshotInput/Output, CleanupManifestInput/Output
 
-### CreateSnapshotResponse
-- workflow_id: number
-- snapshot_id: number
-
-## Extend Debug Hold
-
-### ExtendDebugHoldRequest
-- allocation_id: number
-- extension_ms: number
-
-### ExtendDebugHoldResponse
-- new_debug_hold_until: number
-- max_hold_until: number (24h from completed_at)
-
-## Cancel
-
-### CancelRequest
-- workflow_id: number
-- reason?: string
-
-### CancelResponse
-- status: string
-
-## Status
-
-### WorkflowStatusResponse
-- workflow_id: number
-- type: string
-- status: string
-- current_node: string
-- progress: number
-- output?: object
-- error?: string
+## Materialization
+Shared types used by control plane (engine) and CLI (submission).

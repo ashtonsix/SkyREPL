@@ -1,0 +1,7 @@
+# The SkyREPL Integrity Mark
+
+Inspired by Robert Ulanowicz’s "Ecology, the Ascendent Perspective", the SkyREPL mark is a conical helix: a 1.5-turn "S" trajectory that maps the evolution of compute.
+
+* The REPL Spiral: The centripetal tightening of the helix captures the Read-Eval-Print Loop. It represents iterative cycles accelerating as tooling improves.
+* The Sky Thrust: The upward ascent invokes the Sky. It signals the transition from individual providers to the "Sky Above The Clouds," positioning SkyREPL within the Sky Computing ecosystem.
+* Integrity: A high-contrast silhouette designed for visual stability across developer-centric environments, maintaining legibility at scales as low as 16px.

@@ -28,7 +28,7 @@ import type { ProviderLifecycleHooks, HeartbeatExpectations,
 import * as timing from '../../../../../shared/src/config/timing';
 ```
 
-## Spawn Idempotency Protocol
+## SpawnIdempotencyProtocol
 
 ```typescript
 /**
@@ -118,7 +118,7 @@ async function executeSpawn(
 }
 ```
 
-## Retry & Reconciliation
+## RetryAndReconciliation
 
 ```typescript
 async function retrySpawn(ctx: NodeContext, failedInstanceId: string): Promise<Instance> {
@@ -221,7 +221,7 @@ async function compensateSpawn(ctx: CompensationContext): Promise<void> {
 }
 ```
 
-## Bootstrap Generation
+## BootstrapGeneration
 
 ```typescript
 class AWSProvider implements Provider<AWSInstance, AWSSnapshot> {
@@ -300,7 +300,7 @@ class AWSProvider implements Provider<AWSInstance, AWSSnapshot> {
 }
 ```
 
-## Materialization (Generic -> AWS-Specific)
+## MaterializationGenericToAWS
 
 ```typescript
 /**
@@ -389,7 +389,7 @@ function mapEC2Status(state?: string): ProviderInstanceStatus {
 }
 ```
 
-## Projection (AWS-Specific -> Generic)
+## ProjectionAWSToGeneric
 
 ```typescript
 /**
@@ -452,7 +452,7 @@ function mapStatusToWorkflowState(providerStatus: ProviderInstanceStatus): strin
 }
 ```
 
-## Workflow Boundary Example
+## WorkflowBoundaryExample
 
 ```typescript
 /**
@@ -493,7 +493,7 @@ async function awsWarmVolumePoolWorkflow(ctx: NodeContext): Promise<WorkflowOutp
 }
 ```
 
-## AWS Warm-Volume-Pool Workflow (Hypothetical)
+## AWSWarmVolumePoolWorkflow
 
 ```typescript
 /**
@@ -660,7 +660,7 @@ async function registerWarmVolumes(ctx: NodeContext): Promise<{ registered: numb
 }
 ```
 
-## Control Plane Perspective
+## ControlPlanePerspective
 
 ```typescript
 /**
@@ -693,7 +693,7 @@ async function launchRunWithProviderWorkflow(
 }
 ```
 
-## AWS Lifecycle Hooks
+## AWSLifecycleHooks
 
 ```typescript
 const awsLifecycleHooks: ProviderLifecycleHooks = {
@@ -757,13 +757,13 @@ const awsLifecycleHooks: ProviderLifecycleHooks = {
     return {
       receipts,
       providerTasks: providerTasks.length > 0 ? providerTasks : undefined,
-      nextHeartbeat: { preferredInterval: 30000 },
+      nextHeartbeat: { preferredInterval: 3 * TIMING.HEARTBEAT_INTERVAL_MS },
     };
   },
 };
 ```
 
-## Heartbeat Task Handlers
+## HeartbeatTaskHandlers
 
 ```typescript
 async function performHealthCheck(): Promise<TaskReceipt> {
@@ -910,7 +910,7 @@ async function maintainWarmPools(task: HeartbeatTask): Promise<TaskReceipt> {
 }
 ```
 
-## Event-Driven Hooks
+## EventDrivenHooks
 
 ```typescript
 async function onSpotInterruption(notice: SpotInterruptionNotice): Promise<void> {
@@ -987,7 +987,7 @@ async function onBudgetThreshold(threshold: BudgetThreshold): Promise<void> {
 registerProviderHooks('aws', awsLifecycleHooks);
 ```
 
-## Spot Interruption Workflow
+## SpotInterruptionWorkflow
 
 ```typescript
 /**
@@ -1033,7 +1033,7 @@ const HANDLE_SPOT_INTERRUPTION_WORKFLOW: WorkflowBlueprint = {
 };
 ```
 
-## Full AWS Registration
+## FullAWSRegistration
 
 ```typescript
 registerProvider({

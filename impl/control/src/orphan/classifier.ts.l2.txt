@@ -74,7 +74,7 @@ interface PreflightWarning {
 }
 ```
 
-## Resource Name Parsing
+## ResourceNameParsing
 
 ```typescript
 /**
@@ -118,7 +118,7 @@ function parseTailscaleName(name: string): { controlId: string; instanceIdSlug: 
 }
 ```
 
-## Session-Based Classification
+## SessionBasedClassification
 
 ```typescript
 /**
@@ -132,7 +132,7 @@ function parseTailscaleName(name: string): { controlId: string; instanceIdSlug: 
 function classifyOrphans(
   orphans: OrphanedResource[],
   sessionStartTime: number,
-  currentSessionThresholdMs: number = TIMING.CURRENT_SESSION_THRESHOLD
+  currentSessionThresholdMs: number = TIMING.RECENT_SESSION_THRESHOLD_MS
 ): OrphanClassification {
   const classification: OrphanClassification = {
     currentSession: [],
@@ -189,7 +189,7 @@ function classifyOrphans(
 }
 ```
 
-## Spawn Error Classification
+## SpawnErrorClassification
 
 ```typescript
 /**
@@ -216,7 +216,7 @@ const SPAWN_ERROR_CLASSIFICATIONS: Record<string, SpawnErrorClassification> = {
 };
 ```
 
-## Preflight Orphan Check
+## PreflightOrphanCheck
 
 ```typescript
 /**

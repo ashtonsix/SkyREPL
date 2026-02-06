@@ -54,7 +54,7 @@ Benefits:
 - `priority?` ('low' | 'normal' | 'high')
 - `timeout?` (number): per-workflow timeout override
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §Core Interface
+> See also: impl/control/src/workflow/engine.ts.l2.txt WorkflowEngine Interface
 
 ### 6.2.1 Retry Semantics
 
@@ -71,7 +71,7 @@ Retry MUST:
 **Rationale**: Preserves failed workflow for audit trail, avoids state machine
 violations, enables clean retry without contaminating original workflow state.
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §Retry Semantics
+> See also: impl/control/src/workflow/engine.ts.l2.txt §Retry
 
 ### Execution Loop
 
@@ -102,10 +102,9 @@ FUNCTION executeLoop(workflowId):
 
 Key invariant: ready nodes execute concurrently via parallel dispatch.
 
-**Why workflow_nodes is a separate table:** Concurrent node updates on a JSON blob
-create read-modify-write races. Separate rows = separate updates = no races.
+> Why separate table: rationale extracted to docs/design/rationale-resources.txt
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §Execution Loop
+> See also: impl/control/src/workflow/engine.ts.l2.txt §ExecuteLoop
 
 ### Node Execution Model
 
@@ -121,7 +120,7 @@ create read-modify-write races. Separate rows = separate updates = no races.
 - Subworkflow: `spawnSubworkflow(type, input)` -> SubworkflowHandle
 - Utilities: `getNodeOutput(nodeId)`, `log(level, message, data?)` (emits OTel span events)
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §Node Execution Model
+> See also: impl/control/src/workflow/engine.ts.l2.txt §ExecuteNode
 
 ### Two-Phase Spawn in Node Execution
 
@@ -177,7 +176,7 @@ FUNCTION compensateSpawnNode(ctx):
 - Compensation handles both phases (DB only or DB + cloud)
 - Kill at any step guarantees no orphans
 
-> See also: impl/control/src/workflow/compensation.ts.l2.txt §Two-Phase Spawn
+> See also: impl/control/src/workflow/compensation.ts.l2.txt §TwoPhaseSpawn
 
 ### Persistence Strategy (Crash Recovery)
 
@@ -206,7 +205,7 @@ FUNCTION recoverWorkflows():
     RESUME execution loop for this workflow
 ```
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §Crash Recovery
+> See also: impl/control/src/workflow/engine.ts.l2.txt §CrashRecovery
 
 ## 6.3 Pattern Library
 
@@ -232,7 +231,7 @@ ctx.applyPattern('insert-and-reconverge', {
 });
 ```
 
-> See also: impl/control/src/workflow/patterns.ts.l2.txt §Insert-and-Reconverge
+> See also: impl/control/src/workflow/patterns.ts.l2.txt §InsertAndReconverge
 
 ### 6.3.2 Conditional-Branch (CB)
 
@@ -274,7 +273,7 @@ ctx.applyPattern('conditional-branch', {
 });
 ```
 
-> See also: impl/control/src/workflow/patterns.ts.l2.txt §Conditional-Branch
+> See also: impl/control/src/workflow/patterns.ts.l2.txt §ConditionalBranch
 
 ### 6.3.3 Parallel-Fan-Out (PFO)
 
@@ -300,7 +299,7 @@ ctx.applyPattern('parallel-fan-out', {
 });
 ```
 
-> See also: impl/control/src/workflow/patterns.ts.l2.txt §Parallel-Fan-Out
+> See also: impl/control/src/workflow/patterns.ts.l2.txt §ParallelFanOut
 
 ### 6.3.4 Retry-with-Alternative (RWA)
 
@@ -326,7 +325,7 @@ ctx.applyPattern('retry-with-alternative', {
 });
 ```
 
-> See also: impl/control/src/workflow/patterns.ts.l2.txt §Retry-with-Alternative
+> See also: impl/control/src/workflow/patterns.ts.l2.txt §RetryWithAlternative
 
 
 ## 6.4 Subworkflow Contract
@@ -351,7 +350,7 @@ children are still emitting resources. This ensures complete resource tracking.
 Subworkflow completion MUST release its own manifest. Parent resource claiming MUST
 query child's SEALED manifest and use atomic claim operations.
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §Subworkflow Handling
+> See also: impl/control/src/workflow/engine.ts.l2.txt §Subworkflows
 
 ### Max Depth
 
@@ -444,7 +443,7 @@ immediate failure.
    - Compensation applied to failed node only
    - Manifest preserved with resources for cleanup
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §Error Handling
+> See also: impl/control/src/workflow/engine.ts.l2.txt §RetryStrategy
 
 ### 6.6.2 Workflow -> API Error Mapping
 
@@ -499,7 +498,7 @@ Error-to-HTTP mapping MUST use error category: validation->400, auth->401/403,
 not_found->404, conflict->409, rate_limit->429, timeout->504, provider->502,
 internal->500.
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §Error Mapping
+> See also: impl/control/src/workflow/engine.ts.l2.txt §ErrorMapping
 
 ### 6.6.3 Workflow Timeout
 
@@ -547,7 +546,7 @@ Cancellation MUST:
 2. Set workflow status to 'cancelling' with cancel_reason
 3. Rely on agent response (run_complete) or heartbeat timeout for resolution
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §Cancellation Protocol
+> See also: impl/control/src/workflow/engine.ts.l2.txt §Cancellation
 
 ## 6.8 Compensation Behavior
 
@@ -570,26 +569,6 @@ rely on orphan scan for cleanup.
 
 ## 6.9 Observability
 
-OTel/Loki handles observability, not the core database. The workflow itself is
-the audit trail: nodes emit OpenTelemetry spans/events, pattern applications emit
-as span events, and the workflow_nodes table provides execution history.
-
-The core database focuses on operational state. OTel provides auditability without
-polluting the schema. Span schema details (attribute names, event structures) will
-be finalized based on observability tooling requirements.
-
-**Note**: For production observability deployment, see Chapter 15.1 Observability.
-
-### 6.9.1 Topology Signatures (Observability Extension)
-
-Topology signatures are useful for Grafana dashboards but are NOT part of the core
-workflow engine. They are computed on-demand or by an observability sidecar, not
-stored in the workflows table. The signature is emitted as a span attribute on
-workflow completion, enabling grouping queries without polluting the core schema.
-
-Use cases (all served via Grafana/Loki queries):
-- "Show all workflows with same topology"
-- "Which topology has highest failure rate?"
-- "Has this topology been seen before?"
+> Observability rationale and topology signatures extracted to workshop/ux/observability-features.txt
 
 > See also: impl/control/src/workflow/engine.ts.l2.txt §Observability

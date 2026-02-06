@@ -9,7 +9,9 @@ import { logger } from '../logger';
 import type { ControlToAgentMessage } from '../../../../shared/src/api/agent';
 ```
 
-## SSE Manager
+## SSEManager
+
+## SSECommandStream
 
 ```typescript
 // =============================================================================
@@ -232,7 +234,7 @@ class SSEManager {
 export const sseManager = new SSEManager();
 ```
 
-## WebSocket Route Registration
+## WebSocketLogBroadcast
 
 ```typescript
 // =============================================================================
@@ -295,7 +297,7 @@ export function registerWebSocketRoutes(app: Elysia): void {
 }
 ```
 
-## SSE Workflow Stream (HTTP SSE)
+## WorkflowEventBroadcast
 
 ```typescript
 // =============================================================================
@@ -451,7 +453,7 @@ type WorkflowStreamEvent =
   | { event: 'heartbeat'; data: { timestamp: number } };
 ```
 
-## Helper Functions
+## HelperFunctions
 
 ```typescript
 // =============================================================================

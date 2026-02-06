@@ -1,0 +1,45 @@
+# Licensing Strategy
+
+Extracted from spec/15_OPERATIONS.txt §15.5
+
+## License Model
+
+Source-available license (BSL 1.1 or similar). Free tier for deployments with ≤3
+users. Commercial tier: $18/month base (includes 3 users), $6/month per additional
+seat. License enforcement focuses on redistribution, not internal use or source
+modification.
+
+## Seat Tracking
+
+Control plane tracks user activity per month. Users identified by API key fingerprint
+or OAuth identity. Anonymous usage (no auth) counts as single shared seat. Billing
+API provides monthly active user counts for self-service upgrades. Admins prompted
+to deactivate users inactive >1 month (one-click deactivation frees seat but
+preserves history).
+
+## User-Month Billing
+
+Bill user-months only when user was active (executed runs, viewed dashboard, or
+invoked CLI that month). Dormant users don't count toward seat usage. Prevents
+billing inflation for seasonal usage patterns.
+
+## Enforcement Tiers
+
+**Underprovision 1-5 seats:**
+- Preflight warning on `repl run` + 5-second delay
+- Warning includes upgrade link and current seat usage
+- Doesn't block functionality (nag-ware, not enforcement)
+
+**Missed 1 billing period:**
+- Warning messages on CLI invocations
+- Email reminders to admin contacts
+- No functional restrictions yet
+
+**>8 users + missed 2 periods:**
+- Lockout with escalating warnings beforehand
+- Read-only access for all users
+- Admin must resolve billing to restore access
+
+**Underprovision by >5 users:**
+- New signups create "inactive" accounts with read-only access
+- Admin must explicitly activate users or upgrade seat count

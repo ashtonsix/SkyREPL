@@ -1,0 +1,20 @@
+# Interface Layer Design Rationale
+
+## Type Organization Purpose (Ch13)
+
+Type definitions for all SkyREPL entities, organized by layer to avoid circular
+dependencies. Three distinct type categories:
+
+- **Record types** (db.types.ts): Raw database rows, snake_case, primitive types
+- **Materialized types** (types.ts): Rich domain objects, camelCase, with relationships
+- **API types** (api/*.types.ts): HTTP request/response shapes
+
+Goals: No `any` types, clear separation between layers, proper use of generics.
+
+## Thin Client Principle (Ch10)
+
+Extracted from spec/10_CLI.txt §10.16
+
+Move to server if adding: retry logic beyond network transients, state caching
+beyond config, decision logic (warm pool, fallback), provider-specific code.
+CLI responsibilities: config parsing, workflow submission, progress display, SSH config.

@@ -24,7 +24,7 @@
 - Map categories to user-friendly messages
 - Include request ID in error output for support
 
-## Error Handling
+## ErrorHandling
 - 401 Unauthorized: Invalid/expired token → trigger re-authentication
 - 403 Forbidden: Valid token, insufficient permissions → show permission error
 - 429 Rate Limit: Use retry_after_ms from error details for backoff

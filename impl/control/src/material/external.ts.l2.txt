@@ -28,13 +28,13 @@ const SNAPSHOT_STATE_TTL_MS = 5 * 60 * 1000;       // 5 minutes
 // Instance key format: instance:{id}:external
 ```
 
-## Cache Store
+## CacheStore
 
 ```typescript
 const cache = new Map<string, CacheEntry<unknown>>();
 ```
 
-## Core Cache Function
+## CoreCacheFunction
 
 ```typescript
 /**
@@ -72,7 +72,7 @@ async function getWithCache<T>(
 }
 ```
 
-## Cache Invalidation
+## CacheInvalidation
 
 ```typescript
 /**
@@ -108,7 +108,7 @@ function invalidateCacheByKey(key: string): void {
 }
 ```
 
-## Usage Examples
+## UsageExamples
 
 ```typescript
 // Spot prices: 5 minute TTL
