@@ -135,7 +135,7 @@ LEGEND:
 - `await-completion`: Block until run_complete message received
 - `finalize-run`: Transition allocation to COMPLETE, trigger snapshot if requested
 
-> See also: impl/control/src/intent/launch-run.ts.l2.txt §EntryPoint
+> See also: impl-pseudo/control/src/intent/launch-run.ts.l2.txt §EntryPoint
 
 **syncFiles handler details:**
 
@@ -166,7 +166,7 @@ This replaces the two-step process (download_files → start_job) with a single 
 |------------------|---------------------------------------------|
 | check-budget     | Fail immediately, no resources              |
 | claim-warm       | CB with triggerOnError=true to spawn        |
-| spawn-instance   | Retry-with-Alternative (region)             |
+| spawn-instance   | Node-level retry, then workflow fails       |
 | wait-for-boot    | Timeout → terminate instance                |
 | sync-files       | Allocation → FAILED, terminate instance     |
 | await-completion | Timeout → run cancelled, COMPLETE+debug_hold|
@@ -259,7 +259,7 @@ Each feature MAY provide optional teardownHandler invoked during cleanup-feature
 4. Force-disconnect remaining sessions
 5. Return count of forced disconnects
 
-> See also: impl/control/src/intent/terminate.ts.l2.txt §EntryPoint
+> See also: impl-pseudo/control/src/intent/terminate.ts.l2.txt §EntryPoint
 
 ## 7.3 create-snapshot Intent
 
@@ -326,7 +326,7 @@ interface SnapshotCapability {
 3. Call ctx.emitResource('object', objectId, priority=10)
 4. Return snapshotObjectId for workflow output
 
-> See also: impl/control/src/intent/snapshot.ts.l2.txt §EntryPoint
+> See also: impl-pseudo/control/src/intent/snapshot.ts.l2.txt §EntryPoint
 
 ## 7.4 cleanup-manifest Intent
 
@@ -433,7 +433,7 @@ Cleanup MUST be resilient - partial failures SHOULD NOT prevent remaining cleanu
 | S3_ERROR           | log_and_continue    | Don't block cleanup for S3 blip    |
 | DATABASE_ERROR     | fail_workflow       | Critical - manifest state corrupt  |
 
-> See also: impl/control/src/intent/cleanup-manifest.ts.l2.txt §Types
+> See also: impl-pseudo/control/src/intent/cleanup-manifest.ts.l2.txt §Types
 
 ## 7.5 Pattern Library Usage Notes
 

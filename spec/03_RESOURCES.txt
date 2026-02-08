@@ -409,7 +409,7 @@ resolution.
 - If `ttl = 0`, MUST fetch fresh
 - Control plane state (records/objects) MUST NOT be cached (already in DB)
 
-> See also: impl/control/src/resource/types.ts.l2.txt §MaterializationOptions
+> See also: impl-pseudo/control/src/resource/types.ts.l2.txt §MaterializationOptions
 
 **Principle:** Fetch and combine. No elaborate depth tracking. If you need
 external state, check TTL and fetch if stale.
@@ -432,7 +432,7 @@ Instance materialization MUST combine four sources:
 
 **IP Preference:** External state IP MUST take precedence over cached record IP when fresh external state is available.
 
-> See also: impl/control/src/resource/types.ts.l2.txt §InstanceMaterialization
+> See also: impl-pseudo/control/src/resource/types.ts.l2.txt §InstanceMaterialization
 
 ### 3.2.3 Run Materialization
 
@@ -448,7 +448,7 @@ Run materialization MUST combine five sources:
 
 **Log Limits:** Log queries SHOULD limit results (e.g., 1000 most recent) to prevent excessive payload sizes.
 
-> See also: impl/control/src/resource/types.ts.l2.txt §RunMaterialization
+> See also: impl-pseudo/control/src/resource/types.ts.l2.txt §RunMaterialization
 
 ### 3.2.4 Simple Object Materialization
 
@@ -462,7 +462,7 @@ Simple objects (Snapshot, Artifact, FeatureInstallation, etc.) MUST:
 
 **Snapshot External Validation:** Snapshot materialization MAY check provider API to verify snapshot still exists (uses timing.SNAPSHOT_CACHE_TTL).
 
-> See also: impl/control/src/resource/types.ts.l2.txt §ObjectParsers
+> See also: impl-pseudo/control/src/resource/types.ts.l2.txt §ObjectParsers
 
 ### 3.2.5 Caching Strategy
 
@@ -503,7 +503,7 @@ Reconciliation MUST fetch both control plane record and fresh external state, th
 - `reason`: Human-readable explanation
 - `updates`: Fields to update in DB (optional)
 
-> See also: impl/control/src/resource/types.ts.l2.txt §InstanceReconciliation
+> See also: impl-pseudo/control/src/resource/types.ts.l2.txt §InstanceReconciliation
 
 **Principle:** See everything in one place (our records + fresh external state)
 and decide what to do. No elaborate drift reports. Just: "Here's what's
@@ -546,7 +546,7 @@ function isAvailable(resource: Instance | Run): boolean {
 }
 ```
 
-> See also: impl/control/src/resource/types.ts.l2.txt §StateTransitionValidation
+> See also: impl-pseudo/control/src/resource/types.ts.l2.txt §StateTransitionValidation
 
 This centralizes availability logic and eliminates synchronization bugs.
 

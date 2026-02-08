@@ -26,7 +26,7 @@ state complexity.
 - `debug_hold_until` (number | null): blocks termination if > NOW, enables SSH
 - `created_at`, `updated_at`, `completed_at` (number): three timestamps. `completed_at` is set when status transitions to COMPLETE or FAILED. (See docs/design/rationale-resources.txt for design principles.)
 
-> See also: impl/control/src/resource/allocation.ts.l2.txt §CoreSchema
+> See also: impl-pseudo/control/src/resource/allocation.ts.l2.txt §CoreSchema
 
 ## 5.2 Allocation State Machine
 
@@ -109,6 +109,14 @@ AVAILABLE → CLAIMED → ACTIVE → COMPLETE
     ════════════════════════════════════════════════════════════════════════════
 
     ┌────────────┐         ┌────────────┐
+    │ AVAILABLE  │────────→│   FAILED   │────────→ (terminate instance)
+    └────────────┘         └────────────┘
+                  warm pool
+                   cleanup
+                  (instance
+                  unhealthy)
+
+    ┌────────────┐         ┌────────────┐
     │   ACTIVE   │────────→│   FAILED   │────────→ (terminate instance)
     └────────────┘         └────────────┘
                   lifecycle
@@ -144,7 +152,7 @@ KEY SEMANTICS (terminal state behaviors):
 AllocationStatus: AVAILABLE | CLAIMED | ACTIVE | COMPLETE | FAILED
 
 VALID_TRANSITIONS:
-  AVAILABLE → [CLAIMED]
+  AVAILABLE → [CLAIMED, FAILED]
   CLAIMED   → [ACTIVE, FAILED]     (ACTIVE triggered by sync_complete)
   ACTIVE    → [COMPLETE, FAILED]
   COMPLETE  → []                    (terminal, eventually archived)
@@ -152,6 +160,8 @@ VALID_TRANSITIONS:
 
 TRANSITION_TRIGGERS:
   AVAILABLE→CLAIMED:  Warm pool allocation claimed by workflow
+  AVAILABLE→FAILED:   Warm pool cleanup when instance becomes unhealthy
+                      (heartbeat timeout, spot interruption, infrastructure failure)
   CLAIMED→ACTIVE:     Agent reports sync_complete (files downloaded successfully)
   CLAIMED→FAILED:     Agent reports sync failure or timeout
   ACTIVE→COMPLETE:    Run completes (success or failure); sets debug_hold_until
@@ -174,7 +184,7 @@ Implementations MUST enforce transition validity and SSH access rules:
 - `allowsSSHAccess(allocation)`: MUST return true when status is ACTIVE. MUST return true when status is COMPLETE AND debug_hold_until > NOW. MUST return false otherwise.
 - `isInWarmPool(status)`: Returns true when status is AVAILABLE.
 
-> See also: impl/control/src/resource/allocation.ts.l2.txt §CoreSchema
+> See also: impl-pseudo/control/src/resource/allocation.ts.l2.txt §CoreSchema
 
 ### 5.2.1 Race Condition: ACTIVE→COMPLETE vs ACTIVE→FAILED
 
@@ -215,7 +225,7 @@ Creating an AVAILABLE allocation MUST:
 
 MUST set current_manifest_id if provided; MUST set debug_hold_until to NULL.
 
-> See also: impl/control/src/resource/allocation.ts.l2.txt §WarmPoolOperations
+> See also: impl-pseudo/control/src/resource/allocation.ts.l2.txt §WarmPoolOperations
 
 ### Spec/Checksum Matching Algorithm
 
@@ -268,7 +278,7 @@ FUNCTION claimWarmPoolAllocation(query, runId, maxRetries=3) -> Result
 Concurrency guarantee: transaction with row-level locking MUST prevent double-claim.
 Backoff between attempts SHOULD use linear scaling.
 
-> See also: impl/control/src/resource/allocation.ts.l2.txt §WarmPoolOperations
+> See also: impl-pseudo/control/src/resource/allocation.ts.l2.txt §WarmPoolOperations
 
 ## 5.4 SSH Integration
 
@@ -304,7 +314,7 @@ SSH config MUST be stored as an object record keyed by allocation ID.
 3. Changes to allocation's workdir
 4. Starts shell in that context
 
-> See also: impl/cli/src/ssh.ts.l2.txt §SSHConfigGeneration
+> See also: impl-pseudo/cli/src/ssh.ts.l2.txt §SSHConfigGeneration
 
 ### Tailscale JIT Installation via ProxyCommand
 
@@ -380,7 +390,7 @@ the heartbeat's `active_allocations` list.
 3. New value = max(current, NOW) + SSH_EXTENSION_MS
 4. MUST NOT exceed max SSH extension cap or absolute max hold (24h)
 
-> See also: impl/control/src/resource/allocation.ts.l2.txt §DebugHoldExtension
+> See also: impl-pseudo/control/src/resource/allocation.ts.l2.txt §DebugHoldExtension
 
 ### SSH Config Regeneration
 
@@ -399,7 +409,7 @@ Regeneration MUST query all SSH-accessible allocations (ACTIVE, or COMPLETE with
 When instances have multiple allocations (e.g., COMPLETE with debug_hold + new ACTIVE),
 SSH config includes separate entries---same instance IP, different allocation IDs, different workdirs.
 
-> See also: impl/cli/src/ssh.ts.l2.txt §SSHConfigGeneration
+> See also: impl-pseudo/cli/src/ssh.ts.l2.txt §SSHConfigGeneration
 
 ## 5.5 Background Reconciliation
 
@@ -413,7 +423,7 @@ Implemented as background reconciliation task (see Ch15 §15.9 for interval). Th
 2. Transition each to FAILED with updated timestamp
 3. Log warning with allocation_id and age
 
-> See also: impl/control/src/resource/allocation.ts.l2.txt §BackgroundReconciliationClaimedTimeout
+> See also: impl-pseudo/control/src/resource/allocation.ts.l2.txt §BackgroundReconciliationClaimedTimeout
 
 ## 5.6 Background Task Intervals
 
@@ -487,7 +497,7 @@ Behavior:
 - MUST cap at maxExplicitExtensionMs (default) or absoluteMaxDebugHoldMs (with duration).
 - MUST print allocation short ID and new debug_hold_until timestamp.
 
-> See also: impl/cli/src/ssh.ts.l2.txt §CliCommandReplExtend
+> See also: impl-pseudo/cli/src/ssh.ts.l2.txt §CliCommandReplExtend
 
 ### ACTIVE->COMPLETE Transition Details
 
@@ -514,7 +524,7 @@ Replenishment eligibility requires:
 3. Warm pool replenishment creates new AVAILABLE allocation on same instance
 4. Termination is blocked if any allocation has debug_hold_until > NOW
 
-> See also: impl/control/src/resource/allocation.ts.l2.txt §ActiveCompleteTransition
+> See also: impl-pseudo/control/src/resource/allocation.ts.l2.txt §ActiveCompleteTransition
 
 ### Hold Expiry Background Task
 
@@ -527,7 +537,7 @@ The task MUST:
 2. Set debug_hold_until to NULL with updated timestamp
 3. Trigger SSH config regeneration (allocation no longer SSH-accessible)
 
-> See also: impl/control/src/resource/allocation.ts.l2.txt §HoldExpiryBackgroundTask
+> See also: impl-pseudo/control/src/resource/allocation.ts.l2.txt §HoldExpiryBackgroundTask
 
 ### Termination Blocking Semantics
 
@@ -538,7 +548,7 @@ If termination is blocked, the system MUST return an error indicating which
 allocations hold debug holds and suggest `repl release <allocation-id>` or
 waiting for expiry.
 
-> See also: impl/control/src/resource/allocation.ts.l2.txt §TerminationBlocking
+> See also: impl-pseudo/control/src/resource/allocation.ts.l2.txt §TerminationBlocking
 
 ### CLI Command: `repl release`
 
@@ -550,4 +560,4 @@ Behavior:
 - Instance ID: release all debug holds on that instance
 - MUST trigger SSH config regeneration after release
 
-> See also: impl/cli/src/ssh.ts.l2.txt §CliCommandReplRelease
+> See also: impl-pseudo/cli/src/ssh.ts.l2.txt §CliCommandReplRelease

@@ -58,7 +58,7 @@ repl run status run-xyz789   # Specific run status
 repl run status run-xyz      # Prefix resolution
 ```
 
-> See also: impl/cli/src/commands/run.ts.l2.txt §RunStatusSubcommand
+> See also: impl-pseudo/cli/src/commands/run.ts.l2.txt §RunStatusSubcommand
 
 **Output:** Run ID, status, workflow state, instance info, allocation, timestamps, duration.
 
@@ -139,7 +139,7 @@ New hold:      15:20:32 (+30m)
 Max hold:      2024-02-01 14:32:02 (24h from start)
 ```
 
-> See also: impl/cli/src/ssh.ts.l2.txt §CliCommandReplExtend
+> See also: impl-pseudo/cli/src/ssh.ts.l2.txt §CliCommandReplExtend
 
 ## 10.4 Resource Commands
 

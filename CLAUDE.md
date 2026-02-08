@@ -4,7 +4,7 @@
 
 SkyREPL: cloud compute orchestration for lifecycle management and reproducibility. Control plane (VPS) + CLI client + Python agent (on instances).
 
-**Current phase:** L2/B complete, ready for L3. No active worklog. Completed: `worklogs/011_WORKLOG_L2B_COMPLETION.txt`. Status: `STATUS.txt`. Backlog: `BACKLOG.txt`.
+**Current phase:** L3 Slice 1 in progress (Steps 0-1 done, Step 1.5 framework migration in progress, Steps 2-10 remaining). Active worklog: `WORKLOG_L3_SLICE1_IMPL.txt`. Plan: `worklogs/012_WORKLOG_L3_SLICE1_PLANNING.txt`. Backlog: `BACKLOG.txt`.
 
 ## Dispatch
 
@@ -44,13 +44,18 @@ Three-tier: **MANIFEST → RESOURCE → MATERIAL**
 - **Workflow**: DAG execution with 4 patterns and compensation/rollback
 - **Warm pool**: Allocations WHERE status='AVAILABLE'
 
-## Pseudo-Implementation (impl/)
+## Code Layout
 
-Fidelity suffixes: `.l1.txt` (outlines) → `.l2.txt` (pseudocode) → `.l3.txt` (partial impl) → working code (no suffix).
+Two directories:
 
-Structure: `control/`, `cli/`, `shared/`, `agent/`, `tests/`
+- **`impl/`** — L3 working code (Bun workspace monorepo). Real `.ts`/`.py` files. Currently stub functions (`throw new Error("not implemented")`) being replaced step-by-step.
+- **`impl-pseudo/`** — L1/L2 reference pseudocode (read-only during L3). Fidelity suffixes: `.l1.txt` (outlines), `.l2.txt` (pseudocode).
 
-**Source of truth:** Recent WORKLOG > spec > pseudo-impl.
+Structure (both dirs): `control/`, `cli/`, `shared/`, `agent/`, `tests/`
+
+Stack: Bun runtime, bun:sqlite (WAL), ElysiaJS, TypeBox, Python stdlib-only agent.
+
+**Source of truth:** Recent WORKLOG > spec > impl-pseudo > impl stubs.
 
 ## Worklogs
 

@@ -32,7 +32,7 @@ Benefits:
 - No orchestration overhead (no DAG, no compensation logic)
 - Clean API for simple operations
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §SingleStepHelper
+> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §SingleStepHelper
 
 ## 6.2 Engine Architecture
 
@@ -54,7 +54,7 @@ Benefits:
 - `priority?` ('low' | 'normal' | 'high')
 - `timeout?` (number): per-workflow timeout override
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt WorkflowEngine Interface
+> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt WorkflowEngine Interface
 
 ### 6.2.1 Retry Semantics
 
@@ -71,7 +71,7 @@ Retry MUST:
 **Rationale**: Preserves failed workflow for audit trail, avoids state machine
 violations, enables clean retry without contaminating original workflow state.
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §Retry
+> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §Retry
 
 ### Execution Loop
 
@@ -104,7 +104,7 @@ Key invariant: ready nodes execute concurrently via parallel dispatch.
 
 > Why separate table: rationale extracted to docs/design/rationale-resources.txt
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §ExecuteLoop
+> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §ExecuteLoop
 
 ### Node Execution Model
 
@@ -120,7 +120,7 @@ Key invariant: ready nodes execute concurrently via parallel dispatch.
 - Subworkflow: `spawnSubworkflow(type, input)` -> SubworkflowHandle
 - Utilities: `getNodeOutput(nodeId)`, `log(level, message, data?)` (emits OTel span events)
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §ExecuteNode
+> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §ExecuteNode
 
 ### Two-Phase Spawn in Node Execution
 
@@ -176,7 +176,7 @@ FUNCTION compensateSpawnNode(ctx):
 - Compensation handles both phases (DB only or DB + cloud)
 - Kill at any step guarantees no orphans
 
-> See also: impl/control/src/workflow/compensation.ts.l2.txt §TwoPhaseSpawn
+> See also: impl-pseudo/control/src/workflow/compensation.ts.l2.txt §TwoPhaseSpawn
 
 ### Persistence Strategy (Crash Recovery)
 
@@ -205,7 +205,7 @@ FUNCTION recoverWorkflows():
     RESUME execution loop for this workflow
 ```
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §CrashRecovery
+> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §CrashRecovery
 
 ## 6.3 Pattern Library
 
@@ -231,7 +231,7 @@ ctx.applyPattern('insert-and-reconverge', {
 });
 ```
 
-> See also: impl/control/src/workflow/patterns.ts.l2.txt §InsertAndReconverge
+> See also: impl-pseudo/control/src/workflow/patterns.ts.l2.txt §InsertAndReconverge
 
 ### 6.3.2 Conditional-Branch (CB)
 
@@ -273,7 +273,7 @@ ctx.applyPattern('conditional-branch', {
 });
 ```
 
-> See also: impl/control/src/workflow/patterns.ts.l2.txt §ConditionalBranch
+> See also: impl-pseudo/control/src/workflow/patterns.ts.l2.txt §ConditionalBranch
 
 ### 6.3.3 Parallel-Fan-Out (PFO)
 
@@ -299,7 +299,7 @@ ctx.applyPattern('parallel-fan-out', {
 });
 ```
 
-> See also: impl/control/src/workflow/patterns.ts.l2.txt §ParallelFanOut
+> See also: impl-pseudo/control/src/workflow/patterns.ts.l2.txt §ParallelFanOut
 
 ### 6.3.4 Retry-with-Alternative (RWA)
 
@@ -325,7 +325,7 @@ ctx.applyPattern('retry-with-alternative', {
 });
 ```
 
-> See also: impl/control/src/workflow/patterns.ts.l2.txt §RetryWithAlternative
+> See also: impl-pseudo/control/src/workflow/patterns.ts.l2.txt §RetryWithAlternative
 
 
 ## 6.4 Subworkflow Contract
@@ -350,7 +350,7 @@ children are still emitting resources. This ensures complete resource tracking.
 Subworkflow completion MUST release its own manifest. Parent resource claiming MUST
 query child's SEALED manifest and use atomic claim operations.
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §Subworkflows
+> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §Subworkflows
 
 ### Max Depth
 
@@ -398,7 +398,7 @@ FUNCTION compensateFailedNode(workflowId, failedNodeId):
   -- Manifest policies handle broader resource cleanup.
 ```
 
-> See also: impl/control/src/workflow/compensation.ts.l2.txt §CompensateFailedNode
+> See also: impl-pseudo/control/src/workflow/compensation.ts.l2.txt §CompensateFailedNode
 
 ## 6.6 Error Handling and Retry Strategy
 
@@ -443,7 +443,7 @@ immediate failure.
    - Compensation applied to failed node only
    - Manifest preserved with resources for cleanup
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §RetryStrategy
+> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §RetryStrategy
 
 ### 6.6.2 Workflow -> API Error Mapping
 
@@ -498,7 +498,7 @@ Error-to-HTTP mapping MUST use error category: validation->400, auth->401/403,
 not_found->404, conflict->409, rate_limit->429, timeout->504, provider->502,
 internal->500.
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §ErrorMapping
+> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §ErrorMapping
 
 ### 6.6.3 Workflow Timeout
 
@@ -546,7 +546,7 @@ Cancellation MUST:
 2. Set workflow status to 'cancelling' with cancel_reason
 3. Rely on agent response (run_complete) or heartbeat timeout for resolution
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §Cancellation
+> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §Cancellation
 
 ## 6.8 Compensation Behavior
 
@@ -565,10 +565,10 @@ be wrapped with the 5-minute compensation timeout.
 Non-retryable errors MUST fail immediately. On final failure, MUST log error and
 rely on orphan scan for cleanup.
 
-> See also: impl/control/src/workflow/compensation.ts.l2.txt §CompensateWithRetry
+> See also: impl-pseudo/control/src/workflow/compensation.ts.l2.txt §CompensateWithRetry
 
 ## 6.9 Observability
 
 > Observability rationale and topology signatures extracted to workshop/ux/observability-features.txt
 
-> See also: impl/control/src/workflow/engine.ts.l2.txt §Observability
+> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §Observability

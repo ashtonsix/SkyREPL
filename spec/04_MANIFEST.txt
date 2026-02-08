@@ -116,7 +116,7 @@ STEPS:
      c. Preserve manifest_resources links (needed for cleanup tracking)
 ```
 
-> See also: impl/control/src/resource/manifest.ts.l2.txt §SealManifest
+> See also: impl-pseudo/control/src/resource/manifest.ts.l2.txt §SealManifest
 
 **isManifestExpired(manifestId) -> boolean**
 
@@ -129,7 +129,7 @@ Returns TRUE when ALL of:
 Returns FALSE otherwise (including when manifest not found or retention is null).
 ```
 
-> See also: impl/control/src/resource/manifest.ts.l2.txt §ExpiryCheck
+> See also: impl-pseudo/control/src/resource/manifest.ts.l2.txt §ExpiryCheck
 
 **triggerCleanup(manifestId) -> workflowId**
 
@@ -137,7 +137,7 @@ The system MUST spawn a cleanup-manifest workflow when a manifest is expired. Th
 manifest status is NOT changed (EXPIRED is derived, never stored). The manifest
 MUST be in SEALED state; triggering cleanup on a DRAFT manifest is an error.
 
-> See also: impl/control/src/intent/cleanup-manifest.ts.l2.txt §EntryPoint
+> See also: impl-pseudo/control/src/intent/cleanup-manifest.ts.l2.txt §EntryPoint
 
 ## 4.2 Resource Claiming Protocol
 
@@ -151,7 +151,7 @@ node output wiring. No manifest ceremony is needed because all nodes share the
 same manifest. For example, a spawn-instance node emits an instance_id, which a
 subsequent allocate-run node receives as input and uses to create an allocation.
 
-> See also: impl/control/src/resource/manifest.ts.l2.txt §ResourceClaiming
+> See also: impl-pseudo/control/src/resource/manifest.ts.l2.txt §ResourceClaiming
 
 ### Between-Workflow Resource Claiming
 
@@ -193,7 +193,7 @@ STEPS:
   4. Return { claimed: true, instance_id }
 ```
 
-> See also: impl/control/src/resource/manifest.ts.l2.txt §ResourceClaiming
+> See also: impl-pseudo/control/src/resource/manifest.ts.l2.txt §ResourceClaiming
 
 ### Conflict Resolution
 
@@ -214,7 +214,7 @@ Within transaction:
   4. Return { success: true }
 ```
 
-> See also: impl/control/src/resource/manifest.ts.l2.txt §AtomicClaim
+> See also: impl-pseudo/control/src/resource/manifest.ts.l2.txt §AtomicClaim
 
 ### Subworkflow Manifest Independence
 
@@ -242,7 +242,7 @@ warm pool claim.
   4. Return resourceId on success, null on failure or no candidates
 ```
 
-> See also: impl/control/src/resource/manifest.ts.l2.txt §SubworkflowManifest
+> See also: impl-pseudo/control/src/resource/manifest.ts.l2.txt §SubworkflowManifest
 
 ## 4.3 Cleanup System
 
@@ -274,7 +274,7 @@ back to DEFAULT_MANIFEST_RETENTION_MS), update the manifest's retention_ms, then
 call sealManifest. This ensures workflow-type-specific retention without caller
 needing to know policy details.
 
-> See also: impl/control/src/resource/manifest.ts.l2.txt §RetentionPolicy
+> See also: impl-pseudo/control/src/resource/manifest.ts.l2.txt §RetentionPolicy
 
 ### Cleanup Priority
 
@@ -295,7 +295,7 @@ The system MUST query manifest_resources ordered by cleanup_priority DESC
 (defaulting to 50), destroy each resource in order, remove each
 manifest_resources row, then delete the manifest itself.
 
-> See also: impl/control/src/intent/cleanup-manifest.ts.l2.txt §NodeHandlers
+> See also: impl-pseudo/control/src/intent/cleanup-manifest.ts.l2.txt §NodeHandlers
 
 ### Cleanup Workflow
 
@@ -312,7 +312,7 @@ Resource-type-specific cleanup handlers MUST perform:
 - **run**: Delete files, logs, then DB record
 - **object**: Delete from S3 (if applicable), then delete DB record
 
-> See also: impl/control/src/intent/cleanup-manifest.ts.l2.txt §WorkflowDefinition
+> See also: impl-pseudo/control/src/intent/cleanup-manifest.ts.l2.txt §WorkflowDefinition
 
 ### Expiry Scanner
 
@@ -323,7 +323,7 @@ whether a cleanup-manifest workflow is already running before spawning a new one
 (to prevent duplicate cleanup). The scanner SHOULD use a consecutive-failure
 counter (alert after 5 failures) and MUST NOT rethrow errors (next run catches up).
 
-> See also: impl/control/src/resource/manifest.ts.l2.txt §ExpiryScanner
+> See also: impl-pseudo/control/src/resource/manifest.ts.l2.txt §ExpiryScanner
 
 ### Cost Attribution
 
@@ -332,7 +332,7 @@ Cost MUST be aggregated by resource type (compute for instances via usage_record
 storage for objects via blob size). The breakdown MUST include per-resource
 itemization and category totals (compute, storage, network).
 
-> See also: impl/control/src/resource/manifest.ts.l2.txt §CostAttribution
+> See also: impl-pseudo/control/src/resource/manifest.ts.l2.txt §CostAttribution
 
 ## 4.4 Manifest Examples
 

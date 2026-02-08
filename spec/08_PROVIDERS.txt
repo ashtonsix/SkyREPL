@@ -132,7 +132,7 @@ The compensation handler MUST:
 
 > Kill-at-any-step analysis extracted to docs/design/rationale-execution.txt
 
-> See also: impl/control/src/provider/compute/aws.ts.l2.txt §SpawnIdempotencyProtocol
+> See also: impl-pseudo/control/src/provider/compute/aws.ts.l2.txt §SpawnIdempotencyProtocol
 
 ### 8.1.2 Core Interface Definition
 
@@ -165,7 +165,7 @@ Contract compliance tests MUST verify:
 - list filters by region correctly
 - generateBootstrap returns valid script with content, format, and SHA-256 checksum
 
-> See also: impl/control/src/provider/types.ts.l2.txt §ProviderInterface
+> See also: impl-pseudo/control/src/provider/types.ts.l2.txt §ProviderInterface
 
 ### 8.1.3 Capability Flags
 
@@ -278,7 +278,7 @@ const PROVIDER_CAPABILITIES: Record<ProviderName, ProviderCapabilities> = {
   },
 };
 ```
-> See also: impl/control/src/provider/types.ts.l2.txt §CapabilityFlags
+> See also: impl-pseudo/control/src/provider/types.ts.l2.txt §CapabilityFlags
 
 ### 8.1.4 Core Method Types
 
@@ -337,7 +337,7 @@ interruptionBehavior? (terminate|stop|hibernate), requestType? (one-time|persist
 SpotRequest (requestId, status, instanceId?, spotPrice?).
 SpotPriceInfo (spec, region, availabilityZone?, price, timestamp, savingsPercent?).
 
-> See also: impl/control/src/provider/types.ts.l2.txt §CoreMethodTypes
+> See also: impl-pseudo/control/src/provider/types.ts.l2.txt §CoreMethodTypes
 
 ### 8.1.5 Error Taxonomy
 
@@ -376,9 +376,9 @@ conflict (state conflict), internal (provider internal).
 - mapProviderError(provider, error): Maps provider-specific errors to the taxonomy.
   If already a ProviderError, return as-is. Otherwise wrap as PROVIDER_INTERNAL.
 
-> See also: impl/control/src/provider/errors.ts.l2.txt §ProviderErrorBaseClass
-> See also: impl/control/src/provider/errors.ts.l2.txt §SpecificErrorClasses
-> See also: impl/control/src/provider/errors.ts.l2.txt §ErrorHandlingHelpers
+> See also: impl-pseudo/control/src/provider/errors.ts.l2.txt §ProviderErrorBaseClass
+> See also: impl-pseudo/control/src/provider/errors.ts.l2.txt §SpecificErrorClasses
+> See also: impl-pseudo/control/src/provider/errors.ts.l2.txt §ErrorHandlingHelpers
 
 ### 8.1.6 Bootstrap Generation
 
@@ -396,8 +396,8 @@ The format varies by provider: AWS uses cloud-init YAML, OrbStack uses shell scr
 other providers use whichever format their platform supports. The checksum enables
 warm pool matching -- instances with identical bootstrap checksums are interchangeable.
 
-> See also: impl/control/src/provider/compute/aws.ts.l2.txt §BootstrapGeneration
-> See also: impl/control/src/provider/compute/orbstack.ts.l2.txt §OrbStackBootstrapGeneration
+> See also: impl-pseudo/control/src/provider/compute/aws.ts.l2.txt §BootstrapGeneration
+> See also: impl-pseudo/control/src/provider/compute/orbstack.ts.l2.txt §OrbStackBootstrapGeneration
 
 ## 8.2 Type Enhancement Pattern
 
@@ -442,7 +442,7 @@ platform-specific fields. Key examples:
 - **OrbStackInstance**: adds vmName, arch, distro, distroVersion, resource allocation,
   host integration.
 
-> See also: impl/control/src/provider/types.ts.l2.txt §ProviderSpecificEnhancedTypes
+> See also: impl-pseudo/control/src/provider/types.ts.l2.txt §ProviderSpecificEnhancedTypes
 
 ### 8.2.2 Materialization Pattern (Generic -> Provider-Specific)
 
@@ -471,7 +471,7 @@ FUNCTION materialize(genericInstance) -> ProviderSpecificInstance:
     unknown -> "error"
 ```
 
-> See also: impl/control/src/provider/compute/aws.ts.l2.txt §MaterializationGenericToAWS
+> See also: impl-pseudo/control/src/provider/compute/aws.ts.l2.txt §MaterializationGenericToAWS
 
 ### 8.2.3 Projection Pattern (Provider-Specific -> Generic)
 
@@ -501,7 +501,7 @@ FUNCTION projectToGenericInstance(providerInstance, existingRecord?) -> Instance
 Snapshot projection MUST NOT generate IDs -- the caller MUST insert the snapshot
 record first to obtain an auto-generated database ID.
 
-> See also: impl/control/src/provider/compute/aws.ts.l2.txt §ProjectionAWSToGeneric
+> See also: impl-pseudo/control/src/provider/compute/aws.ts.l2.txt §ProjectionAWSToGeneric
 
 ### 8.2.4 Workflow Boundary Usage
 
@@ -514,7 +514,7 @@ At workflow boundaries, the materialize/project pattern works as follows:
 The control plane MUST NOT access provider-specific fields directly. All
 provider-specific operations happen within provider workflow boundaries.
 
-> See also: impl/control/src/provider/compute/aws.ts.l2.txt §WorkflowBoundaryExample
+> See also: impl-pseudo/control/src/provider/compute/aws.ts.l2.txt §WorkflowBoundaryExample
 
 ## 8.3 Provider Workflows
 
@@ -543,7 +543,7 @@ Provider workflows MUST also declare:
 Provider workflows are registered via a global registry. Registration MUST fail
 if a workflow with the same provider:type key already exists.
 
-> See also: impl/control/src/provider/contracts.ts.l2.txt §ProviderWorkflowConstraints
+> See also: impl-pseudo/control/src/provider/contracts.ts.l2.txt §ProviderWorkflowConstraints
 
 ### 8.3.2 Abstract Contracts
 
@@ -573,7 +573,7 @@ Three standard contracts define provider-agnostic behavior:
 - Input MUST include: providerId, name, spec, initChecksum?
 - Output MUST include: snapshotId (internal), providerSnapshotId, sizeBytes?
 
-> See also: impl/control/src/provider/contracts.ts.l2.txt §AbstractContracts
+> See also: impl-pseudo/control/src/provider/contracts.ts.l2.txt §AbstractContracts
 
 ### 8.3.3 Provider Workflow Extensibility
 
@@ -584,7 +584,7 @@ supports this extensibility pattern: a provider registers additional workflow
 blueprints and contracts during provider registration, and the control plane
 can conditionally invoke them when the provider's capabilities indicate support.
 
-> See also: impl/control/src/provider/compute/aws.ts.l2.txt §AWSWarmVolumePoolWorkflow
+> See also: impl-pseudo/control/src/provider/compute/aws.ts.l2.txt §AWSWarmVolumePoolWorkflow
 
 ### 8.3.4 Control Plane Perspective
 
@@ -599,7 +599,7 @@ plane MUST:
 The control plane MUST NOT inspect or depend on provider-internal workflow steps.
 All provider-specific complexity is encapsulated within the workflow boundary.
 
-> See also: impl/control/src/provider/compute/aws.ts.l2.txt §ControlPlanePerspective
+> See also: impl-pseudo/control/src/provider/compute/aws.ts.l2.txt §ControlPlanePerspective
 
 ## 8.4 Feature Providers
 
@@ -632,8 +632,8 @@ During instance spawn, features listed in SpawnOptions MUST be processed: featur
 requiring bootstrap MUST have their commands included in the bootstrap script.
 During termination, all attached features MUST be detached before compute termination.
 
-> See also: impl/control/src/provider/types.ts.l2.txt §FeatureProviderInterface
-> See also: impl/control/src/provider/types.ts.l2.txt §FeatureLifecycleIntegration
+> See also: impl-pseudo/control/src/provider/types.ts.l2.txt §FeatureProviderInterface
+> See also: impl-pseudo/control/src/provider/types.ts.l2.txt §FeatureLifecycleIntegration
 
 ### 8.4.2 Feature vs Compute Providers
 
@@ -674,7 +674,7 @@ with the following contract:
 - detach(): MUST remove machine from Tailscale network and clean up feature state in DB
 - status(): MUST refresh online status from Tailscale API before returning
 
-> See also: impl/control/src/provider/feature/tailscale.ts.l2.txt §TailscaleFeatureProvider
+> See also: impl-pseudo/control/src/provider/feature/tailscale.ts.l2.txt §TailscaleFeatureProvider
 
 ## 8.5 Extension Framework
 
@@ -688,7 +688,7 @@ This data is NOT persisted -- it is re-fetched on control plane restart. No data
 table is needed. Implementations SHOULD use a simple get-or-fetch pattern with
 TTL-based expiration.
 
-> See also: impl/control/src/provider/extensions.ts.l2.txt §InMemoryCache
+> See also: impl-pseudo/control/src/provider/extensions.ts.l2.txt §InMemoryCache
 
 ### 8.5.2 Lifecycle Hooks: Heartbeat Expectations Model
 
@@ -717,8 +717,8 @@ explicitly communicates what it needs and providers respond with receipts.
   budget_threshold, drift_detected, provider_event.
 - nextHeartbeat?: { preferredInterval } -- timing negotiation
 
-> See also: impl/control/src/provider/extensions.ts.l2.txt §LifecycleHooksInterface
-> See also: impl/control/src/provider/extensions.ts.l2.txt §HeartbeatExpectationsModel
+> See also: impl-pseudo/control/src/provider/extensions.ts.l2.txt §LifecycleHooksInterface
+> See also: impl-pseudo/control/src/provider/extensions.ts.l2.txt §HeartbeatExpectationsModel
 
 ### 8.5.3 Heartbeat Flow Example
 
@@ -768,7 +768,7 @@ const receipts = await provider.onHeartbeat(expectations);
   nextHeartbeat: { preferredInterval: 30000 }
 }
 ```
-> See also: impl/control/src/provider/extensions.ts.l2.txt §HeartbeatExpectationsModel
+> See also: impl-pseudo/control/src/provider/extensions.ts.l2.txt §HeartbeatExpectationsModel
 
 ### 8.5.4 Benefits of Expectations Model
 
@@ -793,7 +793,7 @@ The AWS provider MUST implement lifecycle hooks as follows:
   SHOULD be skipped with reason. Provider MAY report autonomous maintenance
   (e.g., stale volume cleanup) via providerTasks.
 
-> See also: impl/control/src/provider/compute/aws.ts.l2.txt §AWSLifecycleHooks
+> See also: impl-pseudo/control/src/provider/compute/aws.ts.l2.txt §AWSLifecycleHooks
 
 ### 8.5.6 Heartbeat Task Handlers
 
@@ -815,7 +815,7 @@ Providers implementing heartbeat tasks MUST satisfy these behavioral requirement
 - The heartbeat response MAY include nextHeartbeat.preferredInterval (milliseconds)
   to request adaptive scheduling from the control plane.
 
-> See also: impl/control/src/provider/compute/aws.ts.l2.txt §HeartbeatTaskHandlers
+> See also: impl-pseudo/control/src/provider/compute/aws.ts.l2.txt §HeartbeatTaskHandlers
 
 ### 8.5.7 Event-Driven Hooks
 
@@ -829,7 +829,7 @@ Event-driven hooks bridge external events to workflow submission:
   On critical threshold, it MUST terminate non-essential instances (warm pool
   instances with no manifest assignment) via terminate-instance workflows.
 
-> See also: impl/control/src/provider/compute/aws.ts.l2.txt §EventDrivenHooks
+> See also: impl-pseudo/control/src/provider/compute/aws.ts.l2.txt §EventDrivenHooks
 
 ### 8.5.8 TTL Patterns
 
@@ -846,7 +846,7 @@ Providers SHOULD define TTL configurations for cached state categories:
 
 Default TTL SHOULD be 5 minutes. Maximum TTL MUST NOT exceed 1 hour.
 
-> See also: impl/control/src/provider/extensions.ts.l2.txt §TTLConfiguration
+> See also: impl-pseudo/control/src/provider/extensions.ts.l2.txt §TTLConfiguration
 
 ### 8.5.9 Hooks vs Workflows Distinction
 
@@ -874,7 +874,7 @@ WHEN TO USE WORKFLOWS:
 - Operations that need compensation capability
 - Operations with timeout/retry requirements
 ```
-> See also: impl/control/src/provider/compute/aws.ts.l2.txt §SpotInterruptionWorkflow
+> See also: impl-pseudo/control/src/provider/compute/aws.ts.l2.txt §SpotInterruptionWorkflow
 
 ### 8.5.10 Provider Registration
 
@@ -892,9 +892,9 @@ A ProviderRegistration MAY include:
 Complex providers (AWS) register multiple workflows and contracts. Simpler
 providers (Lambda, RunPod) MAY register with empty workflow/contract lists.
 
-> See also: impl/control/src/provider/registry.ts.l2.txt §DynamicProviderRegistration
-> See also: impl/control/src/provider/extensions.ts.l2.txt §HookRegistry
-> See also: impl/control/src/provider/compute/aws.ts.l2.txt §FullAWSRegistration
+> See also: impl-pseudo/control/src/provider/registry.ts.l2.txt §DynamicProviderRegistration
+> See also: impl-pseudo/control/src/provider/extensions.ts.l2.txt §HookRegistry
+> See also: impl-pseudo/control/src/provider/compute/aws.ts.l2.txt §FullAWSRegistration
 
 ### 8.5.11 Contract Testing Pattern
 
@@ -915,10 +915,10 @@ Tests MUST verify:
 
 Capability-gated tests MUST skip gracefully for providers without the feature.
 
-> See also: impl/control/src/provider/registry.ts.l2.txt §ComputeProviderRegistry
-> See also: impl/control/src/provider/registry.ts.l2.txt §RuntimeAccess
-> See also: impl/control/src/provider/registry.ts.l2.txt §TestUtilities
-> See also: impl/control/src/provider/registry.ts.l2.txt §ContractTestingPattern
+> See also: impl-pseudo/control/src/provider/registry.ts.l2.txt §ComputeProviderRegistry
+> See also: impl-pseudo/control/src/provider/registry.ts.l2.txt §RuntimeAccess
+> See also: impl-pseudo/control/src/provider/registry.ts.l2.txt §TestUtilities
+> See also: impl-pseudo/control/src/provider/registry.ts.l2.txt §ContractTestingPattern
 
 ### 8.5.12 Provider Implementation Spectrum
 

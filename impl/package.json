@@ -1,0 +1,9 @@
+{
+  "name": "skyrepl",
+  "private": true,
+  "workspaces": ["shared", "control", "cli"],
+  "devDependencies": {
+    "bun-types": "^1.3.9",
+    "typescript": "^5.9.3"
+  }
+}

@@ -94,35 +94,32 @@ FIX BEFORE L3 (architecture coherence issues)
 ================================================================================
 
 AC1: workflow_state string mismatch between spec and impl
-  Status: FIX BEFORE L3
+  Status: DONE
   Severity: HIGH — would cause real bugs at implementation time
-  Context: launch-run.ts.l2.txt uses 'run:timeout', 'run:complete',
-    'launch:spawning', 'launch:booting'. Spec (Ch03§Resources lines 586-598,
-    Ch05§Allocations) defines these as 'launch-run:timeout', 'launch-run:complete',
-    'spawn:pending', 'launch-run:provisioning'.
-  Action: Align impl to spec (spec naming is more explicit/correct).
+  Resolution: Fixed 6 mismatched strings in launch-run.ts.l2.txt:
+    'launch:spawning' → 'spawn:pending', 'launch:booting' → 'launch-run:provisioning',
+    'launch:compensated' → 'launch-run:compensated', 'launch:running' →
+    'launch-run:running', 'run:timeout' → 'launch-run:timeout', 'run:complete' →
+    'launch-run:complete'. All other L2 files verified correct.
   Ref: architecture coherence review, 2026-02-06
 
 AC2: AVAILABLE→FAILED allocation transition missing from spec
-  Status: FIX BEFORE L3
+  Status: DONE
   Severity: MEDIUM — impl is correct, spec is stale
-  Context: state-transitions.ts.l2.txt (line 135) allows AVAILABLE→FAILED for
-    cleanup/termination paths. spec/05_ALLOCATIONS.txt (line 147) only lists
-    transitions from AVAILABLE→CLAIMED. The impl is more correct — you need
-    this for warm-pool cleanup when instances become unhealthy.
-  Action: Add AVAILABLE→FAILED to spec/05_ALLOCATIONS.txt state machine.
+  Resolution: Added AVAILABLE→FAILED to spec/05_ALLOCATIONS.txt: valid transitions
+    list, transition triggers section, and state diagram. Trigger: warm pool cleanup
+    when instance becomes unhealthy.
   Ref: architecture coherence review, 2026-02-06
 
 AC3: DAG dependency persistence after dynamic pattern application
-  Status: FIX BEFORE L3
+  Status: DONE
   Severity: MEDIUM — under-specified crash recovery for modified DAGs
-  Context: workflow_nodes table (spec/02_MATERIAL.txt) has no dependency column.
-    engine.ts.l2.txt (line 270) acknowledges the gap in a comment. When patterns
-    dynamically modify the DAG (e.g., Conditional-Branch inserts nodes), there is
-    no specified mechanism for persisting the new dependency graph. A crash after
-    pattern application but before completion would lose the modified topology.
-  Action: Add depends_on column to workflow_nodes or a separate workflow_edges
-    table. Spec and impl both need updating.
+  Resolution: Added `depends_on TEXT` column (JSON array of node_id strings) to
+    workflow_nodes in spec/02_MATERIAL.txt and impl migration. Engine persists
+    depends_on on node creation and reads from it for dependency resolution
+    (findReadyNodes) and topology signatures. Patterns already persisted deps
+    (renamed dependencies_json → depends_on for consistency). Crash recovery
+    works because DAG topology is always in the database.
   Ref: architecture coherence review, 2026-02-06
 
 ================================================================================

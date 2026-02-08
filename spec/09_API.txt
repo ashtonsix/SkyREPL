@@ -79,7 +79,7 @@ interface ListQueryParams {
 }
 ```
 
-> See also: impl/shared/src/api/resources.ts.l2.txt §RequestEnvelopes
+> See also: impl-pseudo/shared/src/api/resources.ts.l2.txt §RequestEnvelopes
 
 ### 9.1.3 Runs Endpoints
 
@@ -1182,7 +1182,7 @@ type WorkflowStreamEvent =
   | { event: 'heartbeat'; data: { timestamp: number } };
 ```
 
-> See also: impl/shared/src/api/workflows.ts.l2.txt §WorkflowEngineTypes
+> See also: impl-pseudo/shared/src/api/workflows.ts.l2.txt §WorkflowEngineTypes
 
 ### 9.2.9 GET /v1/preflight
 
@@ -1487,7 +1487,7 @@ specification.
 | GET    | /v1/agent/files/:path      | Download file for run             | External |
 | POST   | /v1/instances/:id/panic    | Emergency diagnostics on shutdown | Internal |
 
-> See also: impl/control/src/api/agent.ts.l2.txt §RouteRegistration
+> See also: impl-pseudo/control/src/api/agent.ts.l2.txt §RouteRegistration
 
 ### 9.5.2 POST /v1/agent/heartbeat
 
@@ -1872,7 +1872,7 @@ interface HeartbeatAckMessage {
 - Agent shuts down if reconnection fails after max retries
 - start_run combines file download + run execution in single message
 
-> See also: impl/control/src/api/sse-protocol.ts.l2.txt §SSEManager
+> See also: impl-pseudo/control/src/api/sse-protocol.ts.l2.txt §SSEManager
 
 ### 9.5.7 GET /v1/agent/files/:path (Deprecated)
 
@@ -2056,7 +2056,7 @@ type ErrorCategory =
   | 'internal';     // 500 - Server error
 ```
 
-> See also: impl/shared/src/errors.ts.l2.txt §ErrorCategoryToHTTPStatusMapping
+> See also: impl-pseudo/shared/src/errors.ts.l2.txt §ErrorCategoryToHTTPStatusMapping
 
 ### 9.6.2 Error Taxonomy
 
@@ -2367,7 +2367,7 @@ CREATE TABLE idempotency_keys (
 CREATE INDEX idx_idempotency_expires ON idempotency_keys(expires_at);
 ```
 
-> See also: impl/control/src/api/routes.ts.l2.txt §ServerSetup
+> See also: impl-pseudo/control/src/api/routes.ts.l2.txt §ServerSetup
 
 **Expiry Policy (example defaults, configurable):**
 - Successful requests: long retention (e.g., 24 hours)
@@ -2427,7 +2427,7 @@ const key = `launch-${hash(command + spec + region)}`;
 
 Clients SHOULD implement exponential backoff for 5xx errors. Clients MUST NOT retry on 409 IDEMPOTENCY_CONFLICT (indicates parameter mismatch). Clients MAY retry safely with same idempotency key for 5xx errors (server handles deduplication).
 
-> See also: impl/control/src/api/operations.ts.l2.txt §RouteRegistration
+> See also: impl-pseudo/control/src/api/operations.ts.l2.txt §RouteRegistration
 
 ### 9.7.6 Implementation Details
 
@@ -2446,7 +2446,7 @@ The control plane MUST implement the following idempotency protocol:
    - Store idempotency record: key, endpoint, params_hash, response status/body, workflow_id, timestamps
    - Apply expiry policy based on status (2xx: 24h, 4xx: 1h, 5xx: immediate)
 
-> See also: impl/control/src/api/middleware.ts.l2.txt §IdempotencyMiddleware
+> See also: impl-pseudo/control/src/api/middleware.ts.l2.txt §IdempotencyMiddleware
 
 ### 9.7.7 Endpoints Supporting Idempotency
 

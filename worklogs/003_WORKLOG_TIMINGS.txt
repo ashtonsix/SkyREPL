@@ -67,7 +67,7 @@ Replace inline values with:
 One table per category with columns:
 | Parameter | Constraint | Default | Range | Rationale |
 
-### Phase B: impl/ Consolidation
+### Phase B: impl-pseudo/ Consolidation
 
 Goal: Single source of truth for timing constants
 

@@ -1,0 +1,31 @@
+# patterns.ts - Workflow Patterns (Ch6)
+
+Four workflow transformation patterns: single-step, insert-and-reconverge, conditional-branch, parallel-fan-out, retry-with-alternative.
+See L2 for graph modification logic, constraint enforcement, and failure handling.
+
+## Pattern Types
+single-step, insert-and-reconverge, conditional-branch, parallel-fan-out, retry-with-alternative
+
+## Constants
+MAX_PARALLEL_BRANCHES=16, MAX_RETRY_ATTEMPTS=3, MAX_IAR_DEPTH=1
+
+## Exports
+applyInsertAndReconverge, applyConditionalBranch, applyParallelFanOut, applyRetryWithAlternative
+
+## Insert-and-Reconverge (IAR)
+Transform A→B to A→A'→B (parallel insertion before target). Max 1 insertion depth.
+
+## Conditional-Branch (CB)
+Two modes: standard (condition evaluated upfront) and try-fallback (triggerOnError=true, option2 runs only on option1 failure).
+
+## Parallel-Fan-Out (PFO)
+Spawn multiple independent branches. Failure policy: if ANY branch fails, ALL are compensated. Max 16 branches.
+
+## Retry-with-Alternative (RWA)
+On failure, compensate and retry with different parameters (region, instance type, etc.). Max 3 attempts.
+
+## Skipped Node Handling
+Skipped nodes count as satisfied dependencies. Join node doesn't wait for skipped branches (prevents deadlock).
+
+## Materialization
+Pattern applications logged in workflow_pattern_applications table. Graph modifications stored in workflow_nodes.depends_on.

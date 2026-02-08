@@ -1,0 +1,462 @@
+# patterns.ts - Workflow Pattern Implementations (L2 Pseudocode)
+
+## Imports
+
+```typescript
+import { getDatabase, queryOne, queryMany } from '../material/db';
+import type {
+  PatternType, PatternConfig, InsertAndReconvergeConfig,
+  ConditionalBranchConfig, ParallelFanOutConfig,
+  RetryWithAlternativeConfig, InlineNodeDef,
+} from '../../../../shared/src/api/workflows';
+```
+
+## Constants
+
+```typescript
+// From Ch6 spec
+const MAX_PARALLEL_BRANCHES = 16;
+const MAX_RETRY_ATTEMPTS = 3;
+const MAX_IAR_DEPTH = 1;  // Max 1 insertion depth for IAR
+```
+
+## §PatternTypes
+
+```typescript
+export type PatternType =
+  | 'single-step'              // Ch6.1: Single node workflow
+  | 'insert-and-reconverge'    // Ch6.3.1: Insert parallel node before target
+  | 'conditional-branch'       // Ch6.3.2: Choose between two paths
+  | 'parallel-fan-out'         // Ch6.3.3: Spawn parallel work items
+  | 'retry-with-alternative';  // Ch6.3.4: Retry with different params
+```
+
+## §InsertAndReconverge
+
+```typescript
+/**
+ * INSERT-AND-RECONVERGE (IAR) pattern (Ch6 §6.3.1).
+ *
+ * Purpose: Insert parallel node that must complete before downstream.
+ *
+ * Transform:
+ *   A -> B -> C  becomes  A -> A' -> B -> C
+ *                            \______/
+ *
+ * Constraints:
+ * - Max 1 insertion depth
+ * - Target node (beforeNode) must be pending
+ *
+ * Example: Insert tailscale-install before start-run
+ */
+function applyInsertAndReconverge(
+  workflowId: string,
+  config: InsertAndReconvergeConfig
+): void {
+  const db = getDatabase();
+
+  // Validate: target node must exist and be pending
+  const targetNode = queryOne(
+    'SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?',
+    [workflowId, config.beforeNode]
+  );
+  if (!targetNode || targetNode.status !== 'pending') {
+    throw new ValidationError(
+      `Target node '${config.beforeNode}' must exist and be pending for IAR`
+    );
+  }
+
+  // Validate: max insertion depth
+  const existingInsertions = queryMany(
+    `SELECT * FROM workflow_pattern_applications
+     WHERE workflow_id = ? AND pattern = 'insert-and-reconverge'
+       AND target_node_id = ?`,
+    [workflowId, config.beforeNode]
+  );
+  if (existingInsertions.length >= MAX_IAR_DEPTH) {
+    throw new ValidationError(
+      `Max IAR insertion depth (${MAX_IAR_DEPTH}) exceeded for node '${config.beforeNode}'`
+    );
+  }
+
+  // Get nodes that currently depend on beforeNode (predecessors)
+  const predecessors = getPredecessors(workflowId, config.beforeNode);
+
+  // Create the inserted node
+  const now = Date.now();
+  db.prepare(`
+    INSERT INTO workflow_nodes (
+      workflow_id, node_id, node_type, status, depends_on,
+      input_json, attempt, created_at
+    ) VALUES (?, ?, ?, 'pending', ?, ?, 0, ?)
+  `).run(
+    workflowId,
+    config.insertedNode.id,
+    config.insertedNode.type,
+    JSON.stringify(predecessors.map(p => p.node_id)),
+    JSON.stringify(config.insertedNode.input),
+    now
+  );
+
+  // Update beforeNode dependencies: add insertedNode as additional dependency
+  const currentDeps = JSON.parse(targetNode.depends_on);
+  currentDeps.push(config.insertedNode.id);
+  db.prepare(`
+    UPDATE workflow_nodes SET depends_on = ?
+    WHERE workflow_id = ? AND node_id = ?
+  `).run(JSON.stringify(currentDeps), workflowId, config.beforeNode);
+
+  // Log pattern application
+  db.prepare(`
+    INSERT INTO workflow_pattern_applications (
+      workflow_id, pattern, target_node_id, config_json, applied_at
+    ) VALUES (?, 'insert-and-reconverge', ?, ?, ?)
+  `).run(workflowId, config.beforeNode, JSON.stringify(config), now);
+}
+```
+
+## §ConditionalBranch
+
+```typescript
+/**
+ * CONDITIONAL-BRANCH (CB) pattern (Ch6 §6.3.2).
+ *
+ * Purpose: Choose between two mutually exclusive paths, or try-fallback on error.
+ *
+ * Transform:
+ *   A -> B -> C  becomes  A -> B_opt1 -> C  (B_opt2 skipped)
+ *
+ * Constraints:
+ * - Exactly two branches
+ * - Deterministic condition (unless triggerOnError=true)
+ *
+ * Modes:
+ * 1. Standard: condition=true → option1, condition=false → option2
+ * 2. Try-fallback: triggerOnError=true → option2 runs only on option1 failure
+ */
+interface ConditionalBranchConfig {
+  triggerOnError?: boolean;  // If true, option2 runs only on option1 failure
+  condition?: boolean;       // Required if triggerOnError=false (default)
+  option1: InlineNodeDef;
+  option2: InlineNodeDef;
+  joinNode: string;
+}
+
+function applyConditionalBranch(
+  workflowId: string,
+  config: ConditionalBranchConfig
+): void {
+  const db = getDatabase();
+  const now = Date.now();
+
+  // Validate join node exists
+  const joinNode = queryOne(
+    'SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?',
+    [workflowId, config.joinNode]
+  );
+  if (!joinNode) {
+    throw new ValidationError(`Join node '${config.joinNode}' not found`);
+  }
+
+  if (config.triggerOnError) {
+    // Try-fallback mode: create both nodes, option2 depends on option1 failure
+    // option1 runs first; if it fails, option2 runs as fallback
+
+    // Create option1 node
+    db.prepare(`
+      INSERT INTO workflow_nodes (
+        workflow_id, node_id, node_type, status, depends_on,
+        input_json, attempt, created_at
+      ) VALUES (?, ?, ?, 'pending', ?, ?, 0, ?)
+    `).run(
+      workflowId, config.option1.id, config.option1.type,
+      JSON.stringify([]),  // No additional deps beyond current position
+      JSON.stringify(config.option1.input), now
+    );
+
+    // Create option2 node (initially pending, activated on option1 failure)
+    db.prepare(`
+      INSERT INTO workflow_nodes (
+        workflow_id, node_id, node_type, status, depends_on,
+        input_json, attempt, created_at, trigger_on_failure_of
+      ) VALUES (?, ?, ?, 'pending', ?, ?, 0, ?, ?)
+    `).run(
+      workflowId, config.option2.id, config.option2.type,
+      JSON.stringify([]),
+      JSON.stringify(config.option2.input), now, config.option1.id
+    );
+
+    // Join node depends on whichever branch succeeds
+    updateJoinDependencies(workflowId, config.joinNode,
+      [config.option1.id, config.option2.id]);
+
+  } else {
+    // Standard conditional: evaluate condition, create chosen branch, skip other
+    const chosen = config.condition ? config.option1 : config.option2;
+    const skipped = config.condition ? config.option2 : config.option1;
+
+    // Create chosen branch node
+    db.prepare(`
+      INSERT INTO workflow_nodes (
+        workflow_id, node_id, node_type, status, depends_on,
+        input_json, attempt, created_at
+      ) VALUES (?, ?, ?, 'pending', ?, ?, 0, ?)
+    `).run(
+      workflowId, chosen.id, chosen.type,
+      JSON.stringify([]),
+      JSON.stringify(chosen.input), now
+    );
+
+    // Create skipped branch node (immediately marked skipped)
+    db.prepare(`
+      INSERT INTO workflow_nodes (
+        workflow_id, node_id, node_type, status, depends_on,
+        input_json, attempt, created_at
+      ) VALUES (?, ?, ?, 'skipped', ?, ?, 0, ?)
+    `).run(
+      workflowId, skipped.id, skipped.type,
+      JSON.stringify([]),
+      JSON.stringify(skipped.input), now
+    );
+
+    // Join node depends on chosen branch (skipped counts as satisfied)
+    updateJoinDependencies(workflowId, config.joinNode,
+      [chosen.id, skipped.id]);
+  }
+
+  // Log pattern application
+  db.prepare(`
+    INSERT INTO workflow_pattern_applications (
+      workflow_id, pattern, target_node_id, config_json, applied_at
+    ) VALUES (?, 'conditional-branch', ?, ?, ?)
+  `).run(workflowId, config.joinNode, JSON.stringify(config), now);
+}
+```
+
+## §ParallelFanOut
+
+```typescript
+/**
+ * PARALLEL-FAN-OUT (PFO) pattern (Ch6 §6.3.3).
+ *
+ * Purpose: Spawn multiple independent parallel work items.
+ *
+ * Transform:
+ *   A -> B  becomes  A -> A1 -> B
+ *                      -> A2 -/
+ *                      -> A3 -/
+ *
+ * Constraints:
+ * - MAX_PARALLEL_BRANCHES = 16
+ *
+ * Failure policy:
+ * - If ANY branch fails, ALL branches are affected
+ * - Completed branches ARE compensated when a sibling fails
+ * - For partial success semantics, use separate workflows
+ */
+function applyParallelFanOut(
+  workflowId: string,
+  config: ParallelFanOutConfig
+): void {
+  const db = getDatabase();
+  const now = Date.now();
+
+  // Validate branch count
+  if (config.branches.length > MAX_PARALLEL_BRANCHES) {
+    throw new ValidationError(
+      `Parallel branches (${config.branches.length}) exceed max (${MAX_PARALLEL_BRANCHES})`
+    );
+  }
+
+  if (config.branches.length === 0) {
+    throw new ValidationError('Parallel-fan-out requires at least 1 branch');
+  }
+
+  // Validate join node exists
+  const joinNode = queryOne(
+    'SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?',
+    [workflowId, config.joinNode]
+  );
+  if (!joinNode) {
+    throw new ValidationError(`Join node '${config.joinNode}' not found`);
+  }
+
+  const branchNodeIds: string[] = [];
+
+  // Create parallel branch nodes
+  for (const branch of config.branches) {
+    db.prepare(`
+      INSERT INTO workflow_nodes (
+        workflow_id, node_id, node_type, status, depends_on,
+        input_json, attempt, created_at
+      ) VALUES (?, ?, ?, 'pending', ?, ?, 0, ?)
+    `).run(
+      workflowId, branch.id, branch.type,
+      JSON.stringify([]),  // Branches run in parallel from fork point
+      JSON.stringify(branch.input), now
+    );
+    branchNodeIds.push(branch.id);
+  }
+
+  // Update join node: depends on ALL branches
+  // Skipped nodes count as satisfied (Ch6 §B5)
+  updateJoinDependencies(workflowId, config.joinNode, branchNodeIds);
+
+  // Log pattern application
+  db.prepare(`
+    INSERT INTO workflow_pattern_applications (
+      workflow_id, pattern, target_node_id, config_json, applied_at
+    ) VALUES (?, 'parallel-fan-out', ?, ?, ?)
+  `).run(workflowId, config.joinNode, JSON.stringify(config), now);
+}
+```
+
+## §RetryWithAlternative
+
+```typescript
+/**
+ * RETRY-WITH-ALTERNATIVE (RWA) pattern (Ch6 §6.3.4).
+ *
+ * Purpose: On failure, compensate failed node and retry with different parameters.
+ *
+ * Transform:
+ *   Attempt 1: A_primary (fails, compensated)
+ *   Attempt 2: A_alternative
+ *
+ * Constraints:
+ * - MAX_RETRY_ATTEMPTS = 3
+ * - Alternative must satisfy same output contract
+ *
+ * Example: spawn-instance-us-east-1 fails (CAPACITY_UNAVAILABLE)
+ *   -> compensate (cleanup partial resources)
+ *   -> spawn-instance-us-west-2 (alternative region)
+ *   -> success, workflow continues
+ */
+function applyRetryWithAlternative(
+  workflowId: string,
+  failedNodeId: string,
+  alternativeNode: InlineNodeDef
+): void {
+  const db = getDatabase();
+  const now = Date.now();
+
+  // Validate failed node exists and is failed
+  const failedNode = queryOne(
+    'SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?',
+    [workflowId, failedNodeId]
+  );
+  if (!failedNode || failedNode.status !== 'failed') {
+    throw new ValidationError(
+      `Node '${failedNodeId}' must exist and be failed for retry-with-alternative`
+    );
+  }
+
+  // Validate retry attempt limit
+  const previousAttempts = queryMany(
+    `SELECT * FROM workflow_pattern_applications
+     WHERE workflow_id = ? AND pattern = 'retry-with-alternative'
+       AND target_node_id = ?`,
+    [workflowId, failedNodeId]
+  );
+  if (previousAttempts.length >= MAX_RETRY_ATTEMPTS) {
+    throw new ValidationError(
+      `Max retry attempts (${MAX_RETRY_ATTEMPTS}) exhausted for node '${failedNodeId}'`
+    );
+  }
+
+  // Get downstream dependencies of failed node
+  const downstreamNodes = getDownstreamNodes(workflowId, failedNodeId);
+
+  // Create alternative node with same dependency position
+  const failedDeps = JSON.parse(failedNode.depends_on);
+  db.prepare(`
+    INSERT INTO workflow_nodes (
+      workflow_id, node_id, node_type, status, depends_on,
+      input_json, attempt, created_at
+    ) VALUES (?, ?, ?, 'pending', ?, ?, 0, ?)
+  `).run(
+    workflowId, alternativeNode.id, alternativeNode.type,
+    JSON.stringify(failedDeps),
+    JSON.stringify(alternativeNode.input), now
+  );
+
+  // Rewire downstream dependencies: replace failedNodeId with alternativeNode.id
+  for (const downstream of downstreamNodes) {
+    const deps = JSON.parse(downstream.depends_on) as string[];
+    const updatedDeps = deps.map(d => d === failedNodeId ? alternativeNode.id : d);
+    db.prepare(`
+      UPDATE workflow_nodes SET depends_on = ?
+      WHERE workflow_id = ? AND node_id = ?
+    `).run(JSON.stringify(updatedDeps), workflowId, downstream.node_id);
+  }
+
+  // Log pattern application
+  db.prepare(`
+    INSERT INTO workflow_pattern_applications (
+      workflow_id, pattern, target_node_id, config_json, applied_at
+    ) VALUES (?, 'retry-with-alternative', ?, ?, ?)
+  `).run(workflowId, failedNodeId, JSON.stringify({
+    failedNodeId,
+    alternativeNode,
+    reason: `Attempt ${previousAttempts.length + 1}`,
+  }), now);
+}
+```
+
+## §Helpers
+
+```typescript
+/**
+ * Get nodes that are predecessors (dependencies) of a given node.
+ */
+function getPredecessors(workflowId: string, nodeId: string): WorkflowNode[] {
+  const node = queryOne(
+    'SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?',
+    [workflowId, nodeId]
+  );
+  if (!node) return [];
+
+  const deps = JSON.parse(node.depends_on) as string[];
+  return deps.map(depId =>
+    queryOne(
+      'SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?',
+      [workflowId, depId]
+    )
+  ).filter(Boolean);
+}
+
+/**
+ * Get nodes that depend on a given node (downstream).
+ */
+function getDownstreamNodes(workflowId: string, nodeId: string): WorkflowNode[] {
+  return queryMany(
+    `SELECT * FROM workflow_nodes
+     WHERE workflow_id = ?
+       AND depends_on LIKE ?`,
+    [workflowId, `%"${nodeId}"%`]
+  );
+}
+
+/**
+ * Update join node dependencies to include new branch nodes.
+ */
+function updateJoinDependencies(
+  workflowId: string,
+  joinNodeId: string,
+  newDeps: string[]
+): void {
+  const joinNode = queryOne(
+    'SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?',
+    [workflowId, joinNodeId]
+  );
+  if (!joinNode) return;
+
+  const currentDeps = JSON.parse(joinNode.depends_on) as string[];
+  const mergedDeps = [...new Set([...currentDeps, ...newDeps])];
+
+  getDatabase().prepare(`
+    UPDATE workflow_nodes SET depends_on = ?
+    WHERE workflow_id = ? AND node_id = ?
+  `).run(JSON.stringify(mergedDeps), workflowId, joinNodeId);
+}
+```

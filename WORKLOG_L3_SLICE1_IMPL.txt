@@ -1,0 +1,111 @@
+WORKLOG: L3 Slice 1 Implementation — OrbStack End-to-End
+========================================================
+
+Status: IN PROGRESS
+Started: 2026-02-08
+Predecessor: WORKLOG_L3_SLICE1_PLANNING.txt (archived as worklogs/012)
+Plan reference: worklogs/012_WORKLOG_L3_SLICE1_PLANNING.txt
+
+## Goal
+
+Implement the minimal L3 "Spine" — CLI submits run -> control plane orchestrates
+-> OrbStack VM runs command -> agent streams logs back. `repl run "echo hello"`
+works end-to-end.
+
+## Steps (from planning worklog)
+
+  Step 0: Prerequisites .................. [X] fix AC1-3, promote 7 nodes L1->L2
+  Step 1: Project scaffolding + stubs .... [X] rename impl/, stubs, monorepo
+  Step 1.5: Framework migration .......... [X] Hono+Zod → ElysiaJS+TypeBox
+  Step 1.6: Drift audit .................. [X] spec/impl alignment, cross-refs
+  Step 2: Material layer ................. [ ] schema, db.ts, blob storage
+  Step 3: Shared types ................... [ ] types, errors, API schemas
+  Step 4: Provider layer ................. [ ] OrbStack via orbctl
+  Step 5: Workflow engine ................ [ ] core loop, CB, crash recovery
+  Step 6: launch-run intent .............. [ ] 8-node DAG + resource CRUD
+  Step 7: API layer ...................... [ ] Elysia routes, SSE, WebSocket
+  Step 8: Agent .......................... [ ] Python, SSE reader, executor
+  Step 9: CLI ............................ [ ] repl run + log streaming
+  Step 10: Integration test .............. [ ] end-to-end gate
+
+## Log
+
+[2026-02-08] Worklog created. Starting Step 0 (prerequisites).
+[2026-02-08] Step 0 COMPLETE. AC1: 6 strings fixed in launch-run.ts.l2.txt.
+             AC2: AVAILABLE→FAILED added to spec. AC3: depends_on column added
+             across 7 files. 0d: 7 node L2 files written (1,617 lines total).
+             Cross-ref check: 0 errors. BACKLOG AC1-AC3 all marked DONE.
+[2026-02-08] Starting Step 1 (project scaffolding + stubs).
+[2026-02-08] Step 1 COMPLETE. impl/ renamed to impl-pseudo/. New impl/ created
+             with Bun workspace monorepo. 44 stub files (7 shared, 28 control,
+             4 cli, 5 agent) totaling ~6,945 lines. All three TS packages
+             compile clean (tsc --noEmit). bun install passes.
+
+--- FRAMEWORK DECISION: Hono+Zod → ElysiaJS+TypeBox ---
+
+[2026-02-08] Framework evaluation completed. Decision: ElysiaJS + TypeBox.
+             Rationale:
+             - Higher ceiling: Bun-native, deeper type inference, built-in WebSocket
+             - TypeBox schemas ARE JSON Schema: Python agent can consume contracts
+               directly, OpenAPI generation without conversion
+             - Type deduplication: Static<typeof Schema> replaces 11 manual interfaces
+             - SSE is DIY regardless of framework (agent command stream needs
+               external push into per-connection ReadableStream)
+             - Bun already hard-locked (distributing control as binary, not NPM)
+             - Accepted risks: single maintainer, patch-version breaking changes,
+               smaller community. Pin versions.
+
+[2026-02-08] Starting Step 1.5: Framework migration (Hono+Zod → ElysiaJS+TypeBox).
+             Migration scope:
+             M1: Package.json updates (zod→@sinclair/typebox, hono→elysia)
+             M2: shared/src/api/agent.ts — Zod→TypeBox, eliminate 11 duplicate
+                 interfaces, derive types via Static<typeof Schema>
+             M3: shared/src/api/workflows.ts — Zod→TypeBox schemas, keep pure
+                 interfaces untouched (internal types, not API boundary)
+             M4: shared/src/index.ts — update re-exports (drop *Parsed suffixes)
+             M5: control/ HTTP layer — Hono→Elysia (main.ts, routes.ts,
+                 api/agent.ts, api/sse-protocol.ts). Plugin pattern with guards.
+             M6: STATUS.txt, CLAUDE.md — update stack references
+[2026-02-08] Step 1.5 COMPLETE. All 6 migration items done:
+             M1: package.json deps swapped, bun install clean (12 packages).
+             M2: agent.ts rewritten 294→225 lines. 11 duplicate interfaces
+                 eliminated. 6 new control→agent schemas added. All types
+                 derived via Static<typeof Schema>.
+             M3: workflows.ts schema section (lines 501-575) converted.
+                 Pure interfaces untouched.
+             M4: index.ts re-exports updated. Dropped 5 *Parsed types,
+                 added 6 control→agent schema exports.
+             M5: 4 control/ files migrated (main.ts, routes.ts, api/agent.ts,
+                 api/sse-protocol.ts). Hono→Elysia imports and types.
+             M6: STATUS.txt and CLAUDE.md updated.
+             All three TS packages compile clean (tsc --noEmit).
+
+--- DRIFT AUDIT: spec vs impl-pseudo vs impl ---
+
+[2026-02-08] Systematic drift audit across all three layers. Dispatched parallel
+             explore agents for inventories (impl, impl-pseudo, spec chapters,
+             backlog/worklog state), then cross-referencing agents (shared types
+             vs spec, launch-run DAG vs spec, DB schema vs spec DDL, structural
+             coverage). Found 18 drift items across 6 severity categories.
+[2026-02-08] Key decisions from audit:
+             D1: snake_case wins for wire format (TypeBox field names). No camelCase.
+             D2: HeartbeatMessage uses per-allocation array, not SSH session count.
+             D3: wait-for-boot node added to launch-run DAG (9 nodes total).
+             D4: CB pattern needed for DAG convergence (warm/cold paths).
+             D5: RWA removed from spawn-instance — node-level retry, then fail.
+             D6: updated_at added to spec DDL (workflows, workflow_nodes, manifests).
+[2026-02-08] Step 1.6 COMPLETE. 18 drift items fixed across 45 files:
+             - agent.ts: snake_case all fields, fix HeartbeatMessage structure,
+               move PrepareSnapshotAck direction, fix RunComplete.workflow_state,
+               add ArtifactMessage + InitCompleteMessage
+             - resources.ts: add completedAt, timeoutMs/timeoutAt, dependsOn;
+               fix region nullability, ManifestResource.resourceId type
+             - types.ts: remove invalid spawnComplete, add cancelling status
+             - errors.ts: CAPACITY_UNAVAILABLE→CAPACITY_ERROR, PROVIDER_ERROR→PROVIDER_INTERNAL
+             - workflows.ts: add triggerOnError to CB config, cleanup-manifest→cleanup
+             - launch-run.ts: add wait-for-boot node, fix DAG convergence edges
+             - db.ts: add tailscale_machine/feature_installation to StorageObject
+             - spec DDL: updated_at on 3 tables. spec intents: remove RWA.
+             - Cross-refs: all impl/→impl-pseudo/ paths fixed, impl-pseudo added
+               to check-crossrefs.py scan dirs, 11 L2 headings CamelCased.
+             Cross-ref check: 165 anchored, 92 bare, 25 file-only. 0 errors.

@@ -119,7 +119,7 @@ Key routing decisions:
 - MUST fall back to public IP if Tailscale IP unavailable
 - MUST be idempotent (multiple SSH attempts MUST NOT trigger duplicate installations)
 
-> See also: impl/cli/src/ssh.ts.l2.txt §ProxyCommandScript
+> See also: impl-pseudo/cli/src/ssh.ts.l2.txt §ProxyCommandScript
 
 ## Tailscale Ensure API Endpoint
 
@@ -129,7 +129,7 @@ Key routing decisions:
 - Return 'failed' status as-is to allow client-side retry decisions
 - Be idempotent: repeated calls during installation MUST NOT duplicate the install
 
-> See also: impl/control/src/resource/allocation.ts.l2.txt (Tailscale section)
+> See also: impl-pseudo/control/src/resource/allocation.ts.l2.txt (Tailscale section)
 
 ## Agent Tailscale Installation Handler
 
@@ -140,7 +140,7 @@ On receiving `trigger_tailscale` message, agent MUST:
 4. Wait for IP assignment (100.x.x.x format, up to 30 retries at 1s intervals)
 5. Report status ('ready' with IP, or 'failed') to control plane via PUT
 
-> See also: impl/control/src/resource/allocation.ts.l2.txt (Tailscale section)
+> See also: impl-pseudo/control/src/resource/allocation.ts.l2.txt (Tailscale section)
 
 ## User Experience
 

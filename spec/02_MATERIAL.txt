@@ -84,7 +84,7 @@ CREATE UNIQUE INDEX idx_instances_spawn_key ON instances(spawn_idempotency_key)
     WHERE spawn_idempotency_key IS NOT NULL;
 ```
 
-> See also: impl/control/src/material/db.types.ts.l2.txt §RecordTypes
+> See also: impl-pseudo/control/src/material/db.types.ts.l2.txt §RecordTypes
 
 **Key Design Decisions:**
 
@@ -182,7 +182,7 @@ CREATE INDEX idx_runs_created ON runs(created_at DESC);
 CREATE INDEX idx_runs_duration ON runs(started_at, finished_at);
 ```
 
-> See also: impl/control/src/material/db.types.ts.l2.txt §RecordTypes
+> See also: impl-pseudo/control/src/material/db.types.ts.l2.txt §RecordTypes
 
 **Key Design Decisions:**
 
@@ -273,7 +273,7 @@ CREATE INDEX idx_allocations_available ON allocations(instance_id, status, workd
     WHERE status = 'AVAILABLE';
 ```
 
-> See also: impl/control/src/material/db.types.ts.l2.txt §RecordTypes
+> See also: impl-pseudo/control/src/material/db.types.ts.l2.txt §RecordTypes
 
 **Key Design Decisions:**
 
@@ -384,6 +384,7 @@ CREATE TABLE workflows (
     created_at INTEGER NOT NULL,            -- Unix timestamp ms
     started_at INTEGER,                     -- Unix timestamp ms
     finished_at INTEGER,                    -- Unix timestamp ms
+    updated_at INTEGER NOT NULL,            -- Unix timestamp ms
 
     -- Foreign Keys
     FOREIGN KEY (parent_workflow_id) REFERENCES workflows(id),
@@ -447,6 +448,12 @@ CREATE TABLE workflow_nodes (
     output_json TEXT,                       -- Node output (JSON)
     error_json TEXT,                        -- Error details if failed (JSON)
 
+    -- Dependencies
+    depends_on TEXT,                        -- JSON array of node_id strings this node depends on
+                                            -- e.g., '["spawn","prepare"]'. Null = no dependencies (root node).
+                                            -- Persisted so crash recovery and dynamic pattern application
+                                            -- can reconstruct the DAG without the original blueprint.
+
     -- Execution
     attempt INTEGER NOT NULL DEFAULT 1,     -- Retry attempt number
     retry_reason TEXT,                      -- Reason for retry (if attempt > 1)
@@ -455,6 +462,7 @@ CREATE TABLE workflow_nodes (
     created_at INTEGER NOT NULL,            -- Unix timestamp ms
     started_at INTEGER,                     -- Unix timestamp ms
     finished_at INTEGER,                    -- Unix timestamp ms
+    updated_at INTEGER NOT NULL,            -- Unix timestamp ms
 
     -- Foreign Keys
     FOREIGN KEY (workflow_id) REFERENCES workflows(id) ON DELETE CASCADE,
@@ -469,7 +477,7 @@ CREATE INDEX idx_workflow_nodes_status ON workflow_nodes(workflow_id, status);
 CREATE INDEX idx_workflow_nodes_type ON workflow_nodes(node_type, status);
 ```
 
-> See also: impl/control/src/material/db.types.ts.l2.txt §RecordTypes
+> See also: impl-pseudo/control/src/material/db.types.ts.l2.txt §RecordTypes
 
 **Key Design Decisions:**
 
@@ -477,6 +485,13 @@ CREATE INDEX idx_workflow_nodes_type ON workflow_nodes(node_type, status);
 
 - `node_type` identifies handler. Same handler may appear multiple times
   (e.g., parallel fan-out creates multiple spawn nodes).
+
+- `depends_on` persists DAG edges as a JSON array of node_id strings. This is
+  required because patterns (Conditional-Branch, Insert-and-Reconverge, etc.)
+  dynamically modify the DAG at runtime. Without persistence, a crash after
+  pattern application but before workflow completion would lose the modified
+  topology. Stored per-node rather than in a separate `workflow_edges` table
+  for simplicity — node count per workflow is small (typically <20).
 
 - `attempt` + `retry_reason` support retry patterns.
 
@@ -575,7 +590,7 @@ CREATE TABLE object_tags (
 CREATE INDEX idx_object_tags_tag ON object_tags(tag);
 ```
 
-> See also: impl/control/src/material/db.types.ts.l2.txt §RecordTypes
+> See also: impl-pseudo/control/src/material/db.types.ts.l2.txt §RecordTypes
 
 **Key Design Decisions:**
 
@@ -627,7 +642,7 @@ CREATE INDEX idx_blobs_s3 ON blobs(s3_bucket, s3_key)
     WHERE s3_key IS NOT NULL;
 ```
 
-> See also: impl/control/src/material/db.types.ts.l2.txt §RecordTypes
+> See also: impl-pseudo/control/src/material/db.types.ts.l2.txt §RecordTypes
 
 **Key Fields:**
 - `id`: Integer primary key (allows multiple blobs with same checksum - logs may transiently match then diverge on append)
@@ -654,7 +669,7 @@ For mutable content (e.g., logs):
 
 The system MUST provide a mechanism to check for existing blobs by checksum before uploading. The system MUST return distinct lists of existing and missing checksums when queried with a bucket identifier and list of checksums. The system MUST support batch deduplication queries to minimize round-trips. The system SHOULD use the blobs table index on (bucket, checksum) for efficient lookups.
 
-> See also: impl/control/src/material/storage.ts.l2.txt §BlobDeduplication
+> See also: impl-pseudo/control/src/material/storage.ts.l2.txt §BlobDeduplication
 
 **Manifest Cleanup (Simplified):**
 
@@ -729,7 +744,7 @@ Objects reference blobs by checksum. Deduplication is decided per-upload:
 
 See implementation for full SQL patterns (inline vs S3, dedup vs no-dedup variants).
 
-> See also: impl/control/src/material/storage.ts.l2.txt §PresignedURLs
+> See also: impl-pseudo/control/src/material/storage.ts.l2.txt §PresignedURLs
 
 **Multi-Tenant Isolation:** Blobs scoped by bucket for clean tenant deletion,
 cost attribution, and security isolation. Trade-off: storage duplication across tenants.
@@ -918,6 +933,7 @@ CREATE TABLE manifests (
     created_at INTEGER NOT NULL,            -- Unix timestamp ms
     released_at INTEGER,                    -- When workflow released ownership
     expires_at INTEGER,                     -- When eligible for cleanup
+    updated_at INTEGER NOT NULL,            -- Unix timestamp ms
 
     -- Foreign Keys
     FOREIGN KEY (workflow_id) REFERENCES workflows(id)
@@ -958,7 +974,7 @@ CREATE INDEX idx_manifest_resources_lookup ON manifest_resources(resource_type, 
 CREATE INDEX idx_manifest_resources_priority ON manifest_resources(manifest_id, cleanup_priority);
 ```
 
-> See also: impl/control/src/material/db.types.ts.l2.txt §RecordTypes
+> See also: impl-pseudo/control/src/material/db.types.ts.l2.txt §RecordTypes
 
 **Key Design Decisions:**
 
@@ -1024,7 +1040,7 @@ CREATE INDEX idx_usage_records_time ON usage_records(started_at, finished_at);
 CREATE INDEX idx_usage_records_cost ON usage_records(estimated_cost_usd DESC);
 ```
 
-> See also: impl/control/src/material/db.types.ts.l2.txt §RecordTypes
+> See also: impl-pseudo/control/src/material/db.types.ts.l2.txt §RecordTypes
 
 **Key Design Decisions:**
 
@@ -1068,5 +1084,5 @@ only - not persisted to database.
 
 EXTERNAL material state MUST use in-memory time-to-live (TTL) caching only. The system MUST NOT persist cache entries to disk or database. The system MUST evict cache entries when their TTL expires. The system MUST support configurable TTL values per cache key. Default TTL SHOULD be 5 minutes for spot prices and capacity information. The system MUST fetch fresh data from provider APIs when cache entries are missing or expired.
 
-> See also: impl/control/src/material/external.ts.l2.txt §CoreCacheFunction
+> See also: impl-pseudo/control/src/material/external.ts.l2.txt §CoreCacheFunction
 

@@ -15,7 +15,7 @@ import re
 import sys
 from pathlib import Path
 
-DIRS_TO_SCAN = ["spec", "impl", "docs", "workshop"]
+DIRS_TO_SCAN = ["spec", "impl", "impl-pseudo", "docs", "workshop"]
 
 
 def find_repo_root():

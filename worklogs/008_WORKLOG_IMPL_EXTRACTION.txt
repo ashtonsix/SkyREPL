@@ -103,7 +103,7 @@ impl/ extraction: COMPLETE — all implementation-aligned pseudo-code now in L2 
 
 The impl/ L2 files are in great shape. However, pass 1 also made aggressive spec
 changes that were meant to be deferred: the "Spec stubs" directive
-(`> Implementation: impl/path/file.l2.txt §Section`) was applied as a REPLACEMENT
+(`> Implementation: impl-pseudo/path/file.l2.txt §Section`) was applied as a REPLACEMENT
 rather than an ADDITION, eviscerating spec content. Three failure modes:
 
   1. Over-stubbing: Substantial definitions replaced with 2-line stubs. E.g. the
@@ -177,7 +177,7 @@ Key patterns:
 
 1. CROSS-REFERENCE STUBS (additive, never replacing)
 
-   Format: `> See also: impl/path/file.l2.txt §Section Name`
+   Format: `> See also: impl-pseudo/path/file.l2.txt §Section Name`
    Placed after the spec content they reference, not before.
    One stub per logical block (not per line).
 
@@ -185,7 +185,7 @@ Key patterns:
 
    SQL DDL (Ch02 ~55%):
      KEEP AS-IS. The DDL IS the data model specification.
-     Add cross-ref to migration files: `> Migration: impl/control/migrations/001.sql.l2.txt`
+     Add cross-ref to migration files: `> Migration: impl-pseudo/control/migrations/001.sql.l2.txt`
      Add normative annotations where missing: "The instances table MUST include..."
 
    SQL example queries (Ch02, scattered):
@@ -284,7 +284,7 @@ Phase A: Gap Remediation (creates new impl/ files)
 
 Phase B: Cross-Reference Pass (additive stubs in spec)
 
-  For each spec chapter, add `> See also: impl/...` stubs after every pseudo-code
+  For each spec chapter, add `> See also: impl-pseudo/...` stubs after every pseudo-code
   block that has a corresponding L2 file. No other changes.
 
   Dispatch: 3-4 parallel sonnet agents, each handling 3-4 chapters.
@@ -365,4 +365,4 @@ Previous: worklogs/007_WORKLOG_L2B_ENTRY.txt
 Next: worklogs/009_WORKLOG_SPEC_HARDENING.txt
 Spec audit: WORKLOG_SPEC_AUDIT.txt
 Spec chapters: spec/01_INTRODUCTION.txt through spec/15_OPERATIONS.txt
-Impl L2 files: impl/**/*.l2.txt (53 files)
+Impl L2 files: impl-pseudo/**/*.l2.txt (53 files)

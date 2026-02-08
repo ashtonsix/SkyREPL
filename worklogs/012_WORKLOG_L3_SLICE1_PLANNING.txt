@@ -1,0 +1,960 @@
+WORKLOG: L3 Slice 1 Planning — OrbStack End-to-End
+==================================================
+
+Status: COMPLETE
+Started: 2026-02-08
+Predecessor: worklogs/011_WORKLOG_L2B_COMPLETION.txt
+
+## Goal
+
+Plan the minimal L3 implementation to get a single run executing end-to-end
+on OrbStack: CLI submits run -> control plane orchestrates -> agent streams
+logs back. This is the "Spine" slice.
+
+## Scope
+
+Research and planning ONLY — no code changes in this worklog.
+
+## Research Tasks
+
+R1. Digest ROUGH_NOTES_CODE_PLANNING.txt — extract actionable insights,
+    cross-reference against spec, identify what holds vs. what's stale.
+
+R2. Explore spec chapters relevant to Slice 1:
+    - Ch05 (Allocations) — warm pool, claiming, state machine
+    - Ch06 (Workflows) — engine tick loop, crash recovery
+    - Ch07 (Intents) — launch-run orchestration
+    - Ch08 (Providers) — provider contract, OrbStack specifics
+    - Ch09 (API) — endpoints needed for agent communication
+    - Ch11 (Agent) — SSE reader, heartbeat, log streaming
+
+R3. Audit current impl/ for Slice 1 files:
+    - What's at L2 already vs. L1-only?
+    - What are the 17 MVK L1-only files from D17 gap?
+    - Which of those are on the Slice 1 critical path?
+
+R4. Review BACKLOG.txt for L3-blocking items (AC1-AC3, BT items).
+
+R5. Review legacy codebase (~/SkyREPL-legacy) for OrbStack integration
+    patterns and sharp-edge solutions.
+
+## Plan Deliverable
+
+A sequenced implementation plan covering:
+1. Pre-requisites (AC1-AC3 fixes, any L1->L2 promotions needed)
+2. File-by-file implementation order with dependencies
+3. Technology choices (SQLite driver, HTTP framework, etc.)
+4. The operational gate: what "done" looks like for Slice 1
+5. Known risks and mitigations
+
+## Phases
+
+Phase 1: Research (R1-R5) .............. [X] COMPLETE
+Phase 2: Synthesis & gap analysis ...... [X] COMPLETE
+Phase 3: Implementation plan ........... [X] COMPLETE
+
+
+================================================================================
+PHASE 1 SUMMARY: Research Findings
+================================================================================
+
+Five parallel research streams converged on a clear picture of the Slice 1
+critical path. Key findings by stream:
+
+**R1 (Rough Notes Digest)**
+Validated the kill-safe execution philosophy (two-phase spawn, intent-first),
+byte-by-byte SSE reader, atomic claiming, and workflow_state format. Found
+three stale claims: (a) manifest sealing incorrectly deferred to Slice 3 —
+it is part of launch-run and must be in Slice 1; (b) allocation.ts missing
+from the "First 10 Files" priority list despite being central to the state
+machine; (c) the behavioral coverage audit offered at the end was already
+completed in worklog 011. Key validated insight: Zod is NOT spec-mandated,
+it is an implementation choice (spec is library-agnostic for validation).
+
+**R2 (Spec Exploration)**
+Chapter-by-chapter MVK extraction for Ch05-Ch11 yielded the end-to-end data
+path: CLI hashes files -> POST /v1/blobs/check -> upload missing -> POST
+/v1/workflows/launch-run -> workflow engine executes 7-node DAG -> agent
+receives start_run via SSE -> downloads files -> executes command -> streams
+stdout/stderr -> sends run_complete -> finalize. Minimum DAG: resolve-instance
+-> [CB: warm/cold] -> wait-for-boot -> create-allocation -> sync-files ->
+await-completion -> finalize-run. The Conditional-Branch pattern is required
+even for MVK (warm pool decision).
+
+**R3 (Impl Audit)**
+136 total files. 53 at L2 (~22k lines). 83 at L1. Critical finding: 7
+workflow node files (510 lines total) are L1-only and ALL sit on the Slice 1
+critical path. These are the actual steps the DAG executes. The agent
+subsystem is the best-covered: all 5 Slice 1 agent files have L2 pseudocode
+(1,981 lines). Resource CRUD for instance.ts (33 lines) and run.ts (35 lines)
+are L1-only gaps. ~6,400 lines of existing L2 are NOT on Slice 1 path
+(AWS provider, orphan scanner, cleanup-manifest, snapshots, etc.).
+
+**R4 (Backlog Blockers)**
+Three AC items MUST be fixed before L3 entry: AC1 (workflow_state strings —
+impl uses wrong names like 'run:timeout' vs spec's 'launch-run:timeout'),
+AC2 (AVAILABLE->FAILED transition missing from spec but needed for cleanup),
+AC3 (DAG dependency persistence — workflow_nodes has no depends_on column,
+crash after pattern application loses topology). Three BT items block Slice 1
+testing: BT2 (completed_at on FAILED), BT8 (expires_at on seal), BT9
+(WorkflowDefinition format mismatch between launch-run and engine). Three BT
+items affect quality: BT5 (scoring), BT6 (transition duplication), BT7
+(ID type mismatch string vs number).
+
+**R5 (Legacy Patterns)**
+OrbStack uses orbctl CLI, not an SDK. Cloud-init has a timing bug on OrbStack
+(runcmd fires before FS ready) — solution: skip cloud-init entirely, use
+`orbctl run` post-boot to inject bootstrap script. Multi-fallback IP discovery
+(orbctl info -> DNS {name}.orb.local -> hostname -I inside VM). Chaos injection
+wrapper wraps any provider. Byte-by-byte SSE confirmed essential. Workdir
+cleanup must chdir to home first (avoid getcwd on deleted directory). Bootstrap
+script is composed from helper functions (header, disable-apt-daily, init,
+download-agent, start-agent).
+
+**Convergence across streams:**
+All five streams independently confirmed: (a) the 7 workflow nodes are the
+critical gap; (b) AC1-AC3 are genuine blockers; (c) the agent is well-covered;
+(d) OrbStack provider is simpler than expected (60 L2 lines, CLI-based).
+
+**Surprises:**
+- Manifest sealing is part of launch-run, not a separate slice (R1 corrected)
+- orbstack.ts.l2.txt is only 60 lines — will need significant expansion at L3
+- The legacy codebase skips cloud-init entirely for OrbStack (R5)
+- Two parallel API directory structures exist (flat L2 files + nested L1 files)
+
+
+================================================================================
+PHASE 2: Gap Analysis & Synthesis
+================================================================================
+
+### 2.1 True Critical Path
+
+Cross-referencing R2 (spec data flow) with R3 (file fidelity audit):
+
+  CLI (run.ts) -> API (routes.ts) -> launch-run intent -> workflow engine
+    -> 7 nodes: resolve -> [CB] -> spawn/claim -> wait -> alloc -> sync
+       -> await -> finalize
+    -> OrbStack provider (orbctl)
+    -> Agent (SSE + heartbeat + executor)
+  -> Log streaming back to CLI (WebSocket)
+
+Files on critical path, grouped by L2 readiness:
+
+  READY (L2 exists, solid pseudocode):
+    cli/src/commands/run.ts .............. 343 lines
+    cli/src/client.ts .................... 615 lines
+    control/src/api/routes.ts ............ 698 lines
+    control/src/api/agent.ts ............. 598 lines
+    control/src/api/sse-protocol.ts ...... 505 lines
+    control/src/intent/launch-run.ts ..... 740 lines
+    control/src/workflow/engine.ts ........ 724 lines
+    control/src/workflow/patterns.ts ...... 462 lines
+    control/src/workflow/state-transitions.ts  690 lines
+    control/src/resource/allocation.ts ... 565 lines
+    control/src/resource/manifest.ts ..... 641 lines
+    control/src/provider/contracts.ts .... 173 lines
+    control/src/provider/types.ts ........ 759 lines
+    control/src/provider/registry.ts ..... 376 lines
+    control/src/provider/errors.ts ....... 261 lines
+    control/src/provider/compute/orbstack.ts  60 lines
+    control/src/material/db.ts ........... 1,204 lines
+    control/src/material/db.types.ts ..... 389 lines
+    control/src/material/storage.ts ...... 546 lines
+    control/migrations/001_initial.sql ... 539 lines
+    shared/src/types.ts .................. 273 lines
+    shared/src/errors.ts ................. 140 lines
+    shared/src/resources.ts .............. 315 lines
+    shared/src/api/agent.ts .............. 217 lines
+    shared/src/api/workflows.ts .......... 520 lines
+    shared/src/config/timing.ts .......... 252 lines
+    agent/agent.py ....................... 319 lines
+    agent/executor.py .................... 630 lines
+    agent/sse.py ......................... 520 lines
+    agent/heartbeat.py ................... 204 lines
+    agent/logs.py ........................ 308 lines
+    ---
+    TOTAL L2 ON CRITICAL PATH: ~12,586 lines across 31 files
+
+  GAP (L1-only, must address before or during L3):
+    control/src/workflow/nodes/resolve-instance.ts ....... 92 L1 lines
+    control/src/workflow/nodes/spawn-instance.ts ......... 167 L1 lines
+    control/src/workflow/nodes/create-allocation.ts ...... 25 L1 lines
+    control/src/workflow/nodes/claim-allocation.ts ....... 45 L1 lines
+    control/src/workflow/nodes/start-run.ts .............. 117 L1 lines
+    control/src/workflow/nodes/wait-completion.ts ........ 27 L1 lines
+    control/src/workflow/nodes/finalize.ts ............... 37 L1 lines
+    control/src/resource/instance.ts ..................... 33 L1 lines
+    control/src/resource/run.ts .......................... 35 L1 lines
+    control/src/background/hold-expiry.ts ................ 43 L1 lines
+    ---
+    TOTAL L1 GAP ON CRITICAL PATH: 621 lines across 10 files
+
+  WIRING (L1-only, structural, can go direct to L3):
+    control/src/main.ts .................. 69 L1 lines (server entry)
+    cli/src/main.ts ...................... 68 L1 lines (CLI entry)
+    cli/src/config.ts .................... 58 L1 lines (config loading)
+    control/src/workflow/engine.types.ts .. 16 L1 lines
+    control/src/intent/launch-run.types.ts  54 L1 lines
+
+### 2.2 Conflicts Between Sources (and Resolution)
+
+1. **Manifest sealing: Slice 1 or Slice 3?**
+   R1 (rough notes) says Slice 3. R2 (spec) says launch-run includes sealing.
+   STATUS.txt MVK definition lists "Manifests: DRAFT -> SEALED."
+   RESOLUTION: Slice 1. The launch-run finalize node seals the manifest.
+   BT8 (expires_at) must be fixed at the same time.
+
+2. **Warm pool in MVK: yes or no?**
+   STATUS.txt MVK says "CLAIMED -> ACTIVE -> COMPLETE" (no AVAILABLE).
+   R2 shows the CB pattern (warm/cold) is part of the launch-run DAG.
+   R1 notes warm pool claiming is "partially" actionable.
+   RESOLUTION: Include the CB pattern structure but always take the cold path
+   for initial testing. The warm pool query and claiming logic should exist
+   (it is simple) but warm pool replenishment is deferred. This keeps the
+   DAG shape honest while removing the hard integration problem.
+
+3. **allocation.ts priority: high or low?**
+   R1 (rough notes) omits it from top 10. R3 (audit) shows it at L2 (565
+   lines). R4 (backlog) has 5 items touching it (BT2, BT5, BT6, BT7, AC2).
+   RESOLUTION: allocation.ts is already at L2 and does not need promotion,
+   but it needs cleanup during L3 (consolidate transitions per BT6, fix
+   types per BT7, add completed_at per BT2). It is high priority for
+   correctness, not for promotion.
+
+4. **File sync: S3 or local?**
+   R2 (spec) describes presigned URLs to S3. For OrbStack (local dev), S3
+   means MinIO or a local blob store.
+   RESOLUTION: Use local filesystem blob store for Slice 1. The control plane
+   serves blobs directly via HTTP (no S3/MinIO dependency). The presigned URL
+   abstraction still works — the URL just points to localhost. This removes
+   an entire infrastructure dependency from the first slice.
+
+5. **Log streaming: WebSocket or SSE?**
+   R2 (spec) says "WS /v1/runs/:id/logs" for CLI log streaming.
+   RESOLUTION: WebSocket for CLI streaming (Hono supports it via Bun's
+   WebSocket). SSE only for agent command delivery (different direction).
+
+6. **L1->L2 promotion vs direct L3?**
+   R3 identifies 10 files / 621 lines as critical-path L1 gaps.
+   RESOLUTION: The 7 workflow node files (510 lines) should get L2 treatment
+   because they encode business logic (node contracts, error handling,
+   resource emission). The 3 remaining files (instance.ts, run.ts,
+   hold-expiry.ts totaling 111 lines) are thin CRUD/timers with clear
+   patterns from existing L2 neighbors — go direct to L3.
+
+### 2.3 Technology Decisions
+
+| Decision             | Choice                  | Rationale                                       |
+|----------------------|-------------------------|-------------------------------------------------|
+| TypeScript runtime   | Bun                     | Used in legacy, built-in SQLite, fast startup   |
+| SQLite driver        | bun:sqlite              | Zero-dep, WAL mode, built-in to Bun             |
+| HTTP framework       | Hono                    | Lightweight, Bun-native, WebSocket support      |
+| Validation           | Zod                     | De facto TS standard, good error messages        |
+| Python agent         | stdlib only             | Spec-mandated (Ch11), no pip install on VMs     |
+| Monorepo structure   | Bun workspaces          | control/, cli/, shared/ as packages              |
+| Package manager      | Bun                     | Single tool for runtime + deps + scripts         |
+| Test framework       | bun:test                | Built-in, fast, compatible with Hono testing     |
+| Process management   | Single Bun process      | Workflow engine runs in-process (no worker pool) |
+| Blob storage (Slice 1) | Local filesystem      | Avoid MinIO/S3 dep for first slice               |
+
+Not choosing yet (defer to Slice 2+):
+- S3 client library (when moving to real blob storage)
+- Tailscale integration approach
+- CLI framework (use raw arg parsing for `repl run` only)
+
+
+================================================================================
+PHASE 3: Implementation Plan
+================================================================================
+
+### Step 0: Prerequisites (AC1-AC3 + L1->L2 Promotions)
+Complexity: M | Dependencies: none | Gate: spec/impl alignment verified
+
+  0a. Fix AC1: Align workflow_state strings in impl-pseudo to spec naming
+      Files: impl-pseudo/control/src/intent/launch-run.ts.l2.txt
+             impl-pseudo/control/src/workflow/state-transitions.ts.l2.txt
+      Action: Replace 'run:timeout' -> 'launch-run:timeout',
+              'run:complete' -> 'launch-run:complete',
+              'launch:spawning' -> 'spawn:pending',
+              'launch:booting' -> 'launch-run:provisioning', etc.
+
+  0b. Fix AC2: Add AVAILABLE->FAILED to spec allocation state machine
+      Files: spec/05_ALLOCATIONS.txt
+      Action: Add transition to VALID_TRANSITIONS table.
+
+  0c. Fix AC3: Add DAG dependency persistence
+      Files: spec/02_MATERIAL.txt
+             impl-pseudo/control/migrations/001_initial.sql.l2.txt
+             impl-pseudo/control/src/workflow/engine.ts.l2.txt
+      Action: Add `depends_on TEXT` column to workflow_nodes table
+              (JSON array of node IDs). Update engine to persist
+              dependencies when patterns modify the DAG.
+
+  0d. Promote 7 workflow node files from L1 to L2
+      Files: impl-pseudo/control/src/workflow/nodes/*.ts
+             (resolve-instance, spawn-instance, create-allocation,
+              claim-allocation, start-run, wait-completion, finalize)
+      Action: Write L2 pseudocode based on spec Ch07 node contracts,
+              R2 findings (inputs/outputs/resource emission), and
+              existing engine.ts.l2.txt NodeExecutor interface.
+      Note: This is 510 L1 lines -> estimated 800-1200 L2 lines.
+
+  Gate: Cross-ref integrity check passes (scripts/check-crossrefs.py).
+        All AC items resolved in spec+impl-pseudo. Node L2 files exist.
+
+------------------------------------------------------------------------
+
+### Step 1: Project Scaffolding + Stub Generation
+Complexity: M | Dependencies: Step 0 | Gate: `bun run check` passes, stubs compile
+
+  1a. Rename impl/ -> impl-pseudo/
+      The existing pseudocode directory becomes impl-pseudo/. This is the
+      L1/L2 reference material. It is NOT modified during L3 work.
+
+  1b. Create impl/ for L3 working code
+      Structure mirrors impl-pseudo/ but contains real TypeScript/Python:
+
+      impl/
+      ├── package.json              (workspace root)
+      ├── bunfig.toml               (Bun config)
+      ├── README.md                 (L3 conventions, how to run)
+      ├── control/
+      │   ├── package.json          (deps: hono, zod, @skyrepl/shared)
+      │   ├── tsconfig.json
+      │   └── src/
+      │       ├── main.ts
+      │       ├── material/         (db.ts, storage.ts, ...)
+      │       ├── workflow/         (engine.ts, patterns.ts, nodes/*.ts, ...)
+      │       ├── intent/           (launch-run.ts, ...)
+      │       ├── resource/         (allocation.ts, instance.ts, run.ts, ...)
+      │       ├── provider/         (contracts.ts, compute/orbstack.ts, ...)
+      │       └── api/              (routes.ts, agent.ts, sse-protocol.ts, ...)
+      ├── cli/
+      │   ├── package.json          (deps: @skyrepl/shared)
+      │   ├── tsconfig.json
+      │   └── src/
+      │       ├── main.ts
+      │       ├── client.ts
+      │       ├── config.ts
+      │       └── commands/run.ts
+      ├── shared/
+      │   ├── package.json          (deps: zod)
+      │   ├── tsconfig.json
+      │   └── src/
+      │       ├── types.ts
+      │       ├── errors.ts
+      │       ├── resources.ts
+      │       ├── api/agent.ts
+      │       ├── api/workflows.ts
+      │       └── config/timing.ts
+      ├── agent/
+      │   ├── agent.py
+      │   ├── sse.py
+      │   ├── executor.py
+      │   ├── heartbeat.py
+      │   └── logs.py
+      └── tests/
+          └── integration/
+
+  1c. Generate stub files for all Slice 1 modules
+      Every Slice 1 file gets a real .ts/.py file with:
+      - All exported types, interfaces, and enums (fully defined)
+      - All exported functions/methods with correct signatures
+      - Function bodies: `throw new Error("not implemented")`
+      - Python equivalent: `raise NotImplementedError`
+      - Imports between modules wired up correctly
+
+      This means after Step 1, the ENTIRE Slice 1 surface area compiles
+      and is importable — you can write integration tests against the stubs
+      before any implementation exists. Each subsequent step replaces
+      `throw new Error("not implemented")` with real logic.
+
+      Source for stub signatures: impl-pseudo/ L2 files (types, function
+      names, parameters) + shared/src/ type definitions from Step 3.
+
+  Key decisions:
+  - L3 code lives in impl/control/src/*.ts (plain .ts, no .l3 suffix)
+  - impl-pseudo/ remains as read-only reference pseudocode
+  - shared/ is a Bun workspace package imported by control/ and cli/
+  - agent/ is standalone Python, deployed via bootstrap script
+  - Stubs enable incremental implementation: each step replaces stubs
+    with real code, and the project compiles at every step boundary
+
+  Gate: `bun install` succeeds. `bun run typecheck` passes across all
+        packages. All stub files compile. Importing any module works
+        (calling functions throws "not implemented").
+
+------------------------------------------------------------------------
+
+### Step 2: Material Layer (Schema + DB Connection)
+Complexity: M | Dependencies: Step 1 | Gate: migrations run, queries work
+Note: Stubs exist from Step 1. Replace throw("not implemented") with real logic.
+
+  2a. Schema (DDL)
+      Source: impl-pseudo/control/migrations/001_initial.sql.l2.txt (539 lines)
+      Output: impl-pseudo/control/src/migrations/001_initial.sql
+      Scope: Create tables: instances, runs, allocations, manifests,
+             workflows, workflow_nodes, objects (blobs), idempotency_keys.
+             Include AC3 fix (depends_on column on workflow_nodes).
+             Include updated_at on allocations, manifest_cleanup_state.
+      Note: Start with core tables only. Skip manifest_resources,
+            scheduled_terminations (defer to later slices).
+
+  2b. Database connection
+      Source: impl-pseudo/control/src/material/db.ts.l2.txt (1,204 lines)
+      Output: impl-pseudo/control/src/material/db.ts
+      Scope: bun:sqlite wrapper with WAL mode, PRAGMA settings,
+             migration runner, prepared statement cache.
+             Core queries: insert/get/update for instances, runs,
+             allocations, workflows, workflow_nodes, objects.
+      Note: Only implement queries needed by Slice 1 nodes.
+            Warm pool query (findWarmAllocation) included but simplified.
+
+  2c. Blob storage (local filesystem)
+      Source: impl-pseudo/control/src/material/storage.ts.l2.txt (546 lines)
+      Output: impl-pseudo/control/src/material/storage.ts
+      Scope: Store blobs in ./data/blobs/{checksum}. Serve via HTTP.
+             blobCheck(checksums) -> {missing, urls}.
+             blobUpload(checksum, data). blobDownload(checksum) -> data.
+      Note: No S3 for Slice 1. URLs point to control plane HTTP server.
+
+  Gate: `bun test control/src/material/` passes. Can create tables, insert
+        rows, run all Slice 1 queries. Blob store/retrieve round-trips.
+
+------------------------------------------------------------------------
+
+### Step 3: Shared Types
+Complexity: S | Dependencies: Step 1 | Gate: types compile, no any
+
+  Source: impl-pseudo/shared/src/*.l2.txt (~1,917 lines across 7 files)
+  Output: impl-pseudo/shared/src/
+
+  3a. Core types (types.ts)
+      AllocationStatus, WorkflowStatus, NodeStatus, InstanceStatus,
+      ManifestStatus, RunStatus. The WorkflowState type enforcing
+      '<workflow>:<phase>' format (AC1 fix realized in types).
+
+  3b. Resource types (resources.ts)
+      Instance, Run, Allocation, Manifest, Workflow, WorkflowNode.
+      Match DDL column types (ID as number, not string — BT7 fix).
+
+  3c. Agent API types (api/agent.ts)
+      StartRunMessage, HeartbeatRequest, HeartbeatAckMessage,
+      LogMessage, RunCompleteMessage. SSE event types.
+
+  3d. Workflow API types (api/workflows.ts)
+      LaunchRunRequest, LaunchRunResponse, WorkflowStatusResponse.
+
+  3e. Timing constants (config/timing.ts)
+      HEARTBEAT_INTERVAL_MS, CLAIMED_TIMEOUT_MS, NODE_TIMEOUT_MS, etc.
+
+  3f. Error types (errors.ts)
+      SkyREPLError base class, ProviderError, WorkflowError.
+
+  Gate: `bun run typecheck` passes for shared/. All resource types match
+        DDL column types. WorkflowState type rejects invalid strings.
+
+------------------------------------------------------------------------
+
+### Step 4: Provider Layer (OrbStack)
+Complexity: M | Dependencies: Steps 2, 3 | Gate: spawn + terminate work
+
+  Source: impl-pseudo/control/src/provider/*.l2.txt + legacy provider-local.ts
+  Output: impl-pseudo/control/src/provider/
+
+  4a. Provider contract (contracts.ts)
+      Provider interface: spawn, terminate, list, get, generateBootstrap.
+      ProviderCapabilities type. SpawnOptions, ProviderInstance types.
+
+  4b. Provider errors (errors.ts)
+      ProviderError base with code/category/retryable/provider.
+      NotFoundError for terminate-missing-instance case.
+
+  4c. OrbStack implementation (compute/orbstack.ts)
+      Key patterns from legacy (R5):
+      - Use orbctl CLI (not SDK). Detect mac mode vs direct mode.
+      - spawn: `orbctl create ubuntu:noble {name} -a arm64`
+        then `orbctl run -m {name} sh -c {bootstrap}` (skip cloud-init!)
+      - terminate: `orbctl delete -f {name}` (idempotent on not-found)
+      - get: `orbctl info {name} --format json`
+      - list: `orbctl list --format json`, filter repl-* prefix
+      - IP discovery: multi-fallback (orbctl info -> DNS -> hostname -I)
+      - generateBootstrap: compose script from helpers
+        (disable-apt-daily, download-agent, set env vars, start agent)
+
+  4d. Provider registry (registry.ts)
+      Register OrbStack provider. Lookup by name.
+
+  Gate: Can spawn an OrbStack VM, get its IP, run a command inside it,
+        and terminate it. All via the provider interface.
+
+------------------------------------------------------------------------
+
+### Step 5: Workflow Engine (Core Loop + CB Pattern)
+Complexity: L | Dependencies: Steps 2, 3 | Gate: DAG executes, crash recovers
+
+  Source: impl-pseudo/control/src/workflow/engine.ts.l2.txt (724 lines),
+          patterns.ts.l2.txt (462 lines), state-transitions.ts.l2.txt (690)
+  Output: impl-pseudo/control/src/workflow/
+
+  5a. Engine core (engine.ts)
+      WorkflowEngine class:
+      - submit(request): Create workflow + nodes in DB, start execution.
+      - executeLoop(workflowId): Load nodes, find ready (pending + deps
+        met), execute concurrently, loop until complete/failed.
+      - Node execution: Set node 'running' BEFORE execute(), then
+        'completed'/'failed' AFTER. Two-phase for crash safety.
+      - Ready detection: node.status === 'pending' AND all nodes in
+        node.depends_on have status 'completed' or 'skipped'.
+
+  5b. Crash recovery (engine.ts)
+      recoverWorkflows(): On startup, find workflows with status='running'.
+      For each: find nodes with status='running'. If idempotent, reset to
+      'pending'. If not, mark 'failed'. Resume executeLoop.
+
+  5c. Conditional-Branch pattern (patterns.ts)
+      CB: evaluate condition -> mark one branch's nodes as 'pending',
+      other as 'skipped' -> set join node depends_on to chosen branch.
+      Used for warm-pool decision in launch-run.
+
+  5d. State transitions (state-transitions.ts)
+      Single canonical source for allocation state transitions (BT6 fix).
+      validateTransition, transitionAllocation (with CAS), completed_at
+      on ALL terminal states (BT2 fix).
+
+  5e. Workflow + node types (engine.types.ts)
+      WorkflowSubmission, NodeExecutor interface, NodeContext.
+
+  Gate: Can submit a workflow with a CB pattern, execute it, verify nodes
+        run in dependency order. Kill process mid-execution, restart,
+        verify recovery completes the workflow.
+
+------------------------------------------------------------------------
+
+### Step 6: launch-run Intent (7-Node DAG)
+Complexity: L | Dependencies: Steps 4, 5 | Gate: end-to-end with mock agent
+
+  Source: impl-pseudo/control/src/intent/launch-run.ts.l2.txt (740 lines),
+          Step 0d L2 node files
+  Output: impl-pseudo/control/src/intent/launch-run.ts,
+          impl/control/src/workflow/nodes/*.ts
+
+  The DAG:
+
+    resolve-instance
+        |
+       [CB: warm available?]
+       / \
+    claim  spawn-instance
+       \ /
+    wait-for-boot
+        |
+    create-allocation
+        |
+    sync-files
+        |
+    await-completion
+        |
+    finalize-run
+
+  6a. Blueprint registration (launch-run.ts)
+      Register launch-run workflow type with engine. Define node graph
+      with depends_on edges. Input schema: {command, spec, provider,
+      files?, env?}. Fix BT9 (align WorkflowDefinition format with
+      engine's WorkflowBlueprint).
+
+  6b. Node implementations (nodes/*.ts)
+      resolve-instance: Query warm pool. For Slice 1, always returns
+        warmAvailable=false (cold path). Apply CB pattern.
+      spawn-instance: Two-phase spawn. Phase 1: insert instance record
+        with workflow_state='spawn:pending', emit to manifest. Phase 2:
+        call provider.spawn(), update record on success/failure.
+      claim-allocation: Atomic CAS claim (not used in cold path for MVK
+        but structurally present for CB correctness).
+      wait-for-boot: Poll instance status via provider.get() until
+        status='running'. For OrbStack, near-instant.
+      create-allocation: Insert allocation with status=CLAIMED, run_id
+        set, workdir assigned. Emit to manifest (priority 90).
+      sync-files: Generate blob download URLs. Send start_run message
+        via SSE to agent. Wait for sync_complete log message.
+        Transition CLAIMED -> ACTIVE on success.
+      await-completion: Block until run_complete message received from
+        agent. Extract exit_code.
+      finalize-run: Transition ACTIVE -> COMPLETE. Set completed_at.
+        Seal manifest with expires_at (BT8 fix). Update run status.
+
+  6c. Resource CRUD (instance.ts, run.ts)
+      Thin wrappers: createInstance, getInstance, updateInstance.
+      createRun, getRun, updateRun. Direct L1->L3 (patterns clear from
+      allocation.ts.l2.txt).
+
+  Gate: Manually trigger launch-run with a mock agent that immediately
+        sends sync_complete and run_complete. Verify: workflow completes,
+        allocation transitions AVAILABLE->CLAIMED->ACTIVE->COMPLETE
+        (or CLAIMED->ACTIVE->COMPLETE for cold path), manifest sealed.
+
+------------------------------------------------------------------------
+
+### Step 7: API Layer (Agent Endpoints + CLI Endpoints)
+Complexity: M | Dependencies: Steps 5, 6 | Gate: curl test all endpoints
+
+  Source: impl-pseudo/control/src/api/*.l2.txt (routes 698, agent 598, sse 505)
+  Output: impl-pseudo/control/src/api/
+
+  7a. Server entry (main.ts)
+      Hono app. Register routes. Start workflow engine recovery on boot.
+      Listen on configurable port (default 3000).
+
+  7b. Workflow endpoints (routes.ts)
+      POST /v1/workflows/launch-run — Validate input (Zod), submit to
+        workflow engine, return 202 {workflow_id, run_id, status_url,
+        stream_url}.
+      GET /v1/workflows/:id/status — Return current workflow state,
+        node statuses, progress.
+
+  7c. Agent endpoints (agent.ts)
+      POST /v1/agent/heartbeat — Validate, update instance
+        last_heartbeat, return {ack, server_time}. Deliver heartbeat_ack
+        via SSE if connection exists.
+      POST /v1/agent/logs — Validate, store log batch. If stream is
+        'sync_complete', signal the sync-files node. Forward logs to
+        any connected CLI WebSocket clients.
+      GET /v1/agent/commands — SSE endpoint. Register connection by
+        instance_id. Send queued commands (start_run). Keep-alive pings.
+
+  7d. Blob endpoints (routes.ts)
+      POST /v1/blobs/check — Accept {checksums}, return {missing, urls}.
+        URLs point to local blob store for Slice 1.
+      PUT /v1/blobs/:checksum — Upload blob data. Store in local FS.
+
+  7e. CLI streaming (routes.ts)
+      WS /v1/runs/:id/logs — WebSocket. On connect, start sending buffered
+        + live log messages for the run. Send StatusMessage on completion.
+        Close connection when run reaches terminal state.
+
+  7f. SSE protocol (sse-protocol.ts)
+      SSEManager: track active connections by instance_id. Queue commands
+      per instance. Deliver on connect or reconnect. Keep-alive every 15s.
+      Command acknowledgment tracking (pending_command_acks in heartbeat).
+
+  Gate: curl POST /v1/workflows/launch-run returns 202. curl GET status
+        returns workflow state. SSE endpoint streams events. WebSocket
+        streams logs.
+
+------------------------------------------------------------------------
+
+### Step 8: Agent (Python)
+Complexity: M | Dependencies: none (parallel with Steps 2-7)
+Gate: agent boots, connects SSE, executes command, streams logs
+
+  Source: impl-pseudo/agent/*.l2.txt (agent 319, executor 630, sse 520,
+          heartbeat 204, logs 308 = 1,981 lines)
+  Output: impl-pseudo/agent/
+
+  8a. SSE reader (sse.py)
+      Byte-by-byte read(1) reader. Connect to /v1/agent/commands.
+      Parse SSE events (data: lines). Exponential backoff reconnect
+      (2s -> 64s, max 10 retries). Deduplication via processed_command_ids.
+
+  8b. Heartbeat (heartbeat.py)
+      Background thread. Send immediately on startup (before first sleep).
+      Then every HEARTBEAT_INTERVAL_MS (10s). Payload: instance_id,
+      active_allocations, workflow_state. HTTP POST to /v1/agent/heartbeat.
+
+  8c. Log flusher (logs.py)
+      Background thread. Buffer log messages locally. Flush every 100ms.
+      sync_complete bypasses buffer (flush_and_send immediately).
+      HTTP POST to /v1/agent/logs with newline-delimited JSON.
+      batch_sequence_id for ordering.
+
+  8d. Executor (executor.py)
+      On start_run: clean workdir (chdir home first! R5 sharp edge),
+      download files from presigned URLs in parallel (urllib, no deps),
+      report sync_complete. Execute command via subprocess, capture
+      stdout/stderr, stream to log buffer. On exit, send run_complete
+      with exit_code.
+
+  8e. Main (agent.py)
+      Acquire lock (/tmp/repl-agent.lock). Read env vars (REPL_CONTROL_
+      PLANE_URL, REPL_INSTANCE_ID, REPL_JOIN_TOKEN). Start threads:
+      heartbeat, log_flusher, sse_command_handler. Dispatch commands
+      to executor. Graceful shutdown on SIGTERM.
+
+  Note: stdlib only. No pip, no venv, no requirements.txt.
+  Note: Can develop/test locally against the control plane.
+
+  Gate: Agent boots, connects SSE, receives start_run, downloads a test
+        file, executes "echo hello", streams stdout, sends run_complete.
+
+------------------------------------------------------------------------
+
+### Step 9: CLI (run Command + Log Streaming)
+Complexity: S | Dependencies: Step 7 | Gate: `repl run "echo hello"` works
+
+  Source: impl-pseudo/cli/src/commands/run.ts.l2.txt (343 lines),
+          impl-pseudo/cli/src/client.ts.l2.txt (615 lines)
+  Output: impl-pseudo/cli/src/
+
+  9a. Entry point (main.ts)
+      Parse argv. For Slice 1, only support: `repl run <command>`.
+      No subcommand framework needed yet (just string matching).
+
+  9b. Config (config.ts)
+      Read REPL_CONTROL_PLANE_URL from env or ~/.repl/config.
+      Default to localhost:3000.
+
+  9c. HTTP client (client.ts)
+      launchRun(request) -> POST /v1/workflows/launch-run
+      checkBlobs(checksums) -> POST /v1/blobs/check
+      uploadBlob(checksum, data) -> PUT /v1/blobs/:checksum
+      getWorkflowStatus(id) -> GET /v1/workflows/:id/status
+
+  9d. Run command (commands/run.ts)
+      Flow:
+      1. Hash local files (if any specified via flags)
+      2. POST /v1/blobs/check -> get missing list
+      3. Upload missing blobs in parallel
+      4. POST /v1/workflows/launch-run
+      5. Connect WebSocket to /v1/runs/:id/logs
+      6. Stream stdout/stderr to terminal
+      7. On StatusMessage, exit with run's exit_code
+
+  Gate: `repl run "echo hello"` outputs "hello" to terminal.
+
+------------------------------------------------------------------------
+
+### Step 10: Integration Test (End-to-End Gate)
+Complexity: M | Dependencies: Steps 1-9 | Gate: all scenarios pass
+
+  Output: impl-pseudo/tests/integration/e2e.test.ts
+
+  Test scenario: Full spine
+
+  1. Start control plane (in-process for test)
+  2. Run `repl run "echo hello"` (spawn CLI as child process)
+  3. Verify: OrbStack VM created (orbctl list shows it)
+  4. Verify: Agent boots and connects (heartbeat received)
+  5. Verify: "hello" appears in CLI output
+  6. Verify: Workflow status is 'completed'
+  7. Verify: Allocation transitions: CLAIMED -> ACTIVE -> COMPLETE
+  8. Verify: Manifest status is 'SEALED' with expires_at set
+  9. Cleanup: Terminate OrbStack VM
+
+  Test scenario: Crash recovery
+
+  1. Start control plane, trigger launch-run
+  2. Wait until workflow is 'running' (at least one node executing)
+  3. Kill control plane process
+  4. Restart control plane
+  5. Verify: Workflow resumes and eventually completes
+  6. Verify: No orphan instances (orbctl list matches DB)
+
+  Test scenario: Agent failure
+
+  1. Start control plane, trigger launch-run
+  2. Wait until agent connects
+  3. Kill agent process (or OrbStack VM)
+  4. Verify: Heartbeat timeout fires
+  5. Verify: Allocation transitions to FAILED
+  6. Verify: Workflow fails with appropriate error
+
+  Gate: All three scenarios pass reliably.
+
+
+================================================================================
+OPERATIONAL GATE: Definition of Done
+================================================================================
+
+Slice 1 is "done" when ALL of the following are true:
+
+1. END-TO-END EXECUTION
+   `repl run "echo hello"` streams "hello" back to the terminal via an
+   OrbStack VM. The complete data path works:
+   CLI -> control plane -> workflow engine -> OrbStack provider (spawns VM)
+   -> bootstrap installs agent -> agent connects SSE -> receives start_run
+   -> executes command -> streams stdout via log channel -> CLI displays
+   output via WebSocket -> CLI exits with correct exit code.
+
+2. STATE MACHINE INTEGRITY
+   Allocation transitions through CLAIMED -> ACTIVE -> COMPLETE.
+   Workflow transitions through pending -> running -> completed.
+   Manifest transitions through DRAFT -> SEALED (with expires_at set).
+   All terminal states have completed_at timestamps.
+
+3. AGENT HEARTBEAT
+   Agent sends heartbeat every 10s. Control plane tracks last_heartbeat.
+   Missing heartbeat for >5 minutes triggers allocation FAILED transition.
+   (Note: full heartbeat timeout enforcement is Slice 2 scope, but the
+   heartbeat channel must be operational.)
+
+4. CRASH RECOVERY
+   Kill control plane mid-run. Restart. Workflow engine discovers
+   interrupted workflows via recoverWorkflows(). Running nodes with
+   idempotent operations reset to pending. Workflow resumes and completes.
+   No orphan instances remain after recovery.
+
+5. FILE SYNC (basic)
+   CLI can specify local files. Files are uploaded to control plane blob
+   store. Agent downloads them before executing command. sync_complete
+   triggers CLAIMED -> ACTIVE transition.
+
+NOT required for Slice 1 done:
+- Warm pool reuse (always cold-spawn)
+- SSH access to instances
+- Artifact collection
+- Snapshot creation
+- Multi-provider support
+- Budget enforcement
+- Idempotency keys
+- Orphan scanner
+- Tailscale networking
+- Cancellation/pause/resume
+
+
+================================================================================
+KNOWN RISKS
+================================================================================
+
+1. ORBSTACK AVAILABILITY ON CI
+   Risk: OrbStack requires macOS. CI runners are typically Linux.
+   Impact: Integration tests can only run locally or on macOS CI.
+   Mitigation: Accept local-only integration tests for Slice 1. The
+   provider interface allows a mock provider for unit tests. Full CI
+   integration testing deferred to when AWS provider exists.
+
+2. WORKFLOW ENGINE COMPLEXITY
+   Risk: The engine (executeLoop + CB pattern + crash recovery) is the most
+   complex component. Under-specifying crash recovery could leave subtle
+   bugs.
+   Impact: Workflows that appear to complete may leave inconsistent state.
+   Mitigation: Step 5 has the largest complexity rating (L) and should be
+   implemented first among the application-logic steps. Invest in unit
+   tests for the engine before building nodes on top of it. The L2
+   pseudocode (724 + 462 + 690 = 1,876 lines) provides strong guidance.
+
+3. AGENT-CONTROL PLANE TIMING
+   Risk: The SSE connection, heartbeat, and log channels create a
+   distributed systems timing problem. The sync-files node blocks until
+   sync_complete arrives — but what if the message is lost or delayed?
+   Impact: Stuck workflows, false FAILED transitions.
+   Mitigation: Timeouts on sync-files and await-completion nodes. Agent
+   command retry protocol (pending_command_acks in heartbeat). For Slice 1,
+   use generous timeouts (5 minutes) and address edge cases in Slice 2.
+
+4. BOOTSTRAP FAILURE MODES
+   Risk: The bootstrap script runs via `orbctl run` post-boot. If it fails
+   (Python not installed, network issue, disk full), the agent never
+   connects and the workflow hangs until timeout.
+   Impact: Poor failure UX — user waits for timeout instead of immediate
+   error.
+   Mitigation: Legacy pattern (R5): bootstrap failures are tolerated;
+   missing heartbeat after timeout is the failure signal. For Slice 1,
+   use a 60-second boot timeout in wait-for-boot node. Log bootstrap
+   output to /tmp/bootstrap.log on the VM for debugging.
+
+5. SCOPE CREEP FROM BACKLOG ITEMS
+   Risk: BT2, BT5, BT6, BT7, BT8, BT9 are all "fix during L3" items that
+   touch Slice 1 code. Each is small individually but together they add
+   friction to every file touched.
+   Impact: Steps take longer than estimated due to accumulated fixes.
+   Mitigation: Fix BT2/BT7/BT8/BT9 in Step 3 (shared types) and Step 5
+   (state transitions) where the types are first defined — this front-loads
+   the fixes. BT5/BT6 are addressed naturally by consolidation in Step 5.
+
+6. L1->L2 PROMOTION QUALITY
+   Risk: The 7 workflow node files need L2 pseudocode before L3. If the
+   L2 content is vague or inconsistent with the engine interface, L3
+   implementation will hit design questions.
+   Impact: Blocked L3 progress, rework.
+   Mitigation: Step 0d uses the engine's NodeExecutor interface and R2's
+   node contract table (inputs/outputs/resource emission per node) as the
+   template. Each node L2 file must specify: execute() signature, input
+   validation, DB operations, resource emission, error paths, output type.
+
+7. SINGLE-PROCESS ARCHITECTURE
+   Risk: Workflow engine, API server, SSE connections, and background tasks
+   all run in one Bun process. A blocking operation stalls everything.
+   Impact: Heartbeat ACKs delayed, SSE connections dropped.
+   Mitigation: Bun's event loop handles async I/O well. The only blocking
+   operation is provider.spawn() (orbctl create), which is already async.
+   SQLite WAL mode allows concurrent reads. Monitor for issues and
+   consider worker threads in Slice 2 if needed.
+
+
+================================================================================
+FUTURE SLICES (tentative, post-Slice 1)
+================================================================================
+
+These are rough directions, not commitments. Scope and ordering will be refined
+after Slice 1 lands and we see what actually hurts.
+
+**Slice 2: Immunity & Robustness**
+Goal: The system cannot be tricked or broken by failure or repetition.
+- Idempotency-key middleware (POST mutations are safely retryable)
+- Heartbeat timeout enforcement (missing heartbeat -> FAILED transition)
+- Warm pool: replenishment + claiming (CB pattern already wired in Slice 1)
+- Two-phase spawn hardening: kill control plane between DB write and orbctl
+  call, verify reconciliation on restart
+- Chaos harness: artificial latency + partial failure injection around provider
+- Cancellation / force-stop of in-progress runs
+
+**Slice 3: Cleanup & Cost Protection**
+Goal: Zero cloud litter, bounded resource lifetime.
+- Orphan scanner: discover provider resources with no matching DB record
+- Manifest lifecycle: expiry sweeper, cleanup-manifest workflow
+- Scheduled termination of idle instances
+- Hold-expiry background job (allocation timeout for stuck claims)
+- Budget / cost guardrails (provider-level spend limits)
+
+**Slice 4: Multi-Provider & Networking**
+Goal: Run on real cloud infrastructure, not just local VMs.
+- AWS provider (EC2 Spot via provider interface)
+- Tailscale networking (control plane ↔ instance connectivity)
+- S3 blob storage (replace local filesystem store)
+- SSH access to running instances
+
+**Slice 5: Artifacts & Reproducibility**
+Goal: Capture outputs, enable re-runs.
+- Artifact collection (files copied back from instance after run)
+- Snapshot creation (checkpoint instance state)
+- Run replay / re-run from identical spec
+- Multi-run workflows
+
+Each slice has its own operational gate (like Slice 1's "echo hello" test).
+Slices are roughly sequential but may overlap where independent.
+
+
+================================================================================
+IMPLEMENTATION SEQUENCE SUMMARY
+================================================================================
+
+  Step 0: Prerequisites .................. M .. fix AC1-3, promote 7 nodes
+  Step 1: Project scaffolding + stubs .... M .. rename impl/, stubs, monorepo
+  Step 2: Material layer ................. M .. schema, db.ts, blob storage
+  Step 3: Shared types ................... S .. types, errors, API schemas
+  Step 4: Provider layer ................. M .. OrbStack via orbctl
+  Step 5: Workflow engine ................ L .. core loop, CB, crash recovery
+  Step 6: launch-run intent .............. L .. 7-node DAG + resource CRUD
+  Step 7: API layer ...................... M .. Hono routes, SSE, WebSocket
+  Step 8: Agent .......................... M .. Python, SSE reader, executor
+  Step 9: CLI ............................ S .. repl run + log streaming
+  Step 10: Integration test .............. M .. end-to-end gate
+
+  Parallelism: Steps 2+3 parallel. Step 4 parallel with 5. Step 8 parallel
+  with Steps 2-7 (agent is standalone Python). Step 9 needs Step 7 done.
+
+  Total estimated L2 input: ~12,600 lines of pseudocode
+  Total L1 gap to address: ~620 lines (Step 0)
+  Backlog items resolved inline: AC1-3, BT2, BT5, BT6, BT7, BT8, BT9
+
+## Log
+
+[2026-02-08] Worklog created. Launching parallel research subagents.
+[2026-02-08] Phase 1 complete. All 5 research streams returned.
+[2026-02-08] Phase 2 complete. Gap analysis and synthesis done.
+[2026-02-08] Phase 3 complete. Implementation plan written. Worklog COMPLETE.
+[2026-02-08] Refinement: impl-pseudo/ -> impl-pseudo/ rename, new impl/ for L3 working
+             code (plain .ts/.py extensions), Step 1 expanded to generate stub
+             files with types + signatures + throw("not implemented").
+[2026-02-08] Added Future Slices section (Slice 2-5 tentative roadmap).
+             Removed stale ROUGH_NOTES_CODE_PLANNING.txt.

@@ -1,0 +1,154 @@
+# resolve-instance.ts - Resolve Instance Node (L2 Pseudocode)
+
+Cross-references:
+- Engine: `../engine.ts.l2.txt` (§ExecuteNode, NodeExecutor, NodeContext)
+- Intent: `../../intent/launch-run.ts.l2.txt` (§WorkflowDefinition, CB at resolve-instance)
+- Allocation: `../../resource/allocation.ts.l2.txt` (§WarmPoolOperations, queryWarmPool)
+- Transitions: `../state-transitions.ts.l2.txt` (AllocationStatus)
+- Spec: Ch7 §7.1 (launch-run blueprint, CB pattern at resolve-instance)
+
+## Imports
+
+```typescript
+import { getDatabase, queryOne } from '../../material/db';
+import { logger } from '../../logger';
+import type { NodeExecutor, NodeContext } from '../../../../../shared/src/api/workflows';
+```
+
+## Types
+
+```typescript
+export interface ResolveInstanceInput {
+  runId: number;
+  spec: string;           // Instance spec (e.g., "gpu-a100-80gb")
+  provider: string;       // Provider name (e.g., "aws", "orbstack")
+  region?: string;        // Preferred region
+  initChecksum?: string;  // Snapshot checksum for warm pool matching
+  preferWarmPool: boolean; // Whether to check warm pool first
+}
+
+export interface ResolveInstanceOutput {
+  warmAvailable: boolean;
+  allocationId?: number;  // Set if warmAvailable=true
+  instanceId?: number;    // Set if warmAvailable=true
+}
+```
+
+## NodeExecutor
+
+```typescript
+export const resolveInstanceExecutor: NodeExecutor<ResolveInstanceInput, ResolveInstanceOutput> = {
+  name: 'resolve-instance',
+  idempotent: true,  // Read-only: safe to retry after crash
+
+  async execute(ctx: NodeContext): Promise<ResolveInstanceOutput> {
+    const input = ctx.input as ResolveInstanceInput;
+
+    // ── Input validation ──────────────────────────────────────────────
+    if (!input.spec) {
+      throw { code: 'VALIDATION_ERROR', message: 'spec is required' };
+    }
+    if (!input.provider) {
+      throw { code: 'VALIDATION_ERROR', message: 'provider is required' };
+    }
+
+    ctx.log('info', 'Resolving instance source', {
+      spec: input.spec,
+      provider: input.provider,
+      preferWarmPool: input.preferWarmPool,
+    });
+
+    // ── Short-circuit: skip warm pool if not preferred ─────────────────
+    // For Slice 1 MVK, preferWarmPool is always false (cold path only).
+    // Warm pool path exists for CB correctness and future use.
+    if (!input.preferWarmPool) {
+      ctx.log('info', 'Warm pool check skipped (preferWarmPool=false)');
+      return { warmAvailable: false };
+    }
+
+    // ── Query warm pool for matching AVAILABLE allocation ─────────────
+    // Scoring: exact checksum match (100) > vanilla instance (50) > incompatible (0)
+    // See §queryWarmPool in allocation.ts.l2.txt for full scoring logic.
+    const warmAllocation = queryOne<{
+      id: number;
+      instance_id: number;
+      status: string;
+      init_checksum: string | null;
+    }>(
+      `SELECT a.id, a.instance_id, a.status, i.init_checksum
+       FROM allocations a
+       JOIN instances i ON a.instance_id = i.id
+       WHERE a.status = 'AVAILABLE'
+         AND i.provider = ?
+         AND i.spec = ?
+         AND (? IS NULL OR i.region = ?)
+         AND (i.init_checksum IS NULL OR i.init_checksum = ? OR ? IS NULL)
+       ORDER BY
+         CASE WHEN i.init_checksum = ? THEN 0 ELSE 1 END,
+         a.created_at ASC
+       LIMIT 1`,
+      [
+        input.provider,
+        input.spec,
+        input.region ?? null, input.region ?? null,
+        input.initChecksum ?? null, input.initChecksum ?? null,
+        input.initChecksum ?? null,
+      ]
+    );
+
+    // ── No warm match: route to spawn path ────────────────────────────
+    if (!warmAllocation) {
+      ctx.log('info', 'No warm pool match found, routing to cold spawn path', {
+        spec: input.spec,
+        provider: input.provider,
+      });
+      return { warmAvailable: false };
+    }
+
+    // ── Warm match found: return allocation details for claim node ─────
+    ctx.log('info', 'Warm pool allocation found', {
+      allocationId: warmAllocation.id,
+      instanceId: warmAllocation.instance_id,
+      checksumMatch: warmAllocation.init_checksum === input.initChecksum,
+    });
+
+    return {
+      warmAvailable: true,
+      allocationId: warmAllocation.id,
+      instanceId: warmAllocation.instance_id,
+    };
+  },
+
+  // No compensation needed: read-only operation with no side effects
+  compensate: undefined,
+};
+```
+
+## CBPatternIntegration
+
+The workflow engine interprets this node's output to apply the Conditional-Branch
+pattern at resolve-instance (Ch7 §7.1):
+
+```
+if (output.warmAvailable) {
+  // Route to claim-allocation node, passing allocationId as input
+  // claim-allocation has triggerOnError fallback to spawn-instance
+} else {
+  // Route to spawn-instance node (cold path)
+}
+// Both paths converge at create-allocation
+```
+
+For Slice 1: `warmAvailable` is always `false`, so the CB always routes to
+spawn-instance. The warm path code exists for structural completeness.
+
+## ErrorHandling
+
+| Error              | Source     | Response                                  |
+|--------------------|------------|-------------------------------------------|
+| VALIDATION_ERROR   | Input      | Fail immediately (missing spec/provider)  |
+| DATABASE_ERROR     | DB query   | Fail immediately (non-retryable)          |
+
+No retry logic needed: this node is read-only and deterministic. If the DB
+query fails, the workflow engine retries the entire node per the engine retry
+strategy (see §RetryStrategy in engine.ts.l2.txt).

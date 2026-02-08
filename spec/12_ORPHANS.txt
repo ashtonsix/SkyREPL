@@ -70,7 +70,7 @@ instanceSlug is the base-36 encoding of instanceId.
 The system MUST parse names matching the regex `^repl-([a-z0-9]+)-([a-z0-9]+|none)-([a-z0-9]+)$`
 and return the parsed components, or null if the name does not match.
 
-> See also: impl/control/src/orphan/scanner.ts.l2.txt §ProviderOrphanDetection
+> See also: impl-pseudo/control/src/orphan/scanner.ts.l2.txt §ProviderOrphanDetection
 
 ### Tailscale Naming
 
@@ -113,7 +113,7 @@ STEPS:
      Record as missing (informational only)
 ```
 
-> See also: impl/control/src/orphan/scanner.ts.l2.txt §ProviderOrphanDetection
+> See also: impl-pseudo/control/src/orphan/scanner.ts.l2.txt §ProviderOrphanDetection
 
 **Each orphaned resource record MUST include:**
 - providerId, resourceType (instance | volume | snapshot | tailscale_machine), provider
@@ -129,7 +129,7 @@ query the objects table for tracked tailscale_machine entries, and report any
 untracked machines as orphans. Tailscale orphan records MUST include machineId,
 machineName, tailscaleIp, inferred instanceIdSlug, lastSeen time, and age.
 
-> See also: impl/control/src/orphan/scanner.ts.l2.txt §TailscaleOrphanDetection
+> See also: impl-pseudo/control/src/orphan/scanner.ts.l2.txt §TailscaleOrphanDetection
 
 ## 12.3 Session-Based Classification
 
@@ -149,7 +149,7 @@ For each orphan:
     -> classify as 'otherSessions'
 ```
 
-> See also: impl/control/src/orphan/classifier.ts.l2.txt §SessionBasedClassification
+> See also: impl-pseudo/control/src/orphan/classifier.ts.l2.txt §SessionBasedClassification
 
 ### Severity Levels
 
@@ -207,7 +207,7 @@ The system MUST support the following whitelist operations:
 - **getUnacknowledgedOrphans()**: Return detected orphans excluding those matched
   by active whitelist entries (filtered by provider:providerId pair).
 
-> See also: impl/control/src/orphan/whitelist.ts.l2.txt §WhitelistOperations
+> See also: impl-pseudo/control/src/orphan/whitelist.ts.l2.txt §WhitelistOperations
 
 ## 12.5 CLI Commands
 
@@ -225,7 +225,7 @@ MUST query unacknowledged orphans, classify them by session, and return warnings
 CLI MUST display warnings before proceeding (see Ch10 for preflight display format).
 Preflight checks MUST NOT block operations -- they are advisory only.
 
-> See also: impl/control/src/orphan/scanner.ts.l2.txt §ProviderOrphanDetection
+> See also: impl-pseudo/control/src/orphan/scanner.ts.l2.txt §ProviderOrphanDetection
 
 ## 12.7 Safety Constraints
 
@@ -247,7 +247,7 @@ Spawn errors classified by orphan risk:
 
 **SpawnErrorClassification**: orphanRisk (boolean), confidenceNoResource (high | medium | low), action (none | scan_immediately | scan_delayed).
 
-> See also: impl/control/src/orphan/classifier.ts.l2.txt §SpawnErrorClassification
+> See also: impl-pseudo/control/src/orphan/classifier.ts.l2.txt §SpawnErrorClassification
 
 | Error Type                  | Orphan Risk | Confidence No Resource | Action           |
 |-----------------------------|-------------|------------------------|------------------|

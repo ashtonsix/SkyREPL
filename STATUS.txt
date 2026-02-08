@@ -18,13 +18,12 @@ chaos problem. Tracking what's running, ensuring cleanup, avoiding cost surprise
 2. SPECIFICATION STATUS
 ================================================================================
 
-**Status: L2/B COMPLETE — ready for L3**
+**Status: L2/B COMPLETE**
 
 ~9,500 lines across 15 chapters (post-distribution). Non-normative content
 extracted to docs/ and workshop/. All 10 done-definition items met. Behavior
-traces completed for MVK paths (launch-run, allocation SM). 8 blockers fixed,
-9 non-MVK issues tracked in BACKLOG (BT1-BT9). 3 architecture coherence items
-(AC1-AC3) to fix before starting L3.
+traces completed for MVK paths (launch-run, allocation SM). AC1-AC3 fixed
+during L3 Step 0. 9 non-MVK issues tracked in BACKLOG (BT1-BT9).
 
 Chapters:
   01 Introduction        09 API
@@ -44,45 +43,61 @@ Key design elements:
 - Intent contracts for provider abstraction
 
 ================================================================================
-3. PSEUDO-IMPLEMENTATION STATUS (impl/)
+3. IMPLEMENTATION STATUS
 ================================================================================
 
-**Current state: L1 complete (trimmed), L2 ~39% (53/136 files), L2/B COMPLETE**
+**Current state: L3 Slice 1 IN PROGRESS (Steps 0-1 complete, Steps 2-10 remaining)**
 
-Fidelity levels:
-  .<ext>.l1.txt  - Coarse outlines, ~20-50 lines each (COMPLETE - 136 files, trimmed)
-  .<ext>.l2.txt  - Detailed pseudocode (53 files, ~22k lines — Wl3-Wl6 + Wl8 extraction)
-  .l3.<ext>      - Partial working code (not started)
-  .<ext>         - Working code (not started)
+Two directories:
+  impl-pseudo/   Read-only L1/L2 reference pseudocode (renamed from impl/)
+  impl/          L3 working code (Bun workspace monorepo)
 
-Structure:
-  impl/
+Pseudo-implementation (impl-pseudo/):
+  .<ext>.l1.txt  - Coarse outlines, ~20-50 lines each (136 files)
+  .<ext>.l2.txt  - Detailed pseudocode (60 files, ~24k lines — includes 7 new node files)
+
+Working code (impl/):
+  Bun workspace with shared/, control/, cli/ packages + standalone agent/ (Python).
+  44 stub files (~6,945 lines) — types fully defined, function bodies throw
+  "not implemented". Each step replaces stubs with real logic.
+  Stack: Bun, bun:sqlite (WAL), ElysiaJS, TypeBox, Python stdlib-only agent.
+
+Structure (both dirs):
   ├── control/    Control plane (VPS deployment)
   ├── cli/        CLI client (user machine)
   ├── shared/     Types shared between control + CLI
   ├── agent/      Python agent (on instances)
   └── tests/      Tests organized by component
 
-L2 gap: 83 L1-only files remain. MVK subset: 17 files (~1,023 lines).
-See docs/reference/l2-gap-analysis.txt for full breakdown.
-
 ================================================================================
-4. MINIMUM VIABLE KERNEL
+4. L3 SLICE 1: OrbStack End-to-End
 ================================================================================
 
-First implementation target:
-- Single intent (launch-run) + OrbStack provider
-- Workflow engine with Conditional-Branch pattern
-- Allocations: CLAIMED → ACTIVE → COMPLETE
-- Manifests: DRAFT → SEALED
-- Basic material layer (instances, runs, allocations)
+Goal: `repl run "echo hello"` works end-to-end via OrbStack VM.
+Active worklog: WORKLOG_L3_SLICE1_IMPL.txt
+Plan: worklogs/012_WORKLOG_L3_SLICE1_PLANNING.txt
+
+  Step 0: Prerequisites .................. [X] AC1-3 fixed, 7 nodes promoted L1->L2
+  Step 1: Project scaffolding + stubs .... [X] impl-pseudo/ + impl/ monorepo, 44 stubs
+  Step 2: Material layer ................. [ ] schema, db.ts, blob storage
+  Step 3: Shared types ................... [ ] types, errors, API schemas
+  Step 4: Provider layer ................. [ ] OrbStack via orbctl
+  Step 5: Workflow engine ................ [ ] core loop, CB, crash recovery
+  Step 6: launch-run intent .............. [ ] 7-node DAG + resource CRUD
+  Step 7: API layer ...................... [ ] Elysia routes, SSE, WebSocket
+  Step 8: Agent .......................... [ ] Python, SSE reader, executor
+  Step 9: CLI ............................ [ ] repl run + log streaming
+  Step 10: Integration test .............. [ ] end-to-end gate
+
+Done gate: CLI -> control plane -> workflow engine -> OrbStack -> agent -> logs
+           streamed back to terminal. Crash recovery works. State machines correct.
 
 ================================================================================
 5. WORKLOG REFERENCES
 ================================================================================
 
 Hot (active):
-  (none — next worklog starts at L3 entry)
+  WORKLOG_L3_SLICE1_IMPL.txt                 - L3 Slice 1 implementation (Steps 0-1 done)
 
 Cold (archived):
   worklogs/001_WORKLOG_L1_RESTRUCTURING.txt  - Structural overhaul
@@ -96,6 +111,7 @@ Cold (archived):
   worklogs/009_WORKLOG_SPEC_HARDENING.txt    - Spec → normative transformation
   worklogs/010_WORKLOG_SPEC_AUDIT.txt        - Spec audit + consolidated findings (§A-M)
   worklogs/011_WORKLOG_L2B_COMPLETION.txt    - L2/B completion (Phases 1-5, D1-D19)
+  worklogs/012_WORKLOG_L3_SLICE1_PLANNING.txt - L3 Slice 1 planning (research + plan)
 
 Backlog:
   BACKLOG.txt

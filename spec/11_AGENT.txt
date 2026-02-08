@@ -419,7 +419,7 @@ Agent MUST use `read(1)` syscall to bypass Python HTTP library buffering.
 
 > Byte-by-byte reading rationale and pseudocode extracted to docs/design/rationale-execution.txt
 
-> See also: impl/agent/sse.py.l2.txt §LowLevelByteReading
+> See also: impl-pseudo/agent/sse.py.l2.txt §LowLevelByteReading
 
 ### Connection Management
 
@@ -430,7 +430,7 @@ Agent MUST:
 4. Parse each line as JSON command message
 5. On error: log and reconnect with exponential backoff (2s initial, 64s max, 10 retries)
 
-> See also: impl/agent/sse.py.l2.txt §ConnectionManagement
+> See also: impl-pseudo/agent/sse.py.l2.txt §ConnectionManagement
 
 ## 11.7 Agent Configuration
 
@@ -488,7 +488,7 @@ write_files:
 
 Agent MUST acquire exclusive lock `/tmp/repl-agent.lock` on startup to prevent duplicate agents on warm pool reuse. Use `fcntl.flock(LOCK_EX | LOCK_NB)` for non-blocking exclusive lock. If lock fails, agent MUST exit immediately with FATAL log.
 
-> See also: impl/agent/agent.py.l2.txt §LockAcquisition
+> See also: impl-pseudo/agent/agent.py.l2.txt §LockAcquisition
 
 ## 11.9 Spot Interruption Handling
 
@@ -541,7 +541,7 @@ Agent MUST clean workdir at start of `start_run` before downloading files. Criti
 
 **Protocol:** If workdir exists, change cwd to home directory, then recursively remove workdir. Log warning on failure but continue (best effort).
 
-> See also: impl/agent/executor.py.l2.txt §WorkdirCleanup
+> See also: impl-pseudo/agent/executor.py.l2.txt §WorkdirCleanup
 
 ## 11.11 Presigned URL Abstraction
 
@@ -551,7 +551,7 @@ Control plane MUST generate presigned URLs for all file operations. Agent uses i
 
 Agent implementation: `urllib.request.Request(url, data=file_data, method="PUT")`. See Ch2 for 64KB threshold rationale.
 
-> See also: impl/agent/artifacts.py.l2.txt §ArtifactUpload
+> See also: impl-pseudo/agent/artifacts.py.l2.txt §ArtifactUpload
 
 ## 11.12 JIT Tailscale Installation
 
@@ -561,7 +561,7 @@ Tailscale MUST be installed on-demand (when SSH requested or instance enters war
 
 **Protocol:** Check existing status → detect existing IP → if not found, download static binary → start daemon → authenticate.
 
-> See also: impl/agent/tailscale.py.l2.txt §JITInstallation
+> See also: impl-pseudo/agent/tailscale.py.l2.txt §JITInstallation
 
 ## 11.13 Error Handling Philosophy
 
@@ -590,7 +590,7 @@ Agent SHOULD send best-effort diagnostics to `/v1/instances/:id/panic` before sh
 - Failures: Expected and acceptable (log warning, continue shutdown)
 - Success rate target: 70-90% (supplements normal logging)
 
-> See also: impl/agent/agent.py.l2.txt §PanicDiagnostics
+> See also: impl-pseudo/agent/agent.py.l2.txt §PanicDiagnostics
 
 **Shutdown Sequence:** Set flag → send diagnostics (2s timeout) → Tailscale logout → terminate run → flush logs → grace period → self-terminate.
 

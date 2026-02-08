@@ -426,4 +426,4 @@ CROSS-REFERENCES
 
 Prior spike: WORKLOG_TODO_TRIAGE.txt (Phase 1 Research, T5 Spike sections)
 Timing consolidation: worklogs/003_WORKLOG_TIMINGS.txt (Wl3)
-Spot checkpoint: impl/agent/spot.py.l1.txt
+Spot checkpoint: impl-pseudo/agent/spot.py.l1.txt

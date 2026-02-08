@@ -181,5 +181,5 @@ CROSS-REFERENCES
 
 Heartbeat timing: worklogs/005_WORKLOG_HEARTBEAT_TIMING.txt (Wl5)
 L2 foundation: worklogs/004_WORKLOG_L2_FOUNDATION.txt (Wl4)
-Checkpoint path: impl/agent/checkpoint.py.l2.txt (from Wl5)
-SSE implementation: impl/agent/sse.py.l2.txt (NEW - from this worklog)
+Checkpoint path: impl-pseudo/agent/checkpoint.py.l2.txt (from Wl5)
+SSE implementation: impl-pseudo/agent/sse.py.l2.txt (NEW - from this worklog)

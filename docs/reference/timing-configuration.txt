@@ -268,4 +268,4 @@ Alerts to consider:
 - Spawn timeout rate exceeding 1%
 - Compensation failures
 
-> See also: impl/shared/src/config/timing.ts.l2.txt §BaseTimingConstants
+> See also: impl-pseudo/shared/src/config/timing.ts.l2.txt §BaseTimingConstants

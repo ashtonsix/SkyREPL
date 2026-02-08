@@ -341,7 +341,7 @@ D. DDL SCHEMA AUDIT (→ Correctness phase)
 D1. Root Cause: db.ts.l2.txt Legacy Holdover (~12 issues)
 ----------------------------------------------------------
 
-File: impl/control/src/material/db.ts.l2.txt
+File: impl-pseudo/control/src/material/db.ts.l2.txt
 
 This file defines LOCAL interfaces and SQL that predate the spec-normative schema.
 
@@ -1105,6 +1105,6 @@ Source agents: 12 background agents (10 audit + 2 legacy), 2026-02-06
 Incorporates: worklogs/010_WORKLOG_SPEC_AUDIT.txt (WS2 verification, folded in)
 Preceding: WORKLOG_L2B_COMPLETION.txt
 Spec: spec/01_INTRODUCTION.txt through spec/15_OPERATIONS.txt
-Impl: impl/**/*.l2.txt (53 files), impl/**/*.l1.txt (131 files)
+Impl: impl-pseudo/**/*.l2.txt (53 files), impl/**/*.l1.txt (131 files)
 DDL: spec/02_MATERIAL.txt, impl/control/migrations/001_initial.sql.l2.txt
 Legacy: ~/SkyREPL-legacy (sharp-edge source, not long-lived)
