@@ -200,13 +200,25 @@ export function mapProviderError(
   provider: ProviderName,
   error: unknown
 ): ProviderError {
-  throw new Error("not implemented");
+  if (error instanceof ProviderError) return error;
+
+  const message = error instanceof Error ? error.message : String(error);
+  return new class extends ProviderError {
+    readonly code = "PROVIDER_INTERNAL" as const;
+    readonly category = "internal" as const;
+    readonly retryable = false;
+    readonly retryAfterMs = undefined;
+  }(message, provider, { originalError: error });
 }
 
 export function shouldRetryWithAlternative(error: ProviderError): boolean {
-  throw new Error("not implemented");
+  return (
+    error.code === "CAPACITY_ERROR" ||
+    error.code === "SPOT_INTERRUPTED" ||
+    error.code === "REGION_UNAVAILABLE"
+  );
 }
 
 export function shouldRetry(error: ProviderError): boolean {
-  throw new Error("not implemented");
+  return error.retryable && error.category !== "auth";
 }

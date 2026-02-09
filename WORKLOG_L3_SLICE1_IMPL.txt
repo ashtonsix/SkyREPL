@@ -18,10 +18,10 @@ works end-to-end.
   Step 1: Project scaffolding + stubs .... [X] rename impl/, stubs, monorepo
   Step 1.5: Framework migration .......... [X] Hono+Zod → ElysiaJS+TypeBox
   Step 1.6: Drift audit .................. [X] spec/impl alignment, cross-refs
-  Step 2: Material layer ................. [ ] schema, db.ts, blob storage
-  Step 3: Shared types ................... [ ] types, errors, API schemas
-  Step 4: Provider layer ................. [ ] OrbStack via orbctl
-  Step 5: Workflow engine ................ [ ] core loop, CB, crash recovery
+  Step 2: Material layer ................. [X] schema, db.ts, blob storage
+  Step 3: Shared types ................... [X] types, errors, API schemas
+  Step 4: Provider layer ................. [X] OrbStack via orbctl
+  Step 5: Workflow engine ................ [X] core loop, CB, crash recovery
   Step 6: launch-run intent .............. [ ] 8-node DAG + resource CRUD
   Step 7: API layer ...................... [ ] Elysia routes, SSE, WebSocket
   Step 8: Agent .......................... [ ] Python, SSE reader, executor
@@ -109,3 +109,127 @@ works end-to-end.
              - Cross-refs: all impl/→impl-pseudo/ paths fixed, impl-pseudo added
                to check-crossrefs.py scan dirs, 11 L2 headings CamelCased.
              Cross-ref check: 165 anchored, 92 bare, 25 file-only. 0 errors.
+
+--- STEP 2: MATERIAL LAYER ---
+
+[2026-02-09] Starting Step 2 (material layer).
+             Migration SQL already exists (001_initial.sql, 368 lines, 19 tables).
+[2026-02-09] Step 2 COMPLETE. All three sub-tasks done:
+             2a: Migration SQL — already existed from Step 1 (19 tables, full DDL).
+             2b: db.ts rewritten 571→1184 lines. 44 stub functions replaced with
+                 real bun:sqlite implementations. Connection management (WAL, FK,
+                 busy_timeout), migration runner, query helpers with SQLITE_BUSY
+                 retry + jittered backoff, full CRUD for all 11 table groups.
+                 Key patterns: CAS claim for allocations, auto updated_at injection
+                 on workflow/node mutations, dedup for dedupable blob buckets,
+                 safety guards on deletes (active allocations, terminal state checks).
+                 Bug fix: recordOrphanScan was missing created_at column.
+             2c: storage.ts rewritten 188→311 lines. Slice 1 local filesystem mode:
+                 small blobs (<=64KB) inline in DB, large blobs on filesystem at
+                 ./data/blobs/{checksum}. S3/multipart throw "not available in
+                 local mode". Log streaming via payload concatenation. Blob GC
+                 cleans filesystem files + DB records.
+                 Bug fix: getInline wraps Uint8Array→Buffer (bun:sqlite returns
+                 Uint8Array for BLOB columns, not Buffer).
+             Tests: 59 tests across 2 files (db.test.ts, storage.test.ts).
+                 Coverage: schema/migrations, instance CRUD, allocation CAS claim,
+                 run lifecycle, workflow+node CRUD, manifest seal/recovery, blob
+                 dedup, object tags, warm pool, orphan whitelist, usage records,
+                 inline storage, upload/download URL generation, log append.
+             All packages compile clean (tsc --noEmit). Gate: PASSED.
+
+--- STEP 3: SHARED TYPES (ALREADY COMPLETE) ---
+
+[2026-02-09] Step 3 COMPLETE. Already realized during Steps 1/1.5:
+             types.ts (289), resources.ts (303), api/agent.ts (247),
+             api/workflows.ts (577), errors.ts (282), timing.ts (350).
+             TypeBox schemas ARE the wire types (Static<typeof>). Workflow/intent
+             interfaces are offline-enforcement contracts. Gate: tsc --noEmit clean.
+
+--- STEP 4: PROVIDER LAYER (OrbStack) ---
+
+[2026-02-09] Starting Step 4 (provider layer).
+             Cross-check phase: dispatched 4 explore agents in parallel:
+             (a) impl stubs vs impl-pseudo L2 — found extensions.ts missing entirely,
+                 contracts.ts/errors.ts/registry.ts had stub functions, orbstack.ts
+                 only had generateBootstrap skeleton in L2.
+             (b) spec Ch08 vs L2 — core interface 100%, error taxonomy 100%, OrbStack
+                 implementation 10% (only generateBootstrap). Spawn idempotency
+                 protocol lives in workflow nodes (Step 6), not provider layer.
+             (c) legacy OrbStack patterns — full orbctl CLI reference extracted:
+                 3-method IP fallback, cloud-init avoidance via base64 + orbctl run,
+                 boot polling, idempotent deletion, VM naming conventions.
+             (d) shared type dependencies — ProviderName, Instance resource, ProviderError,
+                 provider-specific timing overrides (orbstack: 30s spawn, 1s poll).
+[2026-02-09] Step 4 COMPLETE. Dispatched 3 impl agents in parallel:
+             4a: extensions.ts CREATED (189 lines). Lifecycle hooks, InMemoryCache
+                 with TTL, HeartbeatExpectations/Receipts, HookRegistry with
+                 registerProviderHooks/invokeHook/invokeAllHooks — all implemented.
+             4b: contracts.ts FIXED. Added input/output types to SpawnInstance,
+                 TerminateInstance, CreateSnapshot contracts. Implemented
+                 PROVIDER_WORKFLOW_REGISTRY Map + register/get functions.
+             4c: errors.ts FIXED. Implemented mapProviderError (wraps unknown in
+                 PROVIDER_INTERNAL), shouldRetryWithAlternative (CAPACITY_ERROR,
+                 SPOT_INTERRUPTED, REGION_UNAVAILABLE), shouldRetry (retryable && !auth).
+             4d: registry.ts IMPLEMENTED. Provider cache with lazy loading,
+                 getProvider/getAllProviders/isProviderRegistered/clearProviderCache.
+                 Dynamic registration with lifecycle hooks. Test utilities with
+                 SKYREPL_TEST_PROVIDERS env var. Only orbstack registered (cloud
+                 providers added when modules exist).
+             4e: orbstack.ts FULLY IMPLEMENTED (678 lines). All methods from legacy
+                 patterns: spawn (orbctl create + boot poll + IP discovery + base64
+                 bootstrap), terminate (idempotent), list (repl- prefix filter),
+                 get, generateBootstrap (shell script with apt-daily disable, config
+                 write, agent download, checksum), snapshot ops (clone + stop).
+                 Helpers: exec/orbctl wrappers, 3-method IP fallback, parseSpec,
+                 mapOrbStackStatus. Bootstrap failure is non-fatal.
+             Tests: 34 new tests (provider-orbstack.test.ts, 261 lines). Covers
+                 status mapping, name generation, spec parsing, bootstrap generation,
+                 provider properties. Integration tests auto-skip without orbctl.
+             All packages compile clean (tsc --noEmit). 93 tests pass (59 prior + 34 new).
+             Gate: PASSED.
+
+--- STEP 5: WORKFLOW ENGINE ---
+
+[2026-02-09] Starting Step 5 (workflow engine).
+             Cross-check phase: dispatched 3 explore agents in parallel:
+             (a) stubs vs L2 — 19 state-transition signatures match, engine missing
+                 findReadyNodes/findActiveWorkflows in db.ts. BT2/BT6/BT9 backlog
+                 items relevant.
+             (b) spec Ch06 vs L2 — 98% aligned for Slice 1 MVK, no contradictions.
+             (c) planning details — 5a-5e substeps, gate: DAG executes + crash recovers.
+[2026-02-09] Step 5 COMPLETE. Dispatched 3 impl agents in parallel:
+             5a: state-transitions.ts REWRITTEN (569 lines). All 25 CAS functions
+                 implemented. Generic atomicTransition with updated_at guard, table
+                 whitelist for SQL injection prevention. Allocation SM (claim, activate,
+                 complete, fail, failAnyState), Manifest SM (seal), Workflow SM (start,
+                 complete, fail, cancel, startRollback), Node SM (start w/ attempt++,
+                 complete, fail, resetForRetry, skip). TransitionResult<T> for
+                 NOT_FOUND/WRONG_STATE/RACE_LOST. BT2 fix: completed_at on all terminal
+                 transitions. BT6 fix: state transitions consolidated to single file.
+             5b: patterns.ts IMPLEMENTED (265 lines). CB pattern fully implemented in
+                 both modes (deterministic: chosen=pending/skipped=skipped, try-fallback:
+                 both=pending). Helper functions: getPredecessors, getDownstreamNodes,
+                 updateJoinDependencies (merge+dedup). IAR/PFO/RWA remain stubs.
+             5c: engine.ts REWRITTEN (1077 lines). Full engine: submit (idempotency check,
+                 blueprint→nodes, manifest creation, fire-and-forget executeLoop),
+                 executeLoop (tick loop: cancellation check, timeout check, findReadyNodes,
+                 concurrent execution, poll when running, complete/fail when done),
+                 executeNode (start→execute→complete/retry/fail, Promise.race timeout),
+                 determineRetryStrategy (ERROR_RETRY_MAPPING, exponential backoff),
+                 handleRetry (same_params/alternative/fallback), crash recovery
+                 (stale pending timeout, idempotent node reset, non-idempotent fail),
+                 cancellation (skip pending, seal manifest), timeout handling.
+                 Blueprint + executor registries (Map-based). Subworkflow support with
+                 depth limit. calculateTopologySignature (SHA-256 hash).
+             5d: db.ts additions — findReadyNodes (Set-based dependency resolution),
+                 findActiveWorkflows (pending/running query).
+             Bug fix: executeNode called failNode on pending node (no executor case) —
+                 must startNode first, then failNode.
+             Drift audit: CR1 false positive (db.ts sealManifest handles expiresAt
+                 internally). CR2 fixed (Set-based lookup in findReadyNodes).
+             Tests: 102 new tests (workflow-engine.test.ts). State transitions (46),
+                 engine core (40), patterns (16). Covers CAS, all SMs, retry strategy,
+                 DAG execution, CB both modes, dependency helpers.
+             All packages compile clean (tsc --noEmit). 195 tests pass (93 prior + 102 new).
+             Gate: PASSED.

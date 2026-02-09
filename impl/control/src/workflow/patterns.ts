@@ -1,7 +1,13 @@
 // workflow/patterns.ts - Workflow Pattern Implementations
 // Stub: All function bodies throw "not implemented"
 
-import type { WorkflowNode } from "../material/db";
+import {
+  getWorkflowNodes,
+  createWorkflowNode,
+  updateWorkflowNode,
+  queryOne,
+  type WorkflowNode,
+} from "../material/db";
 import type { InlineNodeDef } from "./engine.types";
 
 // =============================================================================
@@ -64,7 +70,106 @@ export function applyConditionalBranch(
   workflowId: number,
   config: ConditionalBranchConfig
 ): void {
-  throw new Error("not implemented");
+  // Validate join node exists
+  const joinNode = queryOne<WorkflowNode>(
+    "SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
+    [workflowId, config.joinNode]
+  );
+
+  if (!joinNode) {
+    throw new Error(`Join node '${config.joinNode}' not found`);
+  }
+
+  if (config.triggerOnError) {
+    // Mode 2: Try-fallback mode
+    // Create option1 node as 'pending'
+    createWorkflowNode({
+      workflow_id: workflowId,
+      node_id: config.option1.id,
+      node_type: config.option1.type,
+      status: "pending",
+      input_json: JSON.stringify(config.option1.input),
+      output_json: null,
+      error_json: null,
+      depends_on: JSON.stringify([]),
+      attempt: 0,
+      retry_reason: null,
+      started_at: null,
+      finished_at: null,
+      updated_at: Date.now(),
+    });
+
+    // Create option2 node as 'pending' with trigger_on_failure_of
+    // Note: trigger_on_failure_of is not in the WorkflowNode interface yet,
+    // but the L2 pseudocode shows it should be there. For now, we'll create
+    // the node as pending and rely on the engine to handle the failure trigger.
+    createWorkflowNode({
+      workflow_id: workflowId,
+      node_id: config.option2.id,
+      node_type: config.option2.type,
+      status: "pending",
+      input_json: JSON.stringify(config.option2.input),
+      output_json: null,
+      error_json: null,
+      depends_on: JSON.stringify([]),
+      attempt: 0,
+      retry_reason: null,
+      started_at: null,
+      finished_at: null,
+      updated_at: Date.now(),
+    });
+
+    // Update join node to depend on both branches
+    updateJoinDependencies(workflowId, config.joinNode, [
+      config.option1.id,
+      config.option2.id,
+    ]);
+  } else {
+    // Mode 1: Deterministic mode
+    if (config.condition === undefined) {
+      throw new Error("condition is required when triggerOnError is false");
+    }
+
+    const chosen = config.condition ? config.option1 : config.option2;
+    const skipped = config.condition ? config.option2 : config.option1;
+
+    // Create chosen branch node as 'pending'
+    createWorkflowNode({
+      workflow_id: workflowId,
+      node_id: chosen.id,
+      node_type: chosen.type,
+      status: "pending",
+      input_json: JSON.stringify(chosen.input),
+      output_json: null,
+      error_json: null,
+      depends_on: JSON.stringify([]),
+      attempt: 0,
+      retry_reason: null,
+      started_at: null,
+      finished_at: null,
+      updated_at: Date.now(),
+    });
+
+    // Create skipped branch node as 'skipped'
+    createWorkflowNode({
+      workflow_id: workflowId,
+      node_id: skipped.id,
+      node_type: skipped.type,
+      status: "skipped",
+      input_json: JSON.stringify(skipped.input),
+      output_json: null,
+      error_json: null,
+      depends_on: JSON.stringify([]),
+      attempt: 0,
+      retry_reason: null,
+      started_at: null,
+      finished_at: null,
+      updated_at: Date.now(),
+    });
+
+    // Update join node to depend on both branches (skipped counts as satisfied)
+    updateJoinDependencies(workflowId, config.joinNode, [chosen.id, skipped.id]);
+  }
 }
 
 // =============================================================================
@@ -98,14 +203,39 @@ export function getPredecessors(
   workflowId: number,
   nodeId: string
 ): WorkflowNode[] {
-  throw new Error("not implemented");
+  // Get the target node
+  const node = queryOne<WorkflowNode>(
+    "SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
+    [workflowId, nodeId]
+  );
+
+  if (!node) return [];
+
+  // Parse the depends_on JSON array
+  const deps = node.depends_on ? JSON.parse(node.depends_on) as string[] : [];
+
+  if (deps.length === 0) return [];
+
+  // Query all workflow nodes
+  const allNodes = getWorkflowNodes(workflowId);
+
+  // Filter to nodes whose id appears in the depends_on array
+  return allNodes.filter(n => deps.includes(n.node_id));
 }
 
 export function getDownstreamNodes(
   workflowId: number,
   nodeId: string
 ): WorkflowNode[] {
-  throw new Error("not implemented");
+  // Query all workflow nodes for this workflow
+  const allNodes = getWorkflowNodes(workflowId);
+
+  // Filter to nodes whose depends_on JSON array contains the given nodeId
+  return allNodes.filter(node => {
+    if (!node.depends_on) return false;
+    const deps = JSON.parse(node.depends_on) as string[];
+    return deps.includes(nodeId);
+  });
 }
 
 export function updateJoinDependencies(
@@ -113,5 +243,22 @@ export function updateJoinDependencies(
   joinNodeId: string,
   newDeps: string[]
 ): void {
-  throw new Error("not implemented");
+  // Get the join node
+  const joinNode = queryOne<WorkflowNode>(
+    "SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
+    [workflowId, joinNodeId]
+  );
+
+  if (!joinNode) return;
+
+  // Parse current dependencies
+  const currentDeps = joinNode.depends_on ? JSON.parse(joinNode.depends_on) as string[] : [];
+
+  // Merge and deduplicate
+  const mergedDeps = [...new Set([...currentDeps, ...newDeps])];
+
+  // Update the join node
+  updateWorkflowNode(joinNode.id, {
+    depends_on: JSON.stringify(mergedDeps),
+  });
 }

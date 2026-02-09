@@ -1,5 +1,16 @@
 // material/storage.ts - Object Storage / Blob Storage
-// Stub: All function bodies throw "not implemented"
+// Slice 1: Local filesystem implementation
+
+import { existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
+import {
+  getDatabase,
+  getBlob,
+  findBlobByChecksum,
+  updateBlobLastReferenced,
+  findOrphanedBlobs,
+  deleteBlobBatch,
+} from "./db";
 
 // =============================================================================
 // Types
@@ -40,6 +51,19 @@ export interface PreparedFile {
 export const INLINE_THRESHOLD = 65536; // 64KB
 export const LARGE_FILE_THRESHOLD = 104857600; // 100MB
 
+const DATA_DIR = process.env.SKYREPL_DATA_DIR || "./data";
+const BLOB_DIR = join(DATA_DIR, "blobs");
+
+function ensureBlobDir(): void {
+  if (!existsSync(BLOB_DIR)) {
+    mkdirSync(BLOB_DIR, { recursive: true });
+  }
+}
+
+function blobPath(checksum: string): string {
+  return join(BLOB_DIR, checksum);
+}
+
 // =============================================================================
 // Presigned URLs
 // =============================================================================
@@ -50,19 +74,33 @@ export function generateUploadUrl(
   contentType?: string,
   reservation?: number
 ): UploadUrlResult {
-  throw new Error("not implemented");
+  const effectiveSize = reservation && reservation > 0 ? reservation : sizeBytes;
+  if (effectiveSize <= INLINE_THRESHOLD) {
+    return { url: `/v1/blobs/${blobId}/inline`, method: "PUT", inline: true };
+  }
+  return { url: `/v1/blobs/${blobId}/upload`, method: "PUT", inline: false };
 }
 
 export function generateDownloadUrl(blobId: number): DownloadUrlResult {
-  throw new Error("not implemented");
+  const blob = getBlob(blobId);
+  if (!blob) throw new Error(`Blob ${blobId} not found`);
+  if (blob.payload !== null) {
+    return { url: `/v1/blobs/${blobId}/inline`, inline: true };
+  }
+  return { url: `/v1/blobs/${blobId}/download`, inline: false };
 }
 
-export function generatePresignedUrls(
+export async function generatePresignedUrls(
   checksums: string[],
   method: "GET" | "PUT",
   ttlMs: number
 ): Promise<string[]> {
-  throw new Error("not implemented");
+  // In local mode, return direct blob URLs
+  return checksums.map(checksum => {
+    const blob = findBlobByChecksum("run-files", checksum);
+    if (!blob) return `/v1/blobs/missing/${checksum}`;
+    return method === "GET" ? `/v1/blobs/${blob.id}/download` : `/v1/blobs/${blob.id}/upload`;
+  });
 }
 
 // =============================================================================
@@ -70,58 +108,63 @@ export function generatePresignedUrls(
 // =============================================================================
 
 export function storeInline(blobId: number, data: Buffer): void {
-  throw new Error("not implemented");
+  const db = getDatabase();
+  db.prepare("UPDATE blobs SET payload = ?, size_bytes = ? WHERE id = ?")
+    .run(data, data.length, blobId);
 }
 
 export function getInline(blobId: number): Buffer | null {
-  throw new Error("not implemented");
+  const db = getDatabase();
+  const row = db.prepare("SELECT payload FROM blobs WHERE id = ?").get(blobId) as { payload: Uint8Array | null } | null;
+  if (!row?.payload) return null;
+  return Buffer.from(row.payload);
 }
 
 // =============================================================================
 // S3 Operations
 // =============================================================================
 
-export function uploadToS3(
+export async function uploadToS3(
   blobId: number,
   data: Buffer,
   contentType?: string
 ): Promise<void> {
-  throw new Error("not implemented");
+  throw new Error("S3 not available in local mode. Use storeInline() or filesystem storage.");
 }
 
-export function downloadFromS3(blobId: number): Promise<Buffer> {
-  throw new Error("not implemented");
+export async function downloadFromS3(blobId: number): Promise<Buffer> {
+  throw new Error("S3 not available in local mode. Use getInline() or filesystem storage.");
 }
 
-export function deleteFromS3(blobId: number): Promise<void> {
-  throw new Error("not implemented");
+export async function deleteFromS3(blobId: number): Promise<void> {
+  throw new Error("S3 not available in local mode.");
 }
 
 // =============================================================================
 // Multipart Uploads
 // =============================================================================
 
-export function generateMultipartUploadUrls(
+export async function generateMultipartUploadUrls(
   blobId: number,
   totalSize: number,
   contentType?: string
 ): Promise<UploadUrlResult> {
-  throw new Error("not implemented");
+  throw new Error("Multipart upload not supported in local mode");
 }
 
-export function completeMultipartUpload(
+export async function completeMultipartUpload(
   blobId: number,
   uploadId: string,
   parts: { partNumber: number; etag: string }[]
 ): Promise<void> {
-  throw new Error("not implemented");
+  throw new Error("Multipart upload not supported in local mode");
 }
 
-export function abortMultipartUpload(
+export async function abortMultipartUpload(
   blobId: number,
   uploadId: string
 ): Promise<void> {
-  throw new Error("not implemented");
+  throw new Error("Multipart upload not supported in local mode");
 }
 
 // =============================================================================
@@ -132,7 +175,21 @@ export function checkBlobsExist(
   bucket: string,
   checksums: string[]
 ): { missing: string[]; existing: Record<string, number> } {
-  throw new Error("not implemented");
+  const DEDUPABLE = ["run-files", "artifacts", "snapshots"];
+  if (!DEDUPABLE.includes(bucket)) {
+    return { missing: checksums, existing: {} };
+  }
+  const existing: Record<string, number> = {};
+  const missing: string[] = [];
+  for (const checksum of checksums) {
+    const blob = findBlobByChecksum(bucket, checksum);
+    if (blob) {
+      existing[checksum] = blob.id;
+    } else {
+      missing.push(checksum);
+    }
+  }
+  return { missing, existing };
 }
 
 export function createBlobWithDedup(
@@ -140,7 +197,28 @@ export function createBlobWithDedup(
   checksum: string,
   data: Buffer
 ): number {
-  throw new Error("not implemented");
+  const DEDUPABLE = ["run-files", "artifacts", "snapshots"];
+  if (DEDUPABLE.includes(bucket)) {
+    const existing = findBlobByChecksum(bucket, checksum);
+    if (existing) {
+      updateBlobLastReferenced(existing.id);
+      return existing.id;
+    }
+  }
+  // Create new blob record
+  const now = Date.now();
+  const db = getDatabase();
+  const result = db.prepare(
+    "INSERT INTO blobs (bucket, checksum, checksum_bytes, size_bytes, payload, created_at, last_referenced_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+  ).run(bucket, checksum, data.length, data.length, data.length <= INLINE_THRESHOLD ? data : null, now, now);
+  const blobId = result.lastInsertRowid as number;
+
+  if (data.length > INLINE_THRESHOLD) {
+    // Store on filesystem
+    ensureBlobDir();
+    writeFileSync(blobPath(checksum), data);
+  }
+  return blobId;
 }
 
 // =============================================================================
@@ -151,7 +229,16 @@ export function prepareFilesForRun(
   runId: number,
   files: FileInfo[]
 ): PreparedFile[] {
-  throw new Error("not implemented");
+  const checksums = files.map(f => f.checksum);
+  const { existing } = checkBlobsExist("run-files", checksums);
+  const result: PreparedFile[] = [];
+  for (const file of files) {
+    const blobId = existing[file.checksum];
+    if (!blobId) throw new Error(`Blob not found for checksum: ${file.checksum}`);
+    const { url } = generateDownloadUrl(blobId);
+    result.push({ path: file.path, blobId, url });
+  }
+  return result;
 }
 
 // =============================================================================
@@ -159,7 +246,10 @@ export function prepareFilesForRun(
 // =============================================================================
 
 export function appendLogData(blobId: number, newData: Buffer): void {
-  throw new Error("not implemented");
+  const db = getDatabase();
+  db.prepare(
+    "UPDATE blobs SET payload = CASE WHEN payload IS NULL THEN ? ELSE payload || ? END, size_bytes = size_bytes + ?, last_referenced_at = ? WHERE id = ?"
+  ).run(newData, newData, newData.length, Date.now(), blobId);
 }
 
 export function getLogUpdates(
@@ -167,7 +257,19 @@ export function getLogUpdates(
   stream: "stdout" | "stderr",
   lastSeen: number
 ): { payload: Buffer; updatedAt: number }[] {
-  throw new Error("not implemented");
+  const db = getDatabase();
+  return db.prepare(`
+    SELECT b.payload, b.last_referenced_at as updatedAt
+    FROM objects o
+    JOIN blobs b ON o.blob_id = b.id
+    JOIN object_tags ot_run ON o.id = ot_run.object_id
+    JOIN object_tags ot_stream ON o.id = ot_stream.object_id
+    WHERE o.type = 'log'
+      AND ot_run.tag = ?
+      AND ot_stream.tag = ?
+      AND b.last_referenced_at > ?
+    ORDER BY b.last_referenced_at
+  `).all(`run_id:${runId}`, `stream:${stream}`, lastSeen) as { payload: Buffer; updatedAt: number }[];
 }
 
 // =============================================================================
@@ -175,7 +277,22 @@ export function getLogUpdates(
 // =============================================================================
 
 export async function runBlobGC(): Promise<number> {
-  throw new Error("not implemented");
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const orphaned = findOrphanedBlobs(cutoff);
+  if (orphaned.length === 0) return 0;
+  // Delete filesystem blobs
+  for (const blob of orphaned) {
+    if (blob.payload === null && blob.checksum) {
+      const path = blobPath(blob.checksum);
+      try {
+        unlinkSync(path);
+      } catch {
+        // File may not exist
+      }
+    }
+  }
+  deleteBlobBatch(orphaned.map(b => b.id));
+  return orphaned.length;
 }
 
 // =============================================================================
@@ -183,5 +300,12 @@ export async function runBlobGC(): Promise<number> {
 // =============================================================================
 
 export function cleanupManifestObjects(manifestId: number): void {
-  throw new Error("not implemented");
+  const db = getDatabase();
+  const objectIds = db.prepare(
+    "SELECT resource_id FROM manifest_resources WHERE manifest_id = ? AND resource_type = 'object'"
+  ).all(manifestId) as { resource_id: string }[];
+  if (objectIds.length === 0) return;
+  const ids = objectIds.map(r => parseInt(r.resource_id));
+  const placeholders = ids.map(() => "?").join(",");
+  db.prepare(`DELETE FROM objects WHERE id IN (${placeholders})`).run(...ids);
 }

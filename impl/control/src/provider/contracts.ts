@@ -43,6 +43,20 @@ export interface CompensationContext {
 
 export interface SpawnInstanceContract extends ProviderWorkflowContract {
   type: "spawn-instance";
+
+  input: {
+    spec: string;
+    region?: string;
+    spot?: boolean;
+    bootstrap: BootstrapConfig;
+  };
+
+  output: {
+    instanceId: string;      // Our internal ID
+    providerId: string;      // Provider's instance ID
+    ip: string | null;       // Public IP (may be null initially)
+    status: string;
+  };
 }
 
 // =============================================================================
@@ -51,6 +65,16 @@ export interface SpawnInstanceContract extends ProviderWorkflowContract {
 
 export interface TerminateInstanceContract extends ProviderWorkflowContract {
   type: "terminate-instance";
+
+  input: {
+    providerId: string;
+    gracePeriodMs?: number;
+  };
+
+  output: {
+    terminated: boolean;
+    finalStatus: string;
+  };
 }
 
 // =============================================================================
@@ -59,19 +83,39 @@ export interface TerminateInstanceContract extends ProviderWorkflowContract {
 
 export interface CreateSnapshotContract extends ProviderWorkflowContract {
   type: "create-snapshot";
+
+  input: {
+    providerId: string;
+    name: string;
+    spec: string;
+    initChecksum?: string;
+  };
+
+  output: {
+    snapshotId: string;
+    providerSnapshotId: string;
+    sizeBytes?: number;
+  };
 }
 
 // =============================================================================
 // Registry
 // =============================================================================
 
+const PROVIDER_WORKFLOW_REGISTRY = new Map<string, ProviderWorkflowContract>();
+
 export function registerProviderWorkflow(contract: ProviderWorkflowContract): void {
-  throw new Error("not implemented");
+  const key = `${contract.provider}:${contract.type}`;
+  if (PROVIDER_WORKFLOW_REGISTRY.has(key)) {
+    throw new Error(`Provider workflow already registered: ${key}`);
+  }
+  PROVIDER_WORKFLOW_REGISTRY.set(key, contract);
 }
 
 export function getProviderWorkflow(
   provider: ProviderName,
   type: string
 ): ProviderWorkflowContract | undefined {
-  throw new Error("not implemented");
+  const key = `${provider}:${type}`;
+  return PROVIDER_WORKFLOW_REGISTRY.get(key);
 }
