@@ -343,7 +343,7 @@ export class OrbStackProvider implements Provider<OrbStackInstance> {
       const bootstrapCmd = `echo '${encoded}' | base64 -d > /tmp/bootstrap.sh && chmod +x /tmp/bootstrap.sh && nohup /tmp/bootstrap.sh > /tmp/bootstrap.log 2>&1 &`;
 
       try {
-        await orbctl(["run", "-m", name, "sh", "-c", bootstrapCmd], {
+        await orbctl(["run", "-m", name, "-u", "root", "sh", "-c", bootstrapCmd], {
           timeout: 30_000,
         });
       } catch (err) {
@@ -493,13 +493,19 @@ ${JSON.stringify(
 )}
 SKYREPL_CONFIG_EOF
 
-${config.initScript ? `# User init script\n${config.initScript}\n` : ""}# Download agent
-curl -fsSL ${config.agentUrl} -o agent.py
+${config.initScript ? `# User init script\n${config.initScript}\n` : ""}# Download agent files
+mkdir -p /opt/skyrepl-agent
+cd /opt/skyrepl-agent
+AGENT_BASE="${config.controlPlaneUrl}/v1/agent/download"
+for f in agent.py executor.py heartbeat.py logs.py sse.py; do
+  curl -fsSL "$AGENT_BASE/$f" -o "$f"
+done
 
 # Set environment variables
 ${envLines}
 
 # Start agent
+cd /opt/skyrepl-agent
 exec python3 agent.py
 `;
 

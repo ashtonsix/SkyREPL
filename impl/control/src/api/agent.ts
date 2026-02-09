@@ -12,7 +12,7 @@ import {
   type Allocation,
   type Run,
 } from "../material/db";
-import { activateAllocation } from "../workflow/state-transitions";
+import { activateAllocation, failAllocation } from "../workflow/state-transitions";
 import { sseManager } from "./sse-protocol";
 import type { AgentBridge } from "../workflow/nodes/start-run";
 import type { StartRunMessage } from "@skyrepl/shared";
@@ -146,9 +146,10 @@ export function registerAgentRoutes(app: Elysia<any>): void {
     const existingLogObj = queryOne<{ id: number; blob_id: number }>(
       `SELECT o.id, o.blob_id FROM objects o
        WHERE o.type = 'log'
-       AND o.metadata_json LIKE ?
+       AND json_extract(o.metadata_json, '$.run_id') = ?
+       AND json_extract(o.metadata_json, '$.stream') = ?
        ORDER BY o.id DESC LIMIT 1`,
-      [`%"run_id":${log.run_id}%"stream":"${log.stream}"%`]
+      [log.run_id, log.stream]
     );
 
     let blobId: number;
@@ -262,6 +263,34 @@ export function registerAgentRoutes(app: Elysia<any>): void {
     return { ack: true };
   });
 
+  // ─── Agent File Download ─────────────────────────────────────────────
+
+  app.get("/v1/agent/download/:filename", async ({ params, set }) => {
+    const allowedFiles = ["agent.py", "executor.py", "heartbeat.py", "logs.py", "sse.py"];
+    const filename = params.filename;
+
+    if (!allowedFiles.includes(filename)) {
+      set.status = 404;
+      return { error: { code: "NOT_FOUND", message: `Agent file not found: ${filename}` } };
+    }
+
+    // Resolve path to impl/agent/ directory (3 levels up from api/ to impl/)
+    const agentDir = new URL("../../../agent", import.meta.url).pathname;
+    const file = Bun.file(`${agentDir}/${filename}`);
+
+    if (!await file.exists()) {
+      set.status = 404;
+      return { error: { code: "NOT_FOUND", message: `Agent file not found on disk: ${filename}` } };
+    }
+
+    return new Response(file, {
+      headers: {
+        "Content-Type": "text/x-python",
+        "Content-Disposition": `attachment; filename=${filename}`,
+      },
+    });
+  });
+
   // ─── Panic Diagnostics (stub for Slice 1) ────────────────────────────
 
   app.post("/v1/instances/:id/panic", async ({ params, body }) => {
@@ -302,6 +331,15 @@ export async function handleSyncComplete(
 ): Promise<void> {
   if (!syncSuccess) {
     updateRun(runId, { workflow_state: "launch-run:sync-failed" });
+
+    // Fail the CLAIMED allocation so waitForEvent detects the failure immediately
+    const alloc = queryOne<Allocation>(
+      "SELECT * FROM allocations WHERE run_id = ? AND status = 'CLAIMED'",
+      [runId]
+    );
+    if (alloc) {
+      failAllocation(alloc.id, "CLAIMED");
+    }
     return;
   }
 
@@ -380,10 +418,18 @@ export function createRealAgentBridge(): AgentBridge {
         if (eventType === "sync_complete") {
           // Check if allocation transitioned CLAIMED -> ACTIVE (means sync is done)
           const alloc = queryOne<Allocation>(
-            "SELECT * FROM allocations WHERE run_id = ? AND status = ?",
-            [opts.runId, "ACTIVE"]
+            "SELECT * FROM allocations WHERE run_id = ? AND (status = ? OR status = ?)",
+            [opts.runId, "ACTIVE", "FAILED"]
           );
-          if (alloc) return { success: true };
+          if (alloc) {
+            if (alloc.status === "FAILED") {
+              throw Object.assign(
+                new Error("File sync failed"),
+                { code: "SYNC_FAILED", category: "internal" }
+              );
+            }
+            return { success: true };
+          }
         } else if (eventType === "run_complete") {
           // Check if run has finished
           const run = queryOne<Run>(

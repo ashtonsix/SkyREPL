@@ -34,7 +34,19 @@ export const waitForBootExecutor: NodeExecutor<WaitForBootInput, WaitForBootOutp
   idempotent: true,
 
   async execute(ctx: NodeContext): Promise<WaitForBootOutput> {
-    const input = ctx.workflowInput as WaitForBootInput;
+    const wfInput = ctx.workflowInput as { provider?: string };
+    const spawnOutput = ctx.getNodeOutput("spawn-instance") as {
+      instanceId: number;
+      providerId: string;
+    } | null;
+    if (!spawnOutput) {
+      throw new Error("spawn-instance output not available");
+    }
+    const input: WaitForBootInput = {
+      instance_id: spawnOutput.instanceId,
+      provider_id: spawnOutput.providerId,
+      provider: wfInput.provider || "orbstack",
+    };
     const provider = await getProvider(input.provider as ProviderName);
     const pollInterval = input.poll_interval_ms ?? TIMING.BOOT_POLL_INTERVAL_MS;
     const timeout = input.timeout_ms ?? TIMING.INSTANCE_BOOT_TIMEOUT_MS;
@@ -69,8 +81,18 @@ export const waitForBootExecutor: NodeExecutor<WaitForBootInput, WaitForBootOutp
   },
 
   async compensate(ctx: NodeContext): Promise<void> {
-    const input = ctx.workflowInput as WaitForBootInput;
-    if (!input.provider_id) return;
+    const wfInput = ctx.workflowInput as { provider?: string };
+    const spawnOutput = ctx.getNodeOutput("spawn-instance") as {
+      instanceId: number;
+      providerId: string;
+    } | null;
+    if (!spawnOutput || !spawnOutput.providerId) return;
+
+    const input: WaitForBootInput = {
+      instance_id: spawnOutput.instanceId,
+      provider_id: spawnOutput.providerId,
+      provider: wfInput.provider || "orbstack",
+    };
 
     try {
       const provider = await getProvider(input.provider as ProviderName);

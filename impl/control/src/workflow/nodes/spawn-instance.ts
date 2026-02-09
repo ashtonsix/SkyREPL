@@ -63,9 +63,11 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
     const controlPlaneUrl = process.env.SKYREPL_CONTROL_PLANE_URL || "http://localhost:3000";
     const registrationToken = generateAuthTokenHash();
     const bootstrapConfig = {
-      agentUrl: `${controlPlaneUrl}/agent/download`,
       controlPlaneUrl,
       registrationToken,
+      environment: {
+        SKYREPL_INSTANCE_ID: String(instance.id),
+      },
     };
     const providerResult = await provider.spawn({
       spec: input.spec,

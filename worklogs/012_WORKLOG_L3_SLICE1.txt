@@ -1,19 +1,20 @@
-WORKLOG: L3 Slice 1 Planning — OrbStack End-to-End
-==================================================
+WORKLOG: L3 Slice 1 — OrbStack End-to-End
+==========================================
 
-Status: COMPLETE
+Status: COMPLETE (planning + implementation + exercise)
 Started: 2026-02-08
+Completed: 2026-02-09
 Predecessor: worklogs/011_WORKLOG_L2B_COMPLETION.txt
 
 ## Goal
 
-Plan the minimal L3 implementation to get a single run executing end-to-end
-on OrbStack: CLI submits run -> control plane orchestrates -> agent streams
-logs back. This is the "Spine" slice.
+Plan and implement the minimal L3 "Spine" — CLI submits run -> control plane
+orchestrates -> OrbStack VM runs command -> agent streams logs back.
+`repl run "echo hello"` works end-to-end.
 
 ## Scope
 
-Research and planning ONLY — no code changes in this worklog.
+Full lifecycle: research, planning, implementation (Steps 0-10), exercise phase.
 
 ## Research Tasks
 
@@ -52,6 +53,8 @@ A sequenced implementation plan covering:
 Phase 1: Research (R1-R5) .............. [X] COMPLETE
 Phase 2: Synthesis & gap analysis ...... [X] COMPLETE
 Phase 3: Implementation plan ........... [X] COMPLETE
+Phase 4: Implementation (Steps 0-10) ... [X] COMPLETE
+Phase 5: Exercise (punishing tests) .... [X] COMPLETE
 
 
 ================================================================================
@@ -244,13 +247,13 @@ Files on critical path, grouped by L2 readiness:
 
 ### 2.3 Technology Decisions
 
-| Decision             | Choice                  | Rationale                                       |
-|----------------------|-------------------------|-------------------------------------------------|
-| TypeScript runtime   | Bun                     | Used in legacy, built-in SQLite, fast startup   |
-| SQLite driver        | bun:sqlite              | Zero-dep, WAL mode, built-in to Bun             |
-| HTTP framework       | Hono                    | Lightweight, Bun-native, WebSocket support      |
-| Validation           | Zod                     | De facto TS standard, good error messages        |
-| Python agent         | stdlib only             | Spec-mandated (Ch11), no pip install on VMs     |
+| Decision             | Choice                  | Rationale                                        |
+|----------------------|-------------------------|--------------------------------------------------|
+| TypeScript runtime   | Bun                     | Used in legacy, built-in SQLite, fast startup    |
+| SQLite driver        | bun:sqlite              | Zero-dep, WAL mode, built-in to Bun              |
+| HTTP framework       | ~Hono~ ElysiaJS         | ~Lightweight, Bun-native, WebSocket support~     |
+| Validation           | ~Zod~ TypeBox           | ~De facto TS standard, good error messages~      |
+| Python agent         | stdlib only             | Spec-mandated (Ch11), no pip install on VMs      |
 | Monorepo structure   | Bun workspaces          | control/, cli/, shared/ as packages              |
 | Package manager      | Bun                     | Single tool for runtime + deps + scripts         |
 | Test framework       | bun:test                | Built-in, fast, compatible with Hono testing     |
@@ -952,9 +955,62 @@ IMPLEMENTATION SEQUENCE SUMMARY
 [2026-02-08] Worklog created. Launching parallel research subagents.
 [2026-02-08] Phase 1 complete. All 5 research streams returned.
 [2026-02-08] Phase 2 complete. Gap analysis and synthesis done.
-[2026-02-08] Phase 3 complete. Implementation plan written. Worklog COMPLETE.
-[2026-02-08] Refinement: impl-pseudo/ -> impl-pseudo/ rename, new impl/ for L3 working
-             code (plain .ts/.py extensions), Step 1 expanded to generate stub
-             files with types + signatures + throw("not implemented").
-[2026-02-08] Added Future Slices section (Slice 2-5 tentative roadmap).
+[2026-02-08] Phase 3 complete. Implementation plan written.
+[2026-02-08] Refinement: new impl/ for L3 working code (plain .ts/.py extensions),
+             Step 1 expanded to generate stub files with types + signatures +
+             throw("not implemented"). Added Future Slices section (Slice 2-5).
              Removed stale ROUGH_NOTES_CODE_PLANNING.txt.
+
+--- IMPLEMENTATION EXECUTION (Phase 4) ---
+
+[2026-02-08] Step 0 COMPLETE. AC1: 6 strings fixed in launch-run.ts.l2.txt.
+             AC2: AVAILABLE→FAILED added to spec. AC3: depends_on column added
+             across 7 files. 0d: 7 node L2 files written (1,617 lines total).
+             Cross-ref check: 0 errors. BACKLOG AC1-AC3 all marked DONE.
+[2026-02-08] Step 1 COMPLETE. impl/ renamed to impl-pseudo/. New impl/ created
+             with Bun workspace monorepo. 44 stub files (7 shared, 28 control,
+             4 cli, 5 agent) totaling ~6,945 lines. All three TS packages
+             compile clean (tsc --noEmit). bun install passes.
+[2026-02-08] Framework decision: Hono+Zod → ElysiaJS+TypeBox. Rationale: Bun-native,
+             TypeBox schemas ARE JSON Schema (Python agent can consume directly),
+             Static<typeof Schema> replaces 11 manual interfaces. Accepted risks:
+             single maintainer, pin versions.
+[2026-02-08] Step 1.5 COMPLETE (framework migration). 6 migration items done.
+             agent.ts 294→225 lines, 11 duplicate interfaces eliminated.
+[2026-02-08] Step 1.6 COMPLETE (drift audit). 18 drift items fixed across 45 files.
+             Key: snake_case wire format, wait-for-boot node added (9-node DAG),
+             CB pattern for warm/cold convergence, updated_at on 3 DDL tables.
+[2026-02-09] Step 2 COMPLETE (material layer). db.ts 571→1184 lines, storage.ts
+             188→311 lines. 59 tests. WAL, CAS claims, auto updated_at, blob dedup.
+[2026-02-09] Step 3 COMPLETE (shared types). Already realized during Steps 1/1.5.
+             TypeBox schemas ARE the wire types. 6 files, ~2,048 lines.
+[2026-02-09] Step 4 COMPLETE (provider layer). orbstack.ts 678 lines, full orbctl
+             integration. 34 new tests. 93 total tests pass.
+[2026-02-09] Step 5 COMPLETE (workflow engine). engine.ts 1077 lines, state-transitions.ts
+             569 lines, patterns.ts 265 lines. 102 new tests. 195 total pass.
+[2026-02-09] Step 6 COMPLETE (launch-run intent). 9-node DAG, all node executors.
+             AgentBridge pattern for DI. 195 tests pass.
+[2026-02-09] Step 7 COMPLETE (API layer). Elysia routes, SSEManager, WebSocket log
+             streaming, agent endpoints. 2 drift CRs fixed. 195 tests pass.
+[2026-02-09] Post-Step-7 audit: 11 bugs (B1-B11), 4 design decisions (C1-C4).
+             10 bugs fixed, 1 not-a-bug (B6). Slice 2 items to BACKLOG.
+[2026-02-09] Step 8 COMPLETE (Python agent). 5 files, 1,635 lines. SSE reader,
+             heartbeats, executor, log buffer. stdlib-only.
+[2026-02-09] Step 9 COMPLETE (CLI). client.ts + run.ts, 404 lines. WS logs +
+             HTTP poll for completion.
+[2026-02-09] Step 10 COMPLETE (integration test). 3 blocker clusters fixed (node data
+             flow, bootstrap/connectivity, engine timeouts). OrbStack E2E passing:
+             VM spawns, agent connects, "echo hello" streams back. ~110s runtime.
+             215 tests pass (195 unit + 17 smoke + 3 OrbStack E2E).
+
+--- EXERCISE PHASE (Phase 5) ---
+
+[2026-02-09] Comprehensive audit → 8 bugs found, 4 fixed:
+             (1) startNode return unchecked → double execution risk
+             (2) SSE heartbeat interval leak on stream cancel
+             (3) Sync failure → 60s timeout instead of immediate fail
+             (4) LIKE query fragile for log lookup → json_extract
+             4 deferred to BACKLOG (EX3, EX7, EX8 + backpressure).
+[2026-02-09] 58 new tests: e2e-exercise (54 in-process), orbstack-exercise (4 VM).
+             Final: 273 pass, 0 fail, 873+ expect() calls across 8 files.
+             Exercise findings centralised in BACKLOG (EX1-EX8, D1).

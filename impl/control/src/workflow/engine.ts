@@ -307,14 +307,26 @@ export async function executeNode(
   }
 
   // Mark node running BEFORE execution (crash recovery semantics)
-  startNode(node.id);
+  const transition = startNode(node.id);
+  if (!transition.success) {
+    // Another runner already started this node (RACE_LOST or WRONG_STATE)
+    return;
+  }
 
   // Build NodeContext
   const ctx = buildNodeContext(workflowId, node);
 
   try {
     // Execute with node-level timeout
-    const nodeTimeoutMs = TIMING.DEFAULT_NODE_TIMEOUT_MS;
+    let nodeTimeoutMs = TIMING.DEFAULT_NODE_TIMEOUT_MS;
+    const workflow = getWorkflow(workflowId);
+    if (workflow) {
+      const bp = blueprints.get(workflow.type);
+      const nodeDef = bp?.nodes[node.node_id];
+      if (nodeDef?.timeout) {
+        nodeTimeoutMs = nodeDef.timeout;
+      }
+    }
     const output = await Promise.race([
       executor.execute(ctx),
       createTimeout(nodeTimeoutMs),

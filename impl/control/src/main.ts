@@ -28,7 +28,7 @@ export async function startup(): Promise<void> {
   setupWorkflowEngine();
   registerProviders();
 
-  const port = parseInt(process.env.SKYREPL_PORT ?? process.env.PORT ?? "8080", 10);
+  const port = parseInt(process.env.SKYREPL_PORT ?? process.env.PORT ?? "3000", 10);
   startHttpServer(port);
 
   startBackgroundTasks();

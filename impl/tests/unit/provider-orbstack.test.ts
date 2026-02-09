@@ -120,7 +120,6 @@ describe("OrbStack Provider - Unit Tests", () => {
 
   describe("generateBootstrap", () => {
     const config = {
-      agentUrl: "https://example.com/agent.py",
       controlPlaneUrl: "https://control.example.com",
       registrationToken: "test-token-123",
     };
@@ -162,9 +161,11 @@ describe("OrbStack Provider - Unit Tests", () => {
       expect(result.content).toContain(config.registrationToken);
     });
 
-    test("script downloads agent from agentUrl", () => {
+    test("script downloads agent files from control plane", () => {
       const result = provider.generateBootstrap(config);
-      expect(result.content).toContain(config.agentUrl);
+      expect(result.content).toContain(
+        `${config.controlPlaneUrl}/v1/agent/download`
+      );
       expect(result.content).toContain("curl -fsSL");
     });
 
@@ -289,7 +290,6 @@ describe("OrbStack Provider - Integration Tests", () => {
     const instance = await provider.spawn({
       spec: "ubuntu:noble:arm64",
       bootstrap: {
-        agentUrl: "https://example.com/agent.py",
         controlPlaneUrl: "https://control.example.com",
         registrationToken: "test-token",
       },

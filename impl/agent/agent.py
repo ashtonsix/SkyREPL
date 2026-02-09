@@ -38,10 +38,10 @@ from executor import RunExecutor, configure as executor_configure
 # Configuration (from environment)
 # =============================================================================
 
-CONTROL_PLANE_URL = os.getenv("REPL_CONTROL_PLANE_URL", "http://localhost:3000")
-INSTANCE_ID = os.getenv("REPL_INSTANCE_ID")  # Required
-WORKDIR = os.getenv("REPL_WORKDIR", "/workspace")
-SHUTDOWN_GRACE_PERIOD_S = int(os.getenv("REPL_SHUTDOWN_GRACE_PERIOD_S", "5"))
+CONTROL_PLANE_URL = os.getenv("SKYREPL_CONTROL_PLANE_URL", "http://localhost:3000")
+INSTANCE_ID = os.getenv("SKYREPL_INSTANCE_ID")  # Required
+WORKDIR = os.getenv("SKYREPL_WORKDIR", "/workspace")
+SHUTDOWN_GRACE_PERIOD_S = int(os.getenv("SKYREPL_SHUTDOWN_GRACE_PERIOD_S", "5"))
 
 # =============================================================================
 # Global State
@@ -142,7 +142,7 @@ def main() -> int:
 
     # Validate required configuration
     if not INSTANCE_ID:
-        _log("FATAL", "REPL_INSTANCE_ID not set")
+        _log("FATAL", "SKYREPL_INSTANCE_ID not set")
         return 1
 
     _log("INFO", f"Agent starting (instance={INSTANCE_ID}, url={CONTROL_PLANE_URL})")

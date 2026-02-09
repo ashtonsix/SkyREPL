@@ -167,7 +167,7 @@ export interface ListFilter {
 // =============================================================================
 
 export interface BootstrapConfig {
-  agentUrl: string;
+  agentUrl?: string;
   controlPlaneUrl: string;
   registrationToken: string;
   initScript?: string;

@@ -196,13 +196,15 @@ export class SSEManager {
       this.logSubscribers.set(runId, new Set());
     }
     this.logSubscribers.get(runId)!.add(ws);
+    // Cleanup is handled by unsubscribeFromLogs() called from the WS close handler
+  }
 
-    ws.addEventListener("close", () => {
-      this.logSubscribers.get(runId)?.delete(ws);
-      if (this.logSubscribers.get(runId)?.size === 0) {
-        this.logSubscribers.delete(runId);
-      }
-    });
+  /** Remove WebSocket from run log subscribers */
+  unsubscribeFromLogs(runId: string, ws: WebSocket): void {
+    this.logSubscribers.get(runId)?.delete(ws);
+    if (this.logSubscribers.get(runId)?.size === 0) {
+      this.logSubscribers.delete(runId);
+    }
   }
 
   /** Broadcast log message to all CLI subscribers for a run */
@@ -228,13 +230,15 @@ export class SSEManager {
       this.workflowSubscribers.set(workflowId, new Set());
     }
     this.workflowSubscribers.get(workflowId)!.add(ws);
+    // Cleanup is handled by unsubscribeFromWorkflow() called from the WS close handler
+  }
 
-    ws.addEventListener("close", () => {
-      this.workflowSubscribers.get(workflowId)?.delete(ws);
-      if (this.workflowSubscribers.get(workflowId)?.size === 0) {
-        this.workflowSubscribers.delete(workflowId);
-      }
-    });
+  /** Remove WebSocket from workflow progress subscribers */
+  unsubscribeFromWorkflow(workflowId: string, ws: WebSocket): void {
+    this.workflowSubscribers.get(workflowId)?.delete(ws);
+    if (this.workflowSubscribers.get(workflowId)?.size === 0) {
+      this.workflowSubscribers.delete(workflowId);
+    }
   }
 
   /** Broadcast workflow event to all CLI subscribers */
@@ -313,9 +317,9 @@ export function registerWebSocketRoutes(app: Elysia<any>): void {
       // No client -> server messages defined yet
     },
     close(ws) {
-      console.debug("[sse] CLI log stream closed", {
-        runId: (ws.data as any).params.id,
-      });
+      const runId = (ws.data as any).params.id;
+      console.debug("[sse] CLI log stream closed", { runId });
+      sseManager.unsubscribeFromLogs(runId, ws.raw as unknown as WebSocket);
     },
   });
 
@@ -335,9 +339,9 @@ export function registerWebSocketRoutes(app: Elysia<any>): void {
       // No client -> server messages defined yet
     },
     close(ws) {
-      console.debug("[sse] CLI workflow stream closed", {
-        workflowId: (ws.data as any).params.id,
-      });
+      const workflowId = (ws.data as any).params.id;
+      console.debug("[sse] CLI workflow stream closed", { workflowId });
+      sseManager.unsubscribeFromWorkflow(workflowId, ws.raw as unknown as WebSocket);
     },
   });
 }
@@ -369,6 +373,8 @@ export function registerSSEWorkflowStream(app: Elysia<any>): void {
     }
 
     const encoder = new TextEncoder();
+
+    let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
 
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -476,16 +482,25 @@ export function registerSSEWorkflowStream(app: Elysia<any>): void {
         sseManager.subscribeToWorkflow(workflowId, fakeWs);
 
         // Heartbeat every 30s to keep connection alive
-        const heartbeatInterval = setInterval(() => {
+        heartbeatInterval = setInterval(() => {
           try {
             const hb = `event: heartbeat\ndata: ${JSON.stringify({
               timestamp: Date.now(),
             })}\n\n`;
             controller.enqueue(encoder.encode(hb));
           } catch {
-            clearInterval(heartbeatInterval);
+            clearInterval(heartbeatInterval!);
+            heartbeatInterval = null;
           }
         }, 30_000);
+      },
+
+      cancel() {
+        if (heartbeatInterval) {
+          clearInterval(heartbeatInterval);
+          heartbeatInterval = null;
+        }
+        sseManager.unsubscribeFromWorkflow(workflowId, {} as WebSocket);
       },
     });
 

@@ -192,7 +192,41 @@ export function applyRetryWithAlternative(
   failedNodeId: string,
   alternativeNode: InlineNodeDef
 ): void {
-  throw new Error("not implemented");
+  // Create the alternative node in the DB as 'pending'
+  createWorkflowNode({
+    workflow_id: workflowId,
+    node_id: alternativeNode.id,
+    node_type: alternativeNode.type,
+    status: "pending",
+    input_json: JSON.stringify(alternativeNode.input),
+    output_json: null,
+    error_json: null,
+    depends_on: JSON.stringify([]),
+    attempt: 0,
+    retry_reason: `alternative_for_${failedNodeId}`,
+    started_at: null,
+    finished_at: null,
+    updated_at: Date.now(),
+  });
+
+  // Update downstream nodes to depend on the alternative node
+  const downstreamNodes = getDownstreamNodes(workflowId, failedNodeId);
+  for (const downstream of downstreamNodes) {
+    // Parse current dependencies
+    const currentDeps = downstream.depends_on
+      ? (JSON.parse(downstream.depends_on) as string[])
+      : [];
+
+    // Replace failedNodeId with alternativeNode.id
+    const updatedDeps = currentDeps.map((dep) =>
+      dep === failedNodeId ? alternativeNode.id : dep
+    );
+
+    // Update the downstream node
+    updateWorkflowNode(downstream.id, {
+      depends_on: JSON.stringify(updatedDeps),
+    });
+  }
 }
 
 // =============================================================================

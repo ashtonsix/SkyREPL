@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 # Configuration (from environment, milliseconds)
 # ---------------------------------------------------------------------------
 
-HEARTBEAT_INTERVAL_MS = int(os.getenv("REPL_HEARTBEAT_INTERVAL_MS", "10000"))
+HEARTBEAT_INTERVAL_MS = int(os.getenv("SKYREPL_HEARTBEAT_INTERVAL_MS", "10000"))
 HEARTBEAT_DEGRADED_MS = 2 * 60 * 1000  # 2 minutes
 
 # Module-level state

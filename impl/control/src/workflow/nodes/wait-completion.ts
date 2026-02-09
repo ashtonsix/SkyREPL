@@ -34,7 +34,23 @@ export const waitCompletionExecutor: NodeExecutor<WaitCompletionInput, WaitCompl
   idempotent: false,
 
   async execute(ctx: NodeContext): Promise<WaitCompletionOutput> {
-    const input = ctx.workflowInput as WaitCompletionInput;
+    const wfInput = ctx.workflowInput as {
+      runId: number;
+      maxDurationMs?: number;
+    };
+    const allocOutput = ctx.getNodeOutput("create-allocation") as {
+      allocationId: number;
+      instanceId: number;
+    } | null;
+    if (!allocOutput) {
+      throw new Error("create-allocation output not available");
+    }
+    const input: WaitCompletionInput = {
+      runId: wfInput.runId,
+      instanceId: allocOutput.instanceId,
+      allocationId: allocOutput.allocationId,
+      maxDurationMs: wfInput.maxDurationMs,
+    };
     const startTime = Date.now();
 
     const bridge = getAgentBridge();

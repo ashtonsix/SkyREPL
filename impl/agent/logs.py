@@ -28,8 +28,8 @@ from urllib.parse import urlparse
 # Configuration (from environment, milliseconds converted to seconds)
 # ---------------------------------------------------------------------------
 
-LOG_LOCAL_BUFFER_MS = int(os.getenv("REPL_LOG_LOCAL_BUFFER", "100"))
-LOG_NETWORK_BATCH_MS = int(os.getenv("REPL_LOG_NETWORK_BATCH_MS", "5000"))
+LOG_LOCAL_BUFFER_MS = int(os.getenv("SKYREPL_LOG_LOCAL_BUFFER", "100"))
+LOG_NETWORK_BATCH_MS = int(os.getenv("SKYREPL_LOG_NETWORK_BATCH_MS", "5000"))
 LOG_NETWORK_BATCH_SIZE = 64 * 1024  # 64KB threshold
 LOG_BUFFER_MAX_SIZE = 1024 * 1024  # 1MB max buffer before overflow
 

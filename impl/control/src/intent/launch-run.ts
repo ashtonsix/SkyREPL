@@ -83,10 +83,12 @@ export const launchRunBlueprint: WorkflowBlueprint = {
     "sync-files": {
       type: "start-run",
       dependsOn: ["create-allocation"],
+      timeout: TIMING.SYNC_TIMEOUT_MS,
     },
     "await-completion": {
       type: "wait-completion",
       dependsOn: ["sync-files"],
+      timeout: TIMING.DEFAULT_WORKFLOW_TIMEOUT_MS,
     },
     "finalize-run": {
       type: "finalize",

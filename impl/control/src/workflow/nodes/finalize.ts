@@ -37,7 +37,34 @@ export const finalizeExecutor: NodeExecutor<FinalizeInput, FinalizeOutput> = {
   idempotent: true,
 
   async execute(ctx: NodeContext): Promise<FinalizeOutput> {
-    const input = ctx.workflowInput as FinalizeInput;
+    const wfInput = ctx.workflowInput as {
+      runId: number;
+      holdDurationMs?: number;
+      createSnapshot?: boolean;
+      initChecksum?: string;
+    };
+    const allocOutput = ctx.getNodeOutput("create-allocation") as {
+      allocationId: number;
+      instanceId: number;
+    } | null;
+    const completionOutput = ctx.getNodeOutput("await-completion") as {
+      exitCode: number;
+      spotInterrupted?: boolean;
+    } | null;
+    if (!allocOutput) {
+      throw new Error("create-allocation output not available");
+    }
+    const input: FinalizeInput = {
+      runId: wfInput.runId,
+      instanceId: allocOutput.instanceId,
+      allocationId: allocOutput.allocationId,
+      manifestId: ctx.manifestId,
+      exitCode: completionOutput?.exitCode ?? 1,
+      spotInterrupted: completionOutput?.spotInterrupted ?? false,
+      holdDurationMs: wfInput.holdDurationMs,
+      createSnapshot: wfInput.createSnapshot,
+      initChecksum: wfInput.initChecksum,
+    };
 
     // Complete allocation: ACTIVE -> COMPLETE
     const debugHoldUntil = input.holdDurationMs

@@ -1,7 +1,7 @@
 ================================================================================
 PROJECT STATUS
 ================================================================================
-Last updated: 2026-02-08
+Last updated: 2026-02-09
 
 ================================================================================
 1. OVERVIEW
@@ -46,7 +46,7 @@ Key design elements:
 3. IMPLEMENTATION STATUS
 ================================================================================
 
-**Current state: L3 Slice 1 IN PROGRESS (Steps 0-9 complete, Step 10 remaining)**
+**Current state: L3 Slice 1 COMPLETE (all steps + exercise phase done)**
 
 Two directories:
   impl-pseudo/   Read-only L1/L2 reference pseudocode (renamed from impl/)
@@ -58,7 +58,7 @@ Pseudo-implementation (impl-pseudo/):
 
 Working code (impl/):
   Bun workspace with shared/, control/, cli/ packages + standalone agent/ (Python).
-  All stubs replaced with real implementations. 195 tests passing.
+  All stubs replaced with real implementations. 273 tests passing (0 failures).
   Stack: Bun, bun:sqlite (WAL), ElysiaJS, TypeBox, Python stdlib-only agent.
 
 Structure (both dirs):
@@ -73,30 +73,32 @@ Structure (both dirs):
 ================================================================================
 
 Goal: `repl run "echo hello"` works end-to-end via OrbStack VM.
-Active worklog: WORKLOG_L3_SLICE1_IMPL.txt
-Plan: worklogs/012_WORKLOG_L3_SLICE1_PLANNING.txt
+Worklog: worklogs/012_WORKLOG_L3_SLICE1.txt
 
   Step 0: Prerequisites .................. [X] AC1-3 fixed, 7 nodes promoted L1->L2
   Step 1: Project scaffolding + stubs .... [X] impl-pseudo/ + impl/ monorepo, 44 stubs
-  Step 2: Material layer ................. [X] schema, db.ts, blob storage
+  Step 1.5: Framework migration .......... [X] Hono+Zod → ElysiaJS+TypeBox
+  Step 1.6: Drift audit .................. [X] spec/impl alignment, 18 items fixed
+  Step 2: Material layer ................. [X] schema, db.ts, blob storage, 59 tests
   Step 3: Shared types ................... [X] types, errors, API schemas
-  Step 4: Provider layer ................. [X] OrbStack via orbctl
-  Step 5: Workflow engine ................ [X] core loop, CB, crash recovery, 195 tests
+  Step 4: Provider layer ................. [X] OrbStack via orbctl, 34 tests
+  Step 5: Workflow engine ................ [X] core loop, CB, crash recovery, 102 tests
   Step 6: launch-run intent .............. [X] 9-node DAG + resource CRUD
   Step 7: API layer ...................... [X] Elysia routes, SSE, WebSocket
   Step 8: Agent .......................... [X] Python 1,635 lines, SSE reader, executor
   Step 9: CLI ............................ [X] repl run + log streaming, 404 lines
-  Step 10: Integration test .............. [ ] end-to-end gate
+  Step 10: Integration test .............. [X] OrbStack E2E, 20 smoke tests
+  Exercise: Punishing verification ....... [X] 4 bug fixes, 58 new tests
 
-Done gate: CLI -> control plane -> workflow engine -> OrbStack -> agent -> logs
-           streamed back to terminal. Crash recovery works. State machines correct.
+  Tests: 273 pass, 0 fail (195 unit + 17 smoke + 54 exercise + 7 OrbStack)
+  Done gate: PASSED — full end-to-end via OrbStack VM, ~110s runtime.
 
 ================================================================================
 5. WORKLOG REFERENCES
 ================================================================================
 
 Hot (active):
-  WORKLOG_L3_SLICE1_IMPL.txt                 - L3 Slice 1 implementation (Steps 0-9 done)
+  (none — Slice 1 complete, Slice 2 not started)
 
 Cold (archived):
   worklogs/001_WORKLOG_L1_RESTRUCTURING.txt  - Structural overhaul
@@ -110,7 +112,7 @@ Cold (archived):
   worklogs/009_WORKLOG_SPEC_HARDENING.txt    - Spec → normative transformation
   worklogs/010_WORKLOG_SPEC_AUDIT.txt        - Spec audit + consolidated findings (§A-M)
   worklogs/011_WORKLOG_L2B_COMPLETION.txt    - L2/B completion (Phases 1-5, D1-D19)
-  worklogs/012_WORKLOG_L3_SLICE1_PLANNING.txt - L3 Slice 1 planning (research + plan)
+  worklogs/012_WORKLOG_L3_SLICE1.txt         - L3 Slice 1 (planning + impl + exercise)
 
 Backlog:
   BACKLOG.txt

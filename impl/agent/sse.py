@@ -26,9 +26,9 @@ from urllib.parse import urlparse
 # Configuration (from environment, milliseconds converted to seconds)
 # ---------------------------------------------------------------------------
 
-SSE_RECONNECT_BASE_S = int(os.getenv("REPL_SSE_RECONNECT_BASE", "2000")) / 1000  # 2s
-SSE_RECONNECT_MAX_S = int(os.getenv("REPL_SSE_RECONNECT_MAX", "64000")) / 1000  # 64s
-SSE_MAX_RETRIES = int(os.getenv("REPL_SSE_MAX_RETRIES", "10"))
+SSE_RECONNECT_BASE_S = int(os.getenv("SKYREPL_SSE_RECONNECT_BASE", "2000")) / 1000  # 2s
+SSE_RECONNECT_MAX_S = int(os.getenv("SKYREPL_SSE_RECONNECT_MAX", "64000")) / 1000  # 64s
+SSE_MAX_RETRIES = int(os.getenv("SKYREPL_SSE_MAX_RETRIES", "10"))
 
 # Module-level state (set by agent.py at startup)
 _control_plane_url: str = ""

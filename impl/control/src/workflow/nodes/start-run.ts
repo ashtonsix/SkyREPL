@@ -72,7 +72,38 @@ export const startRunExecutor: NodeExecutor<StartRunInput, StartRunOutput> = {
   idempotent: false,
 
   async execute(ctx: NodeContext): Promise<StartRunOutput> {
-    const input = ctx.workflowInput as StartRunInput;
+    const wfInput = ctx.workflowInput as {
+      runId: number;
+      command: string;
+      workdir?: string;
+      env?: Record<string, string>;
+      files?: Array<{ path: string; checksum: string; sizeBytes?: number }>;
+      maxDurationMs?: number;
+      artifactPatterns?: string[];
+    };
+    const allocOutput = ctx.getNodeOutput("create-allocation") as {
+      allocationId: number;
+      instanceId: number;
+      workdir: string;
+    } | null;
+    if (!allocOutput) {
+      throw new Error("create-allocation output not available");
+    }
+    const input: StartRunInput = {
+      runId: wfInput.runId,
+      instanceId: allocOutput.instanceId,
+      allocationId: allocOutput.allocationId,
+      command: wfInput.command,
+      workdir: wfInput.workdir || allocOutput.workdir,
+      env: wfInput.env,
+      files: (wfInput.files || []).map(f => ({
+        path: f.path,
+        checksum: f.checksum,
+        sizeBytes: f.sizeBytes ?? 0,
+      })),
+      maxDurationMs: wfInput.maxDurationMs,
+      artifactPatterns: wfInput.artifactPatterns,
+    };
 
     // Update run started_at (allocation stays CLAIMED until agent reports sync_complete)
     updateRun(input.runId, {
@@ -122,19 +153,30 @@ export const startRunExecutor: NodeExecutor<StartRunInput, StartRunOutput> = {
   },
 
   async compensate(ctx: NodeContext): Promise<void> {
-    const input = ctx.workflowInput as StartRunInput;
+    const wfInput = ctx.workflowInput as {
+      runId: number;
+    };
+    const allocOutput = ctx.getNodeOutput("create-allocation") as {
+      instanceId: number;
+    } | null;
+    if (!allocOutput) {
+      ctx.log("warn", "create-allocation output not available during compensation", {
+        runId: wfInput.runId,
+      });
+      return;
+    }
 
     // Best-effort: tell agent to stop the run
     const bridge = getAgentBridge();
     try {
       await bridge.sendStartRun({
         type: "cancel",
-        runId: input.runId,
-        instanceId: input.instanceId,
+        runId: wfInput.runId,
+        instanceId: allocOutput.instanceId,
       });
     } catch {
       ctx.log("warn", "Failed to send cancel during compensation", {
-        runId: input.runId,
+        runId: wfInput.runId,
       });
     }
   },

@@ -4,7 +4,7 @@
 
 SkyREPL: cloud compute orchestration for lifecycle management and reproducibility. Control plane (VPS) + CLI client + Python agent (on instances).
 
-**Current phase:** L3 Slice 1 in progress (Steps 0-9 done, Step 10 integration test remaining). Active worklog: `WORKLOG_L3_SLICE1_IMPL.txt`. Plan: `worklogs/012_WORKLOG_L3_SLICE1_PLANNING.txt`. Backlog: `BACKLOG.txt`.
+**Current phase:** L3 Slice 1 complete. 273 tests pass (0 failures). Slice 2 not started. Worklog: `worklogs/012_WORKLOG_L3_SLICE1.txt`. Backlog: `BACKLOG.txt`.
 
 ## Dispatch
 
@@ -48,7 +48,7 @@ Three-tier: **MANIFEST → RESOURCE → MATERIAL**
 
 Two directories:
 
-- **`impl/`** — L3 working code (Bun workspace monorepo). Real `.ts`/`.py` files. Currently stub functions (`throw new Error("not implemented")`) being replaced step-by-step.
+- **`impl/`** — L3 working code (Bun workspace monorepo). Real `.ts`/`.py` files. Slice 1 fully implemented.
 - **`impl-pseudo/`** — L1/L2 reference pseudocode (read-only during L3). Fidelity suffixes: `.l1.txt` (outlines), `.l2.txt` (pseudocode).
 
 Structure (both dirs): `control/`, `cli/`, `shared/`, `agent/`, `tests/`

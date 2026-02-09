@@ -1,7 +1,7 @@
 ================================================================================
 TODO: Active Backlog
 ================================================================================
-Last updated: 2026-02-08
+Last updated: 2026-02-09
 
 ================================================================================
 VERIFICATION ONLY (No design work needed)
@@ -276,6 +276,80 @@ S2.D4: Minor spec drift in field names / response shapes
   Ref: Post-Step-7 audit D6-D9
 
 ================================================================================
+FIX DURING SLICE 2 (from exercise phase, 2026-02-09)
+================================================================================
+
+EX1: CAS acronym overload — Compare-And-Swap vs Content Addressable Storage
+  Status: FIX DURING SLICE 2
+  Severity: MEDIUM — confusing in code review and spec
+  Context: "CAS" used for both compare-and-swap (state transitions) and
+    content-addressable storage (blob dedup). Pick distinct terms: e.g.
+    "optimistic lock" or "atomic transition" for the state machine pattern,
+    reserve CAS for storage.
+  Scope: spec, impl comments, worklog terminology
+
+EX2: Manifest double-seal on workflow completion
+  Status: FIX DURING SLICE 2
+  Severity: LOW — non-fatal, caught + logged
+  Context: finalize node seals manifest (correct), then engine's
+    handleWorkflowComplete calls sealManifest again (ConflictError).
+    Fix: engine should check manifest status before sealing, or finalize
+    should signal that seal is already done.
+  Ref: Exercise phase, every OrbStack E2E run logs this warning
+
+EX3: SSE backpressure on slow agent consumers
+  Status: FIX DURING SLICE 2
+  Severity: MEDIUM — unbounded memory growth possible
+  Context: ReadableStreamDefaultController.enqueue() buffers without limit.
+    A slow or stalled agent SSE consumer accumulates queued commands in memory.
+    Fix: track queue depth, drop heartbeats when backlogged, close connection
+    above threshold.
+  Ref: Exercise phase audit
+
+EX4: Graceful shutdown — drain workflows and cleanup VMs
+  Status: FIX DURING SLICE 2
+  Severity: MEDIUM — SIGTERM kills process without draining
+  Context: main.ts has signal handlers but they just call process.exit().
+    Need: stop accepting new workflows, wait for in-flight nodes to complete
+    (with timeout), terminate orphaned VMs, close DB cleanly.
+  Ref: Exercise phase audit
+
+EX5: Authentication — agent endpoints wide open
+  Status: DESIGN DURING SLICE 2
+  Severity: HIGH — blocks any non-local deployment
+  Context: All agent endpoints (heartbeat, logs, status, SSE commands) accept
+    any caller. Fine for local OrbStack, not for cloud providers. Auth token
+    already generated in spawn-instance (crypto.randomBytes) but never verified
+    on inbound requests.
+  Ref: Exercise phase audit
+
+EX6: Warm pool — always cold path in Slice 1
+  Status: FIX DURING SLICE 2
+  Severity: HIGH — 20s+ VM spawn overhead on every run
+  Context: resolve-instance always returns warmAvailable=false, skips
+    claim-warm-allocation. BT5 covers scoring algorithm. This item covers
+    the full warm pool lifecycle: pre-spawn, claim, recycle, expiry.
+  Ref: Exercise phase audit, BT5 (scoring subset)
+
+EX7: Double cancelWorkflow race
+  Status: FIX DURING SLICE 2
+  Severity: LOW — non-fatal, second cancel is a no-op
+  Context: Two concurrent cancel requests can both pass the status check
+    before either writes. CAS guard (B5) mitigates but doesn't prevent
+    the second caller from hitting WRONG_STATE. Should return idempotent
+    success instead of error.
+  Ref: Exercise phase audit
+
+EX8: Finalize WRONG_STATE when allocation already completed
+  Status: FIX DURING SLICE 2
+  Severity: LOW — non-fatal edge case
+  Context: If allocation reaches COMPLETE before finalize runs (e.g. via
+    timeout handler or crash recovery), finalize's completeAllocation call
+    hits WRONG_STATE. Should be idempotent — detect already-complete and
+    continue.
+  Ref: Exercise phase audit
+
+================================================================================
 DEFERRED (Low urgency / edge cases)
 ================================================================================
 
@@ -287,3 +361,11 @@ T2: Tailscale JIT installation timing
 L2/A.7: Materialization depth (shallow vs deep)
   Rationale: API design, can defer until N+1 becomes a problem
   Deliverable: `include` param, batch loading, default shallow
+
+D1: Single-process control plane — no HA
+  Status: DEFERRED
+  Severity: LOW for MVP — single user, single VPS
+  Context: No distributed locking, no leader election, no process failover.
+    Workflow engine assumes single writer. Fine for MVP; needs design work
+    before multi-tenant or production deployment.
+  When: Post-MVP, when operational requirements demand it
