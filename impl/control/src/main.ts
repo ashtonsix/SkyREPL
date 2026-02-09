@@ -1,26 +1,49 @@
 // main.ts - Control Plane Entry Point
-// Stub: All function bodies throw "not implemented"
 
-import { Elysia } from "elysia";
 import { createServer } from "./api/routes";
-import { registerAgentRoutes } from "./api/agent";
+import { registerAgentRoutes, createRealAgentBridge } from "./api/agent";
 import { registerWebSocketRoutes, registerSSEWorkflowStream } from "./api/sse-protocol";
 import { initDatabase, runMigrations } from "./material/db";
-import { createWorkflowEngine } from "./workflow/engine";
-import { launchRunBlueprint } from "./intent/launch-run";
+import { createWorkflowEngine, recoverWorkflows } from "./workflow/engine";
+import { registerLaunchRun } from "./intent/launch-run";
+import { setAgentBridge } from "./workflow/nodes/start-run";
+import { TIMING } from "@skyrepl/shared";
+import type { WorkflowEngine } from "./workflow/engine";
 
 // =============================================================================
-// App
+// Module-level State
 // =============================================================================
 
-const app = new Elysia();
+let engine: WorkflowEngine | null = null;
+const intervalHandles: ReturnType<typeof setInterval>[] = [];
 
 // =============================================================================
 // Startup
 // =============================================================================
 
 export async function startup(): Promise<void> {
-  throw new Error("not implemented");
+  console.log("[control] Starting control plane...");
+
+  initializeDatabase();
+  setupWorkflowEngine();
+  registerProviders();
+
+  const port = parseInt(process.env.SKYREPL_PORT ?? process.env.PORT ?? "8080", 10);
+  startHttpServer(port);
+
+  startBackgroundTasks();
+
+  // Register signal handlers for graceful shutdown
+  process.on("SIGINT", () => {
+    console.log("[control] Received SIGINT");
+    shutdown();
+  });
+  process.on("SIGTERM", () => {
+    console.log("[control] Received SIGTERM");
+    shutdown();
+  });
+
+  console.log("[control] Control plane started successfully");
 }
 
 // =============================================================================
@@ -28,7 +51,10 @@ export async function startup(): Promise<void> {
 // =============================================================================
 
 export function initializeDatabase(): void {
-  throw new Error("not implemented");
+  const dbPath = process.env.SKYREPL_DB_PATH ?? "skyrepl-control.db";
+  initDatabase(dbPath);
+  runMigrations();
+  console.log("[control] Database initialized");
 }
 
 // =============================================================================
@@ -36,7 +62,18 @@ export function initializeDatabase(): void {
 // =============================================================================
 
 export function setupWorkflowEngine(): void {
-  throw new Error("not implemented");
+  engine = createWorkflowEngine();
+
+  // Register the launch-run blueprint and all its node executors
+  registerLaunchRun();
+  setAgentBridge(createRealAgentBridge());
+
+  // Recover any workflows that were running when we last crashed
+  recoverWorkflows().catch((err) => {
+    console.error("[control] Failed to recover workflows:", err);
+  });
+
+  console.log("[control] Workflow engine initialized");
 }
 
 // =============================================================================
@@ -44,7 +81,10 @@ export function setupWorkflowEngine(): void {
 // =============================================================================
 
 export function registerProviders(): void {
-  throw new Error("not implemented");
+  // For Slice 1: OrbStack provider is auto-registered via the provider registry
+  // (lazy-loaded on first use via providerRegistry in provider/registry.ts)
+  // No explicit registration needed — getProvider("orbstack") handles it
+  console.log("[control] Providers: orbstack (lazy-loaded via registry)");
 }
 
 // =============================================================================
@@ -52,7 +92,18 @@ export function registerProviders(): void {
 // =============================================================================
 
 export function startHttpServer(port: number): void {
-  throw new Error("not implemented");
+  const app = createServer({ port, corsOrigins: ["*"], maxBodySize: 10 * 1024 * 1024 });
+
+  // Register additional route groups
+  registerAgentRoutes(app);
+  registerWebSocketRoutes(app);
+  registerSSEWorkflowStream(app);
+
+  // CRITICAL: idleTimeout: 0 is required for SSE connections.
+  // Without it, Bun kills idle connections after ~8 seconds.
+  app.listen({ port, idleTimeout: 0 });
+
+  console.log(`[control] Control plane listening on port ${port}`);
 }
 
 // =============================================================================
@@ -60,31 +111,47 @@ export function startHttpServer(port: number): void {
 // =============================================================================
 
 export function startBackgroundTasks(): void {
-  throw new Error("not implemented");
+  // heartbeatTimeoutCheck: the only one that matters for Slice 1 (still a stub)
+  const hbHandle = setInterval(() => {
+    heartbeatTimeoutCheck().catch((err) =>
+      console.error("[control] heartbeatTimeoutCheck error:", err)
+    );
+  }, TIMING.HEARTBEAT_CHECK_INTERVAL_MS);
+  intervalHandles.push(hbHandle);
+
+  // Remaining background tasks: not implemented for Slice 1
+  console.log("[control] Background task holdExpiryCheck: not implemented for Slice 1");
+  console.log("[control] Background task manifestCleanupCheck: not implemented for Slice 1");
+  console.log("[control] Background task reconciliationTask: not implemented for Slice 1");
+  console.log("[control] Background task orphanScanTask: not implemented for Slice 1");
+  console.log("[control] Background task storageGarbageCollection: not implemented for Slice 1");
+
+  console.log("[control] Background tasks started");
 }
 
-export function heartbeatTimeoutCheck(): Promise<void> {
-  throw new Error("not implemented");
+export async function heartbeatTimeoutCheck(): Promise<void> {
+  // Stub for Slice 1: no-op
+  console.debug("[control] heartbeatTimeoutCheck: no-op for Slice 1");
 }
 
-export function holdExpiryCheck(): Promise<void> {
-  throw new Error("not implemented");
+export async function holdExpiryCheck(): Promise<void> {
+  // Stub: no-op for Slice 1
 }
 
-export function manifestCleanupCheck(): Promise<void> {
-  throw new Error("not implemented");
+export async function manifestCleanupCheck(): Promise<void> {
+  // Stub: no-op for Slice 1
 }
 
-export function reconciliationTask(): Promise<void> {
-  throw new Error("not implemented");
+export async function reconciliationTask(): Promise<void> {
+  // Stub: no-op for Slice 1
 }
 
-export function orphanScanTask(): Promise<void> {
-  throw new Error("not implemented");
+export async function orphanScanTask(): Promise<void> {
+  // Stub: no-op for Slice 1
 }
 
-export function storageGarbageCollection(): Promise<void> {
-  throw new Error("not implemented");
+export async function storageGarbageCollection(): Promise<void> {
+  // Stub: no-op for Slice 1
 }
 
 // =============================================================================
@@ -92,7 +159,16 @@ export function storageGarbageCollection(): Promise<void> {
 // =============================================================================
 
 export async function shutdown(): Promise<void> {
-  throw new Error("not implemented");
+  console.log("[control] Shutting down control plane...");
+
+  // Clear all background task intervals
+  for (const handle of intervalHandles) {
+    clearInterval(handle);
+  }
+  intervalHandles.length = 0;
+
+  // For Slice 1: just exit
+  process.exit(0);
 }
 
 // =============================================================================

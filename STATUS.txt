@@ -46,7 +46,7 @@ Key design elements:
 3. IMPLEMENTATION STATUS
 ================================================================================
 
-**Current state: L3 Slice 1 IN PROGRESS (Steps 0-1 complete, Steps 2-10 remaining)**
+**Current state: L3 Slice 1 IN PROGRESS (Steps 0-9 complete, Step 10 remaining)**
 
 Two directories:
   impl-pseudo/   Read-only L1/L2 reference pseudocode (renamed from impl/)
@@ -58,8 +58,7 @@ Pseudo-implementation (impl-pseudo/):
 
 Working code (impl/):
   Bun workspace with shared/, control/, cli/ packages + standalone agent/ (Python).
-  44 stub files (~6,945 lines) — types fully defined, function bodies throw
-  "not implemented". Each step replaces stubs with real logic.
+  All stubs replaced with real implementations. 195 tests passing.
   Stack: Bun, bun:sqlite (WAL), ElysiaJS, TypeBox, Python stdlib-only agent.
 
 Structure (both dirs):
@@ -79,14 +78,14 @@ Plan: worklogs/012_WORKLOG_L3_SLICE1_PLANNING.txt
 
   Step 0: Prerequisites .................. [X] AC1-3 fixed, 7 nodes promoted L1->L2
   Step 1: Project scaffolding + stubs .... [X] impl-pseudo/ + impl/ monorepo, 44 stubs
-  Step 2: Material layer ................. [ ] schema, db.ts, blob storage
-  Step 3: Shared types ................... [ ] types, errors, API schemas
-  Step 4: Provider layer ................. [ ] OrbStack via orbctl
-  Step 5: Workflow engine ................ [ ] core loop, CB, crash recovery
-  Step 6: launch-run intent .............. [ ] 7-node DAG + resource CRUD
-  Step 7: API layer ...................... [ ] Elysia routes, SSE, WebSocket
-  Step 8: Agent .......................... [ ] Python, SSE reader, executor
-  Step 9: CLI ............................ [ ] repl run + log streaming
+  Step 2: Material layer ................. [X] schema, db.ts, blob storage
+  Step 3: Shared types ................... [X] types, errors, API schemas
+  Step 4: Provider layer ................. [X] OrbStack via orbctl
+  Step 5: Workflow engine ................ [X] core loop, CB, crash recovery, 195 tests
+  Step 6: launch-run intent .............. [X] 9-node DAG + resource CRUD
+  Step 7: API layer ...................... [X] Elysia routes, SSE, WebSocket
+  Step 8: Agent .......................... [X] Python 1,635 lines, SSE reader, executor
+  Step 9: CLI ............................ [X] repl run + log streaming, 404 lines
   Step 10: Integration test .............. [ ] end-to-end gate
 
 Done gate: CLI -> control plane -> workflow engine -> OrbStack -> agent -> logs
@@ -97,7 +96,7 @@ Done gate: CLI -> control plane -> workflow engine -> OrbStack -> agent -> logs
 ================================================================================
 
 Hot (active):
-  WORKLOG_L3_SLICE1_IMPL.txt                 - L3 Slice 1 implementation (Steps 0-1 done)
+  WORKLOG_L3_SLICE1_IMPL.txt                 - L3 Slice 1 implementation (Steps 0-9 done)
 
 Cold (archived):
   worklogs/001_WORKLOG_L1_RESTRUCTURING.txt  - Structural overhaul

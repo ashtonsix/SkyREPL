@@ -562,13 +562,14 @@ describe("State Transitions", () => {
       }
     });
 
-    test("failWorkflow: fails from pending", () => {
+    test("failWorkflow: succeeds from pending (B4 fix: crash recovery)", () => {
       const wf = createTestWorkflow({ status: "pending" });
       const result = failWorkflow(wf.id, "error");
 
-      expect(result.success).toBe(false);
-      if (!result.success) {
-        expect(result.reason).toBe("WRONG_STATE");
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.status).toBe("failed");
+        expect(result.data.finished_at).toBeTruthy();
       }
     });
 

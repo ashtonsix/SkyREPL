@@ -1,17 +1,51 @@
 // intent/launch-run.ts - Launch Run Intent
-// Stub: All function bodies throw "not implemented"
 
 import { TIMING } from "@skyrepl/shared";
-import type { Workflow } from "../material/db";
-import type { WorkflowBlueprint } from "../workflow/engine.types";
+import { createRun, getWorkflow, type Workflow } from "../material/db";
+import type { WorkflowBlueprint, NodeExecutor, NodeContext } from "../workflow/engine.types";
+import { submit, registerBlueprint, registerNodeExecutor } from "../workflow/engine";
 import type { LaunchRunInput, LaunchRunOutput } from "./launch-run.types";
+
+// Node executor imports
+import { resolveInstanceExecutor } from "../workflow/nodes/resolve-instance";
+import { claimAllocationExecutor } from "../workflow/nodes/claim-allocation";
+import { spawnInstanceExecutor } from "../workflow/nodes/spawn-instance";
+import { waitForBootExecutor } from "../workflow/nodes/wait-for-boot";
+import { createAllocationExecutor } from "../workflow/nodes/create-allocation";
+import { startRunExecutor } from "../workflow/nodes/start-run";
+import { waitCompletionExecutor } from "../workflow/nodes/wait-completion";
+import { finalizeExecutor } from "../workflow/nodes/finalize";
 
 // =============================================================================
 // Entry Point
 // =============================================================================
 
 export async function launchRun(input: LaunchRunInput): Promise<Workflow> {
-  throw new Error("not implemented");
+  // Create a Run record in the database
+  const run = createRun({
+    command: input.command,
+    workdir: input.workdir ?? "/workspace",
+    max_duration_ms: input.maxDurationMs ?? TIMING.DEFAULT_WORKFLOW_TIMEOUT_MS,
+    workflow_state: "pending",
+    workflow_error: null,
+    current_manifest_id: null,
+    exit_code: null,
+    init_checksum: input.initChecksum ?? null,
+    create_snapshot: input.createSnapshot ? 1 : 0,
+    spot_interrupted: 0,
+    started_at: null,
+    finished_at: null,
+  });
+
+  // Submit the workflow
+  const result = await submit({
+    type: "launch-run",
+    input: { ...input, runId: run.id } as unknown as Record<string, unknown>,
+    idempotencyKey: input.idempotencyKey,
+  });
+
+  // Return the workflow record
+  return getWorkflow(result.workflowId)!;
 }
 
 // =============================================================================
@@ -38,7 +72,7 @@ export const launchRunBlueprint: WorkflowBlueprint = {
       dependsOn: ["resolve-instance"],
     },
     "wait-for-boot": {
-      type: "wait-boot",
+      type: "wait-for-boot",
       dependsOn: ["spawn-instance"],
       timeout: TIMING.INSTANCE_BOOT_TIMEOUT_MS,
     },
@@ -77,19 +111,52 @@ export const LAUNCH_RUN_ERROR_HANDLING: Record<string, string> = {
 };
 
 // =============================================================================
+// Registration
+// =============================================================================
+
+export function registerLaunchRun(): void {
+  registerBlueprint(launchRunBlueprint);
+  registerNodeExecutor(checkBudgetExecutor);
+  registerNodeExecutor(resolveInstanceExecutor);
+  registerNodeExecutor(claimAllocationExecutor);
+  registerNodeExecutor(spawnInstanceExecutor);
+  registerNodeExecutor(waitForBootExecutor);
+  registerNodeExecutor(createAllocationExecutor);
+  registerNodeExecutor(startRunExecutor);
+  registerNodeExecutor(waitCompletionExecutor);
+  registerNodeExecutor(finalizeExecutor);
+}
+
+// =============================================================================
+// Check Budget Executor
+// =============================================================================
+
+export const checkBudgetExecutor: NodeExecutor = {
+  name: "check-budget",
+  idempotent: true,
+  async execute(_ctx: NodeContext) {
+    // Slice 1: no budget enforcement
+    return { budgetOk: true };
+  },
+};
+
+// =============================================================================
 // Node Handlers
 // =============================================================================
 
-export function checkBudget(input: LaunchRunInput): Promise<{ budgetOk: boolean }> {
-  throw new Error("not implemented");
+export function checkBudget(_input: LaunchRunInput): Promise<{ budgetOk: boolean }> {
+  // Slice 1: no budget enforcement
+  return Promise.resolve({ budgetOk: true });
 }
 
 export function resolveInstance(
   input: LaunchRunInput
 ): Promise<{ warmAvailable: boolean; warmAllocationId?: number; instanceId?: number }> {
-  throw new Error("not implemented");
+  // Slice 1: always cold path (no warm pool)
+  return Promise.resolve({ warmAvailable: false });
 }
 
-export function findSnapshotForSpec(input: LaunchRunInput): Promise<string | undefined> {
-  throw new Error("not implemented");
+export function findSnapshotForSpec(_input: LaunchRunInput): Promise<string | undefined> {
+  // Slice 1: no snapshot matching
+  return Promise.resolve(undefined);
 }

@@ -33,6 +33,9 @@ export interface NodeContext {
   /** Node input data */
   input: unknown;
 
+  /** Workflow-level input data (e.g., LaunchRunInput) */
+  workflowInput: unknown;
+
   /** Node output (available during compensation) */
   output?: unknown;
 

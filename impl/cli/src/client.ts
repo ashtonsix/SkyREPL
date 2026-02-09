@@ -3,81 +3,130 @@ import { getControlPlaneUrl } from './config';
 /**
  * HTTP client for SkyREPL control plane API.
  *
- * Responsibilities:
- * - HTTP request/response handling with auth
- * - Retry logic for transient failures
- * - SSE streaming for workflow progress
- * - WebSocket streaming for logs
+ * Slice 1: Simple fetch() calls with no auth, no retry logic.
+ * Uses Bun's built-in fetch() and WebSocket.
  */
 export class ApiClient {
   private baseUrl: string;
-  private token: string | null = null;
 
-  constructor() {
-    this.baseUrl = getControlPlaneUrl();
+  constructor(baseUrl?: string) {
+    this.baseUrl = baseUrl ?? getControlPlaneUrl();
   }
 
   /**
    * Launch a run workflow.
    * POST /v1/workflows/launch-run
-   *
-   * @param request Launch run request parameters
-   * @returns Workflow submission result with workflow_id and run_id
    */
   async launchRun(request: LaunchRunRequest): Promise<LaunchRunResponse> {
-    throw new Error('launchRun not implemented');
-  }
+    const response = await fetch(`${this.baseUrl}/v1/workflows/launch-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request),
+    });
 
-  /**
-   * Check which blobs already exist on the server.
-   * POST /v1/blobs/check
-   *
-   * @param checksums Array of SHA-256 checksums to check
-   * @returns Object with missing checksums and presigned upload URLs
-   */
-  async checkBlobs(checksums: string[]): Promise<CheckBlobsResponse> {
-    throw new Error('checkBlobs not implemented');
-  }
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const msg = (body as any)?.error?.message ?? `HTTP ${response.status}`;
+      throw new Error(`launch-run failed: ${msg}`);
+    }
 
-  /**
-   * Upload a blob to the server.
-   * PUT /v1/blobs/:checksum
-   *
-   * @param checksum SHA-256 checksum of the blob
-   * @param data Blob data as Buffer
-   */
-  async uploadBlob(checksum: string, data: Buffer): Promise<void> {
-    throw new Error('uploadBlob not implemented');
+    return (await response.json()) as LaunchRunResponse;
   }
 
   /**
    * Get workflow status.
    * GET /v1/workflows/:id/status
-   *
-   * @param id Workflow ID
-   * @returns Workflow status information
    */
   async getWorkflowStatus(id: string): Promise<WorkflowStatus> {
-    throw new Error('getWorkflowStatus not implemented');
+    const response = await fetch(`${this.baseUrl}/v1/workflows/${id}/status`);
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const msg = (body as any)?.error?.message ?? `HTTP ${response.status}`;
+      throw new Error(`workflow status failed: ${msg}`);
+    }
+
+    return (await response.json()) as WorkflowStatus;
   }
 
   /**
-   * Stream workflow progress via SSE.
-   * GET /v1/workflows/:id/stream
+   * Stream run logs via WebSocket.
+   * WS /v1/runs/:id/logs
    *
-   * @param workflowId Workflow ID to stream
-   * @param onEvent Callback for each SSE event
-   * @returns Promise that resolves with final workflow result
+   * The server sends JSON messages:
+   * - Log lines: { stream: "stdout"|"stderr", data: "...", timestamp: N }
+   * - Status changes: { type: "status", status: "completed"|"failed"|"timeout", exit_code?, error? }
+   *
+   * @param runId Run ID to stream logs for
+   * @param onLog Callback for each log line
+   * @param onStatus Callback for status changes (run completed/failed)
    */
+  streamLogs(
+    runId: string,
+    onLog: (stream: 'stdout' | 'stderr', data: string) => void,
+    onStatus?: (status: string, exitCode?: number, error?: string) => void,
+  ): Promise<void> {
+    const wsUrl = this.baseUrl.replace(/^http/, 'ws');
+    const url = `${wsUrl}/v1/runs/${runId}/logs`;
+
+    return new Promise<void>((resolve, reject) => {
+      const ws = new WebSocket(url);
+
+      ws.onopen = () => {
+        // Connection established; server will push logs
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(typeof event.data === 'string' ? event.data : '');
+
+          if (msg.type === 'status') {
+            // Run status change (completed, failed, timeout)
+            onStatus?.(msg.status, msg.exit_code, msg.error);
+            if (msg.status === 'completed' || msg.status === 'failed' || msg.status === 'timeout') {
+              ws.close();
+              resolve();
+            }
+          } else if (msg.stream && msg.data !== undefined) {
+            // Log line
+            onLog(msg.stream, msg.data);
+          }
+        } catch {
+          // Non-JSON message; treat as stdout
+          onLog('stdout', String(event.data));
+        }
+      };
+
+      ws.onerror = () => {
+        // WebSocket errors are followed by onclose, so resolve there
+      };
+
+      ws.onclose = () => {
+        resolve();
+      };
+    });
+  }
+
+  // Stubs for future slices (not needed for Slice 1)
+  async checkBlobs(_checksums: string[]): Promise<CheckBlobsResponse> {
+    throw new Error('checkBlobs not implemented');
+  }
+
+  async uploadBlob(_checksum: string, _data: Buffer): Promise<void> {
+    throw new Error('uploadBlob not implemented');
+  }
+
   async streamWorkflowProgress(
-    workflowId: string,
-    onEvent: (event: WorkflowEvent) => void
+    _workflowId: string,
+    _onEvent: (event: WorkflowEvent) => void
   ): Promise<WorkflowCompletionResult> {
     throw new Error('streamWorkflowProgress not implemented');
   }
 }
 
-// Type definitions (stubbed)
+// =============================================================================
+// Type Definitions
+// =============================================================================
 
 export interface LaunchRunRequest {
   command: string;
@@ -86,7 +135,7 @@ export interface LaunchRunRequest {
   provider: string;
   region?: string;
   init_checksum?: string | null;
-  use_tailscale: boolean;
+  use_tailscale?: boolean;
   max_duration_ms: number;
   hold_duration_ms: number;
   create_snapshot: boolean;
@@ -103,8 +152,10 @@ export interface FileManifestEntry {
 }
 
 export interface LaunchRunResponse {
-  workflow_id: string;
-  run_id: string;
+  workflow_id: number;
+  run_id: number;
+  status: string;
+  status_url: string;
 }
 
 export interface CheckBlobsResponse {
@@ -113,15 +164,34 @@ export interface CheckBlobsResponse {
 }
 
 export interface WorkflowStatus {
-  id: string;
+  workflowId: number;
+  type: string;
   status: string;
-  current_node?: string;
+  currentNode: string | null;
+  nodesTotal: number;
+  nodesCompleted: number;
+  nodesFailed: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  progress: {
+    completed_nodes: number;
+    total_nodes: number;
+    percentage: number;
+  };
+  output: unknown;
+  error: {
+    code: string;
+    message: string;
+    category: string;
+    nodeId?: string;
+    details?: unknown;
+  } | null;
 }
 
 export interface WorkflowEvent {
   type: string;
   message?: string;
-  details?: any;
+  details?: unknown;
 }
 
 export interface WorkflowCompletionResult {

@@ -1,7 +1,7 @@
 """
 Run Executor
 
-Handles start_run, cancel_run, prepare_snapshot commands.
+Handles start_run, cancel_run commands.
 Manages subprocess lifecycle, file sync, and command acknowledgment.
 
 Command acknowledgment protocol:
@@ -13,126 +13,460 @@ Command acknowledgment protocol:
 from __future__ import annotations
 
 import collections
+import hashlib
+import http.client
+import json
+import os
+import shutil
+import signal
 import subprocess
 import threading
+import time
 from typing import Optional, List, Set
-from dataclasses import dataclass
+from urllib.parse import urlparse
+
+from logs import log_buffer, flush_and_send
+
+# =============================================================================
+# Constants
+# =============================================================================
+
+PROCESSED_COMMAND_HISTORY_SIZE = 100
+CANCEL_GRACE_PERIOD_S = 10
+
+# Module-level state (set by agent.py)
+_control_plane_url: str = ""
+_workdir_base: str = "/workspace"
 
 
-@dataclass
-class RunState:
-    """State for currently executing run."""
-
-    run_id: str
-    allocation_id: int
-    process: Optional[subprocess.Popen]
-    interrupted: bool = False
+def configure(control_plane_url: str, workdir_base: str = "/workspace") -> None:
+    """Set connection parameters. Called once at startup."""
+    global _control_plane_url, _workdir_base
+    _control_plane_url = control_plane_url
+    _workdir_base = workdir_base
 
 
-class Executor:
+# =============================================================================
+# HTTP Helpers
+# =============================================================================
+
+
+def _http_post(path: str, payload: object, timeout: int = 10) -> http.client.HTTPResponse:
+    """POST JSON to control plane."""
+    parsed = urlparse(_control_plane_url)
+    if parsed.scheme == "https":
+        conn = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=timeout)
+    else:
+        conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=timeout)
+
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Content-Length": str(len(body))}
+
+    try:
+        conn.request("POST", path, body=body, headers=headers)
+        return conn.getresponse()
+    except Exception:
+        conn.close()
+        raise
+
+
+def _http_get(url: str, timeout: int = 300) -> bytes:
+    """GET raw bytes from a URL (for file downloads)."""
+    parsed = urlparse(url)
+
+    # If relative URL, prepend control plane
+    if not parsed.scheme:
+        parsed = urlparse(_control_plane_url + url)
+
+    if parsed.scheme == "https":
+        conn = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=timeout)
+    else:
+        conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=timeout)
+
+    path = parsed.path
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    try:
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        if resp.status != 200:
+            raise Exception(f"HTTP {resp.status}: {resp.reason}")
+        return resp.read()
+    finally:
+        conn.close()
+
+
+# =============================================================================
+# Run Executor
+# =============================================================================
+
+
+class RunExecutor:
     """
-    Manages run lifecycle: file sync, command execution, artifact collection.
+    Manages run lifecycle: file sync, command execution, completion reporting.
 
     State tracking:
-    - current_run: Active run state (None when idle)
+    - current_run_id: Active run identifier (None when idle)
+    - current_process: subprocess.Popen for running command
+    - current_allocation_id: Allocation executing current run
     - pending_command_acks: Command IDs awaiting heartbeat transmission
     - processed_command_ids: Last 100 command IDs (deduplication buffer)
     """
 
-    def __init__(self):
-        """Initialize executor."""
-        self.current_run: Optional[RunState] = None
+    def __init__(self) -> None:
+        self.current_run_id: Optional[int] = None
+        self.current_process: Optional[subprocess.Popen] = None
+        self.current_allocation_id: Optional[int] = None
+
+        # Command acknowledgment protocol
         self.pending_command_acks: Set[int] = set()
-        self.processed_command_ids: collections.deque = collections.deque(maxlen=100)
+        self.processed_command_ids: collections.deque = collections.deque(
+            maxlen=PROCESSED_COMMAND_HISTORY_SIZE
+        )
+
         self._lock = threading.Lock()
 
-    def start_run(self, msg: dict) -> None:
-        """
-        Handle start_run command. Full sequence:
-        1. Dedup check + ack
-        2. Clean workdir (critical for warm pool security)
-        3. Download files (verify checksums)
-        4. Execute init script (if provided)
-        5. Send sync_complete
-        6. Execute command (subprocess)
-        7. Stream stdout/stderr to log buffer
-        8. Wait for completion
-        9. Send run_complete
-        10. Collect and upload artifacts
-
-        Args:
-            msg: start_run message with run_id, allocation_id, command, etc.
-        """
-        raise NotImplementedError("start_run not implemented")
-
-    def cancel_run(self, msg: dict) -> None:
-        """
-        Cancel a running run. Sequence:
-        1. Dedup check + ack
-        2. Find process by run_id
-        3. Send SIGTERM, wait 10s
-        4. If still running: SIGKILL
-        5. Send run_complete with exit_code=-15 (SIGTERM)
-
-        Args:
-            msg: cancel_run message with run_id
-        """
-        raise NotImplementedError("cancel_run not implemented")
-
-    def prepare_snapshot(self, msg: dict) -> None:
-        """
-        Prepare instance for snapshot creation. Sequence:
-        1. Dedup check + ack
-        2. Sync filesystems
-        3. Clear temp files
-        4. Clear workdir (no run state in snapshots)
-        5. Flush buffers
-        6. Send prepare_snapshot_ack
-
-        Args:
-            msg: prepare_snapshot message with instance_id
-        """
-        raise NotImplementedError("prepare_snapshot not implemented")
-
-    def capture_artifacts(self, msg: dict) -> None:
-        """
-        Mid-run or emergency artifact capture (fire-and-forget).
-        Runs in background thread to not block SSE reader.
-
-        Args:
-            msg: capture_artifacts message with run_id
-        """
-        raise NotImplementedError("capture_artifacts not implemented")
-
-    def terminate_current_run(self) -> None:
-        """
-        Terminate current run during shutdown.
-
-        Called by agent.py during graceful shutdown.
-        Sends SIGTERM, waits 10s, then SIGKILL if still running.
-        """
-        raise NotImplementedError("terminate_current_run not implemented")
-
-    def get_and_clear_pending_acks(self) -> List[int]:
-        """
-        Get and clear pending command acknowledgments.
-
-        Called by heartbeat thread after successful heartbeat POST.
-
-        Returns:
-            List of command IDs to acknowledge
-        """
-        raise NotImplementedError("get_and_clear_pending_acks not implemented")
+    # -------------------------------------------------------------------------
+    # Command Acknowledgment
+    # -------------------------------------------------------------------------
 
     def _check_and_ack_command(self, command_id: Optional[int]) -> bool:
         """
         Check deduplication and queue acknowledgment.
 
-        Args:
-            command_id: Command ID to check (None = fire-and-forget)
-
-        Returns:
-            True if command is a duplicate (skip execution)
-            False if command is new (proceed with execution)
+        Returns True if command is a duplicate (skip execution).
+        Returns False if command is new (proceed).
         """
-        raise NotImplementedError("_check_and_ack_command not implemented")
+        if command_id is None:
+            return False
+
+        with self._lock:
+            self.pending_command_acks.add(command_id)
+
+            if command_id in self.processed_command_ids:
+                _log("INFO", f"Duplicate command_id={command_id}, skipping")
+                return True
+
+            self.processed_command_ids.append(command_id)
+            return False
+
+    def get_and_clear_pending_acks(self) -> List[int]:
+        """Called by heartbeat thread after successful heartbeat POST."""
+        with self._lock:
+            acks = list(self.pending_command_acks)
+            self.pending_command_acks.clear()
+            return acks
+
+    # -------------------------------------------------------------------------
+    # start_run Handler
+    # -------------------------------------------------------------------------
+
+    def start_run(self, msg: dict) -> None:
+        """
+        Handle start_run command. Full sequence:
+        1. Dedup check + ack
+        2. Clean workdir
+        3. Download files (verify checksums)
+        4. Send sync_complete
+        5. Execute command (subprocess)
+        6. Stream stdout/stderr to log buffer
+        7. Wait for completion
+        8. Report completion via POST /v1/agent/status
+        """
+        command_id = msg.get("command_id")
+        if self._check_and_ack_command(command_id):
+            return
+
+        run_id = msg["run_id"]
+        allocation_id = msg["allocation_id"]
+        workdir = msg.get("workdir", _workdir_base)
+        command = msg["command"]
+        files = msg.get("files", [])
+
+        self.current_run_id = run_id
+        self.current_allocation_id = allocation_id
+
+        _log("INFO", f"Starting run {run_id} (allocation={allocation_id})")
+
+        try:
+            # Step 1: Send "started" status
+            _send_status(run_id, "started")
+
+            # Step 2: Clean workdir
+            _cleanup_workdir(workdir)
+            os.makedirs(workdir, exist_ok=True)
+
+            # Step 3: Download files
+            sync_success = _download_files(run_id, workdir, files)
+            if not sync_success:
+                _send_sync_complete(run_id, allocation_id, success=False)
+                _send_status(run_id, "failed", exit_code=1)
+                return
+
+            # Step 4: Send sync_complete (bypasses batching)
+            _send_sync_complete(run_id, allocation_id, success=True)
+
+            # Step 5: Execute command
+            exit_code = self._execute_command(run_id, allocation_id, workdir, command)
+
+            # Step 6: Report completion
+            status = "completed" if exit_code == 0 else "failed"
+            _send_status(run_id, status, exit_code=exit_code)
+
+        except Exception as e:
+            _log("ERROR", f"Run {run_id} failed: {e}")
+            _send_status(run_id, "failed", exit_code=1)
+
+        finally:
+            self.current_run_id = None
+            self.current_process = None
+            self.current_allocation_id = None
+
+    def _execute_command(self, run_id: int, allocation_id: int, workdir: str, command: str) -> int:
+        """Execute run command as subprocess, streaming output to log buffer."""
+        try:
+            proc = subprocess.Popen(
+                command,
+                shell=True,
+                cwd=workdir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.current_process = proc
+
+            # Stream stdout/stderr in background threads
+            stdout_thread = threading.Thread(
+                target=_stream_output,
+                args=(proc.stdout, run_id, allocation_id, "stdout"),
+                daemon=True,
+            )
+            stderr_thread = threading.Thread(
+                target=_stream_output,
+                args=(proc.stderr, run_id, allocation_id, "stderr"),
+                daemon=True,
+            )
+            stdout_thread.start()
+            stderr_thread.start()
+
+            # Wait for completion
+            proc.wait()
+            stdout_thread.join(timeout=5)
+            stderr_thread.join(timeout=5)
+
+            return proc.returncode
+
+        except Exception as e:
+            _log("ERROR", f"Command execution failed: {e}")
+            return 1
+
+    # -------------------------------------------------------------------------
+    # cancel_run Handler
+    # -------------------------------------------------------------------------
+
+    def cancel_run(self, msg: dict) -> None:
+        """
+        Cancel a running run.
+        SIGTERM -> wait 10s -> SIGKILL if still running.
+        """
+        command_id = msg.get("command_id")
+        if self._check_and_ack_command(command_id):
+            return
+
+        run_id = msg["run_id"]
+        _log("INFO", f"Cancelling run {run_id}")
+
+        if self.current_run_id != run_id:
+            _log("WARN", f"Cancel for unknown run {run_id}, ignoring")
+            return
+
+        proc = self.current_process
+        if proc is None or proc.poll() is not None:
+            _log("WARN", f"Run {run_id} not running, ignoring cancel")
+            return
+
+        try:
+            proc.send_signal(signal.SIGTERM)
+            _log("INFO", f"Sent SIGTERM to run {run_id}")
+
+            try:
+                proc.wait(timeout=CANCEL_GRACE_PERIOD_S)
+                _log("INFO", f"Run {run_id} exited gracefully after SIGTERM")
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+                _log("WARN", f"Run {run_id} killed after {CANCEL_GRACE_PERIOD_S}s grace period")
+
+        except Exception as e:
+            _log("ERROR", f"Cancel failed for run {run_id}: {e}")
+
+    # -------------------------------------------------------------------------
+    # Terminate (for shutdown)
+    # -------------------------------------------------------------------------
+
+    def terminate_current_run(self) -> None:
+        """Terminate current run during shutdown. Called by agent.py."""
+        proc = self.current_process
+        if proc and proc.poll() is None:
+            try:
+                proc.send_signal(signal.SIGTERM)
+                proc.wait(timeout=CANCEL_GRACE_PERIOD_S)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            except Exception as e:
+                _log("WARN", f"Failed to terminate run: {e}")
+
+
+# =============================================================================
+# Workdir Cleanup
+# =============================================================================
+
+
+def _cleanup_workdir(workdir: str) -> None:
+    """Clean workdir before start_run. Critical for warm pool security."""
+    if os.path.exists(workdir):
+        try:
+            shutil.rmtree(workdir)
+        except Exception as e:
+            _log("WARN", f"Error removing workdir: {e}")
+
+
+# =============================================================================
+# File Download
+# =============================================================================
+
+
+def _download_files(run_id: int, workdir: str, files: list) -> bool:
+    """
+    Download files, verify SHA256 checksums.
+
+    Returns True if all files downloaded and verified, False on any failure.
+    """
+    for file_entry in files:
+        path = file_entry["path"]
+        checksum = file_entry["checksum"]
+        url = file_entry["url"]
+
+        full_path = os.path.join(workdir, path)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+
+        try:
+            data = _http_get(url)
+
+            # Verify checksum
+            actual_checksum = hashlib.sha256(data).hexdigest()
+            if actual_checksum != checksum:
+                _log("ERROR", f"Checksum mismatch for {path}: expected={checksum}, actual={actual_checksum}")
+                log_buffer.append(
+                    {
+                        "type": "log",
+                        "run_id": run_id,
+                        "stream": "stderr",
+                        "data": f"Checksum mismatch: {path}\n",
+                        "phase": "sync",
+                        "timestamp": time.time() * 1000,
+                    }
+                )
+                return False
+
+            with open(full_path, "wb") as f:
+                f.write(data)
+
+            _log("DEBUG", f"Downloaded: {path} ({len(data)} bytes)")
+
+        except Exception as e:
+            _log("ERROR", f"Download failed for {path}: {e}")
+            log_buffer.append(
+                {
+                    "type": "log",
+                    "run_id": run_id,
+                    "stream": "stderr",
+                    "data": f"Download failed: {path}: {e}\n",
+                    "phase": "sync",
+                    "timestamp": time.time() * 1000,
+                }
+            )
+            return False
+
+    _log("INFO", f"Downloaded {len(files)} files for run {run_id}")
+    return True
+
+
+# =============================================================================
+# Output Streaming
+# =============================================================================
+
+
+def _stream_output(pipe: object, run_id: int, allocation_id: int, stream: str) -> None:
+    """Read subprocess pipe and send to log buffer."""
+    try:
+        for line in iter(pipe.readline, b""):  # type: ignore[attr-defined]
+            text = line.decode("utf-8", errors="replace")  # type: ignore[union-attr]
+            log_buffer.append(
+                {
+                    "type": "log",
+                    "run_id": run_id,
+                    "allocation_id": allocation_id,
+                    "stream": stream,
+                    "data": text,
+                    "phase": "execution",
+                    "timestamp": time.time() * 1000,
+                }
+            )
+    except Exception as e:
+        _log("WARN", f"Output stream error ({stream}): {e}")
+    finally:
+        try:
+            pipe.close()  # type: ignore[union-attr]
+        except Exception:
+            pass
+
+
+# =============================================================================
+# Message Senders
+# =============================================================================
+
+
+def _send_sync_complete(run_id: int, allocation_id: int, success: bool) -> None:
+    """
+    Send sync_complete log message. BYPASSES batching via flush_and_send().
+    Critical: sync_complete latency counts against allocation timeout.
+    """
+    payload = {
+        "type": "log",
+        "run_id": run_id,
+        "allocation_id": allocation_id,
+        "stream": "sync_complete",
+        "data": "",
+        "phase": "sync",
+        "sync_success": success,
+        "timestamp": time.time() * 1000,
+    }
+    flush_and_send([payload])
+
+
+def _send_status(run_id: int, status: str, exit_code: Optional[int] = None) -> None:
+    """POST /v1/agent/status to report run status."""
+    payload: dict = {
+        "run_id": run_id,
+        "status": status,
+    }
+    if exit_code is not None:
+        payload["exit_code"] = exit_code
+
+    try:
+        resp = _http_post("/v1/agent/status", payload, timeout=10)
+        resp.read()
+    except Exception as e:
+        _log("ERROR", f"Failed to send status ({status}): {e}")
+
+
+# =============================================================================
+# Logging Utility
+# =============================================================================
+
+
+def _log(level: str, message: str) -> None:
+    """Internal logging (not sent to control plane)."""
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] [{level}] [executor] {message}")

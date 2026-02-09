@@ -359,6 +359,7 @@ export function buildNodeContext(
     workflowId,
     nodeId: node.node_id,
     input: node.input_json ? JSON.parse(node.input_json) : {},
+    workflowInput: workflow?.input_json ? JSON.parse(workflow.input_json) : {},
     manifestId,
 
     emitResource(type: string, id: number | string, cleanupPriority: number): void {
@@ -628,7 +629,8 @@ export async function handleRetry(
 
   switch (decision.strategy) {
     case "same_params":
-      // Simple retry: reset node to pending with incremented attempt
+      // Simple retry: fail first (resetNodeForRetry requires failed status), then reset
+      failNode(node.id, JSON.stringify({ code: error.code, message: error.message, retried: true }));
       resetNodeForRetry(node.id, `retry_${error.code}`);
       break;
 
@@ -804,12 +806,14 @@ export async function cancelWorkflow(
   workflowId: number,
   reason: string
 ): Promise<void> {
-  // Mark workflow as cancelled in DB
-  // The executeLoop will detect this on next iteration and call handleCancellation
-  updateWorkflow(workflowId, {
-    status: "cancelled",
-    error_json: JSON.stringify({ code: "CANCELLED", reason }),
-  });
+  // CAS-guarded cancellation (B5 fix)
+  const result = cancelWorkflowTransition(workflowId);
+  if (result.success) {
+    // Update error_json separately after successful transition
+    updateWorkflow(workflowId, {
+      error_json: JSON.stringify({ code: "CANCELLED", reason }),
+    });
+  }
 }
 
 export async function handleCancellation(workflowId: number): Promise<void> {

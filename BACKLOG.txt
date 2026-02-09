@@ -214,6 +214,68 @@ BT9: WorkflowDefinition format mismatch
   Ref: D15a launch-run trace
 
 ================================================================================
+FIX DURING SLICE 2 PLANNING (from post-Step-7 audit, 2026-02-09)
+================================================================================
+
+S2.C1: Intent as offline typing module
+  Status: DESIGN DURING SLICE 2
+  Severity: HIGH — scope expansion on Intent
+  Context: Workflow uses type erasure + ctx.workflowInput (Approach A, done in
+    Slice 1). Intent becomes offline module guaranteeing type flow correctness
+    across all rewrite variations (Approach B). TypeBox for intent types. Core
+    intents must not blur with provider/workflow-specific enhancements (extra
+    nodes, topology, input/output attributes). Builder/helper pattern TBD —
+    several alternatives need consideration.
+  Ref: Post-Step-7 audit C1, user steering 2026-02-09
+
+S2.C2: Log streaming architecture
+  Status: DESIGN DURING SLICE 2
+  Severity: HIGH — current Slice 1 approach is just chunk persistence
+  Context: Pass-through strategy: logs stream through control to CLI with minimal
+    latency. Small buffer in control accumulates and persists in chunks. Per-line
+    not robust (multi-GB single lines). Streaming is progressive enhancement:
+    active when log volume is reasonable, otherwise CLI shows byte count only,
+    logs go straight to S3. S3 implementation differences affect design.
+  Ref: Post-Step-7 audit C2, user steering 2026-02-09
+
+S2.C3: Resource ownership hierarchy for logs
+  Status: DESIGN DURING SLICE 2
+  Severity: MEDIUM — correctness of cleanup path
+  Context: Manifest→Resource→Object→Blob hierarchy. Logs should be owned by a
+    Resource (Run), not added directly as objects in manifest. The manifest tracks
+    resources, resources own objects, objects have blob payloads.
+  Ref: Post-Step-7 audit C3, user steering 2026-02-09
+
+S2.D1: finalize node uses non-CAS sealManifest
+  Status: FIX DURING SLICE 2
+  Severity: MEDIUM
+  Context: finalize.ts calls sealManifest from db.ts (no updated_at guard)
+    instead of state-transitions.ts (CAS). Need to decide if finalize should
+    use CAS seal or if db.ts seal is acceptable (single writer assumption).
+  Ref: Post-Step-7 audit D3
+
+S2.D2: getLogUpdates polls wrong column
+  Status: FIX DURING SLICE 2
+  Severity: MEDIUM
+  Context: storage.ts getLogUpdates polls blobs.last_referenced_at instead of
+    objects.accessed_at. Needs redesign alongside C2 streaming architecture.
+  Ref: Post-Step-7 audit D1
+
+S2.D3: SSE messages lack id: field for reconnection
+  Status: FIX DURING SLICE 2
+  Severity: MEDIUM
+  Context: SSE protocol missing id: field, so EventSource reconnection can't
+    resume from last-seen event. Needs streaming architecture design (C2).
+  Ref: Post-Step-7 audit D2
+
+S2.D4: Minor spec drift in field names / response shapes
+  Status: FIX DURING SLICE 2
+  Severity: LOW
+  Context: Various minor field name and response shape mismatches between impl
+    and spec. Batch fix during Slice 2 hardening pass.
+  Ref: Post-Step-7 audit D6-D9
+
+================================================================================
 DEFERRED (Low urgency / edge cases)
 ================================================================================
 

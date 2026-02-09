@@ -337,7 +337,7 @@ export function completeWorkflow(
 
 /**
  * Fail a running or rolling-back workflow.
- * [running, rolling_back] -> failed. Sets finished_at, error_json.
+ * [pending, running, rolling_back] -> failed. Sets finished_at, error_json.
  */
 export function failWorkflow(
   workflowId: number,
@@ -346,7 +346,7 @@ export function failWorkflow(
   return atomicTransition<Workflow>(
     "workflows",
     workflowId,
-    ["running", "rolling_back"],
+    ["pending", "running", "rolling_back"],
     "failed",
     { error_json: error, finished_at: Date.now() }
   );

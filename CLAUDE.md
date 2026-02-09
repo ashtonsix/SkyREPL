@@ -4,7 +4,7 @@
 
 SkyREPL: cloud compute orchestration for lifecycle management and reproducibility. Control plane (VPS) + CLI client + Python agent (on instances).
 
-**Current phase:** L3 Slice 1 in progress (Steps 0-1 done, Step 1.5 framework migration in progress, Steps 2-10 remaining). Active worklog: `WORKLOG_L3_SLICE1_IMPL.txt`. Plan: `worklogs/012_WORKLOG_L3_SLICE1_PLANNING.txt`. Backlog: `BACKLOG.txt`.
+**Current phase:** L3 Slice 1 in progress (Steps 0-9 done, Step 10 integration test remaining). Active worklog: `WORKLOG_L3_SLICE1_IMPL.txt`. Plan: `worklogs/012_WORKLOG_L3_SLICE1_PLANNING.txt`. Backlog: `BACKLOG.txt`.
 
 ## Dispatch
 

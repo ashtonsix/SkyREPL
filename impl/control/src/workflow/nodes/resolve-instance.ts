@@ -1,7 +1,8 @@
 // workflow/nodes/resolve-instance.ts - Resolve Instance Node
-// Stub: All function bodies throw "not implemented"
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
+import { queryOne, type WorkflowNode } from "../../material/db";
+import { skipNode } from "../state-transitions";
 
 // =============================================================================
 // Types
@@ -31,6 +32,18 @@ export const resolveInstanceExecutor: NodeExecutor<ResolveInstanceInput, Resolve
   idempotent: true,
 
   async execute(ctx: NodeContext): Promise<ResolveInstanceOutput> {
-    throw new Error("not implemented");
+    // Slice 1: always cold path (no warm pool)
+    // Skip the claim-warm-allocation node so the DAG proceeds on cold path
+    const claimNode = queryOne<WorkflowNode>(
+      "SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
+      [ctx.workflowId, "claim-warm-allocation"]
+    );
+    if (claimNode && claimNode.status === "pending") {
+      skipNode(claimNode.id);
+    }
+
+    ctx.log("info", "Resolved instance: cold path (no warm pool in Slice 1)");
+
+    return { warmAvailable: false };
   },
 };

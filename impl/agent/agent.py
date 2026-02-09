@@ -2,9 +2,9 @@
 """
 Agent Main Entry Point
 
-Startup: lock -> detect tailscale -> start threads -> connect SSE
-Running: SSE dispatch loop + background threads (heartbeat, logs, spot)
-Shutdown: panic diagnostics -> tailscale logout -> terminate run -> flush logs -> grace -> self-term
+Startup: validate config -> start threads -> connect SSE
+Running: SSE dispatch loop + background threads (heartbeat, logs)
+Shutdown: terminate run -> flush logs -> exit
 
 All connections agent-initiated (instances may be behind NAT/VPCs).
 Complexity lives in the control plane, not the agent.
@@ -13,129 +13,182 @@ Complexity lives in the control plane, not the agent.
 from __future__ import annotations
 
 import os
+import signal
 import sys
-import time
 import threading
+import time
 from typing import Optional
 
-# Note: These imports will fail until the modules are created
-# from sse import SSEReader
-# from executor import Executor
-# from heartbeat import HeartbeatSender
-# from logs import LogFlusher
+from sse import run_command_loop, set_shutting_down as sse_set_shutting_down, configure as sse_configure
+from heartbeat import (
+    heartbeat_thread,
+    set_shutting_down as hb_set_shutting_down,
+    set_executor as hb_set_executor,
+    configure as hb_configure,
+)
+from logs import (
+    log_flusher_thread,
+    flush_all_logs,
+    set_shutting_down as logs_set_shutting_down,
+    configure as logs_configure,
+)
+from executor import RunExecutor, configure as executor_configure
+
+# =============================================================================
+# Configuration (from environment)
+# =============================================================================
+
+CONTROL_PLANE_URL = os.getenv("REPL_CONTROL_PLANE_URL", "http://localhost:3000")
+INSTANCE_ID = os.getenv("REPL_INSTANCE_ID")  # Required
+WORKDIR = os.getenv("REPL_WORKDIR", "/workspace")
+SHUTDOWN_GRACE_PERIOD_S = int(os.getenv("REPL_SHUTDOWN_GRACE_PERIOD_S", "5"))
+
+# =============================================================================
+# Global State
+# =============================================================================
+
+_shutting_down: bool = False
+_agent_start_time: float = 0.0
+_executor: Optional[RunExecutor] = None
+_shutdown_event = threading.Event()
 
 
-class Agent:
+# =============================================================================
+# Signal Handling
+# =============================================================================
+
+
+def _setup_signal_handlers() -> None:
+    """Register SIGTERM and SIGINT handlers for graceful shutdown."""
+
+    def signal_handler(signum: int, frame: object) -> None:
+        sig_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
+        _log("INFO", f"Received {sig_name}, initiating shutdown")
+        _initiate_shutdown(reason=sig_name.lower())
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+
+# =============================================================================
+# Shutdown Sequence
+# =============================================================================
+
+
+def _initiate_shutdown(reason: str = "unknown") -> None:
     """
-    Main agent orchestrator.
-
-    Responsibilities:
-    - Lock acquisition (prevent duplicate agents on warm pool)
-    - Environment validation
-    - Thread lifecycle management
-    - SSE connection and dispatch
-    - Graceful shutdown coordination
+    Ordered shutdown sequence:
+    1. Set shutting_down flag (stops all threads)
+    2. Terminate running run (if any)
+    3. Flush remaining logs
+    4. Wait grace period
+    5. Exit
     """
+    global _shutting_down
 
-    def __init__(self):
-        self.instance_id: Optional[str] = None
-        self.control_plane_url: str = ""
-        self.provider: str = ""
-        self.shutting_down: bool = False
-        self.executor = None
-        self.heartbeat_sender = None
-        self.log_flusher = None
-        self.sse_reader = None
+    if _shutting_down:
+        return
+    _shutting_down = True
 
-    def load_config(self) -> None:
-        """
-        Load configuration from environment variables.
+    _log("INFO", f"Shutdown initiated: {reason}")
 
-        Required:
-        - REPL_INSTANCE_ID: Instance identifier
+    # Signal all modules to stop
+    sse_set_shutting_down(True)
+    hb_set_shutting_down(True)
+    logs_set_shutting_down(True)
+    _shutdown_event.set()
 
-        Optional:
-        - REPL_CONTROL_PLANE_URL: Control plane URL (default: https://api.skyrepl.io)
-        - REPL_PROVIDER: Provider name (default: aws)
-        """
-        raise NotImplementedError("load_config not implemented")
+    # Step 1: Terminate running run
+    if _executor:
+        try:
+            _executor.terminate_current_run()
+        except Exception as e:
+            _log("WARN", f"Run termination failed: {e}")
 
-    def acquire_lock(self) -> bool:
-        """
-        Acquire exclusive agent lock to prevent duplicates on warm pool reuse.
+    # Step 2: Flush remaining logs
+    try:
+        flush_all_logs()
+    except Exception as e:
+        _log("WARN", f"Log flush failed: {e}")
 
-        Lock file: /tmp/repl-agent.lock
-        - Persists across restarts within same boot
-        - Cleared on instance termination
-        - Uses LOCK_NB (non-blocking) to fail immediately if held
+    # Step 3: Grace period
+    _log("INFO", f"Waiting {SHUTDOWN_GRACE_PERIOD_S}s grace period")
+    time.sleep(SHUTDOWN_GRACE_PERIOD_S)
 
-        Returns:
-            True if lock acquired, False if lock held by another process
-        """
-        raise NotImplementedError("acquire_lock not implemented")
+    _log("INFO", "Shutdown complete")
 
-    def setup_signal_handlers(self) -> None:
-        """Register SIGTERM and SIGINT handlers for graceful shutdown."""
-        raise NotImplementedError("setup_signal_handlers not implemented")
 
-    def start_threads(self) -> None:
-        """
-        Start background threads.
-
-        Threads:
-        - log-flusher: 100ms interval (log batching)
-        - heartbeat: 10s interval (liveness + state reporting)
-        - spot-monitor: 5s interval (AWS IMDS polling, AWS only)
-
-        All threads are daemon threads.
-        """
-        raise NotImplementedError("start_threads not implemented")
-
-    def run_sse_loop(self) -> str:
-        """
-        Connect to SSE command stream and enter dispatch loop.
-
-        Blocks until connection fails or shutdown requested.
-
-        Returns:
-            Exit reason string (e.g., 'shutdown_requested', 'sse_fatal')
-        """
-        raise NotImplementedError("run_sse_loop not implemented")
-
-    def initiate_shutdown(self, reason: str) -> None:
-        """
-        Ordered shutdown sequence:
-        1. Set shutting_down flag (stops all threads)
-        2. Send panic diagnostics (2s timeout, best-effort)
-        3. Tailscale logout (cleanup device list)
-        4. Terminate running run (if any)
-        5. Flush remaining logs
-        6. Wait grace period (SHUTDOWN_GRACE_PERIOD_S)
-        7. Self-terminate: shutdown -h now (BACKUP SAFETY)
-
-        Agent self-termination is LAST RESORT. Normal path: control plane
-        terminates via provider API. Backup: agent self-terminates if control
-        plane unreachable (crash, network partition, bug).
-
-        Args:
-            reason: Shutdown reason (e.g., 'sigterm', 'sse_fatal', 'heartbeat_timeout')
-        """
-        raise NotImplementedError("initiate_shutdown not implemented")
-
-    def run(self) -> int:
-        """
-        Main agent entry point.
-
-        Returns:
-            Exit code (0 = success, 1 = error)
-        """
-        raise NotImplementedError("run not implemented")
+# =============================================================================
+# Main Entry Point
+# =============================================================================
 
 
 def main() -> int:
-    """Entry point."""
-    agent = Agent()
-    return agent.run()
+    """
+    Agent startup and main loop.
+
+    Startup sequence:
+    1. Validate required env vars
+    2. Configure all modules
+    3. Start background threads (log flusher, heartbeat)
+    4. Connect SSE command stream and enter dispatch loop
+
+    Returns:
+        Exit code (0 = success, 1 = error)
+    """
+    global _agent_start_time, _executor
+
+    _agent_start_time = time.time()
+
+    # Validate required configuration
+    if not INSTANCE_ID:
+        _log("FATAL", "REPL_INSTANCE_ID not set")
+        return 1
+
+    _log("INFO", f"Agent starting (instance={INSTANCE_ID}, url={CONTROL_PLANE_URL})")
+
+    # Setup signal handlers
+    _setup_signal_handlers()
+
+    # Configure all modules with control plane URL
+    logs_configure(CONTROL_PLANE_URL)
+    sse_configure(CONTROL_PLANE_URL, INSTANCE_ID)
+    hb_configure(CONTROL_PLANE_URL, INSTANCE_ID, _shutdown_event)
+    executor_configure(CONTROL_PLANE_URL, WORKDIR)
+
+    # Create executor
+    _executor = RunExecutor()
+    hb_set_executor(_executor)
+
+    # Start background threads (all daemon=True)
+    log_thread = threading.Thread(target=log_flusher_thread, daemon=True, name="log-flusher")
+    log_thread.start()
+
+    hb_thread = threading.Thread(target=heartbeat_thread, daemon=True, name="heartbeat")
+    hb_thread.start()
+
+    _log("INFO", "Background threads started (log-flusher, heartbeat)")
+
+    # Enter SSE command loop (blocks until exit)
+    exit_reason = run_command_loop(_executor)
+    _log("INFO", f"Command loop exited: {exit_reason}")
+
+    # Initiate shutdown based on exit reason
+    if not _shutting_down:
+        _initiate_shutdown(reason=exit_reason)
+
+    return 0
+
+
+# =============================================================================
+# Logging Utility
+# =============================================================================
+
+
+def _log(level: str, message: str) -> None:
+    """Internal logging (not sent to control plane)."""
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] [{level}] [agent] {message}")
 
 
 if __name__ == "__main__":
