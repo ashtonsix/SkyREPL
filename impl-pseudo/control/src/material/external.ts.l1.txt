@@ -1,3 +1,4 @@
+// STATUS: STILL USEFUL — design rationale not yet in impl
 # external.ts - Provider State Caching
 
 In-memory TTL cache for ephemeral provider state (not persisted to DB).

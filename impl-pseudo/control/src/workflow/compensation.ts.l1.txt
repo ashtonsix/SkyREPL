@@ -1,3 +1,4 @@
+// STATUS: STILL USEFUL — design rationale not yet in impl
 # compensation.ts - Compensation Framework (Ch6)
 
 Single-node compensation for failed workflow nodes. Two-phase spawn protocol prevents orphans.

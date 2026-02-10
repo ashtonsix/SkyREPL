@@ -1,3 +1,4 @@
+// STATUS: STILL USEFUL — design rationale not yet in impl
 # compensation.ts - Compensation Framework and Two-Phase Spawn (L2 Pseudocode)
 
 ## Imports

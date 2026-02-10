@@ -127,9 +127,10 @@ export function registerResourceRoutes(app: Elysia<any>): void {
     return { data: rows };
   });
 
-  app.get("/v1/runs/:id", ({ params }: { params: { id: string } }) => {
+  app.get("/v1/runs/:id", ({ params, set }: { params: { id: string }; set: { status?: number | string } }) => {
     const id = parseInt(params.id, 10);
     if (isNaN(id)) {
+      set.status = 400;
       return { error: { code: "INVALID_INPUT", message: "Invalid run ID", category: "validation" } };
     }
     const run = getRun(id);
@@ -152,9 +153,10 @@ export function registerResourceRoutes(app: Elysia<any>): void {
     return { data: rows };
   });
 
-  app.get("/v1/instances/:id", ({ params }: { params: { id: string } }) => {
+  app.get("/v1/instances/:id", ({ params, set }: { params: { id: string }; set: { status?: number | string } }) => {
     const id = parseInt(params.id, 10);
     if (isNaN(id)) {
+      set.status = 400;
       return { error: { code: "INVALID_INPUT", message: "Invalid instance ID", category: "validation" } };
     }
     const instance = getInstance(id);
@@ -187,9 +189,10 @@ export function registerResourceRoutes(app: Elysia<any>): void {
     return { data: rows };
   });
 
-  app.get("/v1/workflows/:id", ({ params, query }: { params: { id: string }; query: Record<string, unknown> }) => {
+  app.get("/v1/workflows/:id", ({ params, query, set }: { params: { id: string }; query: Record<string, unknown>; set: { status?: number | string } }) => {
     const id = parseInt(params.id, 10);
     if (isNaN(id)) {
+      set.status = 400;
       return { error: { code: "INVALID_INPUT", message: "Invalid workflow ID", category: "validation" } };
     }
     const workflow = getWorkflow(id);
@@ -216,9 +219,10 @@ export function registerResourceRoutes(app: Elysia<any>): void {
     return result;
   });
 
-  app.get("/v1/workflows/:id/nodes", ({ params }: { params: { id: string } }) => {
+  app.get("/v1/workflows/:id/nodes", ({ params, set }: { params: { id: string }; set: { status?: number | string } }) => {
     const id = parseInt(params.id, 10);
     if (isNaN(id)) {
+      set.status = 400;
       return { error: { code: "INVALID_INPUT", message: "Invalid workflow ID", category: "validation" } };
     }
     const workflow = getWorkflow(id);
@@ -287,6 +291,7 @@ export function registerOperationRoutes(app: Elysia<any>): void {
         run_id: workflowInput.runId ?? null,
         status: workflow.status,
         status_url: `/v1/workflows/${workflow.id}/status`,
+        stream_url: `/v1/workflows/${workflow.id}/stream`,
       };
     } catch (err) {
       if (err instanceof SkyREPLError) {
@@ -359,9 +364,10 @@ export function registerOperationRoutes(app: Elysia<any>): void {
 
   // ─── Workflow Status ──────────────────────────────────────────────────
 
-  app.get("/v1/workflows/:id/status", ({ params }: { params: { id: string } }) => {
+  app.get("/v1/workflows/:id/status", ({ params, set }: { params: { id: string }; set: { status?: number | string } }) => {
     const id = parseInt(params.id, 10);
     if (isNaN(id)) {
+      set.status = 400;
       return { error: { code: "INVALID_INPUT", message: "Invalid workflow ID", category: "validation" } };
     }
 

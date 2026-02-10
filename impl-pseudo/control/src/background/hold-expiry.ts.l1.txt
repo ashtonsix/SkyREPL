@@ -1,3 +1,4 @@
+// STATUS: STILL USEFUL — design rationale not yet in impl
 # hold-expiry.ts - Debug Hold Expiry Task
 
 # Note: Timing constants import from ../../../../shared/src/config/timing.ts.l2.txt

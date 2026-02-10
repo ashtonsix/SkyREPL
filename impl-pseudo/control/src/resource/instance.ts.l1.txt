@@ -1,3 +1,4 @@
+// STATUS: STILL USEFUL — design rationale not yet in impl
 # instance.ts - Instance Materialization (Ch3)
 
 ## Material Backing

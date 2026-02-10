@@ -1,3 +1,4 @@
+// STATUS: STILL USEFUL — design rationale not yet in impl
 # run.ts - Run Materialization (Ch3)
 
 ## Material Backing

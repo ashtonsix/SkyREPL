@@ -1,3 +1,4 @@
+// STATUS: STILL USEFUL — design rationale not yet in impl
 # idempotency.ts - Idempotency Key Handling
 
 ## Header Processing

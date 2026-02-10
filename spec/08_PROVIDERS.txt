@@ -147,7 +147,7 @@ required fields, terminate handles non-existent instances, etc.).
 | name                     | readonly   | MUST be one of: aws, lambda, runpod, orbstack            |
 | capabilities             | readonly   | ProviderCapabilities flags                               |
 | spawn(options)           | required   | MUST return { id, status } at minimum                    |
-| terminate(providerId)    | required   | MUST throw ProviderError if not found                    |
+| terminate(providerId)    | required   | MUST be idempotent; MUST NOT throw if already terminated or not found |
 | list(filter?)            | required   | Used for reconciliation/drift detection                  |
 | get(providerId)          | required   | MUST return instance or null                             |
 | generateBootstrap(cfg)   | required   | MUST return { content, format, checksum }                |
@@ -161,7 +161,7 @@ required fields, terminate handles non-existent instances, etc.).
 
 Contract compliance tests MUST verify:
 - spawn returns required fields (id, status matching pending|starting|running)
-- terminate throws NotFoundError for non-existent instances
+- terminate is idempotent (MUST NOT throw for already-terminated or non-existent instances)
 - list filters by region correctly
 - generateBootstrap returns valid script with content, format, and SHA-256 checksum
 
@@ -905,8 +905,8 @@ test-time provider discovery.
 Tests MUST verify:
 - **SpawnInstanceContract**: spawn returns required fields; idempotent when
   capability declared (same clientRequestId -> same instance ID); tags are emitted
-- **TerminateInstanceContract**: non-existent instance throws NotFoundError;
-  terminate is idempotent (second call MUST NOT throw)
+- **TerminateInstanceContract**: terminate is idempotent (MUST NOT throw for
+  already-terminated or non-existent instances; second call MUST NOT throw)
 - **ListFilter**: filters by region and status correctly
 - **BootstrapScript**: generates valid script with content, format, and SHA-256 checksum;
   includes agent download URL

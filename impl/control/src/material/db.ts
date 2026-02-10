@@ -6,6 +6,7 @@ import {
   ConflictError,
   NotFoundError,
   calculateBackoff,
+  TIMING,
 } from "@skyrepl/shared";
 
 // @ts-expect-error -- Bun handles `with { type: "text" }` at runtime; tsc lacks the declaration
@@ -434,28 +435,6 @@ export function createAllocation(
   }
 }
 
-
-export function findAvailableAllocation(spec: {
-  spec: string;
-  region?: string;
-}): Allocation | null {
-  let sql = `
-    SELECT a.* FROM allocations a
-    JOIN instances i ON a.instance_id = i.id
-    WHERE a.status = 'AVAILABLE' AND a.run_id IS NULL
-      AND i.spec = ?
-  `;
-  const params: unknown[] = [spec.spec];
-
-  if (spec.region) {
-    sql += " AND i.region = ?";
-    params.push(spec.region);
-  }
-
-  sql += " LIMIT 1";
-
-  return queryOne<Allocation>(sql, params);
-}
 
 export function deleteAllocation(id: number): void {
   const allocation = getAllocation(id);
@@ -979,6 +958,8 @@ export function findWarmAllocation(
   let sql: string;
   const params: unknown[] = [spec.spec];
 
+  const heartbeatCutoff = Date.now() - TIMING.STALE_DETECTION_MS;
+
   if (initChecksum) {
     // Scoring: 100 for exact match, 50 for NULL (vanilla), exclude mismatches
     sql = `
@@ -987,10 +968,11 @@ export function findWarmAllocation(
       WHERE a.status = 'AVAILABLE' AND a.run_id IS NULL
         AND i.spec = ?
         AND i.workflow_state LIKE '%:complete'
+        AND i.last_heartbeat > ?
         AND (i.init_checksum = ? OR i.init_checksum IS NULL)
     `;
-    params.push(initChecksum);
-    // params is now [spec, initChecksum]
+    params.push(heartbeatCutoff, initChecksum);
+    // params is now [spec, heartbeatCutoff, initChecksum]
 
     if (spec.region) {
       sql += " AND i.region = ?";
@@ -1015,7 +997,9 @@ export function findWarmAllocation(
       WHERE a.status = 'AVAILABLE' AND a.run_id IS NULL
         AND i.spec = ?
         AND i.workflow_state LIKE '%:complete'
+        AND i.last_heartbeat > ?
     `;
+    params.push(heartbeatCutoff);
 
     if (spec.region) {
       sql += " AND i.region = ?";

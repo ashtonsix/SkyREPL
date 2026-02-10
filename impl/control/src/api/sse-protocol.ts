@@ -8,6 +8,7 @@ import {
   type WorkflowNode,
 } from "../material/db";
 import type { ControlToAgentMessage } from "@skyrepl/shared";
+import { getControlPlaneId } from "../config";
 
 // =============================================================================
 // Stream Message Types
@@ -51,14 +52,6 @@ export type WorkflowStreamEvent =
   | { event: "workflow_completed"; data: { status: string; output: unknown; timestamp: number } }
   | { event: "workflow_failed"; data: { error: string; node_id?: string; timestamp: number } }
   | { event: "heartbeat"; data: { timestamp: number } };
-
-// =============================================================================
-// Helpers
-// =============================================================================
-
-function getControlPlaneId(): string {
-  return process.env.CONTROL_PLANE_ID ?? "cp-default";
-}
 
 // =============================================================================
 // SSE Manager
@@ -124,6 +117,17 @@ export class SSEManager {
   cleanupRunSequences(runId: string): void {
     this.logSequenceCounters.delete(runId);
     this.logReplayBuffers.delete(runId);
+  }
+
+  /**
+   * Clean up all log-related state for a completed run.
+   * Should be called from workflow finalization (e.g., engine.ts finalizeRun).
+   * Removes entries from logSequenceCounters, logReplayBuffers, and logSubscribers.
+   */
+  cleanupRun(runId: string): void {
+    this.logSequenceCounters.delete(runId);
+    this.logReplayBuffers.delete(runId);
+    this.logSubscribers.delete(runId);
   }
 
   // --- Agent SSE Connections ------------------------------------------------

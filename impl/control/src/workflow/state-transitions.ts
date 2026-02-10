@@ -101,7 +101,7 @@ export type AllocationStatus = "AVAILABLE" | "CLAIMED" | "ACTIVE" | "COMPLETE" |
 
 export const ALLOCATION_TRANSITIONS: Record<AllocationStatus, AllocationStatus[]> = {
   AVAILABLE: ["CLAIMED", "FAILED"],
-  CLAIMED: ["ACTIVE", "FAILED"],
+  CLAIMED: ["AVAILABLE", "ACTIVE", "FAILED"],
   ACTIVE: ["COMPLETE", "FAILED"],
   COMPLETE: [],
   FAILED: [],
@@ -143,6 +143,53 @@ export function claimAllocation(
       WHERE id = ? AND updated_at = ?
     `).run(
       ...[runId, now, allocationId, allocation.updated_at] as SQLQueryBindings[]
+    );
+
+    if (result.changes === 0) {
+      const latest = queryOne<Allocation>("SELECT * FROM allocations WHERE id = ?", [allocationId]);
+      return transitionFailure<Allocation>("RACE_LOST", latest ?? undefined);
+    }
+
+    const updated = queryOne<Allocation>("SELECT * FROM allocations WHERE id = ?", [allocationId]);
+    return transitionSuccess<Allocation>(updated!);
+  });
+}
+
+/**
+ * Release a claimed allocation back to the warm pool.
+ * CLAIMED -> AVAILABLE. Clears run_id.
+ *
+ * Used by compensation to undo a claim without failing the allocation.
+ * Uses custom atomic transition (not atomicTransition) because it also clears run_id.
+ */
+export function releaseAllocation(
+  allocationId: number
+): TransitionResult<Allocation> {
+  const db = getDatabase();
+
+  return transaction(() => {
+    // Phase 1: Read and verify CLAIMED
+    const allocation = queryOne<Allocation>(
+      "SELECT * FROM allocations WHERE id = ? AND status = ?",
+      [allocationId, "CLAIMED"]
+    );
+
+    if (!allocation) {
+      const current = queryOne<Allocation>("SELECT * FROM allocations WHERE id = ?", [allocationId]);
+      if (!current) {
+        return transitionFailure<Allocation>("NOT_FOUND");
+      }
+      return transitionFailure<Allocation>("WRONG_STATE", current);
+    }
+
+    // Phase 2: Optimistic-lock update — clear run_id, return to AVAILABLE
+    const now = Date.now();
+    const result = db.prepare(`
+      UPDATE allocations
+      SET run_id = NULL, status = 'AVAILABLE', updated_at = ?
+      WHERE id = ? AND updated_at = ?
+    `).run(
+      ...[now, allocationId, allocation.updated_at] as SQLQueryBindings[]
     );
 
     if (result.changes === 0) {
@@ -276,18 +323,50 @@ export type ManifestStatus = "DRAFT" | "SEALED";
 /**
  * Seal a draft manifest.
  * DRAFT -> SEALED. Sets sealed_at (via released_at column), expires_at.
+ * Also detaches resources: clears current_manifest_id on all resources
+ * linked via manifest_resources (SD-02).
  */
 export function sealManifest(
   manifestId: number,
   expiresAt: number
 ): TransitionResult<Manifest> {
-  return atomicTransition<Manifest>(
-    "manifests",
-    manifestId,
-    "DRAFT",
-    "SEALED",
-    { released_at: Date.now(), expires_at: expiresAt }
-  );
+  const db = getDatabase();
+  return transaction(() => {
+    // Phase 1: Read and validate manifest
+    const manifest = queryOne<Manifest>(
+      "SELECT * FROM manifests WHERE id = ?",
+      [manifestId]
+    );
+    if (!manifest) return transitionFailure<Manifest>("NOT_FOUND");
+    if (manifest.status !== "DRAFT") return transitionFailure<Manifest>("WRONG_STATE", manifest);
+
+    // Phase 2: Update manifest status with optimistic lock
+    const now = Date.now();
+    const result = db.prepare(
+      `UPDATE manifests SET status = 'SEALED', released_at = ?, expires_at = ?, updated_at = ?
+       WHERE id = ? AND status = 'DRAFT' AND updated_at = ?`
+    ).run(now, expiresAt, now, manifestId, manifest.updated_at);
+
+    if (result.changes === 0) return transitionFailure<Manifest>("RACE_LOST", manifest);
+
+    // Phase 3: Detach resources — clear current_manifest_id on linked resources
+    const RESOURCE_TABLES: Record<string, string> = {
+      instance: "instances",
+      run: "runs",
+      allocation: "allocations",
+      object: "objects",
+    };
+    for (const [resourceType, table] of Object.entries(RESOURCE_TABLES)) {
+      db.prepare(
+        `UPDATE ${table} SET current_manifest_id = NULL
+         WHERE current_manifest_id = ?
+           AND id IN (SELECT resource_id FROM manifest_resources WHERE manifest_id = ? AND resource_type = ?)`
+      ).run(manifestId, manifestId, resourceType);
+    }
+
+    const sealed = queryOne<Manifest>("SELECT * FROM manifests WHERE id = ?", [manifestId]);
+    return transitionSuccess(sealed!);
+  });
 }
 
 // =============================================================================

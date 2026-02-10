@@ -1,6 +1,11 @@
 // provider/types.ts - Provider Interface & Type Definitions
 // Fully defined types (no stubs needed for type-only files)
 
+import type { ProviderName } from "@skyrepl/shared";
+
+// Re-export ProviderName for convenience
+export type { ProviderName };
+
 // =============================================================================
 // Provider Interface
 // =============================================================================
@@ -28,12 +33,6 @@ export interface Provider<
   cancelSpotRequest?(requestId: string): Promise<void>;
   getSpotPrices?(spec: string, regions?: string[]): Promise<SpotPriceInfo[]>;
 }
-
-// =============================================================================
-// Provider Name
-// =============================================================================
-
-export type ProviderName = "aws" | "lambda" | "runpod" | "orbstack";
 
 // =============================================================================
 // Capability Flags
@@ -167,7 +166,7 @@ export interface ListFilter {
 // =============================================================================
 
 export interface BootstrapConfig {
-  agentUrl?: string;
+  agentUrl: string;
   controlPlaneUrl: string;
   registrationToken: string;
   initScript?: string;

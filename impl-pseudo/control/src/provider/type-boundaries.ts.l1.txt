@@ -1,3 +1,4 @@
+// STATUS: STILL USEFUL — design rationale not yet in impl
 # types.ts - Type Boundaries
 
 Type definitions at control plane boundary (generic) and provider context (specific).

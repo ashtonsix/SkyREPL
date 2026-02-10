@@ -3,7 +3,7 @@
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
 import { getAllocation } from "../../material/db";
-import { claimAllocation } from "../state-transitions";
+import { claimAllocation, releaseAllocation } from "../state-transitions";
 import { TIMING } from "@skyrepl/shared";
 import type {
   ClaimAllocationOutput,
@@ -88,17 +88,19 @@ export const claimAllocationExecutor: NodeExecutor<ClaimAllocationInput, ClaimAl
     if (!allocation) return;
 
     // Only release back to AVAILABLE if still in CLAIMED state
-    // (compensation reverses the claim)
+    // (compensation reverses the claim via proper state transition)
     if (allocation.status === "CLAIMED") {
-      const { execute } = await import("../../material/db");
-      const now = Date.now();
-      execute(
-        "UPDATE allocations SET status = ?, run_id = NULL, updated_at = ? WHERE id = ?",
-        ["AVAILABLE", now, output.allocationId]
-      );
-      ctx.log("info", "Released claimed allocation back to warm pool", {
-        allocationId: output.allocationId,
-      });
+      const result = releaseAllocation(output.allocationId);
+      if (result.success) {
+        ctx.log("info", "Released claimed allocation back to warm pool", {
+          allocationId: output.allocationId,
+        });
+      } else {
+        ctx.log("warn", "Failed to release allocation during compensation (best-effort)", {
+          allocationId: output.allocationId,
+          reason: result.reason,
+        });
+      }
     }
   },
 };

@@ -1,3 +1,4 @@
+// STATUS: STILL USEFUL — design rationale not yet in impl
 # reconciliation.ts - Reconciliation Task
 
 Background task (every 60s): syncs instance state, detects degraded/stale heartbeats, recovers stuck allocations.

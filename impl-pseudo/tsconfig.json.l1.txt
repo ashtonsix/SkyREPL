@@ -1,8 +1,0 @@
-# tsconfig.json
-
-## Compiler Options
-target: ES2022, module: NodeNext, strict: true
-outDir: ./dist, rootDir: ./src
-
-## Paths
-@/* → src/*

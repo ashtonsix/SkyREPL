@@ -316,7 +316,7 @@ Resource-type-specific cleanup handlers MUST perform:
 
 ### Expiry Scanner
 
-The system MUST run a CRON job (every minute) that scans for expired manifests.
+The system MUST run a CRON job (every 5 minutes) that scans for expired manifests.
 The scanner MUST find SEALED manifests where expires_at < now AND no
 manifest-owned resources remain. For each candidate, the scanner MUST check
 whether a cleanup-manifest workflow is already running before spawning a new one

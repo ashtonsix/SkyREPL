@@ -72,6 +72,7 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
     const bootstrapConfig = {
       controlPlaneUrl,
       registrationToken: rawToken, // Pass raw token to agent, not the hash
+      agentUrl: `${controlPlaneUrl}/v1/agent`,
       environment: {
         SKYREPL_INSTANCE_ID: String(instance.id),
       },
@@ -140,13 +141,3 @@ export async function findProviderSnapshotId(
   return undefined;
 }
 
-/**
- * Generate a random auth token hash for instance registration.
- * Slice 2: generates raw token and returns SHA256 hash.
- *
- * @deprecated This function is kept for backward compatibility but is no longer used.
- * Token generation and hashing is now done inline in the executor.
- */
-export function generateAuthTokenHash(): string {
-  return crypto.randomBytes(16).toString("hex");
-}

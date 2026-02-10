@@ -1,3 +1,4 @@
+// STATUS: STILL USEFUL — design rationale not yet in impl
 # garbage-collection.ts - Garbage Collection Task (Ch15)
 
 Background task to clean up orphaned blobs, merge duplicates, and expire objects/keys.

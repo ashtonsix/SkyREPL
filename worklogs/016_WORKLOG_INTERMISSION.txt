@@ -1,8 +1,9 @@
 WORKLOG: Intermission — Audit Remediation
 ==========================================
 
-Status: NOT STARTED
-Started: —
+Status: COMPLETE
+Started: 2026-02-10
+Finished: 2026-02-10
 Predecessor: worklogs/014_WORKLOG_SLICE2.txt (Slice 2 done, 278 tests)
 Ref: worklogs/015_AUDIT_POST_SLICE2.txt (full audit), BACKLOG.txt
 
@@ -22,7 +23,7 @@ clear before/after. Group by file to minimise context switches.
 PHASE A: ONE-LINERS + DEAD CODE (pure wins, zero design, ~25 min)
 ================================================================================
 
-STEP 1: engine.ts point fixes .................................... [ ] DONE
+STEP 1: engine.ts point fixes .................................... [x] DONE
   Items: SD-01, SM-25, SD-13, SD-EV2
   Ref: audit §1.5 (SM-25), §2.1 (SD-01), §2.2 (SD-13), §2.4 (SD-EV2)
   Changes:
@@ -32,7 +33,7 @@ STEP 1: engine.ts point fixes .................................... [ ] DONE
     c. Node creation: attempt 0 → 1                                [SD-13]
     d. Remove 'timed_out' from terminal states array               [SD-EV2]
 
-STEP 2: Scattered one-liners ..................................... [ ] DONE
+STEP 2: Scattered one-liners ..................................... [x] DONE
   Items: SD-07, SD-09, SD-17, SM-18
   Ref: audit §2.2 (SD-07, SD-09, SD-17), §1.4 (SM-18)
   Changes:
@@ -43,7 +44,7 @@ STEP 2: Scattered one-liners ..................................... [ ] DONE
     d. spawn-instance.ts: remove deprecated generateAuthTokenHash
        export                                                      [SM-18]
 
-STEP 3: Dead code removal ........................................ [ ] DONE
+STEP 3: Dead code removal ........................................ [x] DONE
   Items: SM-17, SM-22
   Ref: audit §1.4 (SM-17, SM-22)
   Changes:
@@ -57,7 +58,7 @@ STEP 3: Dead code removal ........................................ [ ] DONE
 PHASE B: TIMER + VALIDATION FIXES (~20 min)
 ================================================================================
 
-STEP 4: Timer leak + validation errors ........................... [ ] DONE
+STEP 4: Timer leak + validation errors ........................... [x] DONE
   Items: SM-24, SM-13
   Ref: audit §1.5 (SM-24), §1.3 (SM-13)
   Changes:
@@ -70,7 +71,7 @@ STEP 4: Timer leak + validation errors ........................... [ ] DONE
 PHASE C: STATE MACHINE INTEGRITY (~30 min)
 ================================================================================
 
-STEP 5: Allocation state machine fixes ........................... [ ] DONE
+STEP 5: Allocation state machine fixes ........................... [x] DONE
   Items: SM-11, SM-12, SD-06
   Ref: audit §1.3 (SM-11, SM-12), §2.2 (SD-06)
   Changes:
@@ -83,7 +84,7 @@ STEP 5: Allocation state machine fixes ........................... [ ] DONE
     d. db.ts findWarmAllocation(): add heartbeat freshness check
        (AND i.last_heartbeat > ?)                                  [SD-06]
 
-STEP 6: Seal manifest resource detach ............................. [ ] DONE
+STEP 6: Seal manifest resource detach ............................. [x] DONE
   Items: SD-02
   Ref: audit §2.1 (SD-02)
   Changes:
@@ -95,7 +96,7 @@ STEP 6: Seal manifest resource detach ............................. [ ] DONE
 PHASE D: DEDUP + DATA STRUCTURES (~20 min)
 ================================================================================
 
-STEP 7: Consolidation + performance ............................... [ ] DONE
+STEP 7: Consolidation + performance ............................... [x] DONE
   Items: SM-19, SM-10, SM-28, SM-27
   Ref: audit §1.4 (SM-19, SM-10), §1.5 (SM-28, SM-27)
   Changes:
@@ -112,7 +113,7 @@ STEP 7: Consolidation + performance ............................... [ ] DONE
 PHASE E: SPEC + IMPL-PSEUDO PARITY (~30 min)
 ================================================================================
 
-STEP 8: Spec updates (well-intentioned + evolved drift) ........... [ ] DONE
+STEP 8: Spec updates (well-intentioned + evolved drift) ........... [x] DONE
   Items: SD-WI1..4, SD-08, SD-EV1, SD-EV3, SD-EV4, SD-18, SD-SI1
   Ref: audit §2.3, §2.4, §2.5
   Scope: Update spec/ chapters to match impl reality. ~10 spec edits,
@@ -126,7 +127,7 @@ STEP 8: Spec updates (well-intentioned + evolved drift) ........... [ ] DONE
     f. Ch07: sync-files maps to start-run executor                 [SD-EV1]
     g. Ch02/Ch04: resolve owner_type/owner_id inconsistency        [SD-SI1]
 
-STEP 9: impl-pseudo excision ...................................... [ ] DONE
+STEP 9: impl-pseudo excision ...................................... [x] DONE
   Items: PSEUDO-EXCISE (~38 files)
   Ref: audit §3.1
   Scope: Delete stale/contradictory files. Mark "still useful" files
@@ -146,17 +147,27 @@ DONE DEFINITION
 
 Intermission is DONE when:
 
-  1. [ ] All 278 existing tests pass + no new regressions
-  2. [ ] SD-01 (manifest retention) confirmed fixed via test or log check
-  3. [ ] SM-25 (zombie workflows) has test: engine crash → workflow fails
-  4. [ ] SM-11 (compensation) uses CAS, not raw SQL
-  5. [ ] SD-02 (seal detach) clears current_manifest_id in transaction
-  6. [ ] impl-pseudo/ reduced by ~38 files
-  7. [ ] Spec updated for well-intentioned + evolved drift (~10 edits)
-  8. [ ] Zero typecheck errors (bun run typecheck or tsc --noEmit)
+  1. [x] 282 tests pass (58 db/storage + 224 unit), 0 fail, no regressions
+  2. [x] SD-01: TIMING.DEFAULT_MANIFEST_RETENTION_MS used, local shadow deleted
+  3. [x] SM-25: executeLoop .catch → failWorkflowTransition + crash recovery path
+  4. [x] SM-11: releaseAllocation() with CAS guard, compensation uses it
+  5. [x] SD-02: sealManifest detaches resources in transaction (clears current_manifest_id)
+  6. [x] impl-pseudo/ reduced by 28 files (182→154), 16 marked STILL USEFUL
+  7. [x] Spec updated: 7 edits across Ch02, Ch04, Ch05, Ch07, Ch08, Ch09
+  8. [x] Zero typecheck errors (bunx tsc --noEmit from impl/control)
 
 ================================================================================
 LOG
 ================================================================================
 
-(entries added as work progresses)
+2026-02-10: All 9 steps completed in single session.
+  Phase A: engine.ts fixes (SD-01, SM-25, SD-13, SD-EV2), scattered one-liners
+    (SD-07, SD-09, SD-17, SM-18), dead code removal (SM-17, SM-22)
+  Phase B: Timer leak fix (SM-24), validation 400s (SM-13)
+  Phase C: releaseAllocation CAS (SM-11), cold-path fix (SM-12), heartbeat
+    freshness (SD-06), sealManifest resource detach (SD-02)
+  Phase D: getControlPlaneId dedup (SM-19), ProviderName consolidation (SM-10),
+    deque in logs.py (SM-28), cleanupRun method (SM-27)
+  Phase E: 7 spec edits, 28 impl-pseudo files deleted, 16 marked
+  Bonus: Fixed agentUrl type propagation in spawn-instance.ts (SD-07 cascade)
+  Result: 282 tests pass, 0 fail, 0 typecheck errors

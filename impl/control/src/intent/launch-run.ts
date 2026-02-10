@@ -5,7 +5,6 @@ import { createRun, getWorkflow, type Workflow } from "../material/db";
 import type { WorkflowBlueprint, NodeExecutor, NodeContext } from "../workflow/engine.types";
 import { submit, registerBlueprint, registerNodeExecutor } from "../workflow/engine";
 import type { LaunchRunInput, LaunchRunOutput } from "./launch-run.types";
-import type { CheckBudgetOutput } from "./launch-run.schema";
 
 // Node executor imports
 import { resolveInstanceExecutor } from "../workflow/nodes/resolve-instance";
@@ -134,32 +133,11 @@ export function registerLaunchRun(): void {
 // Check Budget Executor
 // =============================================================================
 
-export const checkBudgetExecutor: NodeExecutor<unknown, CheckBudgetOutput> = {
+export const checkBudgetExecutor: NodeExecutor<unknown, { budgetOk: boolean }> = {
   name: "check-budget",
   idempotent: true,
-  async execute(_ctx: NodeContext): Promise<CheckBudgetOutput> {
+  async execute(_ctx: NodeContext): Promise<{ budgetOk: boolean }> {
     // Slice 1: no budget enforcement
     return { budgetOk: true };
   },
 };
-
-// =============================================================================
-// Node Handlers
-// =============================================================================
-
-export function checkBudget(_input: LaunchRunInput): Promise<{ budgetOk: boolean }> {
-  // Slice 1: no budget enforcement
-  return Promise.resolve({ budgetOk: true });
-}
-
-export function resolveInstance(
-  input: LaunchRunInput
-): Promise<{ warmAvailable: boolean; warmAllocationId?: number; instanceId?: number }> {
-  // Slice 1: always cold path (no warm pool)
-  return Promise.resolve({ warmAvailable: false });
-}
-
-export function findSnapshotForSpec(_input: LaunchRunInput): Promise<string | undefined> {
-  // Slice 1: no snapshot matching
-  return Promise.resolve(undefined);
-}

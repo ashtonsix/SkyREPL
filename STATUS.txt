@@ -1,7 +1,7 @@
 ================================================================================
 PROJECT STATUS
 ================================================================================
-Last updated: 2026-02-09
+Last updated: 2026-02-10
 
 ================================================================================
 1. OVERVIEW
@@ -25,6 +25,8 @@ extracted to docs/ and workshop/. All 10 done-definition items met. Behavior
 traces completed for MVK paths (launch-run, allocation SM). AC1-AC3 fixed
 during L3 Step 0. 9 non-MVK issues tracked in BACKLOG (BT1-BT9).
 
+7 spec drift fixes applied during Intermission (SD-WI1..4, SD-08, SD-EV1, SD-SI1).
+
 Chapters:
   01 Introduction        09 API
   02 Material            10 CLI
@@ -46,19 +48,15 @@ Key design elements:
 3. IMPLEMENTATION STATUS
 ================================================================================
 
-**Current state: L3 Slice 1 COMPLETE (all steps + exercise phase done)**
+**Current state: L3 Slice 2 COMPLETE + Intermission COMPLETE**
 
 Two directories:
-  impl-pseudo/   Read-only L1/L2 reference pseudocode (renamed from impl/)
+  impl-pseudo/   L1/L2 reference pseudocode (154 files; 16 marked STILL USEFUL)
   impl/          L3 working code (Bun workspace monorepo)
-
-Pseudo-implementation (impl-pseudo/):
-  .<ext>.l1.txt  - Coarse outlines, ~20-50 lines each (136 files)
-  .<ext>.l2.txt  - Detailed pseudocode (60 files, ~24k lines — includes 7 new node files)
 
 Working code (impl/):
   Bun workspace with shared/, control/, cli/ packages + standalone agent/ (Python).
-  All stubs replaced with real implementations. 273 tests passing (0 failures).
+  282 tests passing (0 failures). 0 typecheck errors.
   Stack: Bun, bun:sqlite (WAL), ElysiaJS, TypeBox, Python stdlib-only agent.
 
 Structure (both dirs):
@@ -94,11 +92,44 @@ Worklog: worklogs/012_WORKLOG_L3_SLICE1.txt
   Done gate: PASSED — full end-to-end via OrbStack VM, ~110s runtime.
 
 ================================================================================
-5. WORKLOG REFERENCES
+5. L3 SLICE 2: Immunity & Robustness
+================================================================================
+
+Goal: Intent typing, auth, idempotency, shutdown/recovery, log streaming, warm pool.
+Worklog: worklogs/014_WORKLOG_SLICE2.txt
+
+  Phase A: Foundation cleanup (Steps 1-3)
+  Phase B: Hardening (Steps 4-7) — auth, idempotency, shutdown, log streaming
+  Phase C: Warm pool lifecycle (Step 8)
+
+  Tests: 278 pass, 0 fail. 8 steps across 3 phases.
+  Done gate: PASSED — 13/13 audit items verified.
+
+================================================================================
+6. INTERMISSION: Audit Remediation
+================================================================================
+
+Goal: Fix correctness bugs + dead code + spec drift discovered in post-Slice-2 audit.
+Worklog: worklogs/016_WORKLOG_INTERMISSION.txt
+Audit: worklogs/015_AUDIT_POST_SLICE2.txt
+
+  Phase A: One-liners + dead code (Steps 1-3) — SD-01, SM-25, SD-13, SD-EV2,
+    SD-07, SD-09, SD-17, SM-18, SM-17, SM-22
+  Phase B: Timer + validation (Step 4) — SM-24, SM-13
+  Phase C: State machine integrity (Steps 5-6) — SM-11, SM-12, SD-06, SD-02
+  Phase D: Dedup + data structures (Step 7) — SM-19, SM-10, SM-28, SM-27
+  Phase E: Spec + impl-pseudo parity (Steps 8-9) — 7 spec edits, 28 files
+    deleted, 16 marked STILL USEFUL
+
+  Tests: 282 pass, 0 fail. 0 typecheck errors.
+  28 audit items fixed. impl-pseudo/ reduced from 182→154 files.
+
+================================================================================
+7. WORKLOG REFERENCES
 ================================================================================
 
 Hot (active):
-  (none — Slice 1 complete, Slice 2 not started)
+  (none — Intermission complete, Slice 3 not started)
 
 Cold (archived):
   worklogs/001_WORKLOG_L1_RESTRUCTURING.txt  - Structural overhaul
@@ -113,6 +144,10 @@ Cold (archived):
   worklogs/010_WORKLOG_SPEC_AUDIT.txt        - Spec audit + consolidated findings (§A-M)
   worklogs/011_WORKLOG_L2B_COMPLETION.txt    - L2/B completion (Phases 1-5, D1-D19)
   worklogs/012_WORKLOG_L3_SLICE1.txt         - L3 Slice 1 (planning + impl + exercise)
+  worklogs/013_WORKLOG_L3_SLICE1_EXERCISE.txt - Slice 1 punishing exercise
+  worklogs/014_WORKLOG_SLICE2.txt            - L3 Slice 2: Immunity & Robustness
+  worklogs/015_AUDIT_POST_SLICE2.txt         - Post-Slice-2 codebase audit
+  worklogs/016_WORKLOG_INTERMISSION.txt      - Intermission: Audit remediation
 
 Backlog:
   BACKLOG.txt

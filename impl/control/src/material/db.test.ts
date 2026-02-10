@@ -12,7 +12,6 @@ import {
   getInstanceByProviderId,
   getAllocation,
   createAllocation,
-  findAvailableAllocation,
   deleteAllocation,
   getRun,
   createRun,
@@ -370,26 +369,6 @@ describe("allocations", () => {
     // Second claim should fail (already claimed)
     const secondResult = claimAllocation(alloc.id, run.id);
     expect(secondResult.success).toBe(false);
-  });
-
-  it("finds available allocation by spec", () => {
-    const instId = seedInstance();
-    createAllocation({
-      run_id: null,
-      instance_id: instId,
-      status: "AVAILABLE",
-      current_manifest_id: null,
-      user: "ubuntu",
-      workdir: "/home/ubuntu/work",
-      debug_hold_until: null,
-      completed_at: null,
-    });
-
-    const found = findAvailableAllocation({ spec: "4vcpu-8gb" });
-    expect(found).not.toBeNull();
-
-    const notFound = findAvailableAllocation({ spec: "8vcpu-16gb" });
-    expect(notFound).toBeNull();
   });
 
   it("blocks deletion of active allocation", () => {

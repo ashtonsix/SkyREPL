@@ -7,7 +7,7 @@ import {
   getAllocation,
   addResourceToManifest,
 } from "../../material/db";
-import { failAllocation } from "../state-transitions";
+import { claimAllocation, failAllocation } from "../state-transitions";
 import type {
   CreateAllocationOutput,
   LaunchRunWorkflowInput,
@@ -67,16 +67,25 @@ export const createAllocationExecutor: NodeExecutor<CreateAllocationInput, Creat
 
     const workdir = input.workdir || `/home/user/run-${input.runId}`;
 
+    // SM-12 fix: Create in AVAILABLE state first, then claim via state machine.
+    // This ensures all state transitions go through proper CAS-guarded functions.
     const allocation = createAllocation({
-      run_id: input.runId,
+      run_id: null,
       instance_id: instanceId,
-      status: "CLAIMED",
+      status: "AVAILABLE",
       current_manifest_id: ctx.manifestId,
       user: "default", // Slice 1: single-user
       workdir,
       debug_hold_until: null,
       completed_at: null,
     });
+
+    const claimResult = claimAllocation(allocation.id, input.runId);
+    if (!claimResult.success) {
+      throw new Error(
+        `Failed to claim freshly created allocation ${allocation.id}: ${claimResult.reason}`
+      );
+    }
 
     // Emit resources to manifest for lifecycle tracking
     addResourceToManifest(ctx.manifestId, "allocation", String(allocation.id), {

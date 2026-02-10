@@ -794,7 +794,7 @@ Workflow submission endpoints. These are the primary interface for CLI operation
 | POST   | /v1/workflows/terminate-instance  | Terminate an instance          |
 | POST   | /v1/workflows/create-snapshot     | Create snapshot from instance  |
 | POST   | /v1/workflows/extend-hold         | Extend allocation hold         |
-| POST   | /v1/workflows/cancel              | Cancel a running workflow      |
+| POST   | /v1/workflows/:id/cancel          | Cancel a running workflow      |
 | GET    | /v1/workflows/:id/status          | Get workflow status (polling)  |
 | GET    | /v1/workflows/:id/stream          | SSE stream for workflow events |
 | GET    | /v1/preflight                     | Preflight checks before ops    |
@@ -1029,16 +1029,13 @@ interface ExtendHoldRequest {
 }
 ```
 
-### 9.2.6 POST /v1/workflows/cancel
+### 9.2.6 POST /v1/workflows/:id/cancel
 
 Cancel running workflow.
 
 **Request:**
 ```typescript
 interface CancelWorkflowRequest {
-  /** Workflow ID to cancel */
-  workflow_id: string;
-
   /** Reason for cancellation */
   reason?: string;
 
@@ -1048,9 +1045,11 @@ interface CancelWorkflowRequest {
 ```
 
 **Example Request:**
+```
+POST /v1/workflows/wf-launch-abc123/cancel
+```
 ```json
 {
-  "workflow_id": "wf-launch-abc123",
   "reason": "user_requested"
 }
 ```
@@ -2456,7 +2455,7 @@ The control plane MUST implement the following idempotency protocol:
 | POST /v1/workflows/terminate-instance | Yes              |
 | POST /v1/workflows/create-snapshot | Yes                 |
 | POST /v1/workflows/extend-hold    | Yes                  |
-| POST /v1/workflows/cancel         | Yes                  |
+| POST /v1/workflows/:id/cancel     | Yes                  |
 | POST /v1/runs                     | Yes                  |
 | POST /v1/instances                | Yes                  |
 | POST /v1/allocations              | Yes                  |

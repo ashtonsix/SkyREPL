@@ -1,3 +1,4 @@
+// STATUS: STILL USEFUL — design rationale not yet in impl
 # allocation.ts - Allocation State Machine (Ch5)
 
 Run-to-instance binding. AVAILABLE allocations ARE the warm pool.

@@ -1,3 +1,4 @@
+# STATUS: STILL USEFUL — design rationale not yet in impl
 # heartbeat.py - Heartbeat Thread
 
 # Note: Timing constants reference ../../shared/src/config/timing.ts.l2.txt

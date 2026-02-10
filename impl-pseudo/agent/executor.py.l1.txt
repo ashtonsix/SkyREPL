@@ -1,3 +1,4 @@
+# STATUS: STILL USEFUL — design rationale not yet in impl
 # executor.py - Run Executor (Ch11)
 
 Handles start_run, cancel_run, prepare_snapshot commands. Manages subprocess lifecycle, file sync, and command acknowledgment.

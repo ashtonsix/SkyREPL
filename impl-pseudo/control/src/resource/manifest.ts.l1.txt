@@ -1,3 +1,4 @@
+// STATUS: STILL USEFUL — design rationale not yet in impl
 # manifest.ts - Ownership Boundaries (Ch4)
 
 ## Purpose

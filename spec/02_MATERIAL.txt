@@ -553,6 +553,7 @@ CREATE TABLE objects (
     -- Timestamps
     created_at INTEGER NOT NULL,            -- Unix timestamp ms
     accessed_at INTEGER,                    -- Last access timestamp
+    updated_at INTEGER,                     -- Unix timestamp ms (log streaming change detection)
 
     -- Foreign Keys
     FOREIGN KEY (blob_id) REFERENCES blobs(id) ON DELETE RESTRICT,
@@ -961,6 +962,10 @@ CREATE TABLE manifest_resources (
 
     -- Timestamps
     added_at INTEGER NOT NULL,              -- Unix timestamp ms
+
+    -- Resource ownership tracking
+    owner_type TEXT DEFAULT 'manifest',     -- 'manifest', 'workflow', 'policy'
+    owner_id INTEGER,                       -- workflow_id or null (null = manifest owns it)
 
     -- Foreign Keys
     FOREIGN KEY (manifest_id) REFERENCES manifests(id) ON DELETE CASCADE,

@@ -196,7 +196,7 @@ export async function submit(
       output_json: null,
       error_json: null,
       depends_on: dependsOn,
-      attempt: 0,
+      attempt: 1,
       retry_reason: null,
       started_at: null,
       finished_at: null,
@@ -205,12 +205,18 @@ export async function submit(
   }
 
   // Start execution loop (fire-and-forget)
-  executeLoop(workflow.id).catch((err) =>
+  executeLoop(workflow.id).catch((err) => {
     console.error("[workflow] executeLoop unhandled error", {
       workflowId: workflow.id,
       error: err,
-    })
-  );
+    });
+    try {
+      failWorkflowTransition(workflow.id, JSON.stringify({
+        code: "INTERNAL_ERROR",
+        message: `executeLoop crashed: ${err?.message ?? err}`,
+      }));
+    } catch (_) { /* already terminal or DB unavailable */ }
+  });
 
   return { workflowId: workflow.id, status: "created" };
 }
@@ -336,26 +342,33 @@ export async function executeNode(
         nodeTimeoutMs = nodeDef.timeout;
       }
     }
-    const output = await Promise.race([
-      executor.execute(ctx),
-      createTimeout(nodeTimeoutMs),
-    ]);
+    const timeout = createTimeout(nodeTimeoutMs);
+    try {
+      const output = await Promise.race([
+        executor.execute(ctx),
+        timeout.promise,
+      ]);
+      timeout.clear();
 
-    // Validate node output against schema
-    const outputSchema = NODE_OUTPUT_SCHEMAS[node.node_type];
-    if (outputSchema && output && typeof output === "object") {
-      if (!Value.Check(outputSchema, output)) {
-        const errors = [...Value.Errors(outputSchema, output)];
-        console.warn(`[workflow] Node output validation failed for ${node.node_type}`, {
-          errors: errors.map(e => ({ path: e.path, message: e.message })),
-        });
+      // Validate node output against schema
+      const outputSchema = NODE_OUTPUT_SCHEMAS[node.node_type];
+      if (outputSchema && output && typeof output === "object") {
+        if (!Value.Check(outputSchema, output)) {
+          const errors = [...Value.Errors(outputSchema, output)];
+          console.warn(`[workflow] Node output validation failed for ${node.node_type}`, {
+            errors: errors.map(e => ({ path: e.path, message: e.message })),
+          });
+        }
       }
-    }
 
-    // Mark node completed AFTER success
-    const outputRecord =
-      output && typeof output === "object" ? (output as Record<string, unknown>) : {};
-    completeNode(node.id, outputRecord);
+      // Mark node completed AFTER success
+      const outputRecord =
+        output && typeof output === "object" ? (output as Record<string, unknown>) : {};
+      completeNode(node.id, outputRecord);
+    } catch (error) {
+      timeout.clear();
+      throw error;
+    }
   } catch (error) {
     // Normalize error to NodeError shape
     const nodeError = normalizeToNodeError(error);
@@ -844,7 +857,7 @@ export async function cancelWorkflow(
   }
 
   // Already in terminal state — idempotent success (EX7 fix)
-  const terminalStates = ["completed", "failed", "cancelled", "timed_out"];
+  const terminalStates = ["completed", "failed", "cancelled"];
   if (terminalStates.includes(workflow.status)) {
     return { success: true, status: workflow.status };
   }
@@ -967,8 +980,17 @@ export async function recoverWorkflows(): Promise<void> {
 
     if (hasResetNodes && !hasFailedNodes) {
       // Resume the workflow
-      executeLoop(workflow.id).catch(err => {
-        console.error(`[workflow] Failed to resume workflow ${workflow.id}:`, err);
+      executeLoop(workflow.id).catch((err) => {
+        console.error("[workflow] executeLoop unhandled error", {
+          workflowId: workflow.id,
+          error: err,
+        });
+        try {
+          failWorkflowTransition(workflow.id, JSON.stringify({
+            code: "INTERNAL_ERROR",
+            message: `executeLoop crashed: ${err?.message ?? err}`,
+          }));
+        } catch (_) { /* already terminal or DB unavailable */ }
       });
     } else if (hasFailedNodes) {
       // Fail the workflow
@@ -1095,9 +1117,6 @@ export function createWorkflowEngine(): WorkflowEngine {
 // Helpers
 // =============================================================================
 
-/** Default manifest retention: 30 days */
-const DEFAULT_MANIFEST_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
-
 /**
  * Seal a manifest using CAS-based state transition.
  * Computes expiresAt from manifest retention_ms or default 30 days.
@@ -1113,7 +1132,7 @@ function sealManifestSafe(manifestId: number): void {
   const now = Date.now();
   const expiresAt = manifest.retention_ms != null
     ? now + manifest.retention_ms
-    : now + DEFAULT_MANIFEST_RETENTION_MS;
+    : now + TIMING.DEFAULT_MANIFEST_RETENTION_MS;
 
   const result = sealManifestTransition(manifestId, expiresAt);
   if (!result.success) {
@@ -1125,9 +1144,10 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function createTimeout(ms: number): Promise<never> {
-  return new Promise((_, reject) =>
-    setTimeout(
+function createTimeout(ms: number): { promise: Promise<never>; clear: () => void } {
+  let timerId: Timer;
+  const promise = new Promise<never>((_, reject) => {
+    timerId = setTimeout(
       () =>
         reject(
           Object.assign(new Error("Operation timed out"), {
@@ -1137,8 +1157,9 @@ function createTimeout(ms: number): Promise<never> {
           })
         ),
       ms
-    )
-  );
+    );
+  });
+  return { promise, clear: () => clearTimeout(timerId!) };
 }
 
 function normalizeToNodeError(error: unknown): NodeError {

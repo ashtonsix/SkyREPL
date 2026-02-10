@@ -16,12 +16,13 @@ Special: sync_complete bypasses both levels (sent immediately via flush_and_send
 
 from __future__ import annotations
 
+from collections import deque
 import http.client
 import json
 import os
 import threading
 import time
-from typing import List, Optional
+from typing import Deque, List, Optional
 from urllib.parse import urlparse
 
 # ---------------------------------------------------------------------------
@@ -98,7 +99,7 @@ class LogBuffer:
 
     def __init__(self) -> None:
         self._buffer: List[dict] = []  # Level 1: local buffer
-        self._send_queue: List[dict] = []  # Level 2: network send queue
+        self._send_queue: Deque[dict] = deque()  # Level 2: network send queue
         self._lock = threading.Lock()
         self._batch_sequence_id: int = 0
         self._dropped_logs_count: int = 0
@@ -117,7 +118,7 @@ class LogBuffer:
         """Handle buffer overflow (>1MB). Drop oldest entries to make room."""
         dropped = 0
         while self._total_queued_bytes + entry_size > LOG_BUFFER_MAX_SIZE and self._send_queue:
-            removed = self._send_queue.pop(0)
+            removed = self._send_queue.popleft()
             self._total_queued_bytes -= len(removed.get("data", ""))
             dropped += 1
 
@@ -151,7 +152,7 @@ class LogBuffer:
             if not self._send_queue:
                 return None
 
-            batch = self._send_queue.copy()
+            batch = list(self._send_queue)
             self._send_queue.clear()
             self._total_queued_bytes = 0
 

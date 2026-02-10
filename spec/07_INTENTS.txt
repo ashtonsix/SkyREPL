@@ -149,6 +149,8 @@ The sync-files node combines multiple operations:
 
 This replaces the two-step process (download_files → start_job) with a single atomic operation.
 
+**Implementation note:** In the current implementation, sync-files functionality is combined into the `start-run` executor node rather than existing as a separate node. The behavioral contract (presigned URL generation, start_run message, sync_complete transition) remains the same.
+
 ### Resource Emissions
 
 | Node              | Resource   | Cleanup Priority | Example Call                                       |
@@ -406,7 +408,7 @@ Cleanup operations MUST be scoped per-provider:
 
 ### Expiry-Triggered Cleanup
 
-Background scanner MUST run periodically (every minute) to:
+Background scanner MUST run periodically (every 5 minutes) to:
 1. Query manifests WHERE status='SEALED' AND expires_at < now AND no active cleanup workflow
 2. Limit results to prevent overload (e.g., LIMIT 10)
 3. For each expired manifest: submit cleanup workflow (uses per-provider orchestration)

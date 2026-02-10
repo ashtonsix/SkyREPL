@@ -1,3 +1,4 @@
+// STATUS: STILL USEFUL — design rationale not yet in impl
 # control.ts - Control Plane
 
 # Note: Timing constants import from ../../shared/src/config/timing.ts.l2.txt

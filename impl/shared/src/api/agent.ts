@@ -147,7 +147,7 @@ export const HeartbeatMessageSchema = Type.Object({
     Type.Literal('ready'),
     Type.Literal('failed'),
   ]),
-  workflow_state: Type.Record(Type.String(), Type.Unknown()),
+  workflow_state: Type.String(),
   /** Command IDs to acknowledge */
   pending_command_acks: Type.Array(Type.Integer()),
   /** Logs dropped due to buffer overflow */

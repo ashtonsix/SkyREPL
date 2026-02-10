@@ -21,6 +21,7 @@ import { sseManager } from "./sse-protocol";
 import type { AgentBridge } from "../workflow/nodes/start-run";
 import type { StartRunMessage } from "@skyrepl/shared";
 import { extractToken, verifyInstanceToken } from "./middleware/auth";
+import { getControlPlaneId } from "../config";
 
 // =============================================================================
 // Agent Request Types
@@ -544,13 +545,6 @@ export function mapStatusToWorkflowState(status: string): string {
     timeout: "launch-run:timeout",
   };
   return mapping[status] ?? `launch-run:${status}`;
-}
-
-/**
- * Get the unique identifier for this control plane instance.
- */
-export function getControlPlaneId(): string {
-  return process.env.CONTROL_PLANE_ID ?? "cp-default";
 }
 
 // =============================================================================
