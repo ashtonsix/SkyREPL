@@ -1,9 +1,15 @@
 // workflow/nodes/claim-allocation.ts - Claim Allocation Node
-// CAS-based claim of a warm-pool allocation for a run.
+// Atomic claim of a warm-pool allocation for a run, with retry on CAS race loss.
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
-import { getAllocation, updateAllocationStatus } from "../../material/db";
+import { getAllocation } from "../../material/db";
 import { claimAllocation } from "../state-transitions";
+import { TIMING } from "@skyrepl/shared";
+import type {
+  ClaimAllocationOutput,
+  ResolveInstanceOutput,
+  LaunchRunWorkflowInput,
+} from "../../intent/launch-run.schema";
 
 // =============================================================================
 // Types
@@ -16,11 +22,8 @@ export interface ClaimAllocationInput {
   manifestId: number;
 }
 
-export interface ClaimAllocationOutput {
-  allocationId: number;
-  instanceId: number;
-  fromWarmPool: true;
-}
+// Output type re-exported from schema
+export type { ClaimAllocationOutput } from "../../intent/launch-run.schema";
 
 // =============================================================================
 // Node Executor
@@ -31,24 +34,50 @@ export const claimAllocationExecutor: NodeExecutor<ClaimAllocationInput, ClaimAl
   idempotent: true,
 
   async execute(ctx: NodeContext): Promise<ClaimAllocationOutput> {
-    const input = ctx.input as ClaimAllocationInput;
+    const wfInput = ctx.workflowInput as LaunchRunWorkflowInput;
+    const resolveOutput = ctx.getNodeOutput("resolve-instance") as ResolveInstanceOutput | null;
 
-    // Use CAS-based claim from state-transitions
-    const result = claimAllocation(input.allocationId, input.runId);
-    if (!result.success) {
+    if (!resolveOutput?.allocationId) {
       throw Object.assign(
-        new Error(`Failed to claim allocation ${input.allocationId}: ${result.reason}`),
+        new Error("No allocation ID from resolve-instance"),
         { code: "CAPACITY_UNAVAILABLE", category: "capacity" }
       );
     }
 
-    ctx.emitResource("allocation", result.data.id, 90);
+    const allocationId = resolveOutput.allocationId;
+    const runId = wfInput.runId;
+    const maxRetries = TIMING.WARM_CLAIM_MAX_RETRIES;
+    const retryDelay = TIMING.WARM_CLAIM_RETRY_DELAY_MS;
 
-    return {
-      allocationId: result.data.id,
-      instanceId: result.data.instance_id,
-      fromWarmPool: true,
-    };
+    // Retry CAS claim up to maxRetries times (race lost = another workflow claimed it)
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      const result = claimAllocation(allocationId, runId);
+      if (result.success) {
+        ctx.emitResource("allocation", result.data.id, 90);
+
+        return {
+          allocationId: result.data.id,
+          instanceId: result.data.instance_id,
+          fromWarmPool: true,
+        };
+      }
+
+      // If wrong state (already claimed by someone else), not retryable
+      if (result.reason === "WRONG_STATE" || result.reason === "NOT_FOUND") {
+        break;
+      }
+
+      // RACE_LOST: wait and retry
+      if (attempt < maxRetries - 1) {
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+      }
+    }
+
+    // All retries exhausted — fall through to cold path
+    throw Object.assign(
+      new Error(`Failed to claim warm allocation ${allocationId} after ${maxRetries} attempts`),
+      { code: "CAPACITY_UNAVAILABLE", category: "capacity" }
+    );
   },
 
   async compensate(ctx: NodeContext): Promise<void> {
@@ -64,7 +93,7 @@ export const claimAllocationExecutor: NodeExecutor<ClaimAllocationInput, ClaimAl
       const { execute } = await import("../../material/db");
       const now = Date.now();
       execute(
-        "UPDATE allocations SET status = ?, run_id = NULL, manifest_id = NULL, updated_at = ? WHERE id = ?",
+        "UPDATE allocations SET status = ?, run_id = NULL, updated_at = ? WHERE id = ?",
         ["AVAILABLE", now, output.allocationId]
       );
       ctx.log("info", "Released claimed allocation back to warm pool", {

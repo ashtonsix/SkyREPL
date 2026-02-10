@@ -4,7 +4,7 @@
   "type": "module",
   "main": "src/main.ts",
   "bin": {
-    "repl": "src/main.ts"
+    "repl": "bin/repl"
   },
   "dependencies": {
     "@skyrepl/shared": "workspace:*"

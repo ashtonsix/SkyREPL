@@ -1,8 +1,9 @@
 // workflow/nodes/resolve-instance.ts - Resolve Instance Node
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
-import { queryOne, type WorkflowNode } from "../../material/db";
+import { queryOne, findWarmAllocation, type WorkflowNode } from "../../material/db";
 import { skipNode } from "../state-transitions";
+import type { ResolveInstanceOutput, LaunchRunWorkflowInput } from "../../intent/launch-run.schema";
 
 // =============================================================================
 // Types
@@ -17,11 +18,8 @@ export interface ResolveInstanceInput {
   preferWarmPool: boolean;
 }
 
-export interface ResolveInstanceOutput {
-  warmAvailable: boolean;
-  allocationId?: number;
-  instanceId?: number;
-}
+// Output type re-exported from schema
+export type { ResolveInstanceOutput } from "../../intent/launch-run.schema";
 
 // =============================================================================
 // Node Executor
@@ -32,8 +30,45 @@ export const resolveInstanceExecutor: NodeExecutor<ResolveInstanceInput, Resolve
   idempotent: true,
 
   async execute(ctx: NodeContext): Promise<ResolveInstanceOutput> {
-    // Slice 1: always cold path (no warm pool)
-    // Skip the claim-warm-allocation node so the DAG proceeds on cold path
+    const wfInput = ctx.workflowInput as LaunchRunWorkflowInput;
+
+    // Attempt warm pool lookup
+    const warmAllocation = findWarmAllocation(
+      { spec: wfInput.spec, region: wfInput.region },
+      wfInput.initChecksum
+    );
+
+    if (warmAllocation) {
+      // Warm path: skip cold-path nodes (spawn + wait-for-boot)
+      const spawnNode = queryOne<WorkflowNode>(
+        "SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
+        [ctx.workflowId, "spawn-instance"]
+      );
+      if (spawnNode && spawnNode.status === "pending") {
+        skipNode(spawnNode.id);
+      }
+
+      const bootNode = queryOne<WorkflowNode>(
+        "SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
+        [ctx.workflowId, "wait-for-boot"]
+      );
+      if (bootNode && bootNode.status === "pending") {
+        skipNode(bootNode.id);
+      }
+
+      ctx.log("info", "Resolved instance: warm path", {
+        allocationId: warmAllocation.id,
+        instanceId: warmAllocation.instance_id,
+      });
+
+      return {
+        warmAvailable: true,
+        allocationId: warmAllocation.id,
+        instanceId: warmAllocation.instance_id,
+      };
+    }
+
+    // Cold path: skip the claim-warm-allocation node
     const claimNode = queryOne<WorkflowNode>(
       "SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
       [ctx.workflowId, "claim-warm-allocation"]
@@ -42,7 +77,7 @@ export const resolveInstanceExecutor: NodeExecutor<ResolveInstanceInput, Resolve
       skipNode(claimNode.id);
     }
 
-    ctx.log("info", "Resolved instance: cold path (no warm pool in Slice 1)");
+    ctx.log("info", "Resolved instance: cold path (no warm allocation available)");
 
     return { warmAvailable: false };
   },

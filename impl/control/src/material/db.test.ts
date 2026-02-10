@@ -12,8 +12,6 @@ import {
   getInstanceByProviderId,
   getAllocation,
   createAllocation,
-  updateAllocationStatus,
-  claimAllocation,
   findAvailableAllocation,
   deleteAllocation,
   getRun,
@@ -23,7 +21,6 @@ import {
   deleteRun,
   getManifest,
   createManifest,
-  sealManifest,
   addResourceToManifest,
   getManifestResources,
   deleteManifest,
@@ -61,6 +58,11 @@ import {
   getMonthlyCostByProvider,
   getActiveUsageRecords,
 } from "./db";
+import {
+  claimAllocation,
+  completeAllocation,
+  sealManifest,
+} from "../workflow/state-transitions";
 
 // Helper: create a minimal workflow for FK references
 function seedWorkflow(): number {
@@ -119,13 +121,13 @@ afterEach(() => {
 // =============================================================================
 
 describe("schema & migrations", () => {
-  it("runs migrations and reports version 1", () => {
-    expect(getMigrationVersion()).toBe(1);
+  it("runs migrations and reports version 2", () => {
+    expect(getMigrationVersion()).toBe(2);
   });
 
   it("is idempotent on re-run", () => {
     runMigrations(); // second call
-    expect(getMigrationVersion()).toBe(1);
+    expect(getMigrationVersion()).toBe(2);
   });
 });
 
@@ -288,7 +290,7 @@ describe("allocations", () => {
     expect(alloc.created_at).toBe(alloc.updated_at);
   });
 
-  it("updates status", () => {
+  it("claims allocation (atomic transition)", () => {
     const instId = seedInstance();
     const alloc = createAllocation({
       run_id: null,
@@ -301,12 +303,30 @@ describe("allocations", () => {
       completed_at: null,
     });
 
-    const updated = updateAllocationStatus(alloc.id, "CLAIMED");
-    expect(updated.status).toBe("CLAIMED");
-    expect(updated.updated_at).toBeGreaterThanOrEqual(alloc.updated_at);
+    const run = createRun({
+      command: "echo test",
+      workdir: "/home/ubuntu/work",
+      max_duration_ms: 60000,
+      workflow_state: "launch-run:pending",
+      workflow_error: null,
+      current_manifest_id: null,
+      exit_code: null,
+      init_checksum: null,
+      create_snapshot: 0,
+      spot_interrupted: 0,
+      started_at: null,
+      finished_at: null,
+    });
+
+    const result = claimAllocation(alloc.id, run.id);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.status).toBe("CLAIMED");
+      expect(result.data.updated_at).toBeGreaterThanOrEqual(alloc.updated_at);
+    }
   });
 
-  it("claims with CAS", () => {
+  it("prevents double-claim (atomic transition)", () => {
     const instId = seedInstance();
     const alloc = createAllocation({
       run_id: null,
@@ -334,14 +354,16 @@ describe("allocations", () => {
       finished_at: null,
     });
 
-    const claimed = claimAllocation(alloc.id, run.id);
-    expect(claimed).not.toBeNull();
-    expect(claimed!.status).toBe("CLAIMED");
-    expect(claimed!.run_id).toBe(run.id);
+    const result = claimAllocation(alloc.id, run.id);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.status).toBe("CLAIMED");
+      expect(result.data.run_id).toBe(run.id);
+    }
 
     // Second claim should fail (already claimed)
-    const secondClaim = claimAllocation(alloc.id, run.id);
-    expect(secondClaim).toBeNull();
+    const secondResult = claimAllocation(alloc.id, run.id);
+    expect(secondResult.success).toBe(false);
   });
 
   it("finds available allocation by spec", () => {
@@ -392,7 +414,27 @@ describe("allocations", () => {
       debug_hold_until: null,
       completed_at: null,
     });
-    updateAllocationStatus(alloc.id, "COMPLETE");
+
+    // First claim it, then complete it
+    const run = createRun({
+      command: "echo test",
+      workdir: "/home/ubuntu/work",
+      max_duration_ms: 60000,
+      workflow_state: "launch-run:pending",
+      workflow_error: null,
+      current_manifest_id: null,
+      exit_code: null,
+      init_checksum: null,
+      create_snapshot: 0,
+      spot_interrupted: 0,
+      started_at: null,
+      finished_at: null,
+    });
+    claimAllocation(alloc.id, run.id);
+    // Need to transition through ACTIVE before COMPLETE
+    const { activateAllocation } = require("../workflow/state-transitions");
+    activateAllocation(alloc.id);
+    completeAllocation(alloc.id);
 
     deleteAllocation(alloc.id);
     expect(getAllocation(alloc.id)).toBeNull();
@@ -595,8 +637,10 @@ describe("manifests", () => {
   it("seals a manifest with expires_at", () => {
     const wfId = seedWorkflow();
     const manifest = createManifest(wfId, { retention_ms: 3600000 });
+    const expiresAt = Date.now() + 3600000;
 
-    sealManifest(manifest.id);
+    const result = sealManifest(manifest.id, expiresAt);
+    expect(result.success).toBe(true);
 
     const sealed = getManifest(manifest.id);
     expect(sealed!.status).toBe("SEALED");
@@ -608,9 +652,14 @@ describe("manifests", () => {
   it("rejects double seal", () => {
     const wfId = seedWorkflow();
     const manifest = createManifest(wfId);
+    const expiresAt = Date.now() + 3600000;
 
-    sealManifest(manifest.id);
-    expect(() => sealManifest(manifest.id)).toThrow("already sealed");
+    const result = sealManifest(manifest.id, expiresAt);
+    expect(result.success).toBe(true);
+
+    const secondResult = sealManifest(manifest.id, expiresAt);
+    expect(secondResult.success).toBe(false);
+    expect(secondResult.reason).toBe("WRONG_STATE");
   });
 
   it("adds and reads manifest resources", () => {
@@ -627,7 +676,8 @@ describe("manifests", () => {
   it("blocks resource addition to SEALED manifest", () => {
     const wfId = seedWorkflow();
     const manifest = createManifest(wfId);
-    sealManifest(manifest.id);
+    const expiresAt = Date.now() + 3600000;
+    sealManifest(manifest.id, expiresAt);
 
     expect(() => addResourceToManifest(manifest.id, "instance", "1")).toThrow(
       "sealed manifest"
@@ -637,7 +687,8 @@ describe("manifests", () => {
   it("allows recovery addition to SEALED manifest", () => {
     const wfId = seedWorkflow();
     const manifest = createManifest(wfId);
-    sealManifest(manifest.id);
+    const expiresAt = Date.now() + 3600000;
+    sealManifest(manifest.id, expiresAt);
 
     // Should not throw with allowRecovery
     addResourceToManifest(manifest.id, "instance", "1", {
@@ -650,7 +701,8 @@ describe("manifests", () => {
   it("lists expired manifests", () => {
     const wfId = seedWorkflow();
     const manifest = createManifest(wfId, { retention_ms: 1 }); // 1ms retention
-    sealManifest(manifest.id);
+    const expiresAt = Date.now() + 1; // 1ms from now
+    sealManifest(manifest.id, expiresAt);
 
     // After a tiny delay, it should be expired
     const expired = listExpiredManifests(Date.now() + 100);

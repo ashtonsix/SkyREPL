@@ -38,13 +38,15 @@ LOG_RETRY_MAX_S = 32
 
 # Module-level state
 _control_plane_url: str = ""
+_auth_token: str = ""
 _shutting_down: bool = False
 
 
-def configure(control_plane_url: str) -> None:
-    """Set the control plane URL. Called once at startup."""
-    global _control_plane_url
+def configure(control_plane_url: str, auth_token: str = "") -> None:
+    """Set the control plane URL and auth token. Called once at startup."""
+    global _control_plane_url, _auth_token
     _control_plane_url = control_plane_url
+    _auth_token = auth_token
 
 
 def set_shutting_down(value: bool) -> None:
@@ -68,6 +70,10 @@ def _http_post(path: str, payload: object, timeout: int = 10) -> http.client.HTT
 
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json", "Content-Length": str(len(body))}
+
+    # Add auth header if token is set
+    if _auth_token:
+        headers["Authorization"] = f"Bearer {_auth_token}"
 
     try:
         conn.request("POST", path, body=body, headers=headers)

@@ -28,6 +28,7 @@ HEARTBEAT_DEGRADED_MS = 2 * 60 * 1000  # 2 minutes
 # Module-level state
 _control_plane_url: str = ""
 _instance_id: str = ""
+_auth_token: str = ""
 _shutting_down: bool = False
 _shutdown_event: Optional[threading.Event] = None
 
@@ -40,12 +41,13 @@ _lock = threading.Lock()
 _executor: object = None
 
 
-def configure(control_plane_url: str, instance_id: str, shutdown_event: threading.Event) -> None:
+def configure(control_plane_url: str, instance_id: str, shutdown_event: threading.Event, auth_token: str = "") -> None:
     """Set connection parameters. Called once at startup."""
-    global _control_plane_url, _instance_id, _shutdown_event, _last_ack_time
+    global _control_plane_url, _instance_id, _shutdown_event, _last_ack_time, _auth_token
     _control_plane_url = control_plane_url
     _instance_id = instance_id
     _shutdown_event = shutdown_event
+    _auth_token = auth_token
     _last_ack_time = time.time()
 
 
@@ -83,6 +85,10 @@ def _http_post(path: str, payload: object, timeout: int = 10) -> http.client.HTT
 
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json", "Content-Length": str(len(body))}
+
+    # Add auth header if token is set
+    if _auth_token:
+        headers["Authorization"] = f"Bearer {_auth_token}"
 
     try:
         conn.request("POST", path, body=body, headers=headers)

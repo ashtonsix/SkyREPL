@@ -6,6 +6,8 @@ import { updateInstance, getInstance } from "../../material/db";
 import { getProvider } from "../../provider/registry";
 import type { ProviderName } from "../../provider/types";
 import { TIMING } from "@skyrepl/shared";
+import type { WaitForBootOutput } from "../../intent/launch-run.schema";
+import type { LaunchRunWorkflowInput, SpawnInstanceOutput } from "../../intent/launch-run.schema";
 
 // =============================================================================
 // Types
@@ -19,11 +21,8 @@ export interface WaitForBootInput {
   timeout_ms?: number;
 }
 
-export interface WaitForBootOutput {
-  instance_id: number;
-  boot_duration_ms: number;
-  ip: string;
-}
+// Output type re-exported from schema (camelCase: instanceId, bootDurationMs, ip)
+export type { WaitForBootOutput } from "../../intent/launch-run.schema";
 
 // =============================================================================
 // Node Executor
@@ -34,11 +33,8 @@ export const waitForBootExecutor: NodeExecutor<WaitForBootInput, WaitForBootOutp
   idempotent: true,
 
   async execute(ctx: NodeContext): Promise<WaitForBootOutput> {
-    const wfInput = ctx.workflowInput as { provider?: string };
-    const spawnOutput = ctx.getNodeOutput("spawn-instance") as {
-      instanceId: number;
-      providerId: string;
-    } | null;
+    const wfInput = ctx.workflowInput as LaunchRunWorkflowInput;
+    const spawnOutput = ctx.getNodeOutput("spawn-instance") as SpawnInstanceOutput | null;
     if (!spawnOutput) {
       throw new Error("spawn-instance output not available");
     }
@@ -65,8 +61,8 @@ export const waitForBootExecutor: NodeExecutor<WaitForBootInput, WaitForBootOutp
           last_heartbeat: Date.now(),
         });
         return {
-          instance_id: input.instance_id,
-          boot_duration_ms: Date.now() - startTime,
+          instanceId: input.instance_id,
+          bootDurationMs: Date.now() - startTime,
           ip: ip || "127.0.0.1",
         };
       }
@@ -81,11 +77,8 @@ export const waitForBootExecutor: NodeExecutor<WaitForBootInput, WaitForBootOutp
   },
 
   async compensate(ctx: NodeContext): Promise<void> {
-    const wfInput = ctx.workflowInput as { provider?: string };
-    const spawnOutput = ctx.getNodeOutput("spawn-instance") as {
-      instanceId: number;
-      providerId: string;
-    } | null;
+    const wfInput = ctx.workflowInput as LaunchRunWorkflowInput;
+    const spawnOutput = ctx.getNodeOutput("spawn-instance") as SpawnInstanceOutput | null;
     if (!spawnOutput || !spawnOutput.providerId) return;
 
     const input: WaitForBootInput = {

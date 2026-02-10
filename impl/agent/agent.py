@@ -12,6 +12,7 @@ Complexity lives in the control plane, not the agent.
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import sys
@@ -42,6 +43,17 @@ CONTROL_PLANE_URL = os.getenv("SKYREPL_CONTROL_PLANE_URL", "http://localhost:300
 INSTANCE_ID = os.getenv("SKYREPL_INSTANCE_ID")  # Required
 WORKDIR = os.getenv("SKYREPL_WORKDIR", "/workspace")
 SHUTDOWN_GRACE_PERIOD_S = int(os.getenv("SKYREPL_SHUTDOWN_GRACE_PERIOD_S", "5"))
+
+# Registration token for auth (read from env or config file)
+REGISTRATION_TOKEN = os.getenv("SKYREPL_REGISTRATION_TOKEN", "")
+if not REGISTRATION_TOKEN:
+    # Fallback: read from config.json
+    try:
+        with open("/etc/skyrepl/config.json") as f:
+            config = json.load(f)
+            REGISTRATION_TOKEN = config.get("registrationToken", "")
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
 
 # =============================================================================
 # Global State
@@ -150,11 +162,11 @@ def main() -> int:
     # Setup signal handlers
     _setup_signal_handlers()
 
-    # Configure all modules with control plane URL
-    logs_configure(CONTROL_PLANE_URL)
-    sse_configure(CONTROL_PLANE_URL, INSTANCE_ID)
-    hb_configure(CONTROL_PLANE_URL, INSTANCE_ID, _shutdown_event)
-    executor_configure(CONTROL_PLANE_URL, WORKDIR)
+    # Configure all modules with control plane URL and auth token
+    logs_configure(CONTROL_PLANE_URL, REGISTRATION_TOKEN)
+    sse_configure(CONTROL_PLANE_URL, INSTANCE_ID, REGISTRATION_TOKEN)
+    hb_configure(CONTROL_PLANE_URL, INSTANCE_ID, _shutdown_event, REGISTRATION_TOKEN)
+    executor_configure(CONTROL_PLANE_URL, WORKDIR, REGISTRATION_TOKEN)
 
     # Create executor
     _executor = RunExecutor()

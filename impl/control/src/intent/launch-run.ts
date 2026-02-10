@@ -5,6 +5,7 @@ import { createRun, getWorkflow, type Workflow } from "../material/db";
 import type { WorkflowBlueprint, NodeExecutor, NodeContext } from "../workflow/engine.types";
 import { submit, registerBlueprint, registerNodeExecutor } from "../workflow/engine";
 import type { LaunchRunInput, LaunchRunOutput } from "./launch-run.types";
+import type { CheckBudgetOutput } from "./launch-run.schema";
 
 // Node executor imports
 import { resolveInstanceExecutor } from "../workflow/nodes/resolve-instance";
@@ -133,10 +134,10 @@ export function registerLaunchRun(): void {
 // Check Budget Executor
 // =============================================================================
 
-export const checkBudgetExecutor: NodeExecutor = {
+export const checkBudgetExecutor: NodeExecutor<unknown, CheckBudgetOutput> = {
   name: "check-budget",
   idempotent: true,
-  async execute(_ctx: NodeContext) {
+  async execute(_ctx: NodeContext): Promise<CheckBudgetOutput> {
     // Slice 1: no budget enforcement
     return { budgetOk: true };
   },

@@ -3,6 +3,11 @@
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
 import { updateRun } from "../../material/db";
+import type {
+  StartRunOutput,
+  LaunchRunWorkflowInput,
+  CreateAllocationOutput,
+} from "../../intent/launch-run.schema";
 
 // =============================================================================
 // Types
@@ -26,11 +31,8 @@ export interface FileManifestEntry {
   sizeBytes: number;
 }
 
-export interface StartRunOutput {
-  started: boolean;
-  syncedAt: number;
-  filesSynced: number;
-}
+// Output type re-exported from schema
+export type { StartRunOutput } from "../../intent/launch-run.schema";
 
 // =============================================================================
 // Agent Bridge Interface
@@ -72,20 +74,8 @@ export const startRunExecutor: NodeExecutor<StartRunInput, StartRunOutput> = {
   idempotent: false,
 
   async execute(ctx: NodeContext): Promise<StartRunOutput> {
-    const wfInput = ctx.workflowInput as {
-      runId: number;
-      command: string;
-      workdir?: string;
-      env?: Record<string, string>;
-      files?: Array<{ path: string; checksum: string; sizeBytes?: number }>;
-      maxDurationMs?: number;
-      artifactPatterns?: string[];
-    };
-    const allocOutput = ctx.getNodeOutput("create-allocation") as {
-      allocationId: number;
-      instanceId: number;
-      workdir: string;
-    } | null;
+    const wfInput = ctx.workflowInput as LaunchRunWorkflowInput;
+    const allocOutput = ctx.getNodeOutput("create-allocation") as CreateAllocationOutput | null;
     if (!allocOutput) {
       throw new Error("create-allocation output not available");
     }

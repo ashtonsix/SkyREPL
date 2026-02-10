@@ -9,13 +9,18 @@ import {
   updateRun,
   createBlob,
   createObject,
+  addObjectTag,
+  addResourceToManifest,
+  getInstance,
   type Allocation,
   type Run,
+  type Manifest,
 } from "../material/db";
 import { activateAllocation, failAllocation } from "../workflow/state-transitions";
 import { sseManager } from "./sse-protocol";
 import type { AgentBridge } from "../workflow/nodes/start-run";
 import type { StartRunMessage } from "@skyrepl/shared";
+import { extractToken, verifyInstanceToken } from "./middleware/auth";
 
 // =============================================================================
 // Agent Request Types
@@ -101,14 +106,57 @@ export interface PanicDiagnosticsRequest {
 }
 
 // =============================================================================
+// Auth Helper
+// =============================================================================
+
+/**
+ * Verify authentication for agent requests.
+ * Returns an error object if auth fails, or null if auth passes.
+ */
+function requireAuth(
+  body: { instance_id?: string | number },
+  request: Request,
+  query?: Record<string, string>
+): { error: string; message: string } | null {
+  const instanceId = body?.instance_id;
+  if (!instanceId) {
+    return { error: "unauthorized", message: "Missing instance_id" };
+  }
+
+  const token = extractToken(request, query);
+  if (!token) {
+    // No token provided: check if this instance requires auth
+    // Instances without a token hash allow unauthenticated access (backward compat)
+    const instance = getInstance(Number(instanceId));
+    if (instance?.registration_token_hash) {
+      return { error: "unauthorized", message: "Missing authentication token" };
+    }
+    return null; // no token required for this instance
+  }
+
+  if (!verifyInstanceToken(Number(instanceId), token)) {
+    return { error: "unauthorized", message: "Invalid authentication token" };
+  }
+
+  return null; // auth passed
+}
+
+// =============================================================================
 // Route Registration
 // =============================================================================
 
 export function registerAgentRoutes(app: Elysia<any>): void {
   // ─── Heartbeat ───────────────────────────────────────────────────────
 
-  app.post("/v1/agent/heartbeat", async ({ body }) => {
+  app.post("/v1/agent/heartbeat", async ({ body, request, set }) => {
     const hb = body as AgentHeartbeatRequest;
+
+    // Auth check
+    const authError = requireAuth(hb, request);
+    if (authError) {
+      set.status = 401;
+      return authError;
+    }
 
     // Update instance heartbeat timestamp
     execute("UPDATE instances SET last_heartbeat = ? WHERE id = ?", [
@@ -135,8 +183,27 @@ export function registerAgentRoutes(app: Elysia<any>): void {
 
   // ─── Logs ────────────────────────────────────────────────────────────
 
-  app.post("/v1/agent/logs", async ({ body }) => {
+  app.post("/v1/agent/logs", async ({ body, request, set }) => {
     const log = body as AgentLogsRequest;
+
+    // Auth check - need to get instance_id from run_id
+    const run = queryOne<Run>("SELECT * FROM runs WHERE id = ?", [log.run_id]);
+    if (!run) {
+      set.status = 404;
+      return { error: "not_found", message: "Run not found" };
+    }
+    const allocation = queryOne<Allocation>(
+      "SELECT * FROM allocations WHERE run_id = ?",
+      [log.run_id]
+    );
+    // If allocation exists, verify auth. If no allocation yet, skip auth (backward compat).
+    if (allocation) {
+      const authError = requireAuth({ instance_id: allocation.instance_id }, request);
+      if (authError) {
+        set.status = 401;
+        return authError;
+      }
+    }
 
     // Append log data to the run's log stream (chunk buffering)
     const { appendLogData } = await import("../material/storage");
@@ -153,10 +220,12 @@ export function registerAgentRoutes(app: Elysia<any>): void {
     );
 
     let blobId: number;
+    let objectId: number;
     if (existingLogObj) {
       blobId = existingLogObj.blob_id;
+      objectId = existingLogObj.id;
     } else {
-      // Create initial log object
+      // Create initial log object with manifest ownership wiring (S2.C3)
       const now = Date.now();
       const blob = createBlob({
         bucket: "logs",
@@ -168,7 +237,11 @@ export function registerAgentRoutes(app: Elysia<any>): void {
         size_bytes: 0,
         last_referenced_at: now,
       });
-      createObject({
+
+      // Resolve manifest_id from the run's current_manifest_id
+      const manifestId = run.current_manifest_id ?? null;
+
+      const obj = createObject({
         type: "log",
         blob_id: blob.id,
         provider: null,
@@ -178,13 +251,26 @@ export function registerAgentRoutes(app: Elysia<any>): void {
           stream: log.stream,
         }),
         expires_at: null,
-        current_manifest_id: null,
+        current_manifest_id: manifestId,
         accessed_at: null,
+        updated_at: now,
       });
       blobId = blob.id;
+      objectId = obj.id;
+
+      // Wire into manifest ownership: object_tags + manifest_resources
+      addObjectTag(obj.id, "run_id", String(log.run_id));
+      addObjectTag(obj.id, "stream", log.stream);
+      if (manifestId) {
+        try {
+          addResourceToManifest(manifestId, "object", String(obj.id));
+        } catch {
+          // Manifest may be sealed or missing — non-fatal for log ingestion
+        }
+      }
     }
 
-    appendLogData(blobId, Buffer.from(log.data, "utf-8"));
+    appendLogData(blobId, Buffer.from(log.data, "utf-8"), objectId);
 
     // Forward to CLI WebSocket subscribers
     sseManager.broadcastLog(String(log.run_id), {
@@ -207,9 +293,16 @@ export function registerAgentRoutes(app: Elysia<any>): void {
 
   // ─── SSE Commands Stream ─────────────────────────────────────────────
 
-  app.get("/v1/agent/commands", ({ query, request }) => {
+  app.get("/v1/agent/commands", ({ query, request, set }) => {
     const instanceId = query.instance_id as string;
     const allocationId = query.allocation_id as string | undefined;
+
+    // Auth check (SSE uses query param for token since EventSource can't set headers)
+    const authError = requireAuth({ instance_id: instanceId }, request, query as Record<string, string>);
+    if (authError) {
+      set.status = 401;
+      return authError;
+    }
 
     // Returns a raw SSE Response, not JSON
     return sseManager.createCommandStream(instanceId, allocationId, request);
@@ -217,8 +310,22 @@ export function registerAgentRoutes(app: Elysia<any>): void {
 
   // ─── Status (deprecated but kept for compatibility) ──────────────────
 
-  app.post("/v1/agent/status", async ({ body }) => {
+  app.post("/v1/agent/status", async ({ body, request, set }) => {
     const status = body as AgentStatusRequest;
+
+    // Auth check - need to get instance_id from run_id
+    const allocation = queryOne<Allocation>(
+      "SELECT * FROM allocations WHERE run_id = ?",
+      [status.run_id]
+    );
+    // If allocation exists, verify auth. If no allocation yet, skip auth (backward compat).
+    if (allocation) {
+      const authError = requireAuth({ instance_id: allocation.instance_id }, request);
+      if (authError) {
+        set.status = 401;
+        return authError;
+      }
+    }
 
     const workflowState = mapStatusToWorkflowState(status.status);
 
@@ -241,25 +348,89 @@ export function registerAgentRoutes(app: Elysia<any>): void {
 
   // ─── Spot Interrupt Start (stub for Slice 1) ─────────────────────────
 
-  app.post("/v1/agent/spot-interrupt-start", async () => {
+  app.post("/v1/agent/spot-interrupt-start", async ({ body, request, set }) => {
+    const req = body as SpotInterruptStartRequest;
+
+    // Auth check - need to get instance_id from run_id
+    const allocation = queryOne<Allocation>(
+      "SELECT * FROM allocations WHERE run_id = ?",
+      [req.run_id]
+    );
+    // If allocation exists, verify auth. If no allocation yet, skip auth (backward compat).
+    if (allocation) {
+      const authError = requireAuth({ instance_id: allocation.instance_id }, request);
+      if (authError) {
+        set.status = 401;
+        return authError;
+      }
+    }
+
     return { ack: true };
   });
 
   // ─── Spot Interrupt Complete (stub for Slice 1) ───────────────────────
 
-  app.post("/v1/agent/spot-interrupt-complete", async () => {
+  app.post("/v1/agent/spot-interrupt-complete", async ({ body, request, set }) => {
+    const req = body as SpotInterruptCompleteRequest;
+
+    // Auth check - need to get instance_id from run_id
+    const allocation = queryOne<Allocation>(
+      "SELECT * FROM allocations WHERE run_id = ?",
+      [req.run_id]
+    );
+    // If allocation exists, verify auth. If no allocation yet, skip auth (backward compat).
+    if (allocation) {
+      const authError = requireAuth({ instance_id: allocation.instance_id }, request);
+      if (authError) {
+        set.status = 401;
+        return authError;
+      }
+    }
+
     return { ack: true };
   });
 
   // ─── Heartbeat Panic Start (stub for Slice 1) ────────────────────────
 
-  app.post("/v1/agent/heartbeat-panic-start", async () => {
+  app.post("/v1/agent/heartbeat-panic-start", async ({ body, request, set }) => {
+    const req = body as HeartbeatPanicStartRequest;
+
+    // Auth check - need to get instance_id from run_id
+    const allocation = queryOne<Allocation>(
+      "SELECT * FROM allocations WHERE run_id = ?",
+      [req.run_id]
+    );
+    // If allocation exists, verify auth. If no allocation yet, skip auth (backward compat).
+    if (allocation) {
+      const authError = requireAuth({ instance_id: allocation.instance_id }, request);
+      if (authError) {
+        set.status = 401;
+        return authError;
+      }
+    }
+
     return { ack: true };
   });
 
   // ─── Heartbeat Panic Complete (stub for Slice 1) ──────────────────────
 
-  app.post("/v1/agent/heartbeat-panic-complete", async () => {
+  app.post("/v1/agent/heartbeat-panic-complete", async ({ body, request, set }) => {
+    const req = body as HeartbeatPanicCompleteRequest;
+
+    // Auth check - need to get instance_id from run_id
+    const allocation = queryOne<Allocation>(
+      "SELECT * FROM allocations WHERE run_id = ?",
+      [req.run_id]
+    );
+    // If allocation exists, verify auth. If no allocation yet, skip auth (backward compat).
+    if (allocation) {
+      const authError = requireAuth({ instance_id: allocation.instance_id }, request);
+      if (authError) {
+        set.status = 401;
+        return authError;
+      }
+    }
+
     return { ack: true };
   });
 
@@ -293,8 +464,16 @@ export function registerAgentRoutes(app: Elysia<any>): void {
 
   // ─── Panic Diagnostics (stub for Slice 1) ────────────────────────────
 
-  app.post("/v1/instances/:id/panic", async ({ params, body }) => {
+  app.post("/v1/instances/:id/panic", async ({ params, body, request, set }) => {
     const panic = body as PanicDiagnosticsRequest;
+
+    // Auth check
+    const authError = requireAuth(panic, request);
+    if (authError) {
+      set.status = 401;
+      return authError;
+    }
+
     const now = Date.now();
 
     // Store panic record for post-mortem analysis

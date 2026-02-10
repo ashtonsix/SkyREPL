@@ -24,6 +24,8 @@ export interface LogBroadcast {
   data: string;
   timestamp: number;
   sequence?: number;
+  /** Monotonic sequence ID assigned by SSEManager for gap detection / reconnect replay */
+  seq?: number;
 }
 
 export interface StatusBroadcast {
@@ -68,6 +70,9 @@ function getControlPlaneId(): string {
  * Agent SSE: Long-lived, agent-initiated, unidirectional (control -> agent).
  * CLI WebSocket: Bidirectional for log streaming and workflow progress.
  */
+/** Maximum number of log messages to retain per run for reconnect replay */
+const LOG_REPLAY_BUFFER_SIZE = 500;
+
 export class SSEManager {
   /** Active agent SSE connections: instanceId -> SSE controller */
   private agentStreams = new Map<string, ReadableStreamDefaultController<Uint8Array>>();
@@ -83,6 +88,43 @@ export class SSEManager {
 
   /** Command ID counter for acknowledgment protocol */
   private nextCommandId = 1;
+
+  /** Per-run monotonic sequence counter for log messages */
+  private logSequenceCounters = new Map<string, number>();
+
+  /** Per-run ring buffer of recent log messages for reconnect replay */
+  private logReplayBuffers = new Map<string, LogBroadcast[]>();
+
+  /** Get the next log sequence number for a run */
+  getNextLogSequence(runId: string): number {
+    const current = this.logSequenceCounters.get(runId) ?? 0;
+    const next = current + 1;
+    this.logSequenceCounters.set(runId, next);
+    return next;
+  }
+
+  /** Replay buffered log messages from a given sequence number (exclusive) */
+  replayLogsFrom(runId: string, afterSeq: number, ws: WebSocket): number {
+    const buffer = this.logReplayBuffers.get(runId) ?? [];
+    let replayed = 0;
+    for (const msg of buffer) {
+      if (msg.seq !== undefined && msg.seq > afterSeq) {
+        try {
+          ws.send(JSON.stringify(msg));
+          replayed++;
+        } catch {
+          break;
+        }
+      }
+    }
+    return replayed;
+  }
+
+  /** Clean up sequence tracking for a completed run */
+  cleanupRunSequences(runId: string): void {
+    this.logSequenceCounters.delete(runId);
+    this.logReplayBuffers.delete(runId);
+  }
 
   // --- Agent SSE Connections ------------------------------------------------
 
@@ -209,6 +251,22 @@ export class SSEManager {
 
   /** Broadcast log message to all CLI subscribers for a run */
   broadcastLog(runId: string, message: LogBroadcast): void {
+    // Assign monotonic sequence ID for gap detection and reconnect replay
+    const seq = this.getNextLogSequence(runId);
+    message.seq = seq;
+
+    // Store in replay buffer (ring buffer, capped at LOG_REPLAY_BUFFER_SIZE)
+    let buffer = this.logReplayBuffers.get(runId);
+    if (!buffer) {
+      buffer = [];
+      this.logReplayBuffers.set(runId, buffer);
+    }
+    buffer.push(message);
+    if (buffer.length > LOG_REPLAY_BUFFER_SIZE) {
+      // Remove oldest entries to maintain ring buffer size
+      buffer.splice(0, buffer.length - LOG_REPLAY_BUFFER_SIZE);
+    }
+
     const subscribers = this.logSubscribers.get(runId);
     if (!subscribers) return;
 
@@ -274,6 +332,8 @@ export class SSEManager {
       }
     }
     this.logSubscribers.delete(runId);
+    // Clean up sequence tracking after a delay to allow late reconnections
+    setTimeout(() => this.cleanupRunSequences(runId), 60_000);
   }
 
   /** Close all subscribers for a workflow (when workflow completes) */
@@ -308,10 +368,20 @@ export function registerWebSocketRoutes(app: Elysia<any>): void {
   app.ws("/v1/runs/:id/logs", {
     open(ws) {
       const runId = (ws.data as any).params.id;
-      console.info("[sse] CLI log stream opened", { runId });
+      const query = (ws.data as any).query ?? {};
+      const lastSeq = query.last_seq ? parseInt(query.last_seq, 10) : 0;
+      console.info("[sse] CLI log stream opened", { runId, lastSeq });
 
-      // Subscribe to live updates (no historical replay in Slice 1)
+      // Subscribe to live updates
       sseManager.subscribeToLogs(runId, ws.raw as unknown as WebSocket);
+
+      // Replay buffered messages from after lastSeq for reconnect gap fill
+      if (lastSeq > 0) {
+        const replayed = sseManager.replayLogsFrom(runId, lastSeq, ws.raw as unknown as WebSocket);
+        if (replayed > 0) {
+          console.info("[sse] Replayed log messages on reconnect", { runId, lastSeq, replayed });
+        }
+      }
     },
     message(_ws, _message) {
       // No client -> server messages defined yet

@@ -10,6 +10,8 @@ import {
 
 // @ts-expect-error -- Bun handles `with { type: "text" }` at runtime; tsc lacks the declaration
 import migrationSql from "../migrations/001_initial.sql" with { type: "text" };
+// @ts-expect-error -- Bun handles `with { type: "text" }` at runtime; tsc lacks the declaration
+import migration002Sql from "../migrations/002_auth.sql" with { type: "text" };
 
 // =============================================================================
 // Types
@@ -29,6 +31,7 @@ export interface Instance {
   is_spot: number;
   spot_request_id: string | null;
   init_checksum: string | null;
+  registration_token_hash: string | null;
   created_at: number;
   last_heartbeat: number;
 }
@@ -108,6 +111,7 @@ export interface StorageObject {
   current_manifest_id: number | null;
   created_at: number;
   accessed_at: number | null;
+  updated_at: number | null;
 }
 
 export interface Workflow {
@@ -221,6 +225,7 @@ export function closeDatabase(): void {
 
 const MIGRATIONS: Migration[] = [
   { version: 1, sql: migrationSql },
+  { version: 2, sql: migration002Sql },
 ];
 
 export function getMigrationVersion(): number {
@@ -429,54 +434,6 @@ export function createAllocation(
   }
 }
 
-export function updateAllocationStatus(
-  id: number,
-  status: Allocation["status"]
-): Allocation {
-  const now = Date.now();
-
-  execute(
-    "UPDATE allocations SET status = ?, updated_at = ? WHERE id = ?",
-    [status, now, id]
-  );
-
-  return getAllocation(id)!;
-}
-
-export function claimAllocation(
-  id: number,
-  runId: number
-): Allocation | null {
-  const db = getDatabase();
-
-  return db.transaction(() => {
-    // Phase 1: Read current state
-    const allocation = queryOne<Allocation>(
-      "SELECT * FROM allocations WHERE id = ? AND status = ? AND run_id IS NULL",
-      [id, "AVAILABLE"]
-    );
-
-    if (!allocation) {
-      // Not found, wrong status, or already claimed
-      return null;
-    }
-
-    // Phase 2: CAS update with updated_at guard
-    const now = Date.now();
-    const result = db.prepare(`
-      UPDATE allocations
-      SET run_id = ?, status = 'CLAIMED', updated_at = ?
-      WHERE id = ? AND updated_at = ?
-    `).run(runId, now, id, allocation.updated_at);
-
-    if (result.changes === 0) {
-      // Race lost - another transaction modified the row
-      return null;
-    }
-
-    return getAllocation(id);
-  })();
-}
 
 export function findAvailableAllocation(spec: {
   spec: string;
@@ -617,30 +574,6 @@ export function createManifest(
   return getManifest(result.lastInsertRowid as number)!;
 }
 
-export function sealManifest(id: number): void {
-  const db = getDatabase();
-  const now = Date.now();
-
-  // First, get the manifest to check status and compute expires_at
-  const manifest = getManifest(id);
-  if (!manifest) {
-    throw new NotFoundError("Manifest", id);
-  }
-  if (manifest.status === "SEALED") {
-    throw new ConflictError("Manifest already sealed");
-  }
-
-  const expiresAt = manifest.retention_ms != null ? now + manifest.retention_ms : null;
-
-  const result = db.prepare(`
-    UPDATE manifests SET status = 'SEALED', released_at = ?, expires_at = ?, updated_at = ?
-    WHERE id = ? AND status = 'DRAFT'
-  `).run(now, expiresAt, now, id);
-
-  if (result.changes === 0) {
-    throw new ConflictError("Manifest could not be sealed");
-  }
-}
 
 export function addResourceToManifest(
   manifestId: number,
@@ -969,8 +902,8 @@ export function createObject(
   const db = getDatabase();
 
   const stmt = db.prepare(`
-    INSERT INTO objects (type, blob_id, provider, provider_object_id, metadata_json, expires_at, current_manifest_id, created_at, accessed_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO objects (type, blob_id, provider, provider_object_id, metadata_json, expires_at, current_manifest_id, created_at, accessed_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const result = stmt.run(
@@ -982,7 +915,8 @@ export function createObject(
     data.expires_at,
     data.current_manifest_id,
     now,
-    data.accessed_at
+    data.accessed_at,
+    data.updated_at ?? now
   );
 
   // Touch blob last_referenced_at
@@ -1023,36 +957,109 @@ export function deleteObject(id: number): void {
   execute("DELETE FROM objects WHERE id = ?", [id]);
 }
 
+export function updateObjectTimestamp(objectId: number): void {
+  execute("UPDATE objects SET updated_at = ? WHERE id = ?", [Date.now(), objectId]);
+}
+
 // =============================================================================
 // Warm Pool Operations
 // =============================================================================
 
+/**
+ * Find a warm allocation with BT5 scoring:
+ *   100 = init_checksum matches (exact snapshot match)
+ *   50  = init_checksum IS NULL (vanilla instance)
+ *   0   = mismatch (excluded from results)
+ * Tiebreaker: created_at ASC (FIFO — oldest first).
+ */
 export function findWarmAllocation(
   spec: { spec: string; region?: string },
   initChecksum?: string
 ): Allocation | null {
-  let sql = `
-    SELECT a.* FROM allocations a
-    JOIN instances i ON a.instance_id = i.id
-    WHERE a.status = 'AVAILABLE' AND a.run_id IS NULL
-      AND i.spec = ?
-      AND i.workflow_state LIKE '%:complete'
-  `;
+  let sql: string;
   const params: unknown[] = [spec.spec];
 
-  if (spec.region) {
-    sql += " AND i.region = ?";
-    params.push(spec.region);
-  }
-
   if (initChecksum) {
-    sql += " AND i.init_checksum = ?";
+    // Scoring: 100 for exact match, 50 for NULL (vanilla), exclude mismatches
+    sql = `
+      SELECT a.* FROM allocations a
+      JOIN instances i ON a.instance_id = i.id
+      WHERE a.status = 'AVAILABLE' AND a.run_id IS NULL
+        AND i.spec = ?
+        AND i.workflow_state LIKE '%:complete'
+        AND (i.init_checksum = ? OR i.init_checksum IS NULL)
+    `;
     params.push(initChecksum);
-  }
+    // params is now [spec, initChecksum]
 
-  sql += " ORDER BY a.created_at ASC LIMIT 1";
+    if (spec.region) {
+      sql += " AND i.region = ?";
+      params.push(spec.region);
+    }
+
+    // Order: exact match first (CASE returns 0 for match = sorts first with ASC on negative),
+    // then vanilla, then FIFO within each group
+    sql += ` ORDER BY
+      CASE
+        WHEN i.init_checksum = ? THEN 0
+        WHEN i.init_checksum IS NULL THEN 1
+      END ASC,
+      a.created_at ASC
+      LIMIT 1`;
+    params.push(initChecksum);
+  } else {
+    // No checksum: any AVAILABLE allocation works, FIFO order
+    sql = `
+      SELECT a.* FROM allocations a
+      JOIN instances i ON a.instance_id = i.id
+      WHERE a.status = 'AVAILABLE' AND a.run_id IS NULL
+        AND i.spec = ?
+        AND i.workflow_state LIKE '%:complete'
+    `;
+
+    if (spec.region) {
+      sql += " AND i.region = ?";
+      params.push(spec.region);
+    }
+
+    sql += " ORDER BY a.created_at ASC LIMIT 1";
+  }
 
   return queryOne<Allocation>(sql, params);
+}
+
+/**
+ * Count non-terminal allocations for an instance.
+ * Used by replenishment logic to enforce MAX_ALLOCATIONS_PER_INSTANCE.
+ */
+export function countInstanceAllocations(instanceId: number): number {
+  const result = queryOne<{ count: number }>(
+    "SELECT COUNT(*) as count FROM allocations WHERE instance_id = ? AND status NOT IN ('COMPLETE', 'FAILED')",
+    [instanceId]
+  );
+  return result?.count ?? 0;
+}
+
+/**
+ * Find stale CLAIMED allocations older than the given cutoff time.
+ * Used by background reconciliation to timeout abandoned claims.
+ */
+export function findStaleClaimed(cutoffTime: number): Allocation[] {
+  return queryMany<Allocation>(
+    "SELECT * FROM allocations WHERE status = 'CLAIMED' AND updated_at < ?",
+    [cutoffTime]
+  );
+}
+
+/**
+ * Find expired AVAILABLE allocations older than the given cutoff time.
+ * Used by background reconciliation to expire stale warm pool entries.
+ */
+export function findExpiredAvailable(cutoffTime: number): Allocation[] {
+  return queryMany<Allocation>(
+    "SELECT * FROM allocations WHERE status = 'AVAILABLE' AND created_at < ?",
+    [cutoffTime]
+  );
 }
 
 export function getWarmPoolStats(): {
@@ -1199,4 +1206,13 @@ export function getActiveUsageRecords(): UsageRecord[] {
   return queryMany<UsageRecord>(
     "SELECT * FROM usage_records WHERE finished_at IS NULL"
   );
+}
+
+// =============================================================================
+// WAL Operations
+// =============================================================================
+
+export function walCheckpoint(): void {
+  const db = getDatabase();
+  db.run("PRAGMA wal_checkpoint(TRUNCATE)");
 }

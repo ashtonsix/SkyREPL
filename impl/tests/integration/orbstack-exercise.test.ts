@@ -90,6 +90,22 @@ function orbctlSync(args: string[]): { stdout: string; exitCode: number } {
 }
 
 /**
+ * Clean up stray repl-* VMs from previous interrupted test runs.
+ * Called at the start of beforeAll so each run inherits a clean state.
+ */
+function cleanupStrayVMs(): void {
+  const { stdout, exitCode } = orbctlSync(["list"]);
+  if (exitCode !== 0) return;
+  for (const line of stdout.split("\n")) {
+    const name = line.trim().split(/\s+/)[0];
+    if (name?.startsWith("repl-")) {
+      console.log(`[exercise] Cleaning up stray VM: ${name}`);
+      orbctlSync(["delete", "-f", name]);
+    }
+  }
+}
+
+/**
  * URL reachable from a sibling OrbStack VM.
  * OrbStack VMs resolve <vmname>.orb.local to each other's IPs.
  */
@@ -269,6 +285,8 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
   const createdVmNames: string[] = [];
 
   beforeAll(async () => {
+    cleanupStrayVMs();
+
     tmpDir = await mkdtemp(join(tmpdir(), "skyrepl-orbstack-exercise-"));
     const dbPath = join(tmpDir, "test.db");
 

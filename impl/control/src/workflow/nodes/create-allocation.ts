@@ -8,6 +8,13 @@ import {
   addResourceToManifest,
 } from "../../material/db";
 import { failAllocation } from "../state-transitions";
+import type {
+  CreateAllocationOutput,
+  LaunchRunWorkflowInput,
+  ClaimAllocationOutput,
+  SpawnInstanceOutput,
+  WaitForBootOutput,
+} from "../../intent/launch-run.schema";
 
 // =============================================================================
 // Types
@@ -20,11 +27,8 @@ export interface CreateAllocationInput {
   workdir?: string;
 }
 
-export interface CreateAllocationOutput {
-  allocationId: number;
-  instanceId: number;
-  workdir: string;
-}
+// Output type re-exported from schema
+export type { CreateAllocationOutput } from "../../intent/launch-run.schema";
 
 // =============================================================================
 // Node Executor
@@ -38,10 +42,7 @@ export const createAllocationExecutor: NodeExecutor<CreateAllocationInput, Creat
     const input = ctx.workflowInput as CreateAllocationInput;
 
     // Check if warm path already provided an allocation
-    const warmOutput = ctx.getNodeOutput("claim-allocation") as {
-      allocationId?: number;
-      instanceId?: number;
-    } | null;
+    const warmOutput = ctx.getNodeOutput("claim-allocation") as ClaimAllocationOutput | null;
     if (warmOutput?.allocationId) {
       const existing = getAllocation(warmOutput.allocationId);
       if (existing) {
@@ -54,16 +55,12 @@ export const createAllocationExecutor: NodeExecutor<CreateAllocationInput, Creat
     }
 
     // Cold path: get instanceId from spawn or boot output
-    const spawnOutput = ctx.getNodeOutput("spawn-instance") as {
-      instanceId?: number;
-    } | null;
-    const bootOutput = ctx.getNodeOutput("wait-for-boot") as {
-      instance_id?: number;
-    } | null;
+    const spawnOutput = ctx.getNodeOutput("spawn-instance") as SpawnInstanceOutput | null;
+    const bootOutput = ctx.getNodeOutput("wait-for-boot") as WaitForBootOutput | null;
     const instanceId =
       input.instanceId ||
       spawnOutput?.instanceId ||
-      bootOutput?.instance_id;
+      bootOutput?.instanceId;
     if (!instanceId) {
       throw new Error("No instanceId available from upstream nodes");
     }

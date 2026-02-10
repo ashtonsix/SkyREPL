@@ -33,16 +33,18 @@ SSE_MAX_RETRIES = int(os.getenv("SKYREPL_SSE_MAX_RETRIES", "10"))
 # Module-level state (set by agent.py at startup)
 _control_plane_url: str = ""
 _instance_id: str = ""
+_auth_token: str = ""
 _shutting_down: bool = False
 _reconnect_count: int = 0
 _last_message_time: Optional[float] = None
 
 
-def configure(control_plane_url: str, instance_id: str) -> None:
+def configure(control_plane_url: str, instance_id: str, auth_token: str = "") -> None:
     """Set connection parameters. Called once at startup."""
-    global _control_plane_url, _instance_id
+    global _control_plane_url, _instance_id, _auth_token
     _control_plane_url = control_plane_url
     _instance_id = instance_id
+    _auth_token = auth_token
 
 
 def set_shutting_down(value: bool) -> None:
@@ -189,7 +191,10 @@ def _command_stream_single() -> Generator[SSEMessage, None, None]:
     conn = None
     try:
         conn = _get_connection(_control_plane_url)
+        # EventSource can't set headers, so pass token as query param
         path = f"/v1/agent/commands?instance_id={_instance_id}"
+        if _auth_token:
+            path += f"&token={_auth_token}"
         headers = {
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",

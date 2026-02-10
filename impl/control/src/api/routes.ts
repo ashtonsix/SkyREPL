@@ -305,6 +305,57 @@ export function registerOperationRoutes(app: Elysia<any>): void {
     }
   });
 
+  // ─── Workflow Cancel ──────────────────────────────────────────────────
+
+  app.post("/v1/workflows/:id/cancel", async ({ params, body, set }: { params: { id: string }; body: unknown; set: { status?: number | string } }) => {
+    const workflowId = parseInt(params.id, 10);
+    if (isNaN(workflowId)) {
+      set.status = 400;
+      return { error: { code: "INVALID_INPUT", message: "Workflow ID must be a number", category: "validation" } };
+    }
+
+    const b = body as Record<string, unknown>;
+    const reason = (b?.reason as string) ?? "user_requested";
+
+    // Import cancelWorkflow from engine
+    const { cancelWorkflow } = await import("../workflow/engine");
+    const result = await cancelWorkflow(workflowId, reason);
+
+    if (!result.success && result.status === "not_found") {
+      set.status = 404;
+      return { error: { code: "NOT_FOUND", message: `Workflow ${workflowId} not found`, category: "not_found" } };
+    }
+
+    // After successful cancel, send cancel_run SSE command to the agent
+    if (result.success || result.status === "cancelled") {
+      const workflow = getWorkflow(workflowId);
+      if (workflow) {
+        const nodes = getWorkflowNodes(workflowId);
+        const allocNode = nodes.find(n => n.node_id === "create-allocation");
+        if (allocNode?.output_json) {
+          try {
+            const output = JSON.parse(allocNode.output_json);
+            if (output.instanceId) {
+              const { sseManager } = await import("./sse-protocol");
+              await sseManager.sendCommand(String(output.instanceId), {
+                type: "cancel_run",
+                data: { reason },
+              });
+            }
+          } catch (err) {
+            console.warn("[routes] Failed to send cancel_run SSE command", { workflowId, error: err });
+          }
+        }
+      }
+    }
+
+    return {
+      workflowId,
+      status: result.status,
+      cancelled: result.success,
+    };
+  });
+
   // ─── Workflow Status ──────────────────────────────────────────────────
 
   app.get("/v1/workflows/:id/status", ({ params }: { params: { id: string } }) => {

@@ -186,6 +186,7 @@ CREATE TABLE objects (
     current_manifest_id INTEGER,
     created_at INTEGER NOT NULL,
     accessed_at INTEGER,
+    updated_at INTEGER,
     FOREIGN KEY (blob_id) REFERENCES blobs(id) ON DELETE RESTRICT,
     FOREIGN KEY (current_manifest_id) REFERENCES manifests(id)
 );

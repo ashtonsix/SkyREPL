@@ -307,3 +307,18 @@ export interface ReconcileResult {
   orphans: string[];
   missing: string[];
 }
+
+// =============================================================================
+// Category Interfaces Re-exports
+// =============================================================================
+
+export type {
+  ProviderCategory,
+  StorageProvider,
+  StorageProviderCapabilities,
+  TunnelProvider,
+  TunnelProviderCapabilities,
+  TunnelConfig,
+  TunnelInfo,
+  TunnelStatus,
+} from "./categories";

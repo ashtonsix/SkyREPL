@@ -37,13 +37,15 @@ CANCEL_GRACE_PERIOD_S = 10
 # Module-level state (set by agent.py)
 _control_plane_url: str = ""
 _workdir_base: str = "/workspace"
+_auth_token: str = ""
 
 
-def configure(control_plane_url: str, workdir_base: str = "/workspace") -> None:
+def configure(control_plane_url: str, workdir_base: str = "/workspace", auth_token: str = "") -> None:
     """Set connection parameters. Called once at startup."""
-    global _control_plane_url, _workdir_base
+    global _control_plane_url, _workdir_base, _auth_token
     _control_plane_url = control_plane_url
     _workdir_base = workdir_base
+    _auth_token = auth_token
 
 
 # =============================================================================
@@ -61,6 +63,10 @@ def _http_post(path: str, payload: object, timeout: int = 10) -> http.client.HTT
 
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json", "Content-Length": str(len(body))}
+
+    # Add auth header if token is set
+    if _auth_token:
+        headers["Authorization"] = f"Bearer {_auth_token}"
 
     try:
         conn.request("POST", path, body=body, headers=headers)

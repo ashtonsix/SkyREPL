@@ -3,6 +3,7 @@
 
 import type { Provider, ProviderName, FeatureProvider } from "./types";
 import type { ProviderWorkflowContract } from "./contracts";
+import type { ProviderCategory, StorageProvider, TunnelProvider } from "./categories";
 
 // =============================================================================
 // Compute Provider Registry
@@ -49,6 +50,85 @@ export function isProviderRegistered(name: string): name is ProviderName {
 
 export function clearProviderCache(): void {
   providerCache.clear();
+  categoryCache.clear();
+}
+
+// =============================================================================
+// Category Registry
+// =============================================================================
+
+// Maps category → name → loader
+type CategoryRegistry = {
+  compute: Map<string, () => Promise<Provider>>;
+  storage: Map<string, () => Promise<StorageProvider>>;
+  tunnel: Map<string, () => Promise<TunnelProvider>>;
+};
+
+const categoryRegistry: CategoryRegistry = {
+  compute: new Map(),
+  storage: new Map(),
+  tunnel: new Map(),
+};
+
+const categoryCache = new Map<string, unknown>(); // key: "category:name"
+
+// Initialize compute registry from existing static registry
+function initComputeRegistry(): void {
+  for (const [name, loader] of Object.entries(providerRegistry)) {
+    categoryRegistry.compute.set(name, async () => {
+      const module = await loader();
+      return module.default;
+    });
+  }
+}
+
+// Call on module load
+initComputeRegistry();
+
+// =============================================================================
+// Cross-Category Access
+// =============================================================================
+
+// Type helper
+type CategoryProviderType<C extends ProviderCategory> =
+  C extends 'compute' ? Provider :
+  C extends 'storage' ? StorageProvider :
+  C extends 'tunnel' ? TunnelProvider :
+  never;
+
+export function registerCategoryProvider<C extends ProviderCategory>(
+  category: C,
+  name: string,
+  loader: () => Promise<CategoryProviderType<C>>
+): void {
+  const reg = categoryRegistry[category] as Map<string, () => Promise<unknown>>;
+  reg.set(name, loader);
+}
+
+export async function getCategoryProvider<C extends ProviderCategory>(
+  category: C,
+  name: string
+): Promise<CategoryProviderType<C>> {
+  const cacheKey = `${category}:${name}`;
+  if (categoryCache.has(cacheKey)) {
+    return categoryCache.get(cacheKey) as CategoryProviderType<C>;
+  }
+  const reg = categoryRegistry[category] as Map<string, () => Promise<unknown>>;
+  const loader = reg.get(name);
+  if (!loader) {
+    throw new Error(`Provider '${name}' not found in category '${category}'`);
+  }
+  const provider = await loader();
+  categoryCache.set(cacheKey, provider);
+  return provider as CategoryProviderType<C>;
+}
+
+export function listCategoryProviders(category: ProviderCategory): string[] {
+  return Array.from(categoryRegistry[category].keys());
+}
+
+export function getAnyProvider(category: ProviderCategory, name: string): Promise<unknown> {
+  return getCategoryProvider(category as any, name);
 }
 
 // =============================================================================

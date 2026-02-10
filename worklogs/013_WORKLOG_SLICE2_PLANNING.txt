@@ -1,0 +1,482 @@
+WORKLOG: L3 Slice 2 — Planning & Backlog Grooming
+==================================================
+
+Status: COMPLETE
+Started: 2026-02-09
+Predecessor: worklogs/012_WORKLOG_L3_SLICE1.txt
+
+## Goal
+
+Groom backlog, explore gaps between spec/impl-pseudo/impl, design solutions
+for items requiring design attention, and produce a sequenced Slice 2
+implementation plan.
+
+## Scope
+
+Planning only. No code changes. Outputs: groomed backlog with priorities,
+design sketches for HIGH-severity design items, sequenced implementation plan.
+
+## Planning Exercises
+
+PE1. Cross-check: impl/ vs impl-pseudo/ vs spec/ drift ............ [x] DONE
+PE2. Provider scope expansion design (S2.P1) ...................... [x] DONE
+PE3. Intent typing design (S2.C1) ................................. [x] DONE
+PE4. Log streaming architecture (S2.C2 + S2.D2 + S2.D3) ........... [x] DONE
+PE5. Authentication design (EX5) .................................. [x] DONE
+PE6. Warm pool design (EX6 + BT5) ................................. [x] DONE
+PE7. Backlog triage: which BT items are already fixed? ............ [x] DONE
+PE8. Slice 2 scope definition and sequencing ...................... [x] DONE
+PE9. Resource ownership for logs (S2.C3) .......................... [x] DONE
+PE10. Graceful shutdown + cancellation design (EX4) ............... [x] DONE
+
+================================================================================
+PE1: CROSS-CHECK — IMPL VS IMPL-PSEUDO VS SPEC DRIFT
+================================================================================
+
+~15 divergence points found. Key ones:
+
+1. NEW NODE: wait-for-boot (impl only, not in spec or L2)
+   - Separate polling node between spawn-instance and create-allocation
+   - Spec shows spawn returning when ready; impl splits boot-wait phase
+   - Impact: LOW — implementation optimization, good separation of concerns
+
+2. FRAMEWORK LOCK: Hono+Zod -> Elysia+TypeBox
+   - impl-pseudo is framework-agnostic; impl hardcoded to Elysia
+   - Already documented in CLAUDE.md; no action needed
+
+3. NodeExecutor.idempotent FLAG: Added in impl, not in spec/L2
+   - Controls crash recovery strategy per node
+   - Impact: LOW — needed, should be spec'd retroactively
+
+4. IDs: string -> number across impl
+   - L2 uses string IDs; impl uses number (SQL INTEGER PKs)
+   - BT7 confirmed FIXED in L3
+
+5. PATTERNS: CB implemented, IAR/PFO/RWA stubbed
+   - Only Conditional Branch fully implemented
+   - Impact: MEDIUM — IAR needed for warm pool expansion
+
+6. CRASH RECOVERY: Not implemented in engine.ts
+   - recoverWorkflows() exists but doesn't handle stale running nodes
+   - retry() throws "not implemented"
+   - Impact: HIGH — needed for Slice 2 robustness
+
+7. start-run NODE: renamed from sync-files, uses AgentBridge
+   - L2 calls it sync-files with SSEManager; impl uses AgentBridge abstraction
+   - Impact: LOW — better design in impl
+
+8. STALE L2 FILES (superseded by impl):
+   - control/src/api/routes.ts.l2.txt (Elysia-specific in impl)
+   - control/src/workflow/patterns.ts.l2.txt (partially)
+   - control/src/workflow/nodes/spawn-instance.ts.l2.txt (split into 2 files)
+   - control/src/workflow/nodes/start-run.ts.l2.txt (AgentBridge instead)
+   - control/src/intent/launch-run.ts.l2.txt (DAG changed)
+
+9. MISSING FROM SPEC:
+   - wait-for-boot node, idempotent flag, AgentBridge pattern
+   - Elysia framework choice (spec is framework-agnostic, OK)
+
+Action: Spec updates deferred (no-regrowth policy). Stale L2 files left
+as-is (read-only reference). Divergences documented here for awareness.
+
+================================================================================
+PE2: PROVIDER SCOPE EXPANSION (S2.P1) — DESIGN SKETCH
+================================================================================
+
+### Current State
+
+Provider interface is purely compute-centric:
+  - Provider<TInstance, TSnapshot>: spawn, terminate, list, get, generateBootstrap
+  - FeatureProvider<TConfig, TState>: attach(instanceId), detach(instanceId)
+  - Both assume compute instances exist
+
+### The Problem
+
+Non-compute infrastructure has different lifecycles:
+  - Storage: create bucket/database, configure, use, delete
+  - Tunnel: expose service, configure routes, revoke
+  - Messaging: create channel, subscribe, publish, delete
+
+None of these have "instances" to spawn/terminate.
+
+### Recommended Architecture: Separate Category Interfaces
+
+Three category-specific interfaces + unified registry helper:
+
+```
+PROVIDERS
+  COMPUTE (Provider<TInstance, TSnapshot>) .... existing
+    OrbStack, AWS, Lambda, RunPod
+  STORAGE (StorageProvider) ................... NEW
+    DATABASE: SQLite (current), PostgreSQL
+    OBJECT:   S3, GCS, Backblaze, MinIO (local FS)
+  TUNNEL (TunnelProvider) ..................... NEW
+    Tailscale Funnel, Cloudflared, ngrok
+  FEATURE (FeatureProvider<TConfig, TState>) .. existing
+    Tailscale SSH (instance augmentation)
+```
+
+Key interfaces:
+  - StorageProvider: create(), delete(), get(), list(), capabilities
+  - TunnelProvider: expose(service, options), revoke(), status()
+  - Each category has its own registry map
+  - Unified getAnyProvider(category, name) for cross-cutting queries
+  - Lifecycle hooks generalized (heartbeat task types become pluggable)
+
+### Slice 2 Scope for S2.P1
+
+DESIGN ONLY in Slice 2. No implementation of new provider categories.
+  - Define StorageProvider and TunnelProvider interfaces
+  - Refactor registry.ts to support multiple categories
+  - Update spec Ch08 with one-line pointers to docs/
+  - Implementation of S3/Cloudflared providers is Slice 3+
+
+This is architectural ground-laying, not feature delivery.
+
+================================================================================
+PE3: INTENT TYPING DESIGN (S2.C1) — DESIGN SKETCH
+================================================================================
+
+### Current Problem
+
+Type erasure throughout: ctx.workflowInput cast to unknown, ctx.getNodeOutput
+cast with manual type assertions. Concrete bugs found:
+
+  create-allocation.ts:60-66 — bootOutput typed as { instance_id?: number }
+  but wait-for-boot outputs { instanceId: number }. Silent field name mismatch.
+
+  finalize.ts — manually reconstructs data from 3 upstream nodes with
+  defensive ?? defaults. Runtime error suppression, not prevention.
+
+### Recommended Approach: Factory + Validation (Option C)
+
+Three phases:
+
+Phase 1 — Schema Definition (Slice 2):
+  - intent/launch-run.schema.ts: TypeBox schemas for all node I/O
+  - Static<typeof Schema> generates TypeScript types
+  - Schemas validate at submission and node completion
+  - Catches the instanceId/instance_id bug at compile time
+
+Phase 2 — Validation Integration (Slice 2):
+  - Value.Parse() at workflow submission (fail fast)
+  - Value.Check() at node completion (catch executor bugs)
+  - Blueprint registration validates node IDs match schema
+
+Phase 3 — Provider Extensions (Slice 3+):
+  - Core intent schemas (provider-agnostic)
+  - Provider extension schemas (OrbStack-specific, AWS-specific)
+  - Factory pattern: one factory per provider, validates against schema
+
+### Files Created
+
+  impl/control/src/intent/launch-run.schema.ts  (NEW)
+  impl/control/src/intent/launch-run.types.ts   (NEW)
+
+No builder pattern in Slice 2. Factory + Validation if needed in Slice 3.
+
+================================================================================
+PE4: LOG STREAMING ARCHITECTURE (S2.C2 + S2.D2 + S2.D3)
+================================================================================
+
+### Current Data Flow
+
+Agent (executor.py _stream_output, line-by-line)
+  -> LogBuffer (logs.py, 100ms local accumulation)
+  -> Send Queue (5s or 64KB threshold, POST /v1/agent/logs)
+  -> Control Plane (agent.ts:138, creates log object, appends to blob)
+  -> WebSocket broadcast (sseManager.broadcastLog)
+  -> CLI (client.ts:streamLogs, writes to stdout/stderr)
+
+### Issues Confirmed
+
+S2.D2: getLogUpdates polls blobs.last_referenced_at (updated on EVERY append).
+  Cannot distinguish new vs old logs. Should use objects.accessed_at or add
+  objects.updated_at.
+
+S2.D3: No id: field in SSE/WebSocket messages. No reconnection resume.
+  Need monotonic sequence per stream + Last-Event-ID support.
+
+S2.C3: Log objects created with no ownership wiring (current_manifest_id=null,
+  no object_tags, no manifest_resources). Fix by wiring existing spec mechanisms.
+
+### Design for Slice 2
+
+1. Fix S2.D2: Add updated_at to objects table. Poll that column.
+2. Fix S2.D3: Add monotonic sequence_id to each log message. Store in
+   objects.metadata_json. CLI sends last seen ID on reconnect.
+3. Fix S2.C3: Wire log objects into manifest ownership on creation —
+   create object_tags, register in manifest_resources, set current_manifest_id.
+4. S2.C2 streaming: Keep current pass-through for Slice 2. S3 chunking
+   and progressive enhancement deferred to Slice 3 (needs S3 provider).
+
+No schema migration needed — Slice 1 uses in-memory DB. Schema changes
+go into 001_initial.sql directly until first production deployment.
+
+================================================================================
+PE5: AUTHENTICATION DESIGN (EX5)
+================================================================================
+
+### Current State
+
+Token generated: spawn-instance.ts:64 (crypto.randomBytes(16).toString("hex"))
+Token delivered: via SKYREPL_REGISTRATION_TOKEN env var + /etc/skyrepl/config.json
+Token verified: NEVER. All agent endpoints accept any caller.
+
+### MVP Design for Slice 2
+
+1. Store token hash in instances table (new column: registration_token_hash)
+2. Bearer token middleware on agent routes:
+   - Extract from Authorization: Bearer <token>
+   - For SSE: fallback to ?token= query param
+   - SHA256 hash, compare against instances.registration_token_hash
+   - 401 on mismatch
+3. Agent code: add Authorization header to all HTTP requests
+4. Agent SSE: add token to query params on EventSource connection
+
+### Files Changed
+
+  control/src/migrations/001_initial.sql — add registration_token_hash
+  control/src/api/middleware/auth.ts — NEW, bearer token verification
+  control/src/api/routes.ts — wire middleware to agent routes
+  control/src/workflow/nodes/spawn-instance.ts — store hash in DB
+  agent/heartbeat.py — add Authorization header
+  agent/logs.py — add Authorization header
+  agent/agent.py — add Authorization header to SSE connection
+
+CLI auth not in scope for Slice 2 (api_keys table exists, wire later).
+
+================================================================================
+PE6: WARM POOL DESIGN (EX6 + BT5)
+================================================================================
+
+### Current State
+
+resolve-instance.ts always returns { warmAvailable: false }, skips claim node.
+findWarmAllocation in db.ts missing 100/50/0 scoring algorithm.
+No replenishment after run completion. No expiry of stale AVAILABLE allocations.
+
+### Full Lifecycle Design
+
+1. SCORING (BT5 fix):
+   findWarmAllocation adds CASE statement:
+     100 = init_checksum matches (exact snapshot)
+     50  = init_checksum IS NULL (vanilla instance)
+     0   = mismatch (excluded)
+   Tiebreaker: created_at ASC (FIFO)
+
+2. CLAIM PATH:
+   resolve-instance calls findWarmAllocation with scoring.
+   If found: return { warmAvailable: true, allocationId }.
+   claim-warm-allocation uses claimAllocation CAS (already implemented).
+   If race lost: retry 3x with 50ms backoff, then fall through to cold path.
+
+3. RECYCLE (in finalize):
+   After completeAllocation(), check replenishment eligibility:
+     - Instance healthy (heartbeat fresh, not terminating)
+     - Below MAX_ALLOCATIONS_PER_INSTANCE
+   If eligible: createAvailableAllocation(instanceId) — new AVAILABLE allocation.
+
+4. EXPIRY (background task):
+   Periodic scan for stale CLAIMED allocations (CLAIMED_TIMEOUT_MS).
+   Periodic scan for old AVAILABLE allocations beyond age limit.
+   Transition to FAILED (triggers instance cleanup cascade).
+
+### Implementation Order
+
+  Step 1: Fix BT5 scoring in findWarmAllocation
+  Step 2: Enable warm path in resolve-instance
+  Step 3: Add replenishment logic to finalize
+  Step 4: Create background reconciliation task
+  Step 5: Integration test (spawn -> complete -> recycle -> claim)
+
+Schema is already complete for warm pool. No DDL changes needed.
+
+================================================================================
+PE7: BACKLOG TRIAGE — BT ITEMS STATUS
+================================================================================
+
+| Item | L3 Status        | Action                                    |
+|------|------------------|-------------------------------------------|
+| BT1  | NOT STARTED      | Cleanup-manifest not in Slice 1 scope     |
+| BT2  | FIXED            | completed_at set in all terminal xitions  |
+| BT3  | NOT STARTED      | Cleanup-manifest not in Slice 1 scope     |
+| BT4  | NOT STARTED      | Cleanup-manifest not in Slice 1 scope     |
+| BT5  | NOT STARTED      | Scoring algorithm still missing in db.ts  |
+| BT6  | PARTIALLY FIXED  | Canonical in state-transitions.ts; legacy |
+|      |                  | functions in db.ts remain (remove them)   |
+| BT7  | FIXED            | All IDs use ID=number; no string IDs      |
+| BT8  | BUGGY            | finalize.ts imports wrong sealManifest    |
+|      |                  | (db.ts not state-transitions.ts)          |
+| BT9  | FIXED            | WorkflowBlueprint format aligned          |
+
+Summary:
+  - BT2, BT7, BT9: DONE (mark in backlog)
+  - BT6: PARTIALLY DONE (remove legacy db.ts functions in Slice 2)
+  - BT8: CONFIRMED BUG (= S2.D1, finalize uses wrong sealManifest)
+  - BT1, BT3, BT4: Deferred (cleanup-manifest is Slice 3+)
+  - BT5: Open (= part of EX6 warm pool)
+
+================================================================================
+PE8: SLICE 2 SCOPE DEFINITION AND SEQUENCING
+================================================================================
+
+### Theme: Immunity & Robustness
+
+The system cannot be tricked or broken by failure or repetition.
+
+### CANDIDATE ITEMS (explored, not committed)
+
+NOTE: This section captures possibilities explored during planning. Actual
+Slice 2 scope TBD — items may be reordered, dropped, or split differently.
+
+Grouped into 8 candidate implementation steps:
+
+STEP 1: Foundation fixes (bug fixes, schema cleanup)
+  - S2.D1 + BT8: Fix finalize sealManifest import (use state-transitions.ts)
+  - BT6: Remove legacy allocation functions from db.ts
+  - EX1: Rename CAS -> "atomic transition" in state machine code
+  - EX2: Fix double-seal (check manifest status before sealing in engine)
+  - EX7: Make cancelWorkflow idempotent (return success if already cancelled)
+  - EX8: Make finalize idempotent (detect already-complete allocation)
+  - S2.D4: Batch fix field name / response shape drift
+
+STEP 2: Auth + Agent hardening
+  - EX5: Bearer token auth on agent endpoints
+  - EX3: SSE backpressure (queue depth tracking, connection close)
+
+STEP 3: Log streaming fixes
+  - S2.D2: Fix getLogUpdates column (add updated_at to objects)
+  - S2.D3: Add id: field to SSE/WebSocket messages
+  - S2.C3: Wire log objects into manifest ownership (object_tags +
+    manifest_resources + current_manifest_id — no DDL changes)
+  - S2.C2: Live streaming works; catch-up path broken (depends on S2.C3)
+
+STEP 4: Warm pool lifecycle
+  - BT5: Scoring algorithm (100/50/0) in findWarmAllocation
+  - EX6: Enable warm path in resolve-instance
+  - EX6: Replenishment in finalize
+  - EX6: Background reconciliation (CLAIMED timeout, warm pool expiry)
+
+STEP 5: Shutdown + cancellation
+  - EX4: Graceful shutdown (accept barrier, drain, VM cleanup, WAL checkpoint)
+  - Cancel API endpoint (POST /v1/workflows/:id/cancel)
+  - Crash recovery hardening (recover stale running nodes on startup)
+
+STEP 6: Intent typing (design groundwork)
+  - S2.C1: TypeBox schemas for launch-run node I/O
+  - Validation at submission + node completion
+  - Fix instanceId/instance_id bug via schema
+
+STEP 7: Provider scope design (design only)
+  - S2.P1: Define StorageProvider, TunnelProvider interfaces
+  - Refactor registry for multiple categories
+  - No implementation of new providers
+
+STEP 8: Exercise + hardening
+  - OrbStack E2E with warm pool (spawn -> complete -> recycle -> claim)
+  - Chaos testing: kill control plane mid-workflow, verify recovery
+  - Property test: cancel at any step -> no orphaned resources
+  - Cross-ref integrity check
+
+### LIKELY OUT OF SCOPE (Slice 3+)
+
+  - BT1, BT3, BT4: cleanup-manifest implementation
+  - S3/Backblaze storage provider implementation
+  - Cloudflared/ngrok tunnel provider implementation
+  - IAR/PFO/RWA workflow patterns
+  - Retry workflow (engine.retry())
+  - CLI auth (api_keys wiring)
+  - Circuit breaker (WS3.1)
+  - Budget enforcement (WS3.2)
+  - Tailscale container mode (SE1)
+  - Provider extension schemas (S2.C1 Phase 3)
+
+### Candidate Operational Gate
+
+Slice 2 could be considered DONE when (subset TBD):
+  1. Warm pool E2E: spawn -> run -> complete -> recycle -> claim -> run
+  2. Auth E2E: agent with wrong token gets 401
+  3. Graceful shutdown: SIGTERM drains in-flight, terminates VMs
+  4. Crash recovery: kill mid-workflow, restart, workflow completes
+  5. Cancel E2E: cancel running workflow, agent stops, resources cleaned
+  6. All existing tests pass (273+) + new tests for Slice 2 features
+  7. Intent schemas validate launch-run node I/O at submission + completion
+  8. No orphaned resources after any failure scenario
+
+================================================================================
+PE9: RESOURCE OWNERSHIP FOR LOGS (S2.C3)
+================================================================================
+
+Covered in PE4 (Log Streaming Architecture). Summary:
+
+Current: Logs are objects with type='log', created with no ownership wiring
+(current_manifest_id=null, no object_tags, no manifest_resources entry).
+Fix: Wire existing spec mechanisms on log creation — create object_tags
+(run_id:<id>, stream:<stream>), register in manifest_resources, set
+current_manifest_id. No DDL changes needed. See updated BACKLOG S2.C3.
+
+================================================================================
+PE10: GRACEFUL SHUTDOWN + CANCELLATION (EX4)
+================================================================================
+
+### Current State
+
+main.ts signal handlers (SIGINT/SIGTERM) clear interval handles then
+call process.exit(0). No draining, no VM cleanup, no WAL checkpoint.
+
+### Shutdown Sequence Design
+
+1. ACCEPT BARRIER: Set flag, reject new workflow submissions (503)
+2. DRAIN IN-FLIGHT: Query workflows WHERE status='running'. Wait up to
+   30s (configurable). If timeout, force-fail remaining workflows.
+3. TERMINATE VMs: Query allocations WHERE status IN (AVAILABLE, CLAIMED,
+   ACTIVE). Call provider.terminate() for each. Mark FAILED.
+4. WAL CHECKPOINT: PRAGMA wal_checkpoint(TRUNCATE)
+5. EXIT: process.exit(0)
+
+### Cancel API
+
+Missing: POST /v1/workflows/:id/cancel endpoint.
+Design: Try running->cancelled transition. If already terminal, return
+success (idempotent). Fire-and-forget cancel message to agent via SSE.
+Agent receives cancel -> SIGTERM -> wait 10s -> SIGKILL.
+
+### Crash Recovery
+
+On startup, recoverWorkflows() already identifies running workflows.
+Need: for each running node, check idempotent flag. If idempotent, reset
+to pending. If not idempotent, mark as failed with CRASH_RECOVERY error.
+
+================================================================================
+BACKLOG TRIAGE RESULTS
+================================================================================
+
+MARK AS DONE:
+  - BT2: completed_at — FIXED in L3 Slice 1
+  - BT7: ID type inconsistency — FIXED in L3 Slice 1
+  - BT9: WorkflowDefinition format — FIXED in L3 Slice 1
+
+MERGE INTO EXISTING ITEMS:
+  - BT5: Merged into EX6 (warm pool)
+  - BT8: Merged into S2.D1 (same root cause: wrong sealManifest import)
+  - BT6: Standalone fix in Step 1
+
+DEFER TO SLICE 3+:
+  - BT1, BT3, BT4: cleanup-manifest (not MVK, blocks cleanup-manifest only)
+
+## Log
+
+[2026-02-09] Worklog created. Launched 10 parallel exploration subagents.
+[2026-02-09] All 10 agents complete. Synthesis written. PE1-PE10 all DONE.
+  PE1: 15 divergence points. 8 stale L2 files identified. No spec updates
+    needed (no-regrowth policy). Crash recovery is highest-impact gap.
+  PE2: Separate category interfaces recommended. Design only in Slice 2.
+  PE3: Factory + Validation recommended. TypeBox schemas for Slice 2.
+  PE4: 4 fixes identified. S3 chunking deferred to Slice 3.
+  PE5: Bearer token + SHA256 hash. ~6 files changed.
+  PE6: 4-phase lifecycle. 5-step implementation. No DDL changes.
+  PE7: BT2/BT7/BT9 DONE, BT5/BT8 merged, BT1/BT3/BT4 deferred.
+  PE8: 8-step Slice 2 plan. 8-item done definition.
+  PE9: Wire log objects into manifest ownership (no DDL, use existing mechanisms).
+  PE10: 5-phase shutdown. Cancel API. Crash recovery hardening.

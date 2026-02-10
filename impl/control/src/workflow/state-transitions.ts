@@ -42,7 +42,7 @@ function assertValidTable(table: string): void {
 }
 
 // =============================================================================
-// Generic Two-Phase CAS
+// Generic Two-Phase Atomic Transition
 // =============================================================================
 
 export function atomicTransition<T extends { id: number; status: string; updated_at: number }>(
@@ -70,7 +70,7 @@ export function atomicTransition<T extends { id: number; status: string; updated
       return transitionFailure<T>("WRONG_STATE", current);
     }
 
-    // Phase 2: CAS update with updated_at guard
+    // Phase 2: Optimistic-lock update with updated_at guard
     const now = Date.now();
     const updateFields: Record<string, unknown> = { status: toStatus, updated_at: now, ...additionalUpdates };
     const keys = Object.keys(updateFields);
@@ -111,7 +111,7 @@ export const ALLOCATION_TRANSITIONS: Record<AllocationStatus, AllocationStatus[]
  * Claim an available allocation for a run.
  * AVAILABLE -> CLAIMED. Sets run_id, claimed_at.
  *
- * Uses custom CAS (not atomicTransition) because it also validates run_id IS NULL.
+ * Uses custom atomic transition (not atomicTransition) because it also validates run_id IS NULL.
  */
 export function claimAllocation(
   allocationId: number,
@@ -135,7 +135,7 @@ export function claimAllocation(
       return transitionFailure<Allocation>("WRONG_STATE", current);
     }
 
-    // Phase 2: CAS update
+    // Phase 2: Optimistic-lock update
     const now = Date.now();
     const result = db.prepare(`
       UPDATE allocations

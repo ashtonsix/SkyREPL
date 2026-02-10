@@ -1,371 +1,290 @@
 ================================================================================
-TODO: Active Backlog
+BACKLOG — SkyREPL
 ================================================================================
-Last updated: 2026-02-09
+Last updated: 2026-02-09 (post-planning groom)
+Ref: worklogs/013 (planning), worklogs/012 (L3 Slice 1)
 
-================================================================================
-VERIFICATION ONLY (No design work needed)
-================================================================================
-
-L2/A.2: In-flight blob deduplication
-  Status: DESIGN ALREADY EXISTS - verification only
-  Finding: Spec explicitly uses eventual consistency (no UNIQUE constraint)
-  Evidence: spec/02_MATERIAL.txt:611,630,639 - "NOT unique", index for perf only
-  Pattern: Both uploads succeed → GC merges within 24h (garbage-collection.ts.l2.txt)
-  Action: Verify storage.ts.l2.txt documents this as intentional
+Ordering: design-heavy at top, point fixes at bottom, deferred last.
 
 ================================================================================
-DEFERRED (from WS3 gap analysis)
+ARCHITECTURE & DESIGN (needs design thought)
 ================================================================================
 
-WS3.1: Circuit breaker — cross-request failure aggregation
-  Status: DEFERRED
-  Context: Per-request retry logic exists (Ch6§6.6.1 ERROR_RETRY_MAPPING with
-    exponential backoff, max retries per error type). Missing: higher-level
-    circuit breaker state machine (open/closed/half-open) that tracks failures
-    across requests and prevents cascading failures per-provider or per-operation.
-  When: L3 (implementation phase) — pattern is well-understood, add when building
-    the provider adapter layer.
+S2.P1: Provider scope expansion beyond compute
+  Status: DESIGN ONLY (no new provider implementations yet)
+  Severity: HIGH — architectural scope expansion
+  Context: Provider scope currently covers compute providers (OrbStack, AWS
+    EC2) and FeatureProviders for features installed on a compute instance
+    (e.g. Tailscale SSH). Both assume compute instances exist. Need to expand
+    scope to include non-compute infrastructure:
+    - Infrastructure provisioned for control plane and CLI: record storage
+      (SQLite vs PostgreSQL), blob storage (Backblaze vs S3 vs GCS vs Azure
+      Blob Storage vs MinIO), local mode public tunnel (Tailscale Funnel vs
+      Cloudflared vs ngrok)
+    - Non-compute infrastructure (e.g. message brokering — example only,
+      no concrete plans)
+    Note: Don't conflate Tailscale core (SSH debugging on instances) with
+    Tailscale Funnel (exposing local control plane + S3 to public internet).
+    These are distinct provider concerns.
+  Impact: Provider contract (contracts.ts), registry (registry.ts), types
+    (types.ts), extensions (extensions.ts) all need rethinking. Spec Ch08
+    needs updating. Non-compute providers have different lifecycles (no
+    spawn/terminate).
+  Deliverable: Interface definitions (StorageProvider, TunnelProvider),
+    registry refactor for multiple categories, spec Ch08 pointers.
+  Blocks: S3/Backblaze/Cloudflared/ngrok implementations
+  Ref: PE2 design sketch, user direction 2026-02-09
 
-WS3.2: Budget enforcement — per-user quotas
-  Status: DEFERRED
-  Context: Advisory budget warnings exist (Ch9§9.2.9 preflight, Ch10 CLI warnings),
-    check-budget workflow node can fail launches (Ch7§7.3), BUDGET_EXCEEDED error
-    code defined (Ch9§9.3.10), AWS budget alert handling (Ch8§8.3). Missing:
-    per-user/per-manifest budget quotas and mid-execution cost controls.
-  When: Post-MVP — single-user system initially, quotas needed for multi-tenancy.
+S2.C1: Intent as offline typing module
+  Status: DESIGN + IMPLEMENTATION (Phase 1-2 only)
+  Severity: HIGH — type erasure causes silent bugs (instanceId/instance_id)
+  Context: Workflow currently uses type erasure — ctx.workflowInput cast to
+    unknown, ctx.getNodeOutput uses manual type assertions. Confirmed bug:
+    create-allocation reads instance_id but wait-for-boot outputs instanceId.
+    Intent becomes an offline module guaranteeing type flow correctness across
+    all rewrite variations. TypeBox schemas for intent types, validated at
+    build time. Core intents must not blur with provider/workflow-specific
+    enhancements (extra nodes, topology, input/output attributes).
+    Builder/helper pattern TBD — several alternatives need consideration.
+  Deliverable: launch-run.schema.ts, launch-run.types.ts, build-time
+    validation wiring.
+  Later: Provider extension schemas, factory pattern.
+  Ref: PE3 design sketch, post-Step-7 audit C1
 
-================================================================================
-DEFERRED (from sharp-edge gap analysis)
-================================================================================
+S2.C2: Log streaming — catch-up path + volume fallback
+  Status: DESIGN + PARTIAL FIX
+  Severity: HIGH — catch-up path broken, no volume fallback
+  Context: Live streaming WORKS (SSEManager WebSocket pass-through, spec-aligned
+    with Ch9). What's broken: reconnection/catch-up — getLogUpdates queries
+    object_tags that are never created (see S2.C3), so late-connecting clients
+    get no history. What's missing (well-motivated spec drift, not in Ch2/Ch9):
+    (a) Progressive enhancement: when log volume is extreme, CLI shows byte
+    count only and logs go straight to S3 — streaming is opt-out, not the only
+    path. (b) Non-line-based framing: multi-GB single lines exist in ML
+    workloads, per-line framing is not robust. (c) Buffer-then-persist in chunks
+    rather than per-append (reduces SQLite write amplification). S3 fallback
+    needs S3 provider from S2.P1 for full solution.
+  Bundles: S2.D2 (wrong poll column), S2.D3 (missing SSE id field),
+    S2.C3 (log ownership wiring) — all log-related, fix together.
+  Ref: PE4 design sketch, post-Step-7 audit C2
 
-SE1: Tailscale container mode (userspace networking)
-  Status: DEFERRED
-  Severity: HIGH — RunPod instances are containers, Tailscale SSH fails without this
-  Context: Legacy agent detects container env (RunPod or missing /dev/net/tun)
-    and uses `--tun=userspace-networking` with custom socket `/tmp/tailscale.sock`.
-    SkyREPL's tailscale.py.l2.txt has standard tailscaled startup only.
-  When: L3 (implementation phase) — add container detection to tailscale.py.
-  Ref: audit findings §L, Gap 1
+EX5: Authentication — agent endpoints wide open
+  Status: DESIGN + IMPLEMENTATION
+  Severity: HIGH — blocks any non-local deployment
+  Context: Token generated in spawn-instance (crypto.randomBytes) but never
+    verified. Design sketch in PE5: store token hash in DB, Bearer middleware
+    on agent routes, agent code adds Authorization header.
+  ~6 files changed. CLI auth out of scope for now.
+  Ref: PE5 design sketch, exercise phase audit
 
-SE2: Tailscale device limit tracking
-  Status: DEFERRED
-  Severity: MEDIUM — operational surprise at 100-device free-tier limit
-  Context: Legacy tracks device count and warns at 80% utilization.
-    Tailscale logout on shutdown mitigates but doesn't eliminate risk under
-    high concurrency.
-  When: Post-MVP — single-user initially, becomes important at scale.
-  Ref: audit findings §L, Gap 2
+EX6: Warm pool lifecycle (includes BT5 scoring)
+  Status: DESIGN + IMPLEMENTATION
+  Severity: HIGH — 20s+ VM spawn overhead on every run currently
+  Context: resolve-instance always returns warmAvailable=false. Full lifecycle
+    needed: scoring (100/50/0), claim path with retry, recycle in finalize,
+    background expiry. Design sketch in PE6. No DDL changes needed.
+  Subsumes: BT5 (scoring algorithm)
+  Blocked by: foundation fixes (BT6 legacy functions must go first)
+  Ref: PE6 design sketch, exercise phase audit
 
-SE3: Tailscale Funnel port-based routing constraint
-  Status: DEFERRED
-  Severity: LOW-MEDIUM — affects local development mode only
-  Context: Path-based Funnel breaks S3 presigned URL signature verification.
-    Must use port-based routing. Needs annotation in spec/10_CLI.txt.
-  When: When implementing local development mode (Funnel support).
-  Ref: audit findings §L, Gap 4
-
-SE4: CLI local services preflight
-  Status: DEFERRED
-  Severity: LOW — UX issue (cryptic ECONNREFUSED vs actionable messages)
-  Context: Legacy checks MinIO/control-plane reachability before operations.
-    SkyREPL has status command but no automatic preflight.
-  When: CLI polish pass.
-  Ref: audit findings §L, Gap 5
-
-SE5: S3/MinIO connection diagnostics
-  Status: DEFERRED
-  Severity: LOW — developer experience during local development
-  Context: Legacy catches ECONNREFUSED, NoSuchBucket with fix suggestions.
-    SkyREPL has generic error handling only.
-  When: CLI polish pass.
-  Ref: audit findings §L, Gap 6
-
-SE6: WAL checkpoint before database backup
-  Status: DEFERRED
-  Severity: LOW — well-known SQLite practice, will be caught at impl time
-  Context: PRAGMA wal_checkpoint(TRUNCATE) before uploading SQLite to S3.
-    Not specified in SkyREPL.
-  When: L3 (implementation phase).
-  Ref: audit findings §L, Gap 7
-
-================================================================================
-FIX BEFORE L3 (architecture coherence issues)
-================================================================================
-
-AC1: workflow_state string mismatch between spec and impl
-  Status: DONE
-  Severity: HIGH — would cause real bugs at implementation time
-  Resolution: Fixed 6 mismatched strings in launch-run.ts.l2.txt:
-    'launch:spawning' → 'spawn:pending', 'launch:booting' → 'launch-run:provisioning',
-    'launch:compensated' → 'launch-run:compensated', 'launch:running' →
-    'launch-run:running', 'run:timeout' → 'launch-run:timeout', 'run:complete' →
-    'launch-run:complete'. All other L2 files verified correct.
-  Ref: architecture coherence review, 2026-02-06
-
-AC2: AVAILABLE→FAILED allocation transition missing from spec
-  Status: DONE
-  Severity: MEDIUM — impl is correct, spec is stale
-  Resolution: Added AVAILABLE→FAILED to spec/05_ALLOCATIONS.txt: valid transitions
-    list, transition triggers section, and state diagram. Trigger: warm pool cleanup
-    when instance becomes unhealthy.
-  Ref: architecture coherence review, 2026-02-06
-
-AC3: DAG dependency persistence after dynamic pattern application
-  Status: DONE
-  Severity: MEDIUM — under-specified crash recovery for modified DAGs
-  Resolution: Added `depends_on TEXT` column (JSON array of node_id strings) to
-    workflow_nodes in spec/02_MATERIAL.txt and impl migration. Engine persists
-    depends_on on node creation and reads from it for dependency resolution
-    (findReadyNodes) and topology signatures. Patterns already persisted deps
-    (renamed dependencies_json → depends_on for consistency). Crash recovery
-    works because DAG topology is always in the database.
-  Ref: architecture coherence review, 2026-02-06
+EX4: Graceful shutdown + crash recovery
+  Status: DESIGN + IMPLEMENTATION
+  Severity: MEDIUM-HIGH — SIGTERM kills without draining; crash recovery stub
+  Context: main.ts signal handlers just call process.exit(). Need: accept
+    barrier, drain in-flight workflows (30s timeout), terminate orphaned VMs,
+    WAL checkpoint. Also: cancel API (POST /v1/workflows/:id/cancel), crash
+    recovery hardening (idempotent flag per node). Design sketch in PE10.
+  PE1 finding: crash recovery is highest-impact gap in current impl.
+  Ref: PE10 design sketch, exercise phase audit
 
 ================================================================================
-FIX DURING L3 (from D15 behavior traces, 2026-02-08)
+IMPLEMENTATION (bounded, design already sketched)
+================================================================================
+
+S2.C3: Wire log objects into manifest ownership
+  Status: OPEN (part of log streaming bundle)
+  Severity: MEDIUM — correctness of cleanup + catch-up path
+  Context: Log objects created with current_manifest_id=null, no object_tags,
+    no manifest_resources entry — invisible to cleanup and to getLogUpdates
+    (which queries object_tags). No DDL changes needed. Fix: on log creation,
+    (1) create object_tags (run_id:<id>, stream:<stream>), (2) register in
+    manifest_resources via emitResource, (3) set current_manifest_id. Spec's
+    existing ownership mechanisms (Ch2 object_tags + manifest_resources +
+    current_manifest_id) already cover this — the previous description
+    proposing resource_id/resource_type columns on objects was accidental
+    spec drift.
+  Also: getLogUpdates queries object_tags but log creation only writes
+    metadata_json — align creation to match query path.
+  Ref: PE4/PE9, post-Step-7 audit C3
+
+S2.D1: finalize node uses non-CAS sealManifest
+  Status: OPEN
+  Severity: MEDIUM
+  Context: finalize.ts imports sealManifest from db.ts (no updated_at guard)
+    instead of state-transitions.ts (CAS). Also missing expires_at param.
+  Subsumes: BT8 (same root cause)
+  Ref: PE7 triage, post-Step-7 audit D3
+
+BT6: State transition duplication in db.ts
+  Status: PARTIALLY FIXED
+  Severity: MEDIUM — causes behavioral drift
+  Context: Canonical source established in state-transitions.ts (two-phase
+    CAS). Remaining: legacy claimAllocation() and updateAllocationStatus() in
+    db.ts duplicate the logic. Remove them, point callers to state-transitions.
+  Ref: PE7 triage, D15d behavior trace
+
+EX3: SSE backpressure on slow agent consumers
+  Status: OPEN
+  Severity: MEDIUM — unbounded memory growth possible
+  Context: ReadableStreamDefaultController.enqueue() buffers without limit.
+    Fix: track queue depth, drop heartbeats when backlogged, close connection
+    above threshold.
+  Ref: exercise phase audit
+
+================================================================================
+POINT FIXES (small, bounded, no design needed)
+================================================================================
+
+S2.D2: getLogUpdates polls wrong column
+  Status: OPEN
+  Severity: MEDIUM (small fix)
+  Context: storage.ts polls blobs.last_referenced_at instead of
+    objects.accessed_at. Add updated_at to objects table, poll that.
+  Ref: PE4, post-Step-7 audit D1
+
+S2.D3: SSE messages lack id: field for reconnection
+  Status: OPEN
+  Severity: MEDIUM (small fix)
+  Context: No id: field → EventSource reconnection can't resume. Add monotonic
+    sequence_id per stream, store in objects.metadata_json, support
+    Last-Event-ID on reconnect.
+  Ref: PE4, post-Step-7 audit D2
+
+EX1: CAS acronym overload
+  Status: OPEN
+  Severity: MEDIUM (terminology only)
+  Context: "CAS" means both Compare-And-Swap (state transitions) and
+    Content-Addressable Storage (blob dedup). Rename state machine usage to
+    "atomic transition" or "optimistic lock". Reserve CAS for storage.
+  Scope: spec comments, impl comments, worklog terminology
+
+EX2: Manifest double-seal on workflow completion
+  Status: OPEN
+  Severity: LOW — non-fatal, caught + logged (every E2E run)
+  Context: finalize seals manifest, then engine handleWorkflowComplete seals
+    again → ConflictError. Fix: check manifest status before sealing in engine.
+  Ref: exercise phase audit
+
+EX7: Double cancelWorkflow race
+  Status: OPEN
+  Severity: LOW — non-fatal
+  Context: Two concurrent cancels → second hits WRONG_STATE. Should return
+    idempotent success.
+  Ref: exercise phase audit
+
+EX8: Finalize WRONG_STATE when allocation already completed
+  Status: OPEN
+  Severity: LOW — non-fatal edge case
+  Context: If allocation reaches COMPLETE before finalize (e.g. timeout
+    handler), finalize's completeAllocation hits WRONG_STATE. Should detect
+    already-complete and continue.
+  Ref: exercise phase audit
+
+S2.D4: Minor spec drift in field names / response shapes
+  Status: OPEN
+  Severity: LOW
+  Context: Various minor mismatches between impl and spec. Batch fix.
+  Ref: post-Step-7 audit D6-D9
+
+================================================================================
+DEFERRED (cleanup-manifest + provider implementations)
 ================================================================================
 
 BT1: cleanup-manifest DDL schema mismatch (5 issues)
-  Status: FIX DURING L3
-  Severity: HIGH (blocks cleanup-manifest L3, not MVK)
-  Issues:
-    a. manifest_cleanup_state DDL columns (status, current_step, progress_json,
-       finished_at) don't match impl (last_completed_priority,
-       last_completed_resource_id). Impl design is better for crash recovery.
-    b. manifest_resources DDL missing owner_type, owner_id columns used by impl.
-    c. manifest_resources DDL missing cleanup_processed_at; impl queries
-       nonexistent `id` column.
-    d. cleanup-objects filters on sub-types ('artifact','log') instead of 'object'.
-    e. cleanup-snapshots filters on 'snapshot' instead of objects WHERE type='snapshot'.
-  Fix: Update DDL to match impl for (a). Add columns for (b,c). Fix type
-    filtering logic for (d,e).
+  Status: DEFERRED
+  Severity: HIGH (blocks cleanup-manifest, not MVK)
+  Context: DDL columns don't match impl (status/current_step/progress_json vs
+    last_completed_priority/last_completed_resource_id), missing columns,
+    wrong type filtering logic. 5 sub-issues (a-e).
   Ref: D15c cleanup-manifest trace
 
-BT2: completed_at omitted from FAILED transitions (4 locations)
-  Status: FIX DURING L3
-  Severity: MEDIUM — terminal states should record when they happened
-  Locations:
-    a. allocation.ts.l2.txt:262 — transitionToComplete omits completed_at
-    b. state-transitions.ts.l2.txt:286 — failAllocation omits completed_at
-    c. launch-run.ts.l2.txt:556 — sync-files failure omits completed_at
-    d. allocation.ts.l2.txt:421 — reconcileClaimedAllocations omits completed_at
-  Fix: Add `completed_at: Date.now()` to all terminal transitions (COMPLETE+FAILED).
-  Ref: D15d allocation SM trace
-
 BT3: cleanup-manifest progress tracking not wired
-  Status: FIX DURING L3
-  Severity: MEDIUM — defined but never called, crash recovery incomplete
-  Context: updateCleanupProgress() defined at cleanup-manifest.ts.l2.txt:720
-    but no cleanup node ever calls it. Resume logic also missing.
-  Fix: Wire progress updates into each cleanup node; add resume logic to
-    loadResources that skips already-processed resources.
+  Status: DEFERRED
+  Severity: MEDIUM
+  Context: updateCleanupProgress() defined but never called. Resume logic
+    missing.
   Ref: D15c cleanup-manifest trace
 
 BT4: cleanup-manifest secondary issues (3 items)
-  Status: FIX DURING L3
+  Status: DEFERRED
   Severity: MEDIUM
-  Issues:
-    a. ManifestResource.resource_id typed as number, should be string.
-    b. Expiry scanner missing LIMIT 10 (spec requirement).
-    c. json_extract path may be wrong ($.manifest_id vs $.manifestId).
+  Context: (a) resource_id typed as number not string, (b) missing LIMIT 10,
+    (c) json_extract path may be wrong.
   Ref: D15c cleanup-manifest trace
 
-BT5: Warm pool scoring incomplete in db.ts
-  Status: FIX DURING L3
-  Severity: MEDIUM
-  Context: db.ts.l2.txt:868 findWarmAllocation missing 100/50/0 scoring
-    algorithm and excludes vanilla instances (no snapshot). allocation.ts.l2.txt
-    has the correct scoring logic.
-  Fix: Align db.ts with allocation.ts scoring, or consolidate into one location.
-  Ref: D15d allocation SM trace
-
-BT6: State transition duplication (3-4 files)
-  Status: FIX DURING L3
-  Severity: MEDIUM — causes behavioral drift
-  Context: Allocation transitions implemented in state-transitions.ts, allocation.ts,
-    launch-run.ts, and db.ts with slightly different patterns (CAS vs status-only).
-  Fix: Consolidate to single canonical source (state-transitions.ts), other files
-    call it. Natural L3 refactoring.
-  Ref: D15d allocation SM trace
-
-BT7: ID type inconsistency (string vs number)
-  Status: FIX DURING L3
-  Severity: MEDIUM — DDL uses INTEGER, some interfaces use string
-  Context: allocation.ts.l2.txt uses `id: string` (fixed for Allocation, but
-    other files may have similar issues). Shared types use `ID` alias.
-  Fix: Grep for `id: string` in L2 files and fix to match DDL INTEGER.
-  Ref: D15d allocation SM trace, D15a launch-run trace
-
-BT8: launch-run manifest sealed without expires_at
-  Status: FIX DURING L3
-  Severity: MEDIUM
-  Context: launch-run.ts.l2.txt:699 seals manifest without setting expires_at.
-    Without expiry, manifest won't be auto-cleaned by the expiry scanner.
-  Fix: Set expires_at = now + DEFAULT_MANIFEST_RETENTION_MS on seal.
-  Ref: D15a launch-run trace
-
-BT9: WorkflowDefinition format mismatch
-  Status: FIX DURING L3
-  Severity: MEDIUM
-  Context: launch-run.ts.l2.txt:43 defines WorkflowDefinition as array+handlers;
-    engine.ts.l2.txt expects WorkflowBlueprint with Record<string, NodeDefinition>.
-  Fix: Align at L3 when building the real workflow registration.
-  Ref: D15a launch-run trace
-
 ================================================================================
-FIX DURING SLICE 2 PLANNING (from post-Step-7 audit, 2026-02-09)
+DEFERRED — Post-MVP (features, scale, polish)
 ================================================================================
 
-S2.C1: Intent as offline typing module
-  Status: DESIGN DURING SLICE 2
-  Severity: HIGH — scope expansion on Intent
-  Context: Workflow uses type erasure + ctx.workflowInput (Approach A, done in
-    Slice 1). Intent becomes offline module guaranteeing type flow correctness
-    across all rewrite variations (Approach B). TypeBox for intent types. Core
-    intents must not blur with provider/workflow-specific enhancements (extra
-    nodes, topology, input/output attributes). Builder/helper pattern TBD —
-    several alternatives need consideration.
-  Ref: Post-Step-7 audit C1, user steering 2026-02-09
+WS3.1: Circuit breaker — cross-request failure aggregation
+  Context: Per-request retry exists. Missing: open/closed/half-open state
+    machine across requests per-provider.
+  When: L3 provider adapter layer
 
-S2.C2: Log streaming architecture
-  Status: DESIGN DURING SLICE 2
-  Severity: HIGH — current Slice 1 approach is just chunk persistence
-  Context: Pass-through strategy: logs stream through control to CLI with minimal
-    latency. Small buffer in control accumulates and persists in chunks. Per-line
-    not robust (multi-GB single lines). Streaming is progressive enhancement:
-    active when log volume is reasonable, otherwise CLI shows byte count only,
-    logs go straight to S3. S3 implementation differences affect design.
-  Ref: Post-Step-7 audit C2, user steering 2026-02-09
+WS3.2: Budget enforcement — per-user quotas
+  Context: Advisory budget warnings exist. Missing: per-user quotas, mid-exec
+    cost controls.
+  When: Post-MVP (single-user initially, quotas for multi-tenancy)
 
-S2.C3: Resource ownership hierarchy for logs
-  Status: DESIGN DURING SLICE 2
-  Severity: MEDIUM — correctness of cleanup path
-  Context: Manifest→Resource→Object→Blob hierarchy. Logs should be owned by a
-    Resource (Run), not added directly as objects in manifest. The manifest tracks
-    resources, resources own objects, objects have blob payloads.
-  Ref: Post-Step-7 audit C3, user steering 2026-02-09
+SE1: Tailscale container mode (userspace networking)
+  Severity: HIGH when RunPod — containers lack /dev/net/tun
+  When: L3, add container detection to tailscale.py
 
-S2.D1: finalize node uses non-CAS sealManifest
-  Status: FIX DURING SLICE 2
-  Severity: MEDIUM
-  Context: finalize.ts calls sealManifest from db.ts (no updated_at guard)
-    instead of state-transitions.ts (CAS). Need to decide if finalize should
-    use CAS seal or if db.ts seal is acceptable (single writer assumption).
-  Ref: Post-Step-7 audit D3
+SE2: Tailscale device limit tracking
+  Severity: MEDIUM at scale — 100-device free-tier limit
+  When: Post-MVP
 
-S2.D2: getLogUpdates polls wrong column
-  Status: FIX DURING SLICE 2
-  Severity: MEDIUM
-  Context: storage.ts getLogUpdates polls blobs.last_referenced_at instead of
-    objects.accessed_at. Needs redesign alongside C2 streaming architecture.
-  Ref: Post-Step-7 audit D1
+SE3: Tailscale Funnel port-based routing constraint
+  Severity: LOW-MEDIUM — local dev mode only
+  When: When implementing Funnel support (related to S2.P1 TunnelProvider)
 
-S2.D3: SSE messages lack id: field for reconnection
-  Status: FIX DURING SLICE 2
-  Severity: MEDIUM
-  Context: SSE protocol missing id: field, so EventSource reconnection can't
-    resume from last-seen event. Needs streaming architecture design (C2).
-  Ref: Post-Step-7 audit D2
+SE4: CLI local services preflight
+  Severity: LOW — UX polish (ECONNREFUSED → actionable messages)
+  When: CLI polish pass
 
-S2.D4: Minor spec drift in field names / response shapes
-  Status: FIX DURING SLICE 2
-  Severity: LOW
-  Context: Various minor field name and response shape mismatches between impl
-    and spec. Batch fix during Slice 2 hardening pass.
-  Ref: Post-Step-7 audit D6-D9
+SE5: S3/MinIO connection diagnostics
+  Severity: LOW — developer experience
+  When: CLI polish pass
 
-================================================================================
-FIX DURING SLICE 2 (from exercise phase, 2026-02-09)
-================================================================================
-
-EX1: CAS acronym overload — Compare-And-Swap vs Content Addressable Storage
-  Status: FIX DURING SLICE 2
-  Severity: MEDIUM — confusing in code review and spec
-  Context: "CAS" used for both compare-and-swap (state transitions) and
-    content-addressable storage (blob dedup). Pick distinct terms: e.g.
-    "optimistic lock" or "atomic transition" for the state machine pattern,
-    reserve CAS for storage.
-  Scope: spec, impl comments, worklog terminology
-
-EX2: Manifest double-seal on workflow completion
-  Status: FIX DURING SLICE 2
-  Severity: LOW — non-fatal, caught + logged
-  Context: finalize node seals manifest (correct), then engine's
-    handleWorkflowComplete calls sealManifest again (ConflictError).
-    Fix: engine should check manifest status before sealing, or finalize
-    should signal that seal is already done.
-  Ref: Exercise phase, every OrbStack E2E run logs this warning
-
-EX3: SSE backpressure on slow agent consumers
-  Status: FIX DURING SLICE 2
-  Severity: MEDIUM — unbounded memory growth possible
-  Context: ReadableStreamDefaultController.enqueue() buffers without limit.
-    A slow or stalled agent SSE consumer accumulates queued commands in memory.
-    Fix: track queue depth, drop heartbeats when backlogged, close connection
-    above threshold.
-  Ref: Exercise phase audit
-
-EX4: Graceful shutdown — drain workflows and cleanup VMs
-  Status: FIX DURING SLICE 2
-  Severity: MEDIUM — SIGTERM kills process without draining
-  Context: main.ts has signal handlers but they just call process.exit().
-    Need: stop accepting new workflows, wait for in-flight nodes to complete
-    (with timeout), terminate orphaned VMs, close DB cleanly.
-  Ref: Exercise phase audit
-
-EX5: Authentication — agent endpoints wide open
-  Status: DESIGN DURING SLICE 2
-  Severity: HIGH — blocks any non-local deployment
-  Context: All agent endpoints (heartbeat, logs, status, SSE commands) accept
-    any caller. Fine for local OrbStack, not for cloud providers. Auth token
-    already generated in spawn-instance (crypto.randomBytes) but never verified
-    on inbound requests.
-  Ref: Exercise phase audit
-
-EX6: Warm pool — always cold path in Slice 1
-  Status: FIX DURING SLICE 2
-  Severity: HIGH — 20s+ VM spawn overhead on every run
-  Context: resolve-instance always returns warmAvailable=false, skips
-    claim-warm-allocation. BT5 covers scoring algorithm. This item covers
-    the full warm pool lifecycle: pre-spawn, claim, recycle, expiry.
-  Ref: Exercise phase audit, BT5 (scoring subset)
-
-EX7: Double cancelWorkflow race
-  Status: FIX DURING SLICE 2
-  Severity: LOW — non-fatal, second cancel is a no-op
-  Context: Two concurrent cancel requests can both pass the status check
-    before either writes. CAS guard (B5) mitigates but doesn't prevent
-    the second caller from hitting WRONG_STATE. Should return idempotent
-    success instead of error.
-  Ref: Exercise phase audit
-
-EX8: Finalize WRONG_STATE when allocation already completed
-  Status: FIX DURING SLICE 2
-  Severity: LOW — non-fatal edge case
-  Context: If allocation reaches COMPLETE before finalize runs (e.g. via
-    timeout handler or crash recovery), finalize's completeAllocation call
-    hits WRONG_STATE. Should be idempotent — detect already-complete and
-    continue.
-  Ref: Exercise phase audit
-
-================================================================================
-DEFERRED (Low urgency / edge cases)
-================================================================================
+SE6: WAL checkpoint before database backup
+  Severity: LOW — well-known practice, easy fix
+  When: L3 backup implementation
 
 T2: Tailscale JIT installation timing
-  Rationale: Optimization for cold time-to-connect, not correctness
-  When: Install between jobs (not during job, not on cold start)
-  Exception: Interactive mode (Jupyter) → install on start
+  When: Optimization pass (install between jobs, not during)
+
+L2/A.2: In-flight blob deduplication
+  Status: VERIFICATION ONLY — spec explicitly uses eventual consistency
+  Context: Both uploads succeed → GC merges within 24h. Verify storage.ts
+    documents this as intentional.
 
 L2/A.7: Materialization depth (shallow vs deep)
-  Rationale: API design, can defer until N+1 becomes a problem
+  When: Post-MVP, when N+1 becomes a problem
   Deliverable: `include` param, batch loading, default shallow
 
 D1: Single-process control plane — no HA
-  Status: DEFERRED
   Severity: LOW for MVP — single user, single VPS
-  Context: No distributed locking, no leader election, no process failover.
-    Workflow engine assumes single writer. Fine for MVP; needs design work
-    before multi-tenant or production deployment.
   When: Post-MVP, when operational requirements demand it
+
+================================================================================
+DONE (completed, kept for audit trail — purge at next major milestone)
+================================================================================
+
+AC1: workflow_state string mismatch — FIXED (6 strings in launch-run.ts.l2.txt)
+AC2: AVAILABLE→FAILED transition — FIXED (added to spec)
+AC3: DAG dependency persistence — FIXED (depends_on column)
+BT2: completed_at in terminal transitions — FIXED in L3 Slice 1
+BT7: ID type inconsistency (string vs number) — FIXED in L3 Slice 1
+BT9: WorkflowDefinition format mismatch — FIXED in L3 Slice 1
+BT5: Warm pool scoring — MERGED into EX6
+BT8: sealManifest import — MERGED into S2.D1

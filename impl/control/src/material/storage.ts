@@ -245,11 +245,17 @@ export function prepareFilesForRun(
 // Log Streaming
 // =============================================================================
 
-export function appendLogData(blobId: number, newData: Buffer): void {
+export function appendLogData(blobId: number, newData: Buffer, objectId?: number): void {
   const db = getDatabase();
+  const now = Date.now();
   db.prepare(
     "UPDATE blobs SET payload = CASE WHEN payload IS NULL THEN ? ELSE payload || ? END, size_bytes = size_bytes + ?, last_referenced_at = ? WHERE id = ?"
-  ).run(newData, newData, newData.length, Date.now(), blobId);
+  ).run(newData, newData, newData.length, now, blobId);
+
+  // Update objects.updated_at so getLogUpdates can distinguish new vs old data
+  if (objectId) {
+    db.prepare("UPDATE objects SET updated_at = ? WHERE id = ?").run(now, objectId);
+  }
 }
 
 export function getLogUpdates(
@@ -259,7 +265,7 @@ export function getLogUpdates(
 ): { payload: Buffer; updatedAt: number }[] {
   const db = getDatabase();
   return db.prepare(`
-    SELECT b.payload, b.last_referenced_at as updatedAt
+    SELECT b.payload, o.updated_at as updatedAt
     FROM objects o
     JOIN blobs b ON o.blob_id = b.id
     JOIN object_tags ot_run ON o.id = ot_run.object_id
@@ -267,8 +273,8 @@ export function getLogUpdates(
     WHERE o.type = 'log'
       AND ot_run.tag = ?
       AND ot_stream.tag = ?
-      AND b.last_referenced_at > ?
-    ORDER BY b.last_referenced_at
+      AND o.updated_at > ?
+    ORDER BY o.updated_at
   `).all(`run_id:${runId}`, `stream:${stream}`, lastSeen) as { payload: Buffer; updatedAt: number }[];
 }
 

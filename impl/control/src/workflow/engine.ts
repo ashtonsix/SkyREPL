@@ -20,7 +20,7 @@ import {
   updateWorkflow,
   updateWorkflowNode,
   createManifest,
-  sealManifest as sealManifestDb,
+  getManifest,
   addResourceToManifest,
   queryOne,
   queryMany,
@@ -31,6 +31,8 @@ import {
   type WorkflowNode,
 } from "../material/db";
 import { TIMING } from "@skyrepl/shared";
+import { Value } from "@sinclair/typebox/value";
+import { NODE_OUTPUT_SCHEMAS, WORKFLOW_INPUT_SCHEMAS } from "../intent/launch-run.schema";
 import {
   startWorkflow,
   completeWorkflow as completeWorkflowTransition,
@@ -41,6 +43,7 @@ import {
   failNode,
   resetNodeForRetry,
   skipNode,
+  sealManifest as sealManifestTransition,
 } from "./state-transitions";
 import {
   applyConditionalBranch,
@@ -126,6 +129,12 @@ export async function submit(
 
   // Get blueprint (validates the workflow type)
   const blueprint = getBlueprint(request.type);
+
+  // Validate workflow input against schema (fail fast on bad input)
+  const inputSchema = WORKFLOW_INPUT_SCHEMAS[request.type];
+  if (inputSchema) {
+    Value.Parse(inputSchema, request.input);
+  }
 
   // Determine depth for subworkflow support
   let depth = 0;
@@ -331,6 +340,17 @@ export async function executeNode(
       executor.execute(ctx),
       createTimeout(nodeTimeoutMs),
     ]);
+
+    // Validate node output against schema
+    const outputSchema = NODE_OUTPUT_SCHEMAS[node.node_type];
+    if (outputSchema && output && typeof output === "object") {
+      if (!Value.Check(outputSchema, output)) {
+        const errors = [...Value.Errors(outputSchema, output)];
+        console.warn(`[workflow] Node output validation failed for ${node.node_type}`, {
+          errors: errors.map(e => ({ path: e.path, message: e.message })),
+        });
+      }
+    }
 
     // Mark node completed AFTER success
     const outputRecord =
@@ -724,7 +744,7 @@ async function handleWorkflowComplete(
   const workflow = getWorkflow(workflowId);
   if (workflow?.manifest_id) {
     try {
-      sealManifestDb(workflow.manifest_id);
+      sealManifestSafe(workflow.manifest_id);
     } catch (err) {
       console.warn("[workflow] Failed to seal manifest on completion", {
         workflowId,
@@ -752,7 +772,7 @@ async function handleWorkflowFailure(
   const workflow = getWorkflow(workflowId);
   if (workflow?.manifest_id) {
     try {
-      sealManifestDb(workflow.manifest_id);
+      sealManifestSafe(workflow.manifest_id);
     } catch (err) {
       console.warn("[workflow] Failed to seal manifest on failure", {
         workflowId,
@@ -792,7 +812,7 @@ export async function handleWorkflowTimeout(
   const workflow = getWorkflow(workflowId);
   if (workflow?.manifest_id) {
     try {
-      sealManifestDb(workflow.manifest_id);
+      sealManifestSafe(workflow.manifest_id);
     } catch (err) {
       console.warn("[workflow] Failed to seal manifest on timeout", {
         workflowId,
@@ -817,7 +837,23 @@ export async function handleWorkflowTimeout(
 export async function cancelWorkflow(
   workflowId: number,
   reason: string
-): Promise<void> {
+): Promise<{ success: boolean; status: string }> {
+  const workflow = getWorkflow(workflowId);
+  if (!workflow) {
+    return { success: false, status: "not_found" };
+  }
+
+  // Already in terminal state — idempotent success (EX7 fix)
+  const terminalStates = ["completed", "failed", "cancelled", "timed_out"];
+  if (terminalStates.includes(workflow.status)) {
+    return { success: true, status: workflow.status };
+  }
+
+  // Only running workflows can be cancelled
+  if (workflow.status !== "running") {
+    return { success: false, status: workflow.status };
+  }
+
   // CAS-guarded cancellation (B5 fix)
   const result = cancelWorkflowTransition(workflowId);
   if (result.success) {
@@ -825,7 +861,10 @@ export async function cancelWorkflow(
     updateWorkflow(workflowId, {
       error_json: JSON.stringify({ code: "CANCELLED", reason }),
     });
+    return { success: true, status: "cancelled" };
   }
+
+  return { success: false, status: workflow.status };
 }
 
 export async function handleCancellation(workflowId: number): Promise<void> {
@@ -842,7 +881,7 @@ export async function handleCancellation(workflowId: number): Promise<void> {
   const workflow = getWorkflow(workflowId);
   if (workflow?.manifest_id) {
     try {
-      sealManifestDb(workflow.manifest_id);
+      sealManifestSafe(workflow.manifest_id);
     } catch (err) {
       console.warn("[workflow] Failed to seal manifest on cancellation", {
         workflowId,
@@ -873,7 +912,7 @@ export async function recoverWorkflows(): Promise<void> {
     );
     if (workflow.manifest_id) {
       try {
-        sealManifestDb(workflow.manifest_id);
+        sealManifestSafe(workflow.manifest_id);
       } catch (err) {
         console.warn("[workflow] Failed to seal manifest for stale pending workflow", {
           workflowId: workflow.id,
@@ -887,38 +926,54 @@ export async function recoverWorkflows(): Promise<void> {
   }
 
   // Resume running workflows
-  const runningWorkflows = queryMany<Workflow>(
-    `SELECT * FROM workflows WHERE status = 'running'`
-  );
+  const staleWorkflows = findActiveWorkflows();
+  if (staleWorkflows.length === 0) return;
 
-  for (const workflow of runningWorkflows) {
+  console.log(`[workflow] Recovering ${staleWorkflows.length} workflow(s) from crash...`);
+
+  for (const workflow of staleWorkflows) {
     const nodes = getWorkflowNodes(workflow.id);
-    const runningNodes = nodes.filter((n) => n.status === "running");
 
-    for (const node of runningNodes) {
-      if (isIdempotent(node.node_type)) {
-        // Safe to retry - reset to pending
-        updateWorkflowNode(node.id, {
-          status: "pending",
-          attempt: node.attempt + 1,
-          retry_reason: "crash_recovery",
-        });
-      } else {
-        // Not safe to retry - mark failed
-        updateWorkflowNode(node.id, {
-          status: "failed",
-          error_json: JSON.stringify({ code: "CRASH_RECOVERY", message: "Node was running during crash" }),
-        });
+    for (const node of nodes) {
+      if (node.status === "running") {
+        const executor = nodeExecutors.get(node.node_type);
+        if (executor?.idempotent) {
+          // Idempotent node: safe to retry — first fail, then reset to pending
+          const failResult = failNode(node.id, JSON.stringify({
+            code: "CRASH_RECOVERY",
+            message: "Node was running during crash — idempotent, resetting for retry",
+            category: "crash",
+          }));
+          if (failResult.success) {
+            resetNodeForRetry(node.id, "crash_recovery");
+            console.log(`[workflow] Reset idempotent node ${node.node_id} to pending (crash recovery)`);
+          }
+        } else {
+          // Non-idempotent node: unsafe to retry — mark failed
+          failNode(node.id, JSON.stringify({
+            code: "CRASH_RECOVERY",
+            message: "Node was running during crash — non-idempotent, marked failed",
+            category: "crash",
+          }));
+          console.log(`[workflow] Failed non-idempotent node ${node.node_id} (crash recovery)`);
+        }
       }
     }
 
-    // Resume execution loop
-    executeLoop(workflow.id).catch((err) =>
-      console.error("[workflow] Recovery executeLoop failed", {
-        workflowId: workflow.id,
-        error: err,
-      })
-    );
+    // Re-enter the execute loop for workflows that had idempotent nodes reset
+    const updatedNodes = getWorkflowNodes(workflow.id);
+    const hasResetNodes = updatedNodes.some(n => n.status === "pending");
+    const hasFailedNodes = updatedNodes.some(n => n.status === "failed");
+
+    if (hasResetNodes && !hasFailedNodes) {
+      // Resume the workflow
+      executeLoop(workflow.id).catch(err => {
+        console.error(`[workflow] Failed to resume workflow ${workflow.id}:`, err);
+      });
+    } else if (hasFailedNodes) {
+      // Fail the workflow
+      handleWorkflowFailure(workflow.id, updatedNodes);
+    }
   }
 }
 
@@ -1039,6 +1094,32 @@ export function createWorkflowEngine(): WorkflowEngine {
 // =============================================================================
 // Helpers
 // =============================================================================
+
+/** Default manifest retention: 30 days */
+const DEFAULT_MANIFEST_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Seal a manifest using CAS-based state transition.
+ * Computes expiresAt from manifest retention_ms or default 30 days.
+ * Idempotent: returns success if manifest is already sealed (EX2 fix).
+ */
+function sealManifestSafe(manifestId: number): void {
+  const manifest = getManifest(manifestId);
+  if (!manifest) return;
+
+  // Already sealed — idempotent success
+  if (manifest.status === "SEALED") return;
+
+  const now = Date.now();
+  const expiresAt = manifest.retention_ms != null
+    ? now + manifest.retention_ms
+    : now + DEFAULT_MANIFEST_RETENTION_MS;
+
+  const result = sealManifestTransition(manifestId, expiresAt);
+  if (!result.success) {
+    console.warn(`[workflow] Failed to seal manifest ${manifestId}: ${result.reason}`);
+  }
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));

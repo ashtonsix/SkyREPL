@@ -4,6 +4,7 @@
   "type": "module",
   "main": "src/main.ts",
   "dependencies": {
+    "@sinclair/typebox": "^0.34",
     "@skyrepl/shared": "workspace:*",
     "elysia": "^1.2"
   }

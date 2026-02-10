@@ -6,6 +6,7 @@ import type { NodeExecutor, NodeContext } from "../engine.types";
 import { createInstance, updateInstance, getInstance } from "../../material/db";
 import { getProvider } from "../../provider/registry";
 import type { ProviderName } from "../../provider/types";
+import type { SpawnInstanceOutput, LaunchRunWorkflowInput } from "../../intent/launch-run.schema";
 
 // =============================================================================
 // Types
@@ -21,12 +22,8 @@ export interface SpawnInstanceInput {
   initChecksum?: string;
 }
 
-export interface SpawnInstanceOutput {
-  instanceId: number;
-  providerId: string;
-  ip: string | null;
-  status: string;
-}
+// Output type re-exported from schema
+export type { SpawnInstanceOutput } from "../../intent/launch-run.schema";
 
 // =============================================================================
 // Node Executor
@@ -37,7 +34,7 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
   idempotent: true,
 
   async execute(ctx: NodeContext): Promise<SpawnInstanceOutput> {
-    const input = ctx.workflowInput as SpawnInstanceInput;
+    const input = ctx.workflowInput as LaunchRunWorkflowInput & { manifestId?: number; spot?: boolean };
 
     // Phase 1: DB Insert — create instance record in pending state
     const instance = createInstance({
@@ -61,10 +58,19 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
     const providerName = (input.provider || "orbstack") as ProviderName;
     const provider = await getProvider(providerName);
     const controlPlaneUrl = process.env.SKYREPL_CONTROL_PLANE_URL || "http://localhost:3000";
-    const registrationToken = generateAuthTokenHash();
+
+    // Generate auth token: raw token for agent, hash for DB
+    const rawToken = crypto.randomBytes(16).toString("hex");
+    const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
+
+    // Store token hash in DB immediately after instance creation
+    updateInstance(instance.id, {
+      registration_token_hash: tokenHash,
+    });
+
     const bootstrapConfig = {
       controlPlaneUrl,
-      registrationToken,
+      registrationToken: rawToken, // Pass raw token to agent, not the hash
       environment: {
         SKYREPL_INSTANCE_ID: String(instance.id),
       },
@@ -135,7 +141,10 @@ export async function findProviderSnapshotId(
 
 /**
  * Generate a random auth token hash for instance registration.
- * Slice 1: simple random hex string.
+ * Slice 2: generates raw token and returns SHA256 hash.
+ *
+ * @deprecated This function is kept for backward compatibility but is no longer used.
+ * Token generation and hashing is now done inline in the executor.
  */
 export function generateAuthTokenHash(): string {
   return crypto.randomBytes(16).toString("hex");

@@ -5,6 +5,11 @@ import type { NodeExecutor, NodeContext } from "../engine.types";
 import { updateRun } from "../../material/db";
 import { getAgentBridge } from "./start-run";
 import { TIMING } from "@skyrepl/shared";
+import type {
+  WaitCompletionOutput,
+  LaunchRunWorkflowInput,
+  CreateAllocationOutput,
+} from "../../intent/launch-run.schema";
 
 // =============================================================================
 // Types
@@ -17,13 +22,8 @@ export interface WaitCompletionInput {
   maxDurationMs?: number;
 }
 
-export interface WaitCompletionOutput {
-  exitCode: number;
-  completedAt: number;
-  durationMs: number;
-  spotInterrupted: boolean;
-  timedOut: boolean;
-}
+// Output type re-exported from schema
+export type { WaitCompletionOutput } from "../../intent/launch-run.schema";
 
 // =============================================================================
 // Node Executor
@@ -34,14 +34,8 @@ export const waitCompletionExecutor: NodeExecutor<WaitCompletionInput, WaitCompl
   idempotent: false,
 
   async execute(ctx: NodeContext): Promise<WaitCompletionOutput> {
-    const wfInput = ctx.workflowInput as {
-      runId: number;
-      maxDurationMs?: number;
-    };
-    const allocOutput = ctx.getNodeOutput("create-allocation") as {
-      allocationId: number;
-      instanceId: number;
-    } | null;
+    const wfInput = ctx.workflowInput as LaunchRunWorkflowInput;
+    const allocOutput = ctx.getNodeOutput("create-allocation") as CreateAllocationOutput | null;
     if (!allocOutput) {
       throw new Error("create-allocation output not available");
     }
