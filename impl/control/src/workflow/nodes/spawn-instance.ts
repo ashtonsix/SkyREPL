@@ -50,6 +50,7 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
       is_spot: input.spot ? 1 : 0,
       spot_request_id: null,
       init_checksum: input.initChecksum || null,
+      registration_token_hash: null,
       last_heartbeat: Date.now(),
     });
     ctx.emitResource("instance", instance.id, 50);

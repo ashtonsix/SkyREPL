@@ -99,7 +99,7 @@ export function getBlueprint(type: string): WorkflowBlueprint {
 export interface WorkflowEngine {
   submit(request: WorkflowSubmission): Promise<WorkflowSubmissionResult>;
   get(workflowId: number): Promise<Workflow | null>;
-  cancel(workflowId: number, reason: string): Promise<void>;
+  cancel(workflowId: number, reason: string): Promise<{ success: boolean; status: string }>;
   pause(workflowId: number): Promise<void>;
   resume(workflowId: number): Promise<void>;
   retry(workflowId: number): Promise<number>;

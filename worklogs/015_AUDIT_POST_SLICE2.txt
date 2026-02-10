@@ -1,0 +1,586 @@
+AUDIT: Post-Slice-2 Codebase Review
+=====================================
+
+Date: 2026-02-10
+Predecessor: worklogs/014_WORKLOG_SLICE2.txt (Slice 2 complete, 278 tests)
+Scope: Smells, spec drift, impl-pseudo drift, gap analysis
+
+Three axes: (1) Taste — architectural smells in impl/
+             (2) Drift — spec and impl-pseudo parity
+             (3) Gaps — remaining work to spec completeness
+
+================================================================================
+PART 1: SMELLS (31 findings: 8 HIGH, 16 MEDIUM, 7 LOW)
+================================================================================
+
+Methodology: Every .ts file in impl/control/src/, every .py file in impl/agent/,
+all impl/shared/src/ and impl/cli/src/ files read in full.
+
+────────────────────────────────────────────────────────────────────────────────
+1.1 COMMUNICATION PATTERN SMELLS
+────────────────────────────────────────────────────────────────────────────────
+
+SM-01: DB polling in AgentBridge waitForEvent()                        [HIGH]
+  File: control/src/api/agent.ts:596-632
+  Issue: Polls DB every 1s for sync_complete/run_complete. N concurrent
+    runs = 2N queries/sec for pure observation. 1s latency floor.
+  Fix: In-process EventEmitter fired from agent HTTP handlers on state
+    change. waitForEvent() awaits emitter with timeout.
+
+SM-02: Unbounded pending command queue                                 [HIGH]
+  File: control/src/api/sse-protocol.ts:81
+  Issue: pendingCommands Map has no size limit. Agent offline + workflows
+    submitting commands = unbounded memory growth. Stale commands replayed
+    on reconnect (e.g., start_run for timed-out workflow).
+  Fix: Cap at 50/instance, FIFO evict with logging. Filter stale commands
+    on drain by checking parent workflow status.
+
+SM-03: Engine polls for running nodes instead of awaiting promises     [MEDIUM]
+  File: control/src/workflow/engine.ts:258-261
+  Issue: executeLoop sleeps 100ms then re-reads all nodes from DB when
+    waiting — but it already holds the Promise.all from executing nodes.
+    Adds 100ms latency + unnecessary DB reads per inter-node transition.
+  Fix: Await the existing Promise.all. Only poll on crash-recovered
+    workflows (where promises are not in memory).
+
+SM-04: CLI polls status redundantly with WebSocket                     [MEDIUM]
+  File: cli/src/commands/run.ts:76-92
+  Issue: Opens WebSocket for logs AND polls GET /status every 2s. WS
+    already provides status events. Double load on control plane.
+  Fix: Trust WS status event as primary. Poll at 30s as fallback only.
+
+SM-05: Agent SSE byte-by-byte reading                                  [MEDIUM]
+  File: agent/sse.py (entire file)
+  Issue: response.read(1) workaround for Python 8KB buffer deadlock.
+    Extremely slow for high message volume.
+  Fix: socket.makefile(buffering=1) for line-buffered reads, or read in
+    256-byte chunks and buffer locally. Stdlib-only constraint respected.
+
+SM-06: Duplicate _http_post() across 3 agent modules                   [LOW]
+  Files: agent/heartbeat.py:78, agent/executor.py:56, agent/logs.py:63
+  Issue: Identical function copy-pasted. Bug fixes/auth changes need 3
+    updates. No connection pooling.
+  Fix: Extract to shared http_client.py module.
+
+────────────────────────────────────────────────────────────────────────────────
+1.2 PROVIDER ARCHITECTURE SMELLS
+────────────────────────────────────────────────────────────────────────────────
+
+SM-07: OrbStackError bypasses ProviderError taxonomy                   [HIGH]
+  Files: provider/compute/orbstack.ts, provider/errors.ts
+  Issue: OrbStackError extends Error, not ProviderError. Bypasses
+    ERROR_RETRY_MAPPING, shouldRetry(), shouldRetryWithAlternative().
+    Retry/fallback machinery is dead code for the only real provider.
+  Fix: Extend ProviderError. Map orbctl exit codes to error subclasses.
+
+SM-08: Provider registry uses `as any` to bypass type safety           [MEDIUM]
+  File: provider/registry.ts:131,157-166
+  Issue: category and lifecycle hook casts suppress type checking.
+  Fix: Type hook registry with ProviderLifecycleHooks interface.
+
+SM-09: Empty extensibility frameworks                                  [MEDIUM]
+  Files: provider/extensions.ts, provider/contracts.ts, registry.ts
+  Issue: Feature providers, category providers (storage/tunnel), workflow
+    contracts — three frameworks with zero implementations. Speculative
+    generalization adding cognitive overhead.
+  Fix: Acceptable as Slice 1 scaffolding if genuinely needed in S3.
+    Add prominent "// Slice 3+: not yet implemented" markers.
+
+SM-10: ProviderName defined in two places                              [LOW]
+  Files: shared/src/types.ts:19, control/src/provider/types.ts
+  Issue: Independent definitions that must be kept in sync manually.
+  Fix: Single canonical definition in shared/src/types.ts.
+
+────────────────────────────────────────────────────────────────────────────────
+1.3 STATE MANAGEMENT SMELLS
+────────────────────────────────────────────────────────────────────────────────
+
+SM-11: Compensation bypasses state machine with raw SQL                [HIGH]
+  File: workflow/nodes/claim-allocation.ts:93-98
+  Issue: compensate() does raw UPDATE to transition CLAIMED→AVAILABLE,
+    bypassing CAS guard in state-transitions.ts. CLAIMED→AVAILABLE is
+    NOT a valid transition. No concurrency protection.
+  Fix: Add releaseAllocation() to state-transitions.ts with CAS guard,
+    or compensate via failAllocation() + create new AVAILABLE.
+
+SM-12: Cold-path creates allocation directly in CLAIMED state          [HIGH]
+  File: workflow/nodes/create-allocation.ts:70-79
+  Issue: createAllocation({ status: "CLAIMED" }) skips AVAILABLE state.
+    Reconciliation can't distinguish stalled warm claims from in-progress
+    cold creates.
+  Fix: Create AVAILABLE then immediately claim in same transaction, or
+    add source:'warm'|'cold' column for reconciliation.
+
+SM-13: Inconsistent HTTP error responses                               [MEDIUM]
+  File: api/routes.ts:132-140, 157-167, 192-200
+  Issue: Validation errors return 200 OK (plain object). Not-found errors
+    correctly return 404 (new Response). 200 for validation errors is
+    almost certainly unintentional.
+  Fix: Use ElysiaJS set.status consistently, or global error middleware
+    with httpStatusForCategory().
+
+SM-14: Manual input validation instead of TypeBox                      [MEDIUM]
+  File: api/routes.ts:243-297
+  Issue: launch-run manually validates fields. LaunchRunRequestSchema
+    TypeBox schema already exists. Manual code misses constraints
+    (minLength, exclusiveMinimum).
+  Fix: Use ElysiaJS .body(LaunchRunRequestSchema) — native TypeBox
+    support with auto 400 on validation failure.
+
+SM-15: Heartbeat ack race between HTTP and SSE paths                   [LOW]
+  File: agent/heartbeat.py:146-149, 216-236
+  Issue: _last_ack_time written without lock from HTTP path, with lock
+    from SSE path. CPython GIL makes it safe in practice.
+  Fix: Acquire _lock in both paths for clarity.
+
+────────────────────────────────────────────────────────────────────────────────
+1.4 CODE ORGANIZATION SMELLS
+────────────────────────────────────────────────────────────────────────────────
+
+SM-16: db.ts is a 1219-line god module                                 [HIGH]
+  File: material/db.ts
+  Issue: CRUD for all 9 resource types, migrations, query helpers, warm
+    pool scoring, 60+ exports. Imported by nearly every file.
+  Fix: Split: db/init.ts, db/helpers.ts, db/instances.ts,
+    db/allocations.ts, db/runs.ts, db/workflows.ts, db/manifests.ts,
+    db/objects.ts. Barrel re-export from db/index.ts.
+
+SM-17: Dead code in launch-run.ts                                      [MEDIUM]
+  File: intent/launch-run.ts
+  Issue: checkBudget(), resolveInstance(), findSnapshotForSpec() defined
+    but never called (superseded by node executors).
+  Fix: Remove. Move to workshop/ if needed as design reference.
+
+SM-18: Deprecated but exported generateAuthTokenHash()                 [MEDIUM]
+  File: workflow/nodes/spawn-instance.ts:150-152
+  Issue: @deprecated but still exported. Subtle behavior difference from
+    inline version (returns raw hex, not hash). Potential auth bypass.
+  Fix: Remove export.
+
+SM-19: Duplicate getControlPlaneId()                                   [MEDIUM]
+  Files: api/agent.ts:552, api/sse-protocol.ts:59
+  Issue: Identical function in two files.
+  Fix: Extract to shared config.
+
+SM-20: AllocationStatus type defined in three places                   [MEDIUM]
+  Files: shared/types.ts:90-95, resource/allocation.ts:11,
+    state-transitions.ts (string literals)
+  Issue: Independent definitions. Adding a state requires 3 updates.
+  Fix: Single canonical definition in shared/types.ts.
+
+SM-21: Resource layer files are entirely stubs                         [MEDIUM]
+  Files: resource/allocation.ts (137L), resource/instance.ts (66L),
+    resource/run.ts (54L)
+  Issue: All throw "not implemented". Never called. Real logic lives in
+    db.ts and workflow nodes. Misleading to readers.
+  Fix: Either implement as actual resource layer, or delete until needed.
+
+SM-22: findAvailableAllocation() dead code                             [LOW]
+  File: material/db.ts:438
+  Issue: Superseded by findWarmAllocation() with BT5 scoring. Only
+    referenced in db.test.ts.
+  Fix: Remove function and test.
+
+SM-23: CLI defines own types separate from shared                      [LOW]
+  File: cli/src/client.ts:131-207
+  Issue: Local LaunchRunRequest etc. with snake_case vs shared camelCase.
+  Fix: Import from @skyrepl/shared. Document wire format convention.
+
+────────────────────────────────────────────────────────────────────────────────
+1.5 CONCURRENCY / TIMING SMELLS
+────────────────────────────────────────────────────────────────────────────────
+
+SM-24: Timer leak in createTimeout()                                   [HIGH]
+  File: workflow/engine.ts:1128-1142
+  Issue: setTimeout never cleared when node wins Promise.race. Orphaned
+    timers accumulate (9 per workflow × timeout duration). Memory leak
+    plus unhandled rejection handlers.
+  Fix: Return timer handle, clearTimeout() on node completion. Or use
+    AbortController pattern.
+
+SM-25: executeLoop fire-and-forget — engine crash = zombie workflow    [HIGH]
+  File: workflow/engine.ts:207-213
+  Issue: .catch(console.error) on executeLoop. Engine-level error leaves
+    workflow in 'running' forever. Only recovered on restart.
+  Fix: Catch → failWorkflow() with INTERNAL_ERROR code.
+
+SM-26: SSE workflow stream cancel passes {} as WebSocket               [MEDIUM]
+  File: api/sse-protocol.ts:573
+  Issue: unsubscribeFromWorkflow(workflowId, {} as WebSocket) is a no-op.
+    Subscriber set grows with each SSE connection, never cleaned.
+    Self-healing via error on broadcast + catch-delete, but noisy.
+  Fix: Track SSE controllers separately. Add unsubscribeSSE method.
+
+SM-27: No cleanup of log replay buffers / sequence counters            [MEDIUM]
+  File: api/sse-protocol.ts:93-96
+  Issue: logSequenceCounters, logReplayBuffers, logSubscribers maps
+    grow monotonically. Each completed run leaves 500-entry replay buffer.
+  Fix: Add cleanupRun(runId) called from finalize or workflow completion.
+
+SM-28: Log buffer overflow uses list.pop(0) — O(n)                    [MEDIUM]
+  File: agent/logs.py:120-121
+  Issue: _send_queue.pop(0) in loop is O(n²) under backpressure.
+  Fix: Use collections.deque (popleft is O(1)).
+
+SM-29: SSE replay buffer uses splice — O(n)                           [MEDIUM]
+  File: api/sse-protocol.ts:265-267
+  Issue: buffer.splice(0, excess) on every log broadcast at buffer cap.
+  Fix: Ring buffer with write index and modular arithmetic.
+
+SM-30: warmPoolReconciliation uses dynamic imports                     [LOW]
+  File: main.ts:167-169
+  Issue: await import() inside function called on interval. Hides
+    dependencies. Likely workaround for circular imports.
+  Fix: Move imports to top of file. If circular, refactor to break cycle.
+
+SM-31: terminateOrphanedVMs kills ALL VMs on shutdown                  [LOW]
+  File: main.ts:279-297
+  Issue: Calls provider.list() and terminates everything. No DB cross-ref.
+    Will kill actively-running instances on restart.
+  Fix: Only terminate VMs with no matching DB record or in terminal state.
+
+
+================================================================================
+PART 2: SPEC DRIFT (52 items: 12 accidental, 4 well-intentioned,
+                     6 evolved, 30 unimplemented)
+================================================================================
+
+Methodology: Spec chapters 02-15 compared requirement-by-requirement against
+impl/. MUST/SHOULD requirements extracted via grep. Each drift categorized.
+
+Categories:
+  ACCIDENTAL — impl diverged unintentionally. Fix: update impl.
+  WELL-INTENTIONED — impl improved on spec. Fix: update spec.
+  EVOLVED — spec redesigned during implementation. Fix: update spec.
+  UNIMPLEMENTED — spec feature not yet built. Expected for current slice.
+
+────────────────────────────────────────────────────────────────────────────────
+2.1 FIX IMMEDIATELY (HIGH impact)
+────────────────────────────────────────────────────────────────────────────────
+
+SD-01: Manifest retention shadow — 30d vs 24h                    [HIGH/ACCID]
+  Spec: Ch04 timing config
+  Impl: engine.ts:1099 hardcodes DEFAULT_MANIFEST_RETENTION_MS = 30 days,
+    shadowing TIMING.DEFAULT_MANIFEST_RETENTION_MS = 24h in timing.ts.
+    Manifests linger 30× longer than intended.
+  Fix: Remove local constant, use TIMING.DEFAULT_MANIFEST_RETENTION_MS.
+
+SD-02: sealManifest does not detach resources                    [HIGH/UNIMPL]
+  Spec: Ch04 §4.1 lines 101-117 — POSTCONDITION: "Detach resources:
+    clear current_manifest_id on each resource row"
+  Impl: state-transitions.ts:280-291 only updates manifests table.
+    current_manifest_id never cleared on resources.
+  Impact: Warm pool discovery of resources from sealed manifests blocked.
+  Fix: Add resource detach in seal transaction.
+
+SD-03: No idempotency middleware                                 [HIGH/UNIMPL]
+  Spec: Ch09 §9.7 lines 2303-2468 — "MUST implement idempotency protocol"
+  Impl: idempotencyKey field accepted in launch-run body. Workflow-level
+    unique constraint exists. No Idempotency-Key header middleware.
+  Impact: Retried requests can create duplicate runs.
+  Fix: Implement middleware.
+
+SD-04: Agent missing lock file                                   [HIGH/UNIMPL]
+  Spec: Ch11 §11.8 line 489 — "MUST acquire /tmp/repl-agent.lock"
+  Impl: No lock file code in agent.py.
+  Impact: Warm pool reuse can spawn duplicate agents on same instance.
+  Fix: Add fcntl.flock() on startup.
+
+SD-05: Agent missing heartbeat panic timeout                     [HIGH/UNIMPL]
+  Spec: Ch11 §11.5 lines 396-404 — t=15m: PANIC state, t=20m:
+    self-termination via shutdown -h now.
+  Impl: Detects degraded at 2m, never triggers panic/self-termination.
+  Impact: Orphaned agents run indefinitely on unreachable instances.
+  Fix: Implement panic state + self-termination.
+
+────────────────────────────────────────────────────────────────────────────────
+2.2 FIX SOON (MEDIUM impact, accidental drift)
+────────────────────────────────────────────────────────────────────────────────
+
+SD-06: Warm pool missing heartbeat freshness check               [MED/ACCID]
+  Spec: Ch05 §5.3 — MUST check i.last_heartbeat within STALE_DETECTION_MS
+  Impl: findWarmAllocation() checks status and workflow_state but not
+    last_heartbeat. Can claim allocation on stale/dead instance.
+  Fix: Add AND i.last_heartbeat > ? to warm pool query.
+
+SD-07: BootstrapConfig.agentUrl optional vs MUST                 [MED/ACCID]
+  Spec: Ch08 §8.1.4 — agentUrl MUST
+  Impl: provider/types.ts:170 — agentUrl?: string (optional)
+  Fix: Remove ? from type.
+
+SD-08: Cancel URL path mismatch                                  [MED/ACCID]
+  Spec: POST /v1/workflows/cancel (body: workflow_id)
+  Impl: POST /v1/workflows/:id/cancel (path param)
+  Fix: Update spec — impl is more RESTful.
+
+SD-09: HeartbeatMessage.workflow_state typed as Record vs string  [MED/ACCID]
+  Spec: workflow_state: string
+  Impl: shared/src/api/agent.ts:150 — Type.Record(Type.String(), ...)
+  Fix: Change to Type.String().
+
+SD-10: Agent heartbeat field name / missing fields               [MED/ACCID]
+  Spec: workflow_state, tailscale_ip, tailscale_status, pending_command_acks
+  Impl: Sends 'status' not 'workflow_state'. Missing tailscale fields.
+  Fix: Rename field, add missing (stub tailscale as null).
+
+SD-11: OrbStack VM naming doesn't follow spec convention         [MED/UNIMPL]
+  Spec: Ch12 §12.1 — repl-<control_id>-<manifest_id>-<instance_id>
+  Impl: repl-${Date.now()} — no manifest or instance ID encoded.
+  Impact: Orphan detection and DB recovery can't correlate VMs.
+  Fix: Use spec naming format.
+
+SD-12: Agent missing panic diagnostics on shutdown               [MED/UNIMPL]
+  Spec: Ch11 §11.14 — SHOULD send best-effort diagnostics to /v1/panic
+  Impl: Shutdown sequence doesn't send panic diagnostics. Endpoint exists.
+  Fix: Add panic POST to agent shutdown.
+
+SD-13: Node attempt counter starts at 0 vs DDL default 1        [LOW/ACCID]
+  Fix: Create nodes with attempt: 1 (minor).
+
+SD-14: priority field number vs string enum                      [LOW/ACCID]
+  Fix: Align when priority scheduling implemented.
+
+SD-15: OrbStackError not a ProviderError subclass                [LOW/ACCID]
+  (Same as SM-07 — listed in both smell and drift for cross-ref.)
+
+SD-16: ProviderRegistration.hooks typed as unknown               [LOW/ACCID]
+  Fix: Type as ProviderLifecycleHooks.
+
+SD-17: LaunchRun response missing stream_url                     [LOW/ACCID]
+  Fix: Add stream_url to response.
+
+SD-18: PanicRequest schema shape differs                         [LOW/ACCID]
+  Fix: Align spec with impl's JSON-string approach (simpler).
+
+────────────────────────────────────────────────────────────────────────────────
+2.3 WELL-INTENTIONED (update spec to match impl)
+────────────────────────────────────────────────────────────────────────────────
+
+SD-WI1: objects.updated_at column (needed for log streaming)
+SD-WI2: Manifest cleanup interval 5min vs spec's 1min (reasonable)
+SD-WI3: Validation baked into atomicTransition, not standalone function
+SD-WI4: terminate() idempotent on not-found (spec contradicts itself:
+         line 150 says throw, line 909 says MUST NOT throw)
+
+────────────────────────────────────────────────────────────────────────────────
+2.4 EVOLVED (update spec to reflect design evolution)
+────────────────────────────────────────────────────────────────────────────────
+
+SD-EV1: sync-files node maps to start-run executor (combined)
+SD-EV2: timed_out status listed as terminal but never set (dead code)
+SD-EV3: API flat layout vs spec's nested resources/operations/ dirs
+SD-EV4: Simpler directory structure than spec (incremental emergence)
+SD-EV5: Ch14/Ch15 effectively empty (pointers only per no-regrowth)
+
+────────────────────────────────────────────────────────────────────────────────
+2.5 SPEC-INTERNAL INCONSISTENCY
+────────────────────────────────────────────────────────────────────────────────
+
+SD-SI1: Ch02 manifest_resources DDL (line 954) omits owner_type/owner_id
+  but Ch04 (line 39) includes them. Must resolve before implementing
+  resource claim protocol.
+
+────────────────────────────────────────────────────────────────────────────────
+2.6 UNIMPLEMENTED (expected for current slice, 30 items)
+────────────────────────────────────────────────────────────────────────────────
+
+Ch03: Resource materialization layer, reconciliation
+Ch04: Cleanup-manifest intent, manifest expiry scanner, claim protocol
+Ch05: SSH integration, excludeInstanceIds, retry loop in claim
+Ch06: retry(), pause()/resume(), IAR, PFO, subworkflows, compensation,
+      runSingleStep
+Ch07: terminate-instance, create-snapshot, cleanup-manifest intents
+Ch08: AWS/Lambda/RunPod providers, feature providers (Tailscale)
+Ch09: List pagination, L1 write endpoints, terminate/snapshot/extend/
+      preflight endpoints, rate limiting
+Ch10: All CLI commands except 'run', repl.toml, preflight, SSH
+Ch11: Lock file, Tailscale, spot monitor, panic diagnostics, degraded mode
+Ch12: Entire orphan detection system
+
+
+================================================================================
+PART 3: IMPL-PSEUDO DRIFT
+================================================================================
+
+Summary: 93 files analyzed.
+  ~38 STALE/CONTRADICTORY → excise
+  ~13 STILL USEFUL → preserve (design rationale not yet in impl)
+  ~39 UNIMPLEMENTED REFERENCE → preserve (future slice reference)
+
+────────────────────────────────────────────────────────────────────────────────
+3.1 EXCISE (stale or contradictory — impl supersedes)
+────────────────────────────────────────────────────────────────────────────────
+
+Workflow:
+  engine.ts.l1.txt, engine.types.ts.l1.txt — impl is 1174L, strictly richer
+
+Provider:
+  compute/orbstack.ts.l1.txt — contradicts (orbstack create vs orbctl create,
+    chaos injection described but never built)
+  errors.ts.l1.txt — impl (225L) has full hierarchy
+
+Material:
+  storage.ts.l1.txt — impl (318L) has all features
+  migrations/002_idempotency_keys.sql.l1.txt — contradicts (idempotency is
+    column on workflows, not separate table)
+
+Intent:
+  launch-run.types.ts.l1.txt — impl schema is richer
+
+API middleware:
+  auth.ts.l1.txt — contradicts (describes scopes/rate-limiting; impl is
+    SHA256 token comparison only)
+  errors.ts.l1.txt — impl shared/errors.ts (282L) has full coverage
+
+Shared:
+  errors.ts.l1.txt, api/workflows.ts.l1.txt — impl strictly richer
+
+Resource:
+  types.ts.l1.txt — covered by shared types + state-transitions
+
+Agent:
+  agent.py.l1.txt, logs.py.l2.txt, sse.py.l1.txt — impl faithfully implements
+
+Config/meta: ALL (package.json, tsconfig, .env, README) — 10 files
+
+Tests: ALL (11 files) — real tests are authoritative at 278 passing
+
+Main: main.types.ts.l1.txt — covered by actual types
+
+────────────────────────────────────────────────────────────────────────────────
+3.2 PRESERVE (still useful design rationale)
+────────────────────────────────────────────────────────────────────────────────
+
+compensation.ts.l1.txt + .l2.txt — two-phase spawn retry, resource-transfer
+  aware compensation skip. Most detailed reference for completing compensation.
+
+background/reconciliation.ts.l1.txt — 6 reconciliation tasks including
+  heartbeat timeout with graceful panic checkpoint. Critical missing design.
+
+background/hold-expiry.ts.l1.txt — atomic update pattern, max hold 24h.
+
+background/garbage-collection.ts.l1.txt — (partially) dedup merger, object
+  expiry, idempotency key expiry. Mark blob GC section as stale.
+
+resource/allocation.ts.l1.txt — (partially) warm pool replenishment semantics,
+  reconciliation details.
+
+resource/instance.ts.l1.txt — materialization steps, lifecycle states.
+
+resource/run.ts.l1.txt — materialization steps, exit_code semantics.
+
+resource/manifest.ts.l1.txt — cleanup priority ordering (allocations 90 →
+  instances 50 → snapshots 10), cross-workflow claiming semantics.
+
+material/external.ts.l1.txt — TTL cache with bypass semantics.
+
+api/middleware/idempotency.ts.l1.txt — endpoint-level middleware pattern.
+
+provider/type-boundaries.ts.l1.txt — (partially) materialization/projection
+  concepts for cloud providers.
+
+agent/executor.py.l1.txt — (partially) prepare_snapshot, capture_artifacts.
+
+agent/heartbeat.py.l1.txt — (partially) panic checkpoint protocol (15m).
+
+main.ts.l1.txt — (partially) background task descriptions.
+
+cli/src/commands/run.ts.l1.txt — (partially) preflight, streaming, receipt.
+
+────────────────────────────────────────────────────────────────────────────────
+3.3 UNIMPLEMENTED REFERENCE (preserve for future slices)
+────────────────────────────────────────────────────────────────────────────────
+
+Providers: aws.ts.l1, lambda.ts.l1, runpod.ts.l1, feature/tailscale.ts.l1+l2
+
+Intents: terminate.ts.l1, terminate.types.ts.l1, snapshot.types.ts.l1,
+  cleanup.types.ts.l1
+
+Orphan system: classifier.ts.l1, whitelist.ts.l1, nodes/find-orphans.ts.l1,
+  nodes/match-to-manifest.ts.l1, nodes/terminate-orphans.ts.l1
+
+Background: manifest-cleanup.ts.l1
+
+Agent: spot.py.l1, artifacts.py.l1, checkpoint.py.l1, tailscale.py.l1
+
+CLI: ~18 files (list, cancel, logs, artifact, instance, snapshot, usage,
+  control, setup, extend, orphan, config, ssh, preflight, process,
+  ui/progress, ui/prompts, ui/formatters)
+
+Resource: snapshot.ts.l1
+
+Requirements: requirements.txt.l1 — CONTRADICTORY (lists deps but agent
+  is stdlib-only). Excise.
+
+
+================================================================================
+PART 4: GAP ANALYSIS — REMAINING WORK TO SPEC COMPLETENESS
+================================================================================
+
+Current scorecard: 32 MVK complete, 14 MVK partial, 6 designed-not-built,
+37 not started. See BACKLOG.txt for item-level tracking.
+
+────────────────────────────────────────────────────────────────────────────────
+4.1 PROPOSED SLICE SEQUENCE
+────────────────────────────────────────────────────────────────────────────────
+
+Slice 3: "Lifecycle Completeness" — system can clean up after itself
+  1. terminate-instance intent (blueprint + 6 nodes + API)
+  2. Heartbeat timeout enforcement (provider-specific → trigger terminate)
+  3. Debug hold lifecycle (extend API + background expiry)
+  4. Blob GC wiring (connect runBlobGC to background scheduler)
+  5. Manifest expiry scanner (background → trigger cleanup)
+  6. Resource module implementations (fill stubs)
+  7. CLI: list, logs, cancel commands
+  Scope: M-L. Self-contained.
+
+Slice 4: "Agent Maturity" — agent becomes reliable participant
+  1. Command ack protocol
+  2. Spot interruption handling
+  3. Agent degraded mode
+  4. Workdir cleanup between runs
+  5. Artifact collection
+  6. SSE backpressure (EX3)
+  7. Agent panic diagnostics
+  Scope: L. Depends on Slice 3 (terminate-instance for spot).
+
+Slice 5: "Snapshots + API Polish" — power user features
+  1. create-snapshot intent
+  2. Idempotency middleware
+  3. Rate limiting middleware
+  4. Layer 1 write endpoints
+  5. Preflight API
+  6. Field name drift fix (S2.D4)
+  Scope: L. Mostly independent.
+
+Slice 6: "CLI + UX" — real user-facing tool
+  1. repl.toml config
+  2. CLI flag parsing
+  3. Output modes (--json, --quiet)
+  4. Instance management CLI
+  5. SSH integration
+  Scope: M. Depends on API from S3/S5.
+
+Slice 7: "Orphan Management" — safety net
+  1. Detection algorithm
+  2. Whitelist CRUD
+  3. Safety constraints
+  4. CLI commands
+  Scope: M. Depends on provider list APIs.
+
+Slice 8: "Workflow Patterns" — advanced engine
+  1. IAR pattern
+  2. PFO pattern
+  3. Subworkflow contract
+  4. Compensation framework
+  Scope: L. Engine-internal.
+
+Slice 9+: Cloud providers (post-MVP, per provider)
+  AWS (XL), Lambda (L), RunPod (L), Tailscale (L, needs IAR from S8).
+
+
+================================================================================
+PART 5: WHAT TO TACKLE FIRST
+================================================================================
+
+See next section in BACKLOG.txt: "AUDIT ITEMS" for prioritized action list.

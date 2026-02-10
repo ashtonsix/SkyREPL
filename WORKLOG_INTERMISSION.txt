@@ -1,0 +1,162 @@
+WORKLOG: Intermission — Audit Remediation
+==========================================
+
+Status: NOT STARTED
+Started: —
+Predecessor: worklogs/014_WORKLOG_SLICE2.txt (Slice 2 done, 278 tests)
+Ref: worklogs/015_AUDIT_POST_SLICE2.txt (full audit), BACKLOG.txt
+
+## Goal
+
+Address audit discoveries before Slice 3 planning. Fix correctness bugs,
+remove dead code, harden the state machine, and tidy spec/impl-pseudo.
+No new features. The codebase should be strictly healthier after this work
+and all 278 tests should still pass.
+
+## Guiding Principle
+
+Cheapest fixes first. Every item here is bounded (<30 lines) and has a
+clear before/after. Group by file to minimise context switches.
+
+================================================================================
+PHASE A: ONE-LINERS + DEAD CODE (pure wins, zero design, ~25 min)
+================================================================================
+
+STEP 1: engine.ts point fixes .................................... [ ] DONE
+  Items: SD-01, SM-25, SD-13, SD-EV2
+  Ref: audit §1.5 (SM-25), §2.1 (SD-01), §2.2 (SD-13), §2.4 (SD-EV2)
+  Changes:
+    a. Remove local DEFAULT_MANIFEST_RETENTION_MS (30d shadow) → use
+       TIMING.DEFAULT_MANIFEST_RETENTION_MS from shared config     [SD-01]
+    b. executeLoop .catch → failWorkflow() with INTERNAL_ERROR     [SM-25]
+    c. Node creation: attempt 0 → 1                                [SD-13]
+    d. Remove 'timed_out' from terminal states array               [SD-EV2]
+
+STEP 2: Scattered one-liners ..................................... [ ] DONE
+  Items: SD-07, SD-09, SD-17, SM-18
+  Ref: audit §2.2 (SD-07, SD-09, SD-17), §1.4 (SM-18)
+  Changes:
+    a. provider/types.ts: agentUrl? → agentUrl                     [SD-07]
+    b. shared/src/api/agent.ts: Type.Record → Type.String for
+       workflow_state                                              [SD-09]
+    c. api/routes.ts: add stream_url to launch-run response        [SD-17]
+    d. spawn-instance.ts: remove deprecated generateAuthTokenHash
+       export                                                      [SM-18]
+
+STEP 3: Dead code removal ........................................ [ ] DONE
+  Items: SM-17, SM-22
+  Ref: audit §1.4 (SM-17, SM-22)
+  Changes:
+    a. intent/launch-run.ts: remove checkBudget(), resolveInstance(),
+       findSnapshotForSpec()                                       [SM-17]
+    b. material/db.ts: remove findAvailableAllocation()            [SM-22]
+    c. tests/unit/db.test.ts: remove/update test referencing
+       findAvailableAllocation                                     [SM-22]
+
+================================================================================
+PHASE B: TIMER + VALIDATION FIXES (~20 min)
+================================================================================
+
+STEP 4: Timer leak + validation errors ........................... [ ] DONE
+  Items: SM-24, SM-13
+  Ref: audit §1.5 (SM-24), §1.3 (SM-13)
+  Changes:
+    a. engine.ts createTimeout(): return timer handle, clearTimeout
+       when node wins Promise.race. Or AbortController pattern.    [SM-24]
+    b. api/routes.ts: validation error paths return 400 instead
+       of 200. Use new Response(..., { status: 400 }) consistently [SM-13]
+
+================================================================================
+PHASE C: STATE MACHINE INTEGRITY (~30 min)
+================================================================================
+
+STEP 5: Allocation state machine fixes ........................... [ ] DONE
+  Items: SM-11, SM-12, SD-06
+  Ref: audit §1.3 (SM-11, SM-12), §2.2 (SD-06)
+  Changes:
+    a. state-transitions.ts: add releaseAllocation() (CLAIMED →
+       AVAILABLE with CAS guard) for compensation use              [SM-11]
+    b. claim-allocation.ts compensate(): use releaseAllocation()
+       instead of raw SQL                                          [SM-11]
+    c. create-allocation.ts: create in AVAILABLE then immediately
+       claim in same transaction (or add source column)            [SM-12]
+    d. db.ts findWarmAllocation(): add heartbeat freshness check
+       (AND i.last_heartbeat > ?)                                  [SD-06]
+
+STEP 6: Seal manifest resource detach ............................. [ ] DONE
+  Items: SD-02
+  Ref: audit §2.1 (SD-02)
+  Changes:
+    a. state-transitions.ts sealManifest(): in the seal transaction,
+       UPDATE resources to clear current_manifest_id for all entries
+       in manifest_resources for this manifest                     [SD-02]
+
+================================================================================
+PHASE D: DEDUP + DATA STRUCTURES (~20 min)
+================================================================================
+
+STEP 7: Consolidation + performance ............................... [ ] DONE
+  Items: SM-19, SM-10, SM-28, SM-27
+  Ref: audit §1.4 (SM-19, SM-10), §1.5 (SM-28, SM-27)
+  Changes:
+    a. Extract getControlPlaneId() to shared config, update
+       agent.ts + sse-protocol.ts                                  [SM-19]
+    b. Consolidate ProviderName to single definition in
+       shared/types.ts, import elsewhere                           [SM-10]
+    c. agent/logs.py: change _send_queue from list to
+       collections.deque (popleft is O(1))                         [SM-28]
+    d. sse-protocol.ts: add cleanupRun(runId) to remove replay
+       buffers + sequence counters. Call from finalize.             [SM-27]
+
+================================================================================
+PHASE E: SPEC + IMPL-PSEUDO PARITY (~30 min)
+================================================================================
+
+STEP 8: Spec updates (well-intentioned + evolved drift) ........... [ ] DONE
+  Items: SD-WI1..4, SD-08, SD-EV1, SD-EV3, SD-EV4, SD-18, SD-SI1
+  Ref: audit §2.3, §2.4, §2.5
+  Scope: Update spec/ chapters to match impl reality. ~10 spec edits,
+    each a 1-5 line change or comment addition.
+  Key changes:
+    a. Ch02: add updated_at to objects DDL                         [SD-WI1]
+    b. Ch04/Ch07: cleanup interval 5min not 1min                   [SD-WI2]
+    c. Ch05: note atomicTransition as valid approach               [SD-WI3]
+    d. Ch08: resolve terminate() idempotency contradiction         [SD-WI4]
+    e. Ch09: cancel URL → /v1/workflows/:id/cancel                 [SD-08]
+    f. Ch07: sync-files maps to start-run executor                 [SD-EV1]
+    g. Ch02/Ch04: resolve owner_type/owner_id inconsistency        [SD-SI1]
+
+STEP 9: impl-pseudo excision ...................................... [ ] DONE
+  Items: PSEUDO-EXCISE (~38 files)
+  Ref: audit §3.1
+  Scope: Delete stale/contradictory files. Mark "still useful" files
+    with header comment. Leave unimplemented reference files untouched.
+  Substeps:
+    a. Delete ~35 stale files (engine, OrbStack, errors, storage,
+       launch-run types, shared types, ALL tests, ALL config/meta)
+    b. Delete ~3 contradictory files (auth middleware, 002 migration,
+       requirements.txt)
+    c. Add "# STATUS: STILL USEFUL — design rationale not yet in impl"
+       header to ~13 preserved files (compensation, reconciliation,
+       heartbeat panic, hold-expiry, etc.)
+
+================================================================================
+DONE DEFINITION
+================================================================================
+
+Intermission is DONE when:
+
+  1. [ ] All 278 existing tests pass + no new regressions
+  2. [ ] SD-01 (manifest retention) confirmed fixed via test or log check
+  3. [ ] SM-25 (zombie workflows) has test: engine crash → workflow fails
+  4. [ ] SM-11 (compensation) uses CAS, not raw SQL
+  5. [ ] SD-02 (seal detach) clears current_manifest_id in transaction
+  6. [ ] impl-pseudo/ reduced by ~38 files
+  7. [ ] Spec updated for well-intentioned + evolved drift (~10 edits)
+  8. [ ] Zero typecheck errors (bun run typecheck or tsc --noEmit)
+
+================================================================================
+LOG
+================================================================================
+
+(entries added as work progresses)

@@ -16,7 +16,7 @@ import type { WorkflowEngine } from "./workflow/engine";
 
 let engine: WorkflowEngine | null = null;
 const intervalHandles: ReturnType<typeof setInterval>[] = [];
-let httpServer: ReturnType<Elysia["listen"]> | null = null;
+let httpServer: ReturnType<import("elysia").Elysia["listen"]> | null = null;
 let isShuttingDown = false;
 
 // =============================================================================

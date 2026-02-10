@@ -102,6 +102,7 @@ function seedInstance(): number {
     is_spot: 0,
     spot_request_id: null,
     init_checksum: null,
+    registration_token_hash: null,
     last_heartbeat: Date.now(),
   });
   return inst.id;
@@ -150,6 +151,7 @@ describe("instances", () => {
       is_spot: 0,
       spot_request_id: null,
       init_checksum: null,
+      registration_token_hash: null,
       last_heartbeat: Date.now(),
     });
 
@@ -176,6 +178,7 @@ describe("instances", () => {
       is_spot: 0,
       spot_request_id: null,
       init_checksum: null,
+      registration_token_hash: null,
       last_heartbeat: Date.now(),
     });
 
@@ -201,6 +204,7 @@ describe("instances", () => {
       is_spot: 0,
       spot_request_id: null,
       init_checksum: null,
+      registration_token_hash: null,
       last_heartbeat: Date.now(),
     });
 
@@ -227,6 +231,7 @@ describe("instances", () => {
       is_spot: 0,
       spot_request_id: null,
       init_checksum: null,
+      registration_token_hash: null,
       last_heartbeat: Date.now(),
     });
     createInstance({
@@ -242,6 +247,7 @@ describe("instances", () => {
       is_spot: 0,
       spot_request_id: null,
       init_checksum: null,
+      registration_token_hash: null,
       last_heartbeat: Date.now(),
     });
 
@@ -659,7 +665,9 @@ describe("manifests", () => {
 
     const secondResult = sealManifest(manifest.id, expiresAt);
     expect(secondResult.success).toBe(false);
-    expect(secondResult.reason).toBe("WRONG_STATE");
+    if (!secondResult.success) {
+      expect(secondResult.reason).toBe("WRONG_STATE");
+    }
   });
 
   it("adds and reads manifest resources", () => {
@@ -848,6 +856,7 @@ describe("blobs", () => {
       expires_at: null,
       current_manifest_id: null,
       accessed_at: null,
+      updated_at: null,
     });
 
     expect(() => deleteBlob(blob.id)).toThrow("referencing objects");
@@ -876,6 +885,7 @@ describe("objects", () => {
       expires_at: null,
       current_manifest_id: null,
       accessed_at: null,
+      updated_at: null,
     });
 
     expect(obj.id).toBeGreaterThan(0);
@@ -906,6 +916,7 @@ describe("objects", () => {
       expires_at: null,
       current_manifest_id: null,
       accessed_at: null,
+      updated_at: null,
     });
 
     addObjectTag(obj.id, "run_id", "42");
@@ -940,6 +951,7 @@ describe("objects", () => {
       expires_at: null,
       current_manifest_id: null,
       accessed_at: null,
+      updated_at: null,
     });
 
     addObjectTag(obj.id, "key", "val");
@@ -966,6 +978,7 @@ describe("warm pool", () => {
       is_spot: 0,
       spot_request_id: null,
       init_checksum: "abc123",
+      registration_token_hash: null,
       last_heartbeat: Date.now(),
     });
 
@@ -1011,6 +1024,7 @@ describe("warm pool", () => {
       is_spot: 0,
       spot_request_id: null,
       init_checksum: null,
+      registration_token_hash: null,
       last_heartbeat: Date.now(),
     });
 

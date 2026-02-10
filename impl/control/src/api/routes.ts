@@ -335,11 +335,12 @@ export function registerOperationRoutes(app: Elysia<any>): void {
         if (allocNode?.output_json) {
           try {
             const output = JSON.parse(allocNode.output_json);
-            if (output.instanceId) {
+            if (output.instanceId && output.runId) {
               const { sseManager } = await import("./sse-protocol");
               await sseManager.sendCommand(String(output.instanceId), {
                 type: "cancel_run",
-                data: { reason },
+                command_id: Math.floor(Math.random() * 1000000),
+                run_id: output.runId,
               });
             }
           } catch (err) {
