@@ -4,6 +4,7 @@
 import type { Allocation, Workflow, WorkflowNode, Manifest } from "../material/db";
 import { getDatabase, queryOne, transaction } from "../material/db";
 import type { SQLQueryBindings } from "bun:sqlite";
+import type { AllocationStatus } from "@skyrepl/shared";
 
 // =============================================================================
 // Transition Result Type
@@ -96,8 +97,6 @@ export function atomicTransition<T extends { id: number; status: string; updated
 // =============================================================================
 // Allocation State Machine
 // =============================================================================
-
-export type AllocationStatus = "AVAILABLE" | "CLAIMED" | "ACTIVE" | "COMPLETE" | "FAILED";
 
 export const ALLOCATION_TRANSITIONS: Record<AllocationStatus, AllocationStatus[]> = {
   AVAILABLE: ["CLAIMED", "FAILED"],

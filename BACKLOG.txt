@@ -1,9 +1,10 @@
 ================================================================================
 BACKLOG — SkyREPL
 ================================================================================
-Last updated: 2026-02-10 (post-Intermission)
+Last updated: 2026-02-11 (post-MVK)
 Ref: worklogs/015_AUDIT_POST_SLICE2.txt (full findings)
      worklogs/016_WORKLOG_INTERMISSION.txt (remediation)
+     WORKLOG_MVK.txt (MVK — CLI, control lifecycle, E2E)
 
 Ordering: HIGH-severity first, then MEDIUM bounded work, then point fixes,
 then deferred. Items prefixed SM- are smells, SD- are spec drift.
@@ -17,23 +18,9 @@ SM-01: Replace DB polling in AgentBridge with EventEmitter       [~50 lines]
   Context: agent.ts waitForEvent() polls every 1s.
   Fix: In-process EventEmitter fired on state change.
 
-SM-02: Cap pending command queue                                 [~30 lines]
-  Severity: HIGH — unbounded memory if agent disconnects
-  Context: sse-protocol.ts pendingCommands has no size limit.
-  Fix: Cap at 50/instance, FIFO evict, filter stale.
-
-SM-07: OrbStackError → extend ProviderError                     [~40 lines]
-  Severity: HIGH — retry/fallback machinery dead for only real provider
-  Context: orbstack.ts OrbStackError extends Error, not ProviderError.
-  Fix: Extend ProviderError, map exit codes to subclasses.
-
 SM-16: Split db.ts god module                                   [mechanical]
   Severity: HIGH — 1219 lines, 60+ exports, imported everywhere
   Fix: Split into db/init, db/helpers, db/{resource}.ts. Barrel re-export.
-
-SD-04: Agent lock file for warm pool safety                      [~10 lines]
-  Severity: HIGH — duplicate agents on warm pool reuse
-  Fix: fcntl.flock() on startup.
 
 SD-05: Agent heartbeat panic timeout + self-termination          [~40 lines]
   Severity: HIGH — orphaned agents run indefinitely
@@ -54,51 +41,20 @@ SM-03: Engine: await promises instead of polling                 [~20 lines]
 SM-14: Manual input validation → TypeBox                         [~30 lines]
   Context: routes.ts. Replace manual checks with .body(schema).
 
-SM-20: AllocationStatus defined in three places                  [~10 lines]
-  Fix: Single canonical definition in shared/types.ts.
-
 SM-21: Resource layer files are entirely stubs                   [delete or impl]
   Context: resource/allocation.ts, instance.ts, run.ts all throw "not implemented".
-
-SM-06: Duplicate _http_post() across 3 agent modules             [~40 lines]
-  Fix: Extract to agent/http_client.py. Update 3 files.
-
-SM-05: Agent SSE byte-by-byte reading                            [~20 lines]
-  Fix: socket.makefile(buffering=1) or chunked reads.
-
-SM-29: SSE replay buffer splice O(n)                             [~15 lines]
-  Fix: Ring buffer with write index.
-
-SM-26: SSE workflow stream cancel passes {} as WebSocket          [~20 lines]
-  Fix: Track SSE controllers separately.
 
 EX3: SSE backpressure on slow agent consumers                    [~30 lines]
   Fix: Track queue depth, drop heartbeats when backlogged.
 
-SD-10: Agent heartbeat field name / missing fields               [~15 lines]
-  Fix: Rename status→workflow_state, add stub fields.
-
-SD-11: OrbStack VM naming convention                             [~10 lines]
-  Fix: repl-${Date.now()} → spec naming format.
-
 SD-12: Agent missing panic diagnostics on shutdown               [~15 lines]
   Fix: Add panic POST to agent shutdown.
 
-SM-04: CLI: trust WS status, reduce poll to 30s fallback         [~10 lines]
-
-SM-31: terminateOrphanedVMs: cross-ref DB before killing         [~15 lines]
-  Fix: Only terminate VMs with no matching record.
 
 ================================================================================
 POINT FIXES (small, bounded, no design needed)
 ================================================================================
 
-SM-08: Provider registry as-any casts → ProviderLifecycleHooks   [~5 lines]
-SM-09: Empty extensibility frameworks — add "not yet" markers    [~5 lines]
-SM-15: Agent heartbeat ack lock inconsistency                    [~2 lines]
-SM-23: CLI defines own types separate from shared                [~20 lines]
-SM-30: Dynamic imports in warmPoolReconciliation                 [~5 lines]
-SD-16: ProviderRegistration.hooks typed as unknown               [~1 line]
 S2.D4: Minor spec drift in field names / response shapes         [batch fix]
 
 ================================================================================
@@ -110,7 +66,7 @@ SD-EV4: Spec Ch13: simpler directory structure (incremental)
 SD-18: Spec Ch09: PanicRequest — align with impl JSON-string approach
 
 ================================================================================
-DEFERRED (cleanup-manifest + provider implementations)
+DEFERRED (cleanup-manifest + provider implementations + infra)
 ================================================================================
 
 BT1: cleanup-manifest DDL schema mismatch (5 issues)
@@ -138,6 +94,9 @@ T2: Tailscale JIT installation timing
 L2/A.2: In-flight blob deduplication (VERIFICATION ONLY)
 L2/A.7: Materialization depth (shallow vs deep)
 D1: Single-process control plane — no HA
+MVK-01: Progress display during VM spawn phase                   [~40 lines]
+  Context: CLI is silent for 10-30s during VM create + bootstrap.
+  Fix: Subscribe to SSE workflow stream, print node transitions.
 
 ================================================================================
 DONE (completed, kept for audit trail)
@@ -197,3 +156,39 @@ SD-EV1: Spec sync-files → start-run — FIXED
 SD-SI1: Spec manifest_resources consistency — FIXED
 PSEUDO-EXCISE: 28 stale files deleted — DONE
 PSEUDO-MARK: 16 files marked STILL USEFUL — DONE
+
+— Intermission Extension —
+SM-02: pendingCommands capped at 50/instance — FIXED
+SM-07: OrbStackError → extends ProviderError — FIXED
+SD-04: Agent lock file fcntl.flock() on startup — FIXED
+SM-20: AllocationStatus consolidated to shared/types.ts — FIXED
+SM-06: _http_post() extracted to agent/http_client.py — FIXED
+SM-05: Agent SSE byte-by-byte → buffered readline — FIXED
+SM-29: SSE replay buffer splice → slice trim — FIXED
+SM-26: SSE cancel fakeWs reference fix — FIXED
+SD-10: Agent heartbeat stub fields added — FIXED
+SD-11: OrbStack VM naming repl-i{id}-{ts} — FIXED
+SM-04: CLI poll 2s→30s, WS status trusted — FIXED
+SM-31: terminateOrphanedVMs DB cross-ref — FIXED
+SD-16: ProviderRegistration.hooks typed — FIXED
+SM-08: Provider registry as-any casts removed — FIXED
+SM-09: Extensibility "NOT YET IMPLEMENTED" markers — FIXED
+SM-15: Agent heartbeat ack lock consistency — FIXED
+SM-23: CLI types documented (wire-format divergence) — FIXED
+SM-30: warmPoolReconciliation static imports — FIXED
+
+— Intermission E2E —
+E2E-SIM: Simulated E2E framework (7 tests, <2s) — DONE
+E2E-BUG: 4 bugs surfaced by E2E (warm path, WS terminal, log flush, poll) — FIXED
+E2E-BOOT: OrbStack bootstrap two-step setsid — FIXED
+
+— MVK —
+MVK: CLI surface complete — DONE (WORKLOG_MVK.txt, 16 steps)
+  repl run/launch/attach/list/cancel, control start/stop/restart/status/reset,
+  instance list, allocation list, help. TOML profiles, env files, SIGINT,
+  ECONNREFUSED UX, table formatting, host.internal, poll timer leak.
+
+— OrbStack Networking —
+ORB-01: IP pool exhaustion from rapid create/delete — LIKELY FIXED
+  Fix: stop-before-delete in provider terminate() + recovery script.
+  If it recurs: run `scripts/orbstack-reset-networking.sh` from macOS host.

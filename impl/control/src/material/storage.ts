@@ -3,6 +3,7 @@
 
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import {
   getDatabase,
   getBlob,
@@ -51,7 +52,7 @@ export interface PreparedFile {
 export const INLINE_THRESHOLD = 65536; // 64KB
 export const LARGE_FILE_THRESHOLD = 104857600; // 100MB
 
-const DATA_DIR = process.env.SKYREPL_DATA_DIR || "./data";
+const DATA_DIR = process.env.SKYREPL_DATA_DIR || join(homedir(), ".repl", "data");
 const BLOB_DIR = join(DATA_DIR, "blobs");
 
 function ensureBlobDir(): void {

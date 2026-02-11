@@ -25,7 +25,8 @@ import time
 from typing import Optional, List, Set
 from urllib.parse import urlparse
 
-from logs import log_buffer, flush_and_send
+from http_client import http_post, get_control_plane_url
+from logs import log_buffer, flush_and_send, flush_all
 
 # =============================================================================
 # Constants
@@ -35,45 +36,20 @@ PROCESSED_COMMAND_HISTORY_SIZE = 100
 CANCEL_GRACE_PERIOD_S = 10
 
 # Module-level state (set by agent.py)
-_control_plane_url: str = ""
 _workdir_base: str = "/workspace"
-_auth_token: str = ""
 
 
 def configure(control_plane_url: str, workdir_base: str = "/workspace", auth_token: str = "") -> None:
     """Set connection parameters. Called once at startup."""
-    global _control_plane_url, _workdir_base, _auth_token
-    _control_plane_url = control_plane_url
+    global _workdir_base
+    import http_client
+    http_client.configure(control_plane_url, auth_token)
     _workdir_base = workdir_base
-    _auth_token = auth_token
 
 
 # =============================================================================
 # HTTP Helpers
 # =============================================================================
-
-
-def _http_post(path: str, payload: object, timeout: int = 10) -> http.client.HTTPResponse:
-    """POST JSON to control plane."""
-    parsed = urlparse(_control_plane_url)
-    if parsed.scheme == "https":
-        conn = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=timeout)
-    else:
-        conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=timeout)
-
-    body = json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json", "Content-Length": str(len(body))}
-
-    # Add auth header if token is set
-    if _auth_token:
-        headers["Authorization"] = f"Bearer {_auth_token}"
-
-    try:
-        conn.request("POST", path, body=body, headers=headers)
-        return conn.getresponse()
-    except Exception:
-        conn.close()
-        raise
 
 
 def _http_get(url: str, timeout: int = 300) -> bytes:
@@ -82,7 +58,7 @@ def _http_get(url: str, timeout: int = 300) -> bytes:
 
     # If relative URL, prepend control plane
     if not parsed.scheme:
-        parsed = urlparse(_control_plane_url + url)
+        parsed = urlparse(get_control_plane_url() + url)
 
     if parsed.scheme == "https":
         conn = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=timeout)
@@ -216,12 +192,16 @@ class RunExecutor:
             # Step 5: Execute command
             exit_code = self._execute_command(run_id, allocation_id, workdir, command)
 
-            # Step 6: Report completion
+            # Step 6: Flush logs then report completion
+            # Flush all buffered logs before sending terminal status, otherwise
+            # the control plane closes CLI WebSockets before logs are delivered.
+            flush_all()
             status = "completed" if exit_code == 0 else "failed"
             _send_status(run_id, status, exit_code=exit_code)
 
         except Exception as e:
             _log("ERROR", f"Run {run_id} failed: {e}")
+            flush_all()
             _send_status(run_id, "failed", exit_code=1)
 
         finally:
@@ -461,7 +441,7 @@ def _send_status(run_id: int, status: str, exit_code: Optional[int] = None) -> N
         payload["exit_code"] = exit_code
 
     try:
-        resp = _http_post("/v1/agent/status", payload, timeout=10)
+        resp = http_post("/v1/agent/status", payload, timeout=10)
         resp.read()
     except Exception as e:
         _log("ERROR", f"Failed to send status ({status}): {e}")

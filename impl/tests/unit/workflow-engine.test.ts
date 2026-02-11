@@ -95,6 +95,7 @@ function createTestInstance() {
     is_spot: 0,
     spot_request_id: null,
     init_checksum: null,
+    registration_token_hash: null,
     last_heartbeat: Date.now(),
   });
 }

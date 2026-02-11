@@ -382,6 +382,7 @@ export async function executeNode(
       // No retry - fail the node
       failNode(node.id, JSON.stringify(nodeError));
 
+      // NOT YET IMPLEMENTED — deferred to future slice
       // Note: compensation is deferred (compensateFailedNode not yet available)
       // When compensation.ts is implemented, call compensateFailedNode here
       // if executor.compensate is defined
@@ -428,6 +429,7 @@ export function buildNodeContext(
       _resourceType: string,
       _resourceId: string
     ): Promise<boolean> {
+      // NOT YET IMPLEMENTED — deferred to future slice
       // Stub for Slice 1 - resource claiming across manifests not yet needed
       console.warn("[workflow] claimResource not yet implemented");
       return Promise.resolve(false);
@@ -681,6 +683,7 @@ export async function handleRetry(
 
     case "alternative":
       // Compensate failed node, then apply retry-with-alternative pattern
+      // NOT YET IMPLEMENTED — deferred to future slice
       // Note: compensateFailedNode deferred until compensation.ts is implemented
       // For now, fail the node and attempt RWA pattern
       failNode(
@@ -726,6 +729,7 @@ export async function handleRetry(
         const currentInput = node.input_json
           ? JSON.parse(node.input_json)
           : {};
+        // NOT YET IMPLEMENTED — deferred to future slice
         // CB pattern stub - full implementation needs a joinNode
         // For Slice 1, just log the intent
         console.warn(
@@ -1097,16 +1101,17 @@ export function createWorkflowEngine(): WorkflowEngine {
     cancel: cancelWorkflow,
 
     async pause(_workflowId: number): Promise<void> {
-      // Deferred: not needed for Slice 1
+      // NOT YET IMPLEMENTED — deferred to future slice
       throw new Error("pause() not implemented - deferred for future slice");
     },
 
     async resume(_workflowId: number): Promise<void> {
-      // Deferred: not needed for Slice 1
+      // NOT YET IMPLEMENTED — deferred to future slice
       throw new Error("resume() not implemented - deferred for future slice");
     },
 
     async retry(workflowId: number): Promise<number> {
+      // NOT YET IMPLEMENTED — deferred to future slice
       // Deferred: creates a new workflow with same inputs
       throw new Error("retry() not implemented - deferred for future slice");
     },

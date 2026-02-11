@@ -58,7 +58,14 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
     // Phase 2: Provider API Call — spawn the actual VM
     const providerName = (input.provider || "orbstack") as ProviderName;
     const provider = await getProvider(providerName);
-    const controlPlaneUrl = process.env.SKYREPL_CONTROL_PLANE_URL || "http://localhost:3000";
+    let controlPlaneUrl = process.env.SKYREPL_CONTROL_PLANE_URL || "http://localhost:3000";
+
+    // OrbStack VMs can't reach host localhost — rewrite to host.internal
+    if (providerName === "orbstack") {
+      controlPlaneUrl = controlPlaneUrl
+        .replace("localhost", "host.internal")
+        .replace("127.0.0.1", "host.internal");
+    }
 
     // Generate auth token: raw token for agent, hash for DB
     const rawToken = crypto.randomBytes(16).toString("hex");
@@ -80,6 +87,7 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
     const providerResult = await provider.spawn({
       spec: input.spec,
       bootstrap: bootstrapConfig,
+      instanceId: instance.id,
     });
 
     // Phase 3: DB Update — record provider-assigned IDs

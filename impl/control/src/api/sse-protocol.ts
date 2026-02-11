@@ -66,6 +66,9 @@ export type WorkflowStreamEvent =
 /** Maximum number of log messages to retain per run for reconnect replay */
 const LOG_REPLAY_BUFFER_SIZE = 500;
 
+/** Maximum number of pending commands to retain per instance (FIFO eviction if exceeded) */
+const MAX_PENDING_COMMANDS = 50;
+
 export class SSEManager {
   /** Active agent SSE connections: instanceId -> SSE controller */
   private agentStreams = new Map<string, ReadableStreamDefaultController<Uint8Array>>();
@@ -198,8 +201,12 @@ export class SSEManager {
       // Queue for when agent reconnects
       const pending = this.pendingCommands.get(instanceId) ?? [];
       pending.push(command);
+      // FIFO eviction if pending commands exceed limit (SM-02)
+      while (pending.length > MAX_PENDING_COMMANDS) {
+        pending.shift();
+      }
       this.pendingCommands.set(instanceId, pending);
-      console.warn("[sse] Agent not connected, command queued", {
+      console.log("[sse] Agent not connected, command queued", {
         instanceId,
         type: command.type,
       });
@@ -266,9 +273,11 @@ export class SSEManager {
       this.logReplayBuffers.set(runId, buffer);
     }
     buffer.push(message);
+    // Ring buffer trim strategy: use slice instead of splice to avoid O(n) shift on every trim (SM-29)
+    // slice creates a new array but avoids the element-by-element shift that splice requires
     if (buffer.length > LOG_REPLAY_BUFFER_SIZE) {
-      // Remove oldest entries to maintain ring buffer size
-      buffer.splice(0, buffer.length - LOG_REPLAY_BUFFER_SIZE);
+      // Trim down to exactly LOG_REPLAY_BUFFER_SIZE by keeping the last N messages
+      this.logReplayBuffers.set(runId, buffer.slice(-LOG_REPLAY_BUFFER_SIZE));
     }
 
     const subscribers = this.logSubscribers.get(runId);
@@ -449,6 +458,7 @@ export function registerSSEWorkflowStream(app: Elysia<any>): void {
     const encoder = new TextEncoder();
 
     let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+    let fakeWs: WebSocket | null = null; // SM-26: Moved to outer scope for cancel() access
 
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -525,7 +535,7 @@ export function registerSSEWorkflowStream(app: Elysia<any>): void {
 
         // Subscribe to live workflow events via a WebSocket-like wrapper
         const listeners = new Map<string, Array<(event: any) => void>>();
-        const fakeWs = {
+        fakeWs = {
           send(data: string) {
             try {
               const parsed = JSON.parse(data);
@@ -574,7 +584,10 @@ export function registerSSEWorkflowStream(app: Elysia<any>): void {
           clearInterval(heartbeatInterval);
           heartbeatInterval = null;
         }
-        sseManager.unsubscribeFromWorkflow(workflowId, {} as WebSocket);
+        // SM-26: Pass fakeWs instead of {} to properly unsubscribe
+        if (fakeWs) {
+          sseManager.unsubscribeFromWorkflow(workflowId, fakeWs);
+        }
       },
     });
 

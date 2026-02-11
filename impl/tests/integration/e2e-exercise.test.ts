@@ -42,6 +42,7 @@ import {
   registerSSEWorkflowStream,
 } from "../../control/src/api/sse-protocol";
 import { setAgentBridge } from "../../control/src/workflow/nodes/start-run";
+import { registerProvider, clearProviderCache } from "../../control/src/provider/registry";
 import type { Server } from "bun";
 
 // =============================================================================
@@ -49,7 +50,7 @@ import type { Server } from "bun";
 // =============================================================================
 
 let tmpDir: string;
-let server: Server;
+let server: Server<unknown>;
 let baseUrl: string;
 let wsBaseUrl: string;
 
@@ -63,6 +64,42 @@ beforeAll(async () => {
   createWorkflowEngine();
   registerLaunchRun();
   setAgentBridge(createRealAgentBridge());
+
+  // Override orbstack provider with a stub that always fails to spawn.
+  // This test doesn't need a real provider — it exercises API routes, DB state,
+  // and workflow failure paths. Tests that need working workflows use e2e-simulated.
+  clearProviderCache();
+  registerProvider({
+    provider: {
+      name: "orbstack" as any,
+      capabilities: {
+        snapshots: false,
+        spot: false,
+        gpu: false,
+        multiRegion: false,
+        persistentVolumes: false,
+        warmVolumes: false,
+        hibernation: false,
+        costExplorer: false,
+        tailscaleNative: false,
+        idempotentSpawn: true,
+        customNetworking: false,
+      },
+      async spawn() {
+        throw new Error("OrbStack not available in test environment");
+      },
+      async terminate() {},
+      async list() {
+        return [];
+      },
+      async get() {
+        return null;
+      },
+      generateBootstrap() {
+        return { content: "#!/bin/bash\n# stub", format: "shell" as const, checksum: "stub" };
+      },
+    },
+  });
 
   const app = createServer({
     port: 0,
@@ -86,6 +123,7 @@ afterAll(async () => {
   if (server) {
     server.stop(true);
   }
+  clearProviderCache();
   closeDatabase();
   if (tmpDir) {
     await rm(tmpDir, { recursive: true, force: true });
@@ -147,6 +185,7 @@ function createTestInstance(overrides: Partial<Instance> = {}): Instance {
     ip: "127.0.0.1",
     workflow_state: "spawn:complete",
     workflow_error: null,
+    registration_token_hash: null,
     current_manifest_id: null,
     spawn_idempotency_key: null,
     is_spot: 0,
@@ -775,10 +814,13 @@ describe("API error handling", () => {
       body: "plain text body",
     });
 
-    // Without Content-Type: application/json, Elysia may not parse the body,
-    // leading to a 500 (body is undefined/null -> TypeError), a 400, or 415.
-    // The point is it should NOT return 200/202.
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    // Without Content-Type: application/json, Elysia doesn't parse the body,
+    // so body is undefined. The nullish guard in the handler treats it as {}
+    // and returns 400 INVALID_INPUT (command is required).
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBeDefined();
+    expect(body.error.code).toBe("INVALID_INPUT");
   });
 
   test("GET on nonexistent instance returns 404", async () => {
@@ -1245,6 +1287,7 @@ describe("Agent file download", () => {
       "heartbeat.py",
       "logs.py",
       "sse.py",
+      "http_client.py",
     ];
     for (const f of files) {
       const res = await fetch(`${baseUrl}/v1/agent/download/${f}`);

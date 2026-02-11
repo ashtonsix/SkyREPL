@@ -3,12 +3,11 @@
 
 import type { Allocation } from "../material/db";
 import type { TransitionResult } from "../workflow/state-transitions";
+import type { AllocationStatus } from "@skyrepl/shared";
 
 // =============================================================================
 // Types
 // =============================================================================
-
-export type AllocationStatus = "AVAILABLE" | "CLAIMED" | "ACTIVE" | "COMPLETE" | "FAILED";
 
 export interface WarmPoolQuery {
   provider?: string;

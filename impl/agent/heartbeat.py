@@ -10,13 +10,13 @@ Responsibilities:
 
 from __future__ import annotations
 
-import http.client
 import json
 import os
 import threading
 import time
 from typing import Optional
-from urllib.parse import urlparse
+
+from http_client import http_post
 
 # ---------------------------------------------------------------------------
 # Configuration (from environment, milliseconds)
@@ -26,9 +26,7 @@ HEARTBEAT_INTERVAL_MS = int(os.getenv("SKYREPL_HEARTBEAT_INTERVAL_MS", "10000"))
 HEARTBEAT_DEGRADED_MS = 2 * 60 * 1000  # 2 minutes
 
 # Module-level state
-_control_plane_url: str = ""
 _instance_id: str = ""
-_auth_token: str = ""
 _shutting_down: bool = False
 _shutdown_event: Optional[threading.Event] = None
 
@@ -43,11 +41,11 @@ _executor: object = None
 
 def configure(control_plane_url: str, instance_id: str, shutdown_event: threading.Event, auth_token: str = "") -> None:
     """Set connection parameters. Called once at startup."""
-    global _control_plane_url, _instance_id, _shutdown_event, _last_ack_time, _auth_token
-    _control_plane_url = control_plane_url
+    global _instance_id, _shutdown_event, _last_ack_time
+    import http_client
+    http_client.configure(control_plane_url, auth_token)
     _instance_id = instance_id
     _shutdown_event = shutdown_event
-    _auth_token = auth_token
     _last_ack_time = time.time()
 
 
@@ -68,34 +66,6 @@ def set_shutting_down(value: bool) -> None:
 def get_last_ack_time() -> float:
     """Return timestamp of last heartbeat ack."""
     return _last_ack_time
-
-
-# =============================================================================
-# HTTP Helper
-# =============================================================================
-
-
-def _http_post(path: str, payload: object, timeout: int = 10) -> http.client.HTTPResponse:
-    """POST JSON to control plane."""
-    parsed = urlparse(_control_plane_url)
-    if parsed.scheme == "https":
-        conn = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=timeout)
-    else:
-        conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=timeout)
-
-    body = json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json", "Content-Length": str(len(body))}
-
-    # Add auth header if token is set
-    if _auth_token:
-        headers["Authorization"] = f"Bearer {_auth_token}"
-
-    try:
-        conn.request("POST", path, body=body, headers=headers)
-        return conn.getresponse()
-    except Exception:
-        conn.close()
-        raise
 
 
 # =============================================================================
@@ -143,10 +113,11 @@ def heartbeat_thread() -> None:
 
         # Send heartbeat
         if _send_heartbeat(workflow_state):
-            _last_ack_time = time.time()
-            if _degraded_since is not None:
-                _log("INFO", f"Control plane recovered after {time.time() - _degraded_since:.1f}s degraded")
-                _degraded_since = None
+            with _lock:
+                _last_ack_time = time.time()
+                if _degraded_since is not None:
+                    _log("INFO", f"Control plane recovered after {time.time() - _degraded_since:.1f}s degraded")
+                    _degraded_since = None
 
 
 def _send_heartbeat(workflow_state: str = "idle") -> bool:
@@ -180,10 +151,18 @@ def _send_heartbeat(workflow_state: str = "idle") -> bool:
         "active_allocations": active_allocations,
         "pending_command_acks": pending_acks,
         "dropped_logs_count": dropped_logs,
+        # Stub fields — not yet instrumented
+        "cpu_percent": None,
+        "memory_percent": None,
+        "disk_percent": None,
+        "gpu_utilization": None,
+        "gpu_memory_percent": None,
+        "tailscale_ip": None,
+        "tailscale_status": None,
     }
 
     try:
-        resp = _http_post("/v1/agent/heartbeat", payload, timeout=10)
+        resp = http_post("/v1/agent/heartbeat", payload, timeout=10)
         body = resp.read()
 
         if resp.status == 200:

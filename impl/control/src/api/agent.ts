@@ -344,6 +344,15 @@ export function registerAgentRoutes(app: Elysia<any>): void {
 
     updateRun(status.run_id, updates);
 
+    // Close CLI WebSocket log subscribers with terminal status
+    if (["completed", "failed", "timeout"].includes(status.status)) {
+      sseManager.closeRunSubscribers(String(status.run_id), {
+        type: "status",
+        status: status.status as "completed" | "failed" | "timeout",
+        exit_code: status.exit_code,
+      });
+    }
+
     return { ack: true };
   });
 
@@ -352,6 +361,7 @@ export function registerAgentRoutes(app: Elysia<any>): void {
   app.post("/v1/agent/spot-interrupt-start", async ({ body, request, set }) => {
     const req = body as SpotInterruptStartRequest;
 
+    // NOT YET IMPLEMENTED — deferred to future slice
     // Auth check - need to get instance_id from run_id
     const allocation = queryOne<Allocation>(
       "SELECT * FROM allocations WHERE run_id = ?",
@@ -374,6 +384,7 @@ export function registerAgentRoutes(app: Elysia<any>): void {
   app.post("/v1/agent/spot-interrupt-complete", async ({ body, request, set }) => {
     const req = body as SpotInterruptCompleteRequest;
 
+    // NOT YET IMPLEMENTED — deferred to future slice
     // Auth check - need to get instance_id from run_id
     const allocation = queryOne<Allocation>(
       "SELECT * FROM allocations WHERE run_id = ?",
@@ -396,6 +407,7 @@ export function registerAgentRoutes(app: Elysia<any>): void {
   app.post("/v1/agent/heartbeat-panic-start", async ({ body, request, set }) => {
     const req = body as HeartbeatPanicStartRequest;
 
+    // NOT YET IMPLEMENTED — deferred to future slice
     // Auth check - need to get instance_id from run_id
     const allocation = queryOne<Allocation>(
       "SELECT * FROM allocations WHERE run_id = ?",
@@ -418,6 +430,7 @@ export function registerAgentRoutes(app: Elysia<any>): void {
   app.post("/v1/agent/heartbeat-panic-complete", async ({ body, request, set }) => {
     const req = body as HeartbeatPanicCompleteRequest;
 
+    // NOT YET IMPLEMENTED — deferred to future slice
     // Auth check - need to get instance_id from run_id
     const allocation = queryOne<Allocation>(
       "SELECT * FROM allocations WHERE run_id = ?",
@@ -438,7 +451,7 @@ export function registerAgentRoutes(app: Elysia<any>): void {
   // ─── Agent File Download ─────────────────────────────────────────────
 
   app.get("/v1/agent/download/:filename", async ({ params, set }) => {
-    const allowedFiles = ["agent.py", "executor.py", "heartbeat.py", "logs.py", "sse.py"];
+    const allowedFiles = ["agent.py", "executor.py", "heartbeat.py", "logs.py", "sse.py", "http_client.py"];
     const filename = params.filename;
 
     if (!allowedFiles.includes(filename)) {
@@ -468,6 +481,7 @@ export function registerAgentRoutes(app: Elysia<any>): void {
   app.post("/v1/instances/:id/panic", async ({ params, body, request, set }) => {
     const panic = body as PanicDiagnosticsRequest;
 
+    // NOT YET IMPLEMENTED — deferred to future slice
     // Auth check
     const authError = requireAuth(panic, request);
     if (authError) {
@@ -617,7 +631,7 @@ export function createRealAgentBridge(): AgentBridge {
           }
         }
 
-        await new Promise((r) => setTimeout(r, 1000));
+        await new Promise((r) => setTimeout(r, 200));
       }
 
       throw Object.assign(

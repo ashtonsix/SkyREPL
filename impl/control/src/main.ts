@@ -3,12 +3,17 @@
 import { createServer } from "./api/routes";
 import { registerAgentRoutes, createRealAgentBridge } from "./api/agent";
 import { registerWebSocketRoutes, registerSSEWorkflowStream } from "./api/sse-protocol";
-import { initDatabase, runMigrations } from "./material/db";
+import { initDatabase, runMigrations, findStaleClaimed, findExpiredAvailable, getInstance, queryOne } from "./material/db";
 import { createWorkflowEngine, recoverWorkflows } from "./workflow/engine";
 import { registerLaunchRun } from "./intent/launch-run";
 import { setAgentBridge } from "./workflow/nodes/start-run";
 import { TIMING } from "@skyrepl/shared";
 import type { WorkflowEngine } from "./workflow/engine";
+import { failAllocation } from "./workflow/state-transitions";
+import { getProvider } from "./provider/registry";
+import { readFileSync, existsSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
 
 // =============================================================================
 // Module-level State
@@ -25,6 +30,9 @@ let isShuttingDown = false;
 
 export async function startup(): Promise<void> {
   console.log("[control] Starting control plane...");
+
+  // Load env file (lowest priority — won't overwrite existing env vars)
+  loadControlEnvFile();
 
   initializeDatabase();
   setupWorkflowEngine();
@@ -53,7 +61,7 @@ export async function startup(): Promise<void> {
 // =============================================================================
 
 export function initializeDatabase(): void {
-  const dbPath = process.env.SKYREPL_DB_PATH ?? "skyrepl-control.db";
+  const dbPath = process.env.SKYREPL_DB_PATH ?? join(homedir(), ".repl", "skyrepl-control.db");
   initDatabase(dbPath);
   runMigrations();
   console.log("[control] Database initialized");
@@ -164,9 +172,6 @@ export async function reconciliationTask(): Promise<void> {
  * For expired AVAILABLE: transition to FAILED and terminate the instance if no other active allocations.
  */
 export async function warmPoolReconciliation(): Promise<void> {
-  const { findStaleClaimed, findExpiredAvailable, getInstance: getInst, queryOne: qo } = await import("./material/db");
-  const { failAllocation } = await import("./workflow/state-transitions");
-
   const now = Date.now();
 
   // 1. Timeout stale CLAIMED allocations
@@ -188,17 +193,16 @@ export async function warmPoolReconciliation(): Promise<void> {
       console.log(`[warm-pool] Expired stale AVAILABLE allocation ${alloc.id} (instance ${alloc.instance_id})`);
 
       // Check if instance has any remaining non-terminal allocations
-      const remaining = qo<{ count: number }>(
+      const remaining = queryOne<{ count: number }>(
         "SELECT COUNT(*) as count FROM allocations WHERE instance_id = ? AND status NOT IN ('COMPLETE', 'FAILED')",
         [alloc.instance_id]
       );
       if (remaining && remaining.count === 0) {
         // No active allocations — terminate the instance
         try {
-          const instance = getInst(alloc.instance_id);
+          const instance = getInstance(alloc.instance_id);
           if (instance?.provider_id) {
-            const { getProvider: gp } = await import("./provider/registry");
-            const provider = await gp(instance.provider as any);
+            const provider = await getProvider(instance.provider as any);
             await provider.terminate(instance.provider_id);
             console.log(`[warm-pool] Terminated instance ${alloc.instance_id} (no active allocations)`);
           }
@@ -282,8 +286,23 @@ async function terminateOrphanedVMs(): Promise<void> {
     const provider = await getProvider("orbstack");
     const vms = await provider.list();
     if (vms.length === 0) return;
-    console.log(`[control] Terminating ${vms.length} orphaned VM(s)...`);
-    for (const vm of vms) {
+
+    // Cross-reference with DB to find truly orphaned VMs
+    const { queryMany } = await import("./material/db");
+    const knownInstances = queryMany(
+      "SELECT provider_id FROM instances WHERE provider_id IS NOT NULL AND status != 'terminated'"
+    );
+    const knownIds = new Set(
+      knownInstances.map((r: any) => r.provider_id as string)
+    );
+    const orphaned = vms.filter((vm) => !knownIds.has(vm.id));
+
+    if (orphaned.length === 0) return;
+
+    console.log(
+      `[control] Terminating ${orphaned.length} orphaned VM(s) (${vms.length} total)...`
+    );
+    for (const vm of orphaned) {
       try {
         await provider.terminate(vm.id);
       } catch (err) {
@@ -293,6 +312,30 @@ async function terminateOrphanedVMs(): Promise<void> {
   } catch (err) {
     // Provider not available — skip
     console.warn("[control] Orphan cleanup skipped:", err);
+  }
+}
+
+// =============================================================================
+// Env File
+// =============================================================================
+
+function loadControlEnvFile(): void {
+  const envPath = join(homedir(), ".repl", "control.env");
+  if (!existsSync(envPath)) return;
+  const content = readFileSync(envPath, "utf-8");
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    let value = trimmed.slice(eqIdx + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (process.env[key] === undefined) {
+      process.env[key] = value;
+    }
   }
 }
 

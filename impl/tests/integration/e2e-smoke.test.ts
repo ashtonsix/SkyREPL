@@ -37,7 +37,7 @@ import type { Server } from "bun";
 // =============================================================================
 
 let tmpDir: string;
-let server: Server;
+let server: Server<unknown>;
 let baseUrl: string;
 
 beforeAll(async () => {

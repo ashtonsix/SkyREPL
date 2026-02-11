@@ -83,27 +83,25 @@ class SSEMessage:
 
 def read_line(response: http.client.HTTPResponse) -> Optional[bytes]:
     """
-    Read a single line from HTTP response, byte-by-byte.
+    Read a single line from HTTP response using the underlying buffered socket.
 
-    Why byte-by-byte:
-    - Python's http.client uses 8KB internal buffers
-    - read(n) and readline() block until buffer fills or connection closes
-    - SSE messages are ~150 bytes, sent infrequently
-    - Buffered reads would block forever waiting for 8KB
-    - Byte-by-byte bypasses buffers at negligible syscall cost
+    Uses response.fp.readline() which is a BufferedReader wrapping the socket.
+    This avoids byte-by-byte syscalls while still working correctly for SSE streams.
 
     Returns:
         bytes: Line content (without newline), or None if connection closed
     """
-    line = b""
-    while not _shutting_down:
-        byte = response.read(1)
-        if not byte:
+    if _shutting_down:
+        return None
+    try:
+        # response.fp is a BufferedReader from socket.makefile("rb")
+        # readline() reads until \n without the 8KB blocking issue of read()
+        line = response.fp.readline()
+        if not line:
             return None
-        if byte == b"\n":
-            return line
-        line += byte
-    return None
+        return line.rstrip(b"\r\n")
+    except Exception:
+        return None
 
 
 # =============================================================================

@@ -17,6 +17,7 @@ import type {
   ProviderInstanceStatus,
 } from "../types";
 import { getProviderTiming } from "@skyrepl/shared";
+import { ProviderError, type ProviderErrorCode, type ProviderErrorCategory } from "../errors";
 
 // =============================================================================
 // OrbStack-specific Error
@@ -24,18 +25,46 @@ import { getProviderTiming } from "@skyrepl/shared";
 
 /**
  * Concrete error class for OrbStack provider operations.
- * Stands alone rather than extending the abstract ProviderError from the
- * provider error taxonomy, but carries the same structural fields so it
- * can be caught and handled uniformly.
+ * Extends ProviderError from the provider error taxonomy.
  */
-class OrbStackError extends Error {
-  readonly provider = "orbstack" as const;
-  readonly details?: Record<string, unknown>;
+class OrbStackError extends ProviderError {
+  readonly code: ProviderErrorCode;
+  readonly category: ProviderErrorCategory;
+  readonly retryable: boolean;
+  readonly retryAfterMs?: number;
 
-  constructor(message: string, details?: Record<string, unknown>) {
-    super(message);
-    this.name = "OrbStackError";
-    this.details = details;
+  constructor(
+    message: string,
+    code: ProviderErrorCode = "PROVIDER_INTERNAL",
+    options?: { retryable?: boolean; retryAfterMs?: number; details?: Record<string, unknown> }
+  ) {
+    super(message, "orbstack", options?.details);
+    this.code = code;
+    this.category = this.categorizeError(code);
+    this.retryable = options?.retryable ?? false;
+    this.retryAfterMs = options?.retryAfterMs;
+  }
+
+  private categorizeError(code: ProviderErrorCode): ProviderErrorCategory {
+    switch (code) {
+      case "CAPACITY_ERROR":
+      case "QUOTA_EXCEEDED":
+      case "SPOT_INTERRUPTED":
+        return "capacity";
+      case "AUTH_ERROR":
+        return "auth";
+      case "RATE_LIMIT_ERROR":
+        return "rate_limit";
+      case "INVALID_SPEC":
+        return "validation";
+      case "NOT_FOUND":
+        return "not_found";
+      case "ALREADY_EXISTS":
+      case "INVALID_STATE":
+        return "conflict";
+      default:
+        return "internal";
+    }
   }
 }
 
@@ -69,11 +98,11 @@ interface OrbctlInfoOutput {
 const VM_PREFIX = "repl-";
 
 function isReplVM(name: string): boolean {
-  return name.startsWith(VM_PREFIX);
+  return name.startsWith(VM_PREFIX) || /^repl-i\d+-\d+$/.test(name);
 }
 
-function generateVmName(): string {
-  return `${VM_PREFIX}${Date.now()}`;
+function generateVmName(instanceId?: number): string {
+  return instanceId ? `repl-i${instanceId}-${Date.now()}` : `${VM_PREFIX}${Date.now()}`;
 }
 
 function mapOrbStackStatus(state: string): ProviderInstanceStatus {
@@ -138,7 +167,8 @@ async function exec(
     if (timedOut) {
       throw new OrbStackError(
         `Command timed out after ${timeout}ms: ${command.join(" ")}`,
-        { command, timeout }
+        "TIMEOUT_ERROR",
+        { retryable: true, details: { command, timeout } }
       );
     }
 
@@ -202,10 +232,10 @@ function toOrbStackInstance(
 }
 
 /**
- * Extract timestamp from VM name (repl-{timestamp}).
+ * Extract timestamp from VM name (repl-{timestamp} or repl-i{instanceId}-{timestamp}).
  */
 function extractTimestamp(name: string): number {
-  const match = name.match(/^repl-(\d+)$/);
+  const match = name.match(/^repl-(?:i\d+-)?(\d+)$/);
   return match ? parseInt(match[1]!, 10) : Date.now();
 }
 
@@ -283,7 +313,7 @@ export class OrbStackProvider implements Provider<OrbStackInstance> {
 
   async spawn(options: SpawnOptions): Promise<OrbStackInstance> {
     const { distro, version, arch } = parseSpec(options.spec);
-    const name = generateVmName();
+    const name = generateVmName(options.instanceId);
 
     // Create the VM
     const createTimeout = getProviderTiming("SPAWN_TIMEOUT_MS", "orbstack");
@@ -295,7 +325,8 @@ export class OrbStackProvider implements Provider<OrbStackInstance> {
     if (createResult.exitCode !== 0) {
       throw new OrbStackError(
         `Failed to create VM ${name}: ${createResult.stderr.trim()}`,
-        { name, spec: options.spec, exitCode: createResult.exitCode }
+        "PROVIDER_INTERNAL",
+        { retryable: true, details: { name, spec: options.spec, exitCode: createResult.exitCode } }
       );
     }
 
@@ -326,7 +357,8 @@ export class OrbStackProvider implements Provider<OrbStackInstance> {
       if (Date.now() - pollStart >= pollTimeout) {
         throw new OrbStackError(
           `VM ${name} did not reach running state within ${pollTimeout}ms`,
-          { name, timeout: pollTimeout }
+          "TIMEOUT_ERROR",
+          { retryable: true, details: { name, timeout: pollTimeout } }
         );
       }
 
@@ -340,18 +372,40 @@ export class OrbStackProvider implements Provider<OrbStackInstance> {
     if (options.bootstrap) {
       const bootstrapScript = this.generateBootstrap(options.bootstrap);
       const encoded = Buffer.from(bootstrapScript.content).toString("base64");
-      const bootstrapCmd = `echo '${encoded}' | base64 -d > /tmp/bootstrap.sh && chmod +x /tmp/bootstrap.sh && nohup /tmp/bootstrap.sh > /tmp/bootstrap.log 2>&1 &`;
 
+      // Two-step bootstrap: write script first, then start it detached.
+      // Single-command nohup via orbctl run is unreliable — the backgrounded
+      // process gets killed when orbctl's session exits.
+      const writeCmd = `echo '${encoded}' | base64 -d > /tmp/bootstrap.sh && chmod +x /tmp/bootstrap.sh`;
+      let writeOk = false;
       try {
-        await orbctl(["run", "-m", name, "-u", "root", "sh", "-c", bootstrapCmd], {
+        const writeResult = await orbctl(["run", "-m", name, "-u", "root", "sh", "-c", writeCmd], {
           timeout: 30_000,
         });
+        writeOk = writeResult.exitCode === 0;
       } catch (err) {
-        // Bootstrap failure is NON-FATAL
         console.warn(
-          `[orbstack] Bootstrap failed for ${name} (non-fatal):`,
+          `[orbstack] Bootstrap write failed for ${name} (non-fatal):`,
           err instanceof Error ? err.message : String(err)
         );
+      }
+
+      // Start bootstrap detached with setsid so it survives orbctl exit.
+      // The trailing sleep ensures the shell stays alive long enough for
+      // the setsid'd process to fully start before orbctl's session ends.
+      if (writeOk) {
+        const startCmd = `setsid /tmp/bootstrap.sh </dev/null >/tmp/bootstrap.log 2>&1 & sleep 0.5`;
+        try {
+          await orbctl(["run", "-m", name, "-u", "root", "sh", "-c", startCmd], {
+            timeout: 30_000,
+          });
+        } catch (err) {
+          // Bootstrap failure is NON-FATAL
+          console.warn(
+            `[orbstack] Bootstrap start failed for ${name} (non-fatal):`,
+            err instanceof Error ? err.message : String(err)
+          );
+        }
       }
     }
 
@@ -368,6 +422,17 @@ export class OrbStackProvider implements Provider<OrbStackInstance> {
 
   async terminate(providerId: string): Promise<void> {
     const timeout = getProviderTiming("TERMINATE_TIMEOUT_MS", "orbstack");
+
+    // Graceful stop before delete: gives OrbStack's DHCP allocator time to
+    // reclaim the IP address. Without this, rapid create/delete cycles can
+    // exhaust the IP pool (leases expire after ~24h).
+    try {
+      await orbctl(["stop", providerId], { timeout: 15_000 });
+      await Bun.sleep(1_000);
+    } catch {
+      // Stop failure is non-fatal — VM may already be stopped or deleted
+    }
+
     const result = await orbctl(["delete", "-f", providerId], { timeout });
 
     if (result.exitCode !== 0) {
@@ -378,7 +443,8 @@ export class OrbStackProvider implements Provider<OrbStackInstance> {
       }
       throw new OrbStackError(
         `Failed to terminate VM ${providerId}: ${result.stderr.trim()}`,
-        { providerId, exitCode: result.exitCode }
+        "PROVIDER_INTERNAL",
+        { retryable: true, details: { providerId, exitCode: result.exitCode } }
       );
     }
   }
@@ -391,7 +457,8 @@ export class OrbStackProvider implements Provider<OrbStackInstance> {
     if (result.exitCode !== 0) {
       throw new OrbStackError(
         `Failed to list VMs: ${result.stderr.trim()}`,
-        { exitCode: result.exitCode }
+        "PROVIDER_INTERNAL",
+        { retryable: true, details: { exitCode: result.exitCode } }
       );
     }
 
@@ -405,7 +472,9 @@ export class OrbStackProvider implements Provider<OrbStackInstance> {
       items = JSON.parse(raw);
     } catch {
       throw new OrbStackError(
-        `Failed to parse orbctl list output: ${raw.slice(0, 200)}`
+        `Failed to parse orbctl list output: ${raw.slice(0, 200)}`,
+        "PROVIDER_INTERNAL",
+        { retryable: false }
       );
     }
 
@@ -438,7 +507,8 @@ export class OrbStackProvider implements Provider<OrbStackInstance> {
       }
       throw new OrbStackError(
         `Failed to get VM ${providerId}: ${result.stderr.trim()}`,
-        { providerId, exitCode: result.exitCode }
+        "PROVIDER_INTERNAL",
+        { retryable: true, details: { providerId, exitCode: result.exitCode } }
       );
     }
 
@@ -450,7 +520,9 @@ export class OrbStackProvider implements Provider<OrbStackInstance> {
       info = JSON.parse(raw);
     } catch {
       throw new OrbStackError(
-        `Failed to parse orbctl info output for ${providerId}`
+        `Failed to parse orbctl info output for ${providerId}`,
+        "PROVIDER_INTERNAL",
+        { retryable: false, details: { providerId } }
       );
     }
 
@@ -497,7 +569,7 @@ ${config.initScript ? `# User init script\n${config.initScript}\n` : ""}# Downlo
 mkdir -p /opt/skyrepl-agent
 cd /opt/skyrepl-agent
 AGENT_BASE="${config.controlPlaneUrl}/v1/agent/download"
-for f in agent.py executor.py heartbeat.py logs.py sse.py; do
+for f in agent.py executor.py heartbeat.py logs.py sse.py http_client.py; do
   curl -fsSL "$AGENT_BASE/$f" -o "$f"
 done
 
@@ -532,7 +604,8 @@ exec python3 agent.py
     if (cloneResult.exitCode !== 0) {
       throw new OrbStackError(
         `Failed to clone VM ${providerId} as ${snapshotName}: ${cloneResult.stderr.trim()}`,
-        { providerId, snapshotName, exitCode: cloneResult.exitCode }
+        "PROVIDER_INTERNAL",
+        { retryable: true, details: { providerId, snapshotName, exitCode: cloneResult.exitCode } }
       );
     }
 
@@ -612,6 +685,14 @@ exec python3 agent.py
   }
 
   async deleteSnapshot(providerSnapshotId: string): Promise<void> {
+    // Graceful stop before delete to help DHCP allocator reclaim the IP
+    try {
+      await orbctl(["stop", providerSnapshotId], { timeout: 15_000 });
+      await Bun.sleep(1_000);
+    } catch {
+      // Stop failure is non-fatal — snapshot VM may already be stopped
+    }
+
     const result = await orbctl(["delete", "-f", providerSnapshotId], {
       timeout: 30_000,
     });
@@ -624,7 +705,8 @@ exec python3 agent.py
       }
       throw new OrbStackError(
         `Failed to delete snapshot ${providerSnapshotId}: ${result.stderr.trim()}`,
-        { providerSnapshotId, exitCode: result.exitCode }
+        "PROVIDER_INTERNAL",
+        { retryable: true, details: { providerSnapshotId, exitCode: result.exitCode } }
       );
     }
   }
@@ -641,7 +723,8 @@ exec python3 agent.py
       }
       throw new OrbStackError(
         `Failed to query snapshot ${name}: ${result.stderr.trim()}`,
-        { name, exitCode: result.exitCode }
+        "PROVIDER_INTERNAL",
+        { retryable: true, details: { name, exitCode: result.exitCode } }
       );
     }
 

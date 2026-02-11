@@ -17,13 +17,12 @@ Special: sync_complete bypasses both levels (sent immediately via flush_and_send
 from __future__ import annotations
 
 from collections import deque
-import http.client
-import json
 import os
 import threading
 import time
 from typing import Deque, List, Optional
-from urllib.parse import urlparse
+
+from http_client import http_post
 
 # ---------------------------------------------------------------------------
 # Configuration (from environment, milliseconds converted to seconds)
@@ -38,50 +37,19 @@ LOG_RETRY_BASE_S = 1
 LOG_RETRY_MAX_S = 32
 
 # Module-level state
-_control_plane_url: str = ""
-_auth_token: str = ""
 _shutting_down: bool = False
 
 
 def configure(control_plane_url: str, auth_token: str = "") -> None:
     """Set the control plane URL and auth token. Called once at startup."""
-    global _control_plane_url, _auth_token
-    _control_plane_url = control_plane_url
-    _auth_token = auth_token
+    import http_client
+    http_client.configure(control_plane_url, auth_token)
 
 
 def set_shutting_down(value: bool) -> None:
     """Signal log flusher to exit gracefully."""
     global _shutting_down
     _shutting_down = value
-
-
-# =============================================================================
-# HTTP Helper
-# =============================================================================
-
-
-def _http_post(path: str, payload: object, timeout: int = 10) -> http.client.HTTPResponse:
-    """POST JSON to control plane. Returns HTTPResponse."""
-    parsed = urlparse(_control_plane_url)
-    if parsed.scheme == "https":
-        conn = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=timeout)
-    else:
-        conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=timeout)
-
-    body = json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json", "Content-Length": str(len(body))}
-
-    # Add auth header if token is set
-    if _auth_token:
-        headers["Authorization"] = f"Bearer {_auth_token}"
-
-    try:
-        conn.request("POST", path, body=body, headers=headers)
-        return conn.getresponse()
-    except Exception:
-        conn.close()
-        raise
 
 
 # =============================================================================
@@ -254,7 +222,7 @@ def _send_log_batch(batch: List[dict]) -> bool:
         attempt_delay = delay
         for attempt in range(max_attempts):
             try:
-                resp = _http_post("/v1/agent/logs", payload, timeout=10)
+                resp = http_post("/v1/agent/logs", payload, timeout=10)
                 # Read response body to release connection
                 resp.read()
                 if resp.status == 200:

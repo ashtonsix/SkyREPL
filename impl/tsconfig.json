@@ -12,5 +12,12 @@
     "outDir": "dist",
     "rootDir": "src",
     "types": ["bun-types"]
-  }
+  },
+  "files": [],
+  "references": [
+    { "path": "control" },
+    { "path": "cli" },
+    { "path": "shared" },
+    { "path": "tests" }
+  ]
 }

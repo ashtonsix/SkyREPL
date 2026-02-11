@@ -4,7 +4,7 @@
 
 SkyREPL: cloud compute orchestration for lifecycle management and reproducibility. Control plane (VPS) + CLI client + Python agent (on instances).
 
-**Current phase:** L3 Slice 2 complete + Intermission done. 282 tests pass (0 failures). Slice 3 not started. Backlog: `BACKLOG.txt`.
+**Current phase:** MVK complete. 367 tests pass (0 failures). Backlog: `BACKLOG.txt`. Completed: `WORKLOG_MVK.txt`.
 
 ## Dispatch
 
@@ -55,7 +55,20 @@ Structure (both dirs): `control/`, `cli/`, `shared/`, `agent/`, `tests/`
 
 Stack: Bun runtime, bun:sqlite (WAL), ElysiaJS, TypeBox, Python stdlib-only agent.
 
+CLI entry point: `impl/cli/bin/repl` (added to PATH via `~/.zshrc`). Run `repl` from anywhere.
+
 **Source of truth:** Recent WORKLOG > spec > impl and impl-pseudo tied.
+
+## Testing
+
+Mix of automated and interactive whole-system testing:
+
+- **Automated:** `bun test` (unit + integration + simulated E2E). Fast and near-comprehensive.
+- **Interactive:** `demo/` project with `repl.toml` profiles for breadth-first human/agent exploration. Catches friction and qualitative issues that automated tests miss.
+
+## OrbStack IP Exhaustion
+
+If `orbctl create` fails with "missing IP address", do NOT run the recovery script yourself. Ask the user to exit this Claude session, run `bash scripts/orbstack-reset-networking.sh` from the macOS host, then resume.
 
 ## Worklogs
 

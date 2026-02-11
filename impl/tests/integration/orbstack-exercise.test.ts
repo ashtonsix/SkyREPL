@@ -30,6 +30,7 @@ import {
 import {
   createWorkflowEngine,
 } from "../../control/src/workflow/engine";
+import { clearProviderCache } from "../../control/src/provider/registry";
 import { registerLaunchRun } from "../../control/src/intent/launch-run";
 import { createServer } from "../../control/src/api/routes";
 import {
@@ -92,6 +93,10 @@ function orbctlSync(args: string[]): { stdout: string; exitCode: number } {
 /**
  * Clean up stray repl-* VMs from previous interrupted test runs.
  * Called at the start of beforeAll so each run inherits a clean state.
+ *
+ * Note: The provider's terminate() method does a graceful stop-before-delete
+ * to help OrbStack's DHCP allocator reclaim IPs. This cleanup uses plain
+ * delete -f for speed (to stay within bun's 5s hook timeout).
  */
 function cleanupStrayVMs(): void {
   const { stdout, exitCode } = orbctlSync(["list"]);
@@ -279,12 +284,13 @@ const describeOrSkip = hasOrbctl ? describe : describe.skip;
 
 describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
   let tmpDir: string;
-  let server: Server;
+  let server: Server<unknown>;
   let baseUrl: string;
   let savedControlPlaneUrl: string | undefined;
   const createdVmNames: string[] = [];
 
   beforeAll(async () => {
+    clearProviderCache(); // Ensure no stale MockProvider from other test files
     cleanupStrayVMs();
 
     tmpDir = await mkdtemp(join(tmpdir(), "skyrepl-orbstack-exercise-"));
@@ -308,14 +314,14 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
     app.listen({ port: 0, idleTimeout: 0 });
     server = app.server!;
 
-    baseUrl = `http://localhost:${server.port}`;
-    const controlPlaneUrl = getReachableUrl(server.port);
+    baseUrl = `http://localhost:${server.port!}`;
+    const controlPlaneUrl = getReachableUrl(server.port!);
 
     savedControlPlaneUrl = process.env.SKYREPL_CONTROL_PLANE_URL;
     process.env.SKYREPL_CONTROL_PLANE_URL = controlPlaneUrl;
 
     console.log(
-      `[exercise] Server on port ${server.port}, reachable at ${controlPlaneUrl}`
+      `[exercise] Server on port ${server.port!}, reachable at ${controlPlaneUrl}`
     );
   });
 
@@ -350,7 +356,7 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
 
       // Collect logs (there may be none since exit 42 produces no output)
       const { promise: logDone } = collectLogs(
-        server.port,
+        server.port!,
         runId,
         SINGLE_TEST_TIMEOUT_MS
       );
@@ -416,7 +422,7 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
 
       // Collect logs
       const { promise: logDone, messages } = collectLogs(
-        server.port,
+        server.port!,
         runId,
         SINGLE_TEST_TIMEOUT_MS
       );
@@ -483,7 +489,7 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
 
       // Collect logs
       const { promise: logDone, messages } = collectLogs(
-        server.port,
+        server.port!,
         runId,
         SINGLE_TEST_TIMEOUT_MS
       );
@@ -567,7 +573,7 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
 
       // Collect logs
       const { promise: logDone, messages } = collectLogs(
-        server.port,
+        server.port!,
         runId,
         SINGLE_TEST_TIMEOUT_MS
       );

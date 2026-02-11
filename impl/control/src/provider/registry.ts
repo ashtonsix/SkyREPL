@@ -4,6 +4,7 @@
 import type { Provider, ProviderName, FeatureProvider } from "./types";
 import type { ProviderWorkflowContract } from "./contracts";
 import type { ProviderCategory, StorageProvider, TunnelProvider } from "./categories";
+import type { ProviderLifecycleHooks } from "./extensions";
 
 // =============================================================================
 // Compute Provider Registry
@@ -137,7 +138,7 @@ export function getAnyProvider(category: ProviderCategory, name: string): Promis
 
 export interface ProviderRegistration {
   provider: Provider;
-  hooks?: unknown;
+  hooks?: ProviderLifecycleHooks;
   contracts?: ProviderWorkflowContract[];
 }
 
@@ -154,16 +155,16 @@ export function registerProvider(registration: ProviderRegistration): void {
   providerCache.set(provider.name as ProviderName, provider);
 
   // Call lifecycle hook if present
-  if (hooks && typeof (hooks as any).onStartup === "function") {
-    (hooks as any).onStartup();
+  if (hooks?.onStartup) {
+    hooks.onStartup();
   }
 }
 
 export function unregisterProvider(name: string): void {
   // Call shutdown hook if present
   const registration = dynamicProviders.get(name);
-  if (registration?.hooks && typeof (registration.hooks as any).onShutdown === "function") {
-    (registration.hooks as any).onShutdown();
+  if (registration?.hooks?.onShutdown) {
+    registration.hooks.onShutdown();
   }
 
   dynamicProviders.delete(name);

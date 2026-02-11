@@ -1,0 +1,127 @@
+================================================================================
+WORKLOG: MVK — Minimum Viable Kernel
+================================================================================
+Started: 2026-02-11
+Status: COMPLETE
+Theme: End-to-end usable system from repl.toml -> VM -> output -> cleanup
+
+PURPOSE
+-------
+After Slices 1-2 + Intermission, the engine works but the user surface is
+incomplete. This worklog closes the gap to a self-contained MVK: a human can
+cd into demo/, run commands, see output, list resources, cancel runs, and
+manage the control plane — without needing curl or manual env vars.
+
+Once MVK lands, development shifts from slice-by-slice to parallel epics
+(covering spec breadth and ongoing development beyond core functionality).
+
+PRIOR ART (already delivered, kept for context)
+-----------------------------------------------
+[x] demo/repl.toml — multi-profile project config (default, quick, init-demo)
+[x] CLI: repl.toml discovery (walk up from cwd) — impl/cli/src/project.ts
+[x] CLI: -p/--profile, -c/--command flag parsing
+[x] CLI: `repl run` with no args uses profile defaults
+[x] CLI: --dry-run prints resolved config as JSON
+[x] Live E2E verified: quick + default profiles on OrbStack
+[x] Bug fix: WS->poll race — retry loop before resolving pollPromise
+
+STEPS
+-----
+[x] Step 1: Unify env var — REPL_CONTROL_PLANE_URL -> SKYREPL_CONTROL_PLANE_URL
+      File: impl/cli/src/config.ts
+
+[x] Step 2: OrbStack host.internal auto-detection
+      When provider=orbstack and URL is unset or localhost, rewrite to
+      http://host.internal:<port> in bootstrap config only.
+      File: impl/control/src/workflow/nodes/spawn-instance.ts
+
+[x] Step 3: SIGINT handler — print info on interrupt
+      On Ctrl-C print: "Run {id} continuing in background. Use `repl run
+      cancel {workflow_id}` to stop it." Exit cleanly, no cancel sent.
+      File: impl/cli/src/commands/run.ts
+
+[x] Step 4: Connection-refused UX
+      Catch ECONNREFUSED (Bun: code='ConnectionRefused'), print helpful msg.
+      Shared isConnectionRefused() helper in config.ts.
+      File: impl/cli/src/commands/run.ts, impl/cli/src/config.ts
+
+[x] Step 5: Remove dead-code profile fields and aspirational profiles
+      - Remove init_command, spot, create_snapshot, artifact_patterns from Profile
+      - Remove --spot/--no-spot/--snapshot flags from run command
+      - Remove gpu-spot, cpu-large profiles (unimplemented providers)
+      Files: impl/cli/src/project.ts, impl/cli/src/commands/run.ts, demo/repl.toml
+
+[x] Step 6: `repl control <start|stop|restart|status|reset>`
+      Background process via child_process.spawn. PID in ~/.repl/control.pid.
+      Reset: stop + terminate all repl- VMs + clean DB + clean ~/.repl (keep .env).
+      Files: impl/cli/src/commands/control.ts (new), impl/cli/src/main.ts
+
+[x] Step 7: Resource list + cancel commands
+      - `repl run list` with workflow status cross-reference (shows cancelled correctly)
+      - `repl run cancel <workflow-id>`
+      - `repl instance list`, `repl allocation list`
+      Padded column tables via printTable() + displayState() helpers.
+      Files: impl/cli/src/commands/instance.ts (new), allocation.ts (new),
+             impl/cli/src/main.ts, impl/cli/src/client.ts, impl/cli/src/config.ts
+
+[x] Step 8: ~/.repl directory creation + cli.env loading
+      On any `repl` command: mkdir ~/.repl, load cli.env.
+      File: impl/cli/src/main.ts
+
+[x] Step 9: Fix poll timer leak
+      Cancel pending setTimeout when pollPromise resolves.
+      File: impl/cli/src/commands/run.ts
+
+[x] Step 10: Update CLAUDE.md — testing guidance + CLI PATH info
+      File: CLAUDE.md
+
+[x] Step 11: Verify — live E2E cycle
+      Bugs found & fixed:
+      - control.ts __dirname path off-by-one (../../ → ../../../)
+      - Bun ECONNREFUSED code='ConnectionRefused', added isConnectionRefused()
+      - controlStatus hardcoded localhost → getControlPlaneUrl()
+
+[x] Step 12: ~/.repl env files — cli.env, control.env, agent.env
+      Lowest priority: hard default < env file < env var < CLI flag.
+      Files: impl/cli/src/config.ts, impl/control/src/main.ts, impl/agent/agent.py
+
+[x] Step 13: `repl run launch` alias + `repl help`
+      File: impl/cli/src/main.ts
+
+[x] Step 14: `repl run attach <id>`
+      Shows run state and command. Warns if already completed. Ctrl-C detaches.
+      File: impl/cli/src/main.ts
+
+[x] Step 15: Output quality — stderr/stdout, table alignment, state display
+      - Non-error output to stdout (was all stderr = red text in terminal)
+      - Padded column tables via printTable() helper (was tab-based)
+      - displayState(): launch-run:finalized→completed, launch-run:syncing→running
+      - run list cross-refs workflow status (shows cancelled after cancel)
+      - attach shows run state + warns if already terminal
+      Files: all CLI files
+
+[x] Step 16: `repl control reset`
+      Stop control plane + terminate all repl- VMs + delete DB + clean ~/.repl
+      (preserves .env files). Near-clean slate.
+      File: impl/cli/src/commands/control.ts
+
+FUTURE WORK (brief, spec covers)
+---------------------------------
+- init_command / init_script profile field (requires file sync + snapshot)
+- spot instance support (requires cloud providers)
+- attach/cancel/detach on interrupt (requires session management)
+- repl control managing MinIO and other infra
+- Progress display during VM spawn (see BACKLOG MVK-01)
+- Intent-first config evolution (profiles become intent declarations)
+
+DESIGN DECISIONS
+----------------
+- TOML config: Bun.TOML built-in, no new deps
+- Profile = named TOML table; [default] when no -p flag
+- Resolution: CLI flag > profile > env file > hardcoded default
+- Control plane as background process with PID file in ~/.repl/
+- host.internal detection scoped to OrbStack provider only
+- Subcommand routing: `repl <noun> <verb>` (run list, run cancel, instance list)
+- Cancel goes through workflow (POST /v1/workflows/:id/cancel), not run
+- DB lives in CWD (skyrepl-control.db), reset cleans it
+- All non-error CLI output to stdout; only errors to stderr

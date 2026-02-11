@@ -107,6 +107,74 @@ export class ApiClient {
     });
   }
 
+  /**
+   * List runs.
+   * GET /v1/runs
+   */
+  async listRuns(filters?: { status?: string }): Promise<{ data: any[] }> {
+    const params = new URLSearchParams();
+    if (filters?.status) params.set('status', filters.status);
+    const qs = params.toString();
+    const response = await fetch(`${this.baseUrl}/v1/runs${qs ? '?' + qs : ''}`);
+    if (!response.ok) throw new Error(`list runs failed: HTTP ${response.status}`);
+    return (await response.json()) as { data: any[] };
+  }
+
+  /**
+   * Cancel a workflow.
+   * POST /v1/workflows/:id/cancel
+   */
+  async cancelWorkflow(id: string, reason?: string): Promise<{ workflowId: number; status: string; cancelled: boolean }> {
+    const response = await fetch(`${this.baseUrl}/v1/workflows/${id}/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: reason ?? 'user_requested' }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const msg = (body as any)?.error?.message ?? `HTTP ${response.status}`;
+      throw new Error(`cancel workflow failed: ${msg}`);
+    }
+    return (await response.json()) as { workflowId: number; status: string; cancelled: boolean };
+  }
+
+  /**
+   * List instances.
+   * GET /v1/instances
+   */
+  async listInstances(filters?: { status?: string; provider?: string }): Promise<{ data: any[] }> {
+    const params = new URLSearchParams();
+    if (filters?.status) params.set('status', filters.status);
+    if (filters?.provider) params.set('provider', filters.provider);
+    const qs = params.toString();
+    const response = await fetch(`${this.baseUrl}/v1/instances${qs ? '?' + qs : ''}`);
+    if (!response.ok) throw new Error(`list instances failed: HTTP ${response.status}`);
+    return (await response.json()) as { data: any[] };
+  }
+
+  /**
+   * List allocations.
+   * GET /v1/allocations
+   */
+  async listAllocations(filters?: { status?: string }): Promise<{ data: any[] }> {
+    const params = new URLSearchParams();
+    if (filters?.status) params.set('status', filters.status);
+    const qs = params.toString();
+    const response = await fetch(`${this.baseUrl}/v1/allocations${qs ? '?' + qs : ''}`);
+    if (!response.ok) throw new Error(`list allocations failed: HTTP ${response.status}`);
+    return (await response.json()) as { data: any[] };
+  }
+
+  /**
+   * List workflows.
+   * GET /v1/workflows
+   */
+  async listWorkflows(): Promise<{ data: any[] }> {
+    const response = await fetch(`${this.baseUrl}/v1/workflows`);
+    if (!response.ok) throw new Error(`list workflows failed: HTTP ${response.status}`);
+    return (await response.json()) as { data: any[] };
+  }
+
   // Stubs for future slices (not needed for Slice 1)
   async checkBlobs(_checksums: string[]): Promise<CheckBlobsResponse> {
     throw new Error('checkBlobs not implemented');
@@ -127,6 +195,12 @@ export class ApiClient {
 // =============================================================================
 // Type Definitions
 // =============================================================================
+
+// Wire-format types for CLI client. These match the API contract (snake_case).
+// The shared package (@skyrepl/shared/api/workflows) has canonical domain types
+// with camelCase field names. These CLI types use snake_case to match the HTTP
+// wire format, so they are defined locally rather than imported.
+// See: impl/shared/src/api/workflows.ts for LaunchRunRequest, LaunchRunResponse, WorkflowStatusResponse
 
 export interface LaunchRunRequest {
   command: string;
@@ -154,8 +228,8 @@ export interface FileManifestEntry {
 export interface LaunchRunResponse {
   workflow_id: number;
   run_id: number;
-  status: string;
-  status_url: string;
+  status: string; // Wire format includes 'created' | 'deduplicated'
+  status_url?: string; // CLI extension; not in shared canonical type
 }
 
 export interface CheckBlobsResponse {
@@ -163,6 +237,8 @@ export interface CheckBlobsResponse {
   urls: Record<string, string>;
 }
 
+// WorkflowStatus uses camelCase fields matching shared WorkflowStatusResponse.
+// The 'progress' field is a CLI-specific extension for display purposes.
 export interface WorkflowStatus {
   workflowId: number;
   type: string;

@@ -42,7 +42,7 @@ export const createAllocationExecutor: NodeExecutor<CreateAllocationInput, Creat
     const input = ctx.workflowInput as CreateAllocationInput;
 
     // Check if warm path already provided an allocation
-    const warmOutput = ctx.getNodeOutput("claim-allocation") as ClaimAllocationOutput | null;
+    const warmOutput = ctx.getNodeOutput("claim-warm-allocation") as ClaimAllocationOutput | null;
     if (warmOutput?.allocationId) {
       const existing = getAllocation(warmOutput.allocationId);
       if (existing) {

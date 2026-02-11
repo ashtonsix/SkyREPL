@@ -7,6 +7,7 @@ import {
   NotFoundError,
   calculateBackoff,
   TIMING,
+  type AllocationStatus,
 } from "@skyrepl/shared";
 
 // @ts-expect-error -- Bun handles `with { type: "text" }` at runtime; tsc lacks the declaration
@@ -58,7 +59,7 @@ export interface Allocation {
   id: number;
   run_id: number | null;
   instance_id: number;
-  status: "AVAILABLE" | "CLAIMED" | "ACTIVE" | "COMPLETE" | "FAILED";
+  status: AllocationStatus;
   current_manifest_id: number | null;
   user: string;
   workdir: string;

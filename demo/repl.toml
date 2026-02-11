@@ -1,0 +1,33 @@
+# SkyREPL demo project — for interactive exploration and friction testing.
+#
+# Usage:
+#   repl run                    # runs [default] profile
+#   repl run -c "echo override" # inline command, still uses default profile settings
+
+[default]
+command = "python3 -c \"import platform; print(f'Hello from {platform.node()} ({platform.machine()})')\""
+provider = "orbstack"
+spec = "ubuntu"
+workdir = "/workspace"
+max_duration = "1h"
+hold_duration = "5m"
+
+[default.env]
+DEMO = "true"
+PYTHONUNBUFFERED = "1"
+
+[quick]
+command = "echo 'quick test' && date"
+provider = "orbstack"
+spec = "ubuntu"
+workdir = "/workspace"
+max_duration = "10m"
+hold_duration = "1m"
+
+[init-demo]
+command = "python3 app.py"
+provider = "orbstack"
+spec = "ubuntu"
+workdir = "/workspace"
+max_duration = "1h"
+hold_duration = "10m"

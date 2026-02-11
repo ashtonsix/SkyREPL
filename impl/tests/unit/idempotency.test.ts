@@ -64,7 +64,9 @@ describe("EX2: Double-seal idempotency", () => {
     // Try to seal it again — should fail with WRONG_STATE but not crash
     const result2 = sealManifest(manifestId, expiresAt);
     expect(result2.success).toBe(false);
-    expect(result2.reason).toBe("WRONG_STATE");
+    if (!result2.success) {
+      expect(result2.reason).toBe("WRONG_STATE");
+    }
 
     // Manifest should still be sealed
     const manifest3 = getManifest(manifestId);
@@ -271,7 +273,7 @@ describe("EX8: Finalize-already-complete idempotency", () => {
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       ["local", `test-inst-${ts}`, "small", "local", "ready", ts, ts]
     );
-    const instanceId = Number(db.query("SELECT last_insert_rowid() as id").get()!.id);
+    const instanceId = Number((db.query("SELECT last_insert_rowid() as id").get() as { id: number }).id);
 
     // Create run
     db.run(
@@ -279,7 +281,7 @@ describe("EX8: Finalize-already-complete idempotency", () => {
        VALUES (?, ?, ?, ?, ?)`,
       ["echo hi", "/workspace", 60000, "launch-run:running", ts]
     );
-    const runId = Number(db.query("SELECT last_insert_rowid() as id").get()!.id);
+    const runId = Number((db.query("SELECT last_insert_rowid() as id").get() as { id: number }).id);
 
     // Create allocation
     const alloc = createAllocation({

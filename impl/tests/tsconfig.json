@@ -2,10 +2,11 @@
   "extends": "../tsconfig.json",
   "compilerOptions": {
     "composite": true,
-    "rootDir": "src",
+    "rootDir": ".",
     "outDir": "dist",
     "noEmit": true,
     "emitDeclarationOnly": true
   },
-  "include": ["src"]
+  "include": ["**/*.test.ts", "**/*.ts"],
+  "references": [{ "path": "../control" }, { "path": "../shared" }]
 }

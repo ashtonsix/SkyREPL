@@ -105,9 +105,9 @@ describe("Crash Recovery", () => {
     expect(recoveredNode).toBeDefined();
     // Node should be pending (with retry_reason) or already completed (if executeLoop ran fast)
     // Since this is idempotent, both are acceptable outcomes
-    expect(["pending", "completed"]).toContain(recoveredNode?.status);
-    if (recoveredNode?.status === "pending") {
-      expect(recoveredNode?.retry_reason).toBe("crash_recovery");
+    expect(["pending", "completed"]).toContain(recoveredNode!.status);
+    if (recoveredNode!.status === "pending") {
+      expect(recoveredNode!.retry_reason).toBe("crash_recovery");
     }
   });
 

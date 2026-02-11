@@ -87,12 +87,7 @@ export type WorkflowState = `${string}:${string}`;
 export type ResourceStatus = WorkflowState;
 
 /** Allocation state machine states */
-export type AllocationStatus =
-  | 'AVAILABLE'
-  | 'CLAIMED'
-  | 'ACTIVE'
-  | 'COMPLETE'
-  | 'FAILED';
+export type AllocationStatus = "AVAILABLE" | "CLAIMED" | "ACTIVE" | "COMPLETE" | "FAILED";
 
 /** Workflow execution states */
 export type WorkflowExecutionStatus =

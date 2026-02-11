@@ -123,6 +123,7 @@ export interface SpawnOptions {
   volumeId?: string;
   networkConfig?: NetworkConfig;
   clientRequestId?: string;
+  instanceId?: number;
 }
 
 export interface ProviderInstance {

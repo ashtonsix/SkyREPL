@@ -242,7 +242,7 @@ export function registerOperationRoutes(app: Elysia<any>): void {
   // ─── Launch Run ──────────────────────────────────────────────────────
 
   app.post("/v1/workflows/launch-run", async ({ body, set }: { body: unknown; set: { status?: number | string } }) => {
-    const b = body as Record<string, unknown>;
+    const b = (body ?? {}) as Record<string, unknown>;
 
     // Validate required fields
     if (!b.command || typeof b.command !== "string") {
@@ -319,8 +319,8 @@ export function registerOperationRoutes(app: Elysia<any>): void {
       return { error: { code: "INVALID_INPUT", message: "Workflow ID must be a number", category: "validation" } };
     }
 
-    const b = body as Record<string, unknown>;
-    const reason = (b?.reason as string) ?? "user_requested";
+    const b = (body ?? {}) as Record<string, unknown>;
+    const reason = (b.reason as string) ?? "user_requested";
 
     // Import cancelWorkflow from engine
     const { cancelWorkflow } = await import("../workflow/engine");
@@ -442,7 +442,7 @@ export function registerOperationRoutes(app: Elysia<any>): void {
   // ─── Blob Check ───────────────────────────────────────────────────────
 
   app.post("/v1/blobs/check", ({ body }: { body: unknown }) => {
-    const b = body as Record<string, unknown>;
+    const b = (body ?? {}) as Record<string, unknown>;
     const checksums = (b.checksums as string[]) ?? [];
 
     // For Slice 1: no S3, return all as missing with empty URLs

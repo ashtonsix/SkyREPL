@@ -301,13 +301,17 @@ describe("Warm claim with CAS retry", () => {
     // Second claim fails with WRONG_STATE
     const result2 = claimAllocation(alloc.id, runId2);
     expect(result2.success).toBe(false);
-    expect(result2.reason).toBe("WRONG_STATE");
+    if (!result2.success) {
+      expect(result2.reason).toBe("WRONG_STATE");
+    }
   });
 
   test("claimAllocation returns NOT_FOUND for non-existent allocation", () => {
     const result = claimAllocation(99999, 42);
     expect(result.success).toBe(false);
-    expect(result.reason).toBe("NOT_FOUND");
+    if (!result.success) {
+      expect(result.reason).toBe("NOT_FOUND");
+    }
   });
 });
 

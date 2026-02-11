@@ -12,6 +12,7 @@ Complexity lives in the control plane, not the agent.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import signal
@@ -34,6 +35,31 @@ from logs import (
     configure as logs_configure,
 )
 from executor import RunExecutor, configure as executor_configure
+
+# =============================================================================
+# Env File (lowest priority — won't overwrite existing vars)
+# =============================================================================
+
+def _load_env_file(path: str) -> None:
+    """Load KEY=VALUE env file, skipping blanks and comments."""
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key, value = key.strip(), value.strip()
+                if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
+                    value = value[1:-1]
+                if key not in os.environ:
+                    os.environ[key] = value
+    except FileNotFoundError:
+        pass
+
+_load_env_file(os.path.expanduser("~/.repl/agent.env"))
 
 # =============================================================================
 # Configuration (from environment)
@@ -158,6 +184,17 @@ def main() -> int:
         return 1
 
     _log("INFO", f"Agent starting (instance={INSTANCE_ID}, url={CONTROL_PLANE_URL})")
+
+    # Acquire lock file to prevent duplicate agents
+    lock_path = "/tmp/repl-agent.lock"
+    try:
+        lock_fd = open(lock_path, "w")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_fd.write(str(os.getpid()))
+        lock_fd.flush()
+    except (IOError, OSError):
+        _log("FATAL", "Another agent is already running (lock file held)")
+        return 1
 
     # Setup signal handlers
     _setup_signal_handlers()
