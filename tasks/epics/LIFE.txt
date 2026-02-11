@@ -1,0 +1,190 @@
+================================================================================
+EPIC LIFE — Lifecycle Completeness
+================================================================================
+Spec: Ch03 (Resources), Ch04 (Manifest), Ch05 (Allocations), Ch07 (Intents)
+
+Scope:
+  The system can't clean up after itself without this. Fills resource
+  stubs, wires background tasks, builds terminate-instance and
+  cleanup-manifest intents.
+
+Pseudo subsumed:
+  resource/{allocation,instance,run,manifest}.ts.l1.txt
+  background/{reconciliation,hold-expiry,garbage-collection,manifest-cleanup}.ts.l1.txt
+  intent/{terminate,cleanup-manifest}.ts + types + node files
+
+================================================================================
+TASK INDEX
+================================================================================
+
+  #LIFE-01  Fill resource layer stubs                            [PENDING]
+  #LIFE-02  Heartbeat timeout enforcement                        [PENDING]
+  #LIFE-03  Hold expiry lifecycle                                [PENDING]
+  #LIFE-04  Manifest expiry scanner                              [PENDING]
+  #LIFE-05  Blob GC wiring                                       [PENDING]
+  #LIFE-06  DDL migration for cleanup-manifest schema            [PENDING]
+  #LIFE-07  terminate-instance intent (blueprint + nodes)        [PENDING]
+  #LIFE-08  terminate-instance API + CLI wiring                  [PENDING]
+  #LIFE-09  cleanup-manifest intent (blueprint + nodes)          [PENDING]
+  #LIFE-10  cleanup-manifest background trigger                  [PENDING]
+  #LIFE-11  Allocation reconciliation                            [PENDING]
+  #LIFE-12  Resource claiming protocol                           [PENDING]
+
+================================================================================
+TASK DETAIL
+================================================================================
+
+## #LIFE-01: Fill resource layer stubs                             [Lg] [PENDING]
+  Carries: SM-21
+  Depends: #FND-01
+  ---
+  resource/allocation.ts, instance.ts, run.ts all throw "not implemented".
+  Replace with actual materialization logic.
+  Ref: impl-pseudo resource/{allocation,instance,run}.ts.l1.txt
+
+  Deliverables:
+  - [ ] Allocation resource: CRUD, state queries, warm pool helpers
+  - [ ] Instance resource: lifecycle queries, provider state mapping
+  - [ ] Run resource: CRUD, exit code, completion tracking
+  - [ ] Unit tests for each resource module
+
+## #LIFE-02: Heartbeat timeout enforcement                         [Md] [PENDING]
+  Depends: #FND-01
+  Pseudo: control/src/background/reconciliation.ts.l1.txt
+  ---
+  Wire heartbeatTimeoutCheck background task (currently no-op in main.ts).
+  Detect stalled agents, transition allocations to FAILED.
+
+  Deliverables:
+  - [ ] Implement heartbeatTimeoutCheck in background scheduler
+  - [ ] Transition stalled allocations (no heartbeat > threshold)
+  - [ ] Integration test: simulate stalled heartbeat → allocation fails
+
+## #LIFE-03: Hold expiry lifecycle                                 [Md] [PENDING]
+  Depends: #FND-01
+  Spec: Ch05 §5.7
+  Pseudo: control/src/background/hold-expiry.ts.l1.txt
+  ---
+  Wire holdExpiryCheck background task. Debug holds with automatic expiry,
+  max 24h. Atomic update pattern.
+
+  Deliverables:
+  - [ ] Implement holdExpiryCheck
+  - [ ] Atomic transition: held → released on expiry
+  - [ ] Extend API support (hold extension from CLI)
+
+## #LIFE-04: Manifest expiry scanner                               [Md] [PENDING]
+  Depends: #FND-01
+  Pseudo: control/src/background/manifest-cleanup.ts.l1.txt
+  ---
+  Wire manifestCleanupCheck background task. Triggers cleanup-manifest
+  intent for expired manifests.
+
+  Deliverables:
+  - [ ] Implement manifestCleanupCheck
+  - [ ] Scan for sealed manifests past retention period
+  - [ ] Queue cleanup-manifest intent for each
+
+## #LIFE-05: Blob GC wiring                                        [Md] [PENDING]
+  Depends: #FND-01
+  Pseudo: control/src/background/garbage-collection.ts.l1.txt
+  ---
+  Wire storageGarbageCollection background task. Object expiry,
+  idempotency key expiry, dedup merger.
+
+  Deliverables:
+  - [ ] Implement storageGarbageCollection
+  - [ ] Object expiry (unreferenced blobs past TTL)
+  - [ ] Idempotency key expiry
+
+## #LIFE-06: DDL migration for cleanup-manifest schema             [Md] [PENDING]
+  Carries: BT1
+  Depends: #FND-01
+  ---
+  5 DDL schema issues blocking cleanup-manifest intent. Fix migration.
+
+  Deliverables:
+  - [ ] New migration fixing schema mismatches
+  - [ ] Verify cleanup-manifest tables match spec Ch04
+
+## #LIFE-07: terminate-instance intent (blueprint + nodes)         [Xl] [PENDING]
+  Spec: Ch07 §7.2
+  Pseudo: intent/terminate.ts.l1.txt, terminate.types.ts.l1.txt, related nodes
+  Depends: #LIFE-01, #WF-01
+  ---
+  6-node DAG: check-allocation → stop-run → drain-agent →
+  terminate-provider → release-allocation → finalize.
+  Needs compensation for rollback on partial terminate.
+
+  Deliverables:
+  - [ ] Workflow blueprint definition
+  - [ ] 6 node executors
+  - [ ] Compensation actions for each reversible node
+  - [ ] Unit tests for each node
+  - [ ] Integration test: full terminate lifecycle on mock provider
+
+## #LIFE-08: terminate-instance API + CLI wiring                   [Md] [PENDING]
+  Depends: #LIFE-07
+  ---
+  POST /v1/intents/terminate-instance endpoint.
+  `repl instance terminate <id>` CLI command.
+
+  Deliverables:
+  - [ ] API endpoint with TypeBox validation
+  - [ ] CLI command
+  - [ ] E2E test: terminate via CLI
+
+## #LIFE-09: cleanup-manifest intent (blueprint + nodes)           [Xl] [PENDING]
+  Carries: BT3, BT4
+  Spec: Ch07 §7.4
+  Pseudo: intent/cleanup-manifest.ts.l1+l2.txt, cleanup.ts.l1.txt, related nodes
+  Depends: #LIFE-06, #WF-03
+  ---
+  Priority ordering: allocations (90), instances (50), snapshots (10).
+  Cross-workflow claiming. Needs subworkflow support.
+
+  Deliverables:
+  - [ ] Workflow blueprint with priority-ordered cleanup
+  - [ ] Node executors for each resource type cleanup
+  - [ ] Cross-manifest resource claiming
+  - [ ] Integration test: manifest cleanup releases all owned resources
+
+## #LIFE-10: cleanup-manifest background trigger                   [Md] [PENDING]
+  Depends: #LIFE-09, #LIFE-04
+  ---
+  Wire manifest expiry scanner to automatically trigger cleanup-manifest.
+
+  Deliverables:
+  - [ ] Connect manifestCleanupCheck → cleanup-manifest intent
+  - [ ] Integration test: expired manifest triggers cleanup
+
+## #LIFE-11: Allocation reconciliation                             [Lg] [PENDING]
+  Spec: Ch05 §5.5
+  Pseudo: control/src/background/reconciliation.ts.l1.txt
+  Depends: #LIFE-01, #LIFE-02
+  ---
+  6 reconciliation tasks per spec: heartbeat timeout, warm pool health,
+  orphaned claims, stalled transitions, provider state sync, allocation aging.
+
+  Deliverables:
+  - [ ] Reconciliation runner with 6 task types
+  - [ ] Integration test for each reconciliation scenario
+
+## #LIFE-12: Resource claiming protocol                            [Lg] [PENDING]
+  Spec: Ch04 §4.2
+  Pseudo: control/src/resource/manifest.ts.l1.txt
+  Depends: #LIFE-01
+  ---
+  Manifest-resource ownership with claim/release semantics.
+  ctx.claimResource() currently returns false always.
+
+  Deliverables:
+  - [ ] Implement claim/release in manifest resource layer
+  - [ ] Cross-manifest resource transfer
+  - [ ] Unit tests for ownership invariants
+
+================================================================================
+SCRATCHPAD
+================================================================================
+
+(Design notes, session logs, open questions)

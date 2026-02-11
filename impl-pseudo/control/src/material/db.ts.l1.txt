@@ -1,7 +1,7 @@
 # db.ts - Database Layer
 
 SQLite database layer with WAL mode, migrations, and query helpers.
-See L2 for connection management, query helpers, transaction retry with jittered backoff, CAS claim pattern, blob GC operations.
+See L2 for connection management, query helpers, transaction retry with jittered backoff, atomic claim pattern, blob GC operations.
 
 ## Connection
 
@@ -30,7 +30,7 @@ getRun(id), createRun(data), updateRun(id, updates), listRuns(filter?)
 
 getAllocation(id), createAllocation(data), updateAllocationStatus(id, status), claimAllocation(id, runId), findAvailableAllocation(spec)
 
-claimAllocation concurrency: Two-phase CAS pattern (SELECT with updated_at, UPDATE with WHERE updated_at = original)
+claimAllocation concurrency: Two-phase atomic transition pattern (SELECT with updated_at, UPDATE with WHERE updated_at = original)
 Returns null if claim fails (not found, wrong state, or race lost)
 
 ## WorkflowOperations

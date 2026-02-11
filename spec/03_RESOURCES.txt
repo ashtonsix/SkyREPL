@@ -184,11 +184,11 @@ KEY FIELDS:
 - current_node: string | null (currently executing node ID)
 - input_json: string (JSON-encoded input parameters)
 - output_json: string | null (JSON-encoded output/results)
-- error_message: string | null
+- error_json: string | null (JSON-encoded structured error with code, message, category)
 - created_at: timestamp
 - started_at: timestamp | null
 - finished_at: timestamp | null
-- current_manifest_id: number | null (workflow's own manifest for resources)
+- manifest_id: number | null (workflow's own manifest for resources)
 
 RELATIONSHIPS:
 - Has many: WorkflowNodes (execution nodes)

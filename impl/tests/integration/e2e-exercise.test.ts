@@ -30,6 +30,9 @@ import {
 import {
   createWorkflowEngine,
   recoverWorkflows,
+  requestEngineShutdown,
+  awaitEngineQuiescence,
+  resetEngineShutdown,
 } from "../../control/src/workflow/engine";
 import { registerLaunchRun } from "../../control/src/intent/launch-run";
 import { createServer } from "../../control/src/api/routes";
@@ -55,6 +58,7 @@ let baseUrl: string;
 let wsBaseUrl: string;
 
 beforeAll(async () => {
+  resetEngineShutdown();
   tmpDir = await mkdtemp(join(tmpdir(), "skyrepl-exercise-"));
   const dbPath = join(tmpDir, "test.db");
 
@@ -124,6 +128,8 @@ afterAll(async () => {
     server.stop(true);
   }
   clearProviderCache();
+  requestEngineShutdown();
+  await awaitEngineQuiescence(5_000);
   closeDatabase();
   if (tmpDir) {
     await rm(tmpDir, { recursive: true, force: true });
@@ -1331,10 +1337,10 @@ describe("Workflow status endpoint detail", () => {
     expect(body.error).toBeDefined();
     expect(body.error.code).toBeDefined();
     expect(body.error.message).toBeDefined();
-    expect(body.error.nodeId).toBeDefined();
+    expect(body.error.node_id).toBeDefined();
     // The failing node should be spawn-instance
-    expect(body.error.nodeId).toBe("spawn-instance");
-    expect(body.finishedAt).toBeGreaterThan(0);
+    expect(body.error.node_id).toBe("spawn-instance");
+    expect(body.finished_at).toBeGreaterThan(0);
     expect(body.progress.percentage).toBeLessThan(100);
   });
 });

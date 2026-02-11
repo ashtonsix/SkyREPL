@@ -1,0 +1,127 @@
+================================================================================
+EPIC DX — Docs, Workshop & GTM Readiness
+================================================================================
+Spec: Ch14 (Implementation), Ch15 (Operations) — pointer updates
+
+Scope:
+  User-facing documentation, workshop commercial materials, demo
+  expansion. Also covers impl-pseudo final cleanup and spec pointer
+  chapter updates. Can proceed partially now, gates on other epics
+  for completeness.
+
+================================================================================
+TASK INDEX
+================================================================================
+
+  #DX-01  Getting started guide                                  [PENDING]
+  #DX-02  Per-provider setup guides                              [PENDING]
+  #DX-03  Architecture overview refresh                          [PENDING]
+  #DX-04  API reference documentation                            [PENDING]
+  #DX-05  Workshop commercial materials refresh                  [PENDING]
+  #DX-06  Demo project: multi-provider examples                  [PENDING]
+  #DX-07  Spec Ch14 + Ch15 update                                [PENDING]
+  #DX-08  README.md                                              [PENDING]
+  #DX-09  impl-pseudo final sweep and deletion                   [PENDING]
+
+================================================================================
+TASK DETAIL
+================================================================================
+
+## #DX-01: Getting started guide                                    [Md] [PENDING]
+  Depends: #PROV-02
+  ---
+  User-facing quickstart: install SkyREPL, configure provider credentials,
+  run first job. Target: docs/guides/getting-started.txt
+
+  Deliverables:
+  - [ ] Installation instructions (bun, PATH setup)
+  - [ ] Provider credential setup (at least AWS + OrbStack)
+  - [ ] First run walkthrough with repl.toml
+  - [ ] Troubleshooting common issues
+
+## #DX-02: Per-provider setup guides                                [Lg] [PENDING]
+  Depends: #PROV-02, #PROV-03, #PROV-04
+  ---
+  Detailed setup guides for each provider. Target: docs/guides/providers/
+
+  Deliverables:
+  - [ ] AWS: IAM setup, security groups, spot configuration
+  - [ ] Lambda Labs: API key, GPU types
+  - [ ] RunPod: API key, templates
+  - [ ] OrbStack: local dev setup (already partially covered)
+
+## #DX-03: Architecture overview refresh                            [Md] [PENDING]
+  ---
+  Update docs/design/ with post-MVK architecture. Currently stale.
+
+  Deliverables:
+  - [ ] Update docs/design/core-principles.txt
+  - [ ] Update docs/design/implementation-phases.txt
+  - [ ] Architecture diagram (text-based)
+
+## #DX-04: API reference documentation                              [Lg] [PENDING]
+  Depends: #API-04
+  ---
+  Update docs/reference/ and docs/guides/api-overview.txt to match
+  complete API surface.
+
+  Deliverables:
+  - [ ] Update api-overview.txt with all endpoints
+  - [ ] Update error-codes.txt with new error types
+  - [ ] Update timing-configuration.txt if timing changed
+
+## #DX-05: Workshop commercial materials refresh                    [Md] [PENDING]
+  ---
+  Update workshop/commercial/ and workshop/product/ for GTM.
+
+  Deliverables:
+  - [ ] Update positioning.txt with multi-provider story
+  - [ ] Update target-users.txt
+  - [ ] Refresh pitch.txt
+  - [ ] Review deployment-models.txt and licensing-strategy.txt
+
+## #DX-06: Demo project: multi-provider examples                    [Md] [PENDING]
+  Depends: #PROV-02
+  ---
+  Expand demo/ with profiles for AWS, Lambda, RunPod alongside OrbStack.
+
+  Deliverables:
+  - [ ] demo/repl.toml: add AWS, Lambda, RunPod profiles
+  - [ ] Demo scripts exercising each provider
+  - [ ] Documentation for running demos
+
+## #DX-07: Spec Ch14 + Ch15 update                                  [Sm] [PENDING]
+  ---
+  Update the minimal pointer chapters with current implementation state.
+
+  Deliverables:
+  - [ ] Ch14: point to docs/design/implementation-phases.txt
+  - [ ] Ch15: point to docs/guides/operations.txt
+
+## #DX-08: README.md                                                [Sm] [PENDING]
+  ---
+  Project README for GitHub. Does not currently exist.
+
+  Deliverables:
+  - [ ] Project description, architecture summary
+  - [ ] Quick start instructions
+  - [ ] Link to docs/ for detailed guides
+  - [ ] Contributing guidelines
+
+## #DX-09: impl-pseudo final sweep and deletion                     [Md] [PENDING]
+  Depends: (all other epics)
+  ---
+  After all epics complete, verify all impl-pseudo files have been
+  subsumed into real code. Delete the entire impl-pseudo/ directory.
+
+  Deliverables:
+  - [ ] Audit: every pseudo file either subsumed or explicitly cut
+  - [ ] Delete impl-pseudo/
+  - [ ] Update CLAUDE.md to remove impl-pseudo references
+  - [ ] Update check-crossrefs.py to remove impl-pseudo from scan
+
+================================================================================
+SCRATCHPAD
+================================================================================
+
+(Design notes, session logs, open questions)

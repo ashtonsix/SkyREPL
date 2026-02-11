@@ -1,0 +1,202 @@
+================================================================================
+EPIC FND — Foundation
+================================================================================
+Spec: Ch02 (Material)
+
+Scope:
+  Resolve all HIGH-severity backlog items and structural blockers.
+  Prerequisite for all other epics. Must complete before parallel
+  tracks diverge.
+
+================================================================================
+TASK INDEX
+================================================================================
+
+  #FND-01  Split db.ts into domain modules                      [DONE]
+  #FND-02  Replace AgentBridge DB polling with EventEmitter     [DONE]
+  #FND-03  Idempotency middleware                               [DONE]
+  #FND-04  Agent panic timeout and self-termination             [DONE]
+  #FND-05  Engine await promises instead of polling             [DONE]
+  #FND-06  TypeBox route validation                             [DONE]
+  #FND-07  Field name and response shape drift batch fix        [DONE]
+  #FND-08  Fix createInstance registration_token_hash regression [DONE]
+  #FND-09  Fix idempotency key scope and wire cleanup           [DONE]
+  #FND-10  Graceful engine shutdown before DB close             [DONE]
+
+================================================================================
+TASK DETAIL
+================================================================================
+
+## #FND-01: Split db.ts into domain modules                       [Lg] [DONE]
+  Carries: SM-16
+  Worklog: 018_WORKLOG_FND01.txt
+  ---
+  db.ts is 1204 lines with 79 exports, imported by 30+ files. Split into
+  10 domain modules + barrel re-export:
+    db/init.ts          connection, PRAGMA, migrations, walCheckpoint
+    db/helpers.ts       queryOne, queryMany, execute, transaction, getDatabase
+    db/instances.ts     Instance type + 6 CRUD functions
+    db/allocations.ts   Allocation type + 8 functions (CRUD + warm pool + stale)
+    db/runs.ts          Run type + 5 CRUD functions
+    db/workflows.ts     Workflow/WorkflowNode types + 10 functions
+    db/manifests.ts     Manifest/ManifestResource types + 7 functions
+    db/objects.ts       Blob/StorageObject types + 13 functions (blob + object + tags)
+    db/orphans.ts       OrphanScanResult type + 5 functions
+    db/usage.ts         UsageRecord type + 4 functions
+    db/index.ts         Barrel re-export (zero import churn for consumers)
+
+  Expanded scope: consolidate migrations/001_initial.sql + 002_auth.sql into
+  a single 001_schema.sql (no live deployments — free to reorganise).
+
+  Deliverables:
+  - [ ] Create impl/control/src/material/db/ directory structure (11 files)
+  - [ ] Move and split db.ts into domain files
+  - [ ] Consolidate migrations into single 001_schema.sql
+  - [ ] Barrel re-export from db/index.ts (zero-change imports)
+  - [ ] All 367 tests pass
+  - [ ] `repl reset && repl control start` works cleanly
+
+## #FND-02: Replace AgentBridge DB polling with EventEmitter       [Md] [DONE]
+  Carries: SM-01
+  Depends: #FND-01
+  ---
+  AgentBridge.waitForEvent() polls DB every 1s → 2N queries/sec for N runs.
+  Replace with in-process EventEmitter fired on state change in db helpers.
+
+  Deliverables:
+  - [ ] EventEmitter in agent bridge, fired on relevant DB writes
+  - [ ] Remove polling loop from waitForEvent()
+  - [ ] Unit test: event fires within 50ms of state change
+
+## #FND-03: Idempotency middleware                                 [Md] [DONE]
+  Carries: SD-03
+  Spec: Ch09 §9.7
+  Pseudo: control/src/api/middleware/idempotency.ts.l1.txt
+  ---
+  Retried requests create duplicate runs. Implement Idempotency-Key header
+  middleware per spec. Store key→response in DB with TTL expiry.
+
+  Deliverables:
+  - [ ] Idempotency middleware in api/middleware/
+  - [ ] Wire to launch-run and future intent endpoints
+  - [ ] Unit test: duplicate key returns cached response
+  - [ ] TTL expiry for stored keys
+
+## #FND-04: Agent panic timeout and self-termination               [Md] [DONE]
+  Carries: SD-05
+  Spec: Ch11 §11.5, §11.14
+  Pseudo: agent/heartbeat.py.l1.txt
+  ---
+  Orphaned agents run indefinitely. Implement: t=15m no heartbeat ack → PANIC
+  state, t=20m → `shutdown -h now`.
+
+  Deliverables:
+  - [ ] Panic timer in agent heartbeat thread
+  - [ ] PANIC state transition at 15m
+  - [ ] Self-termination at 20m
+  - [ ] Unit test: panic triggers after simulated heartbeat silence
+
+## #FND-05: Engine await promises instead of polling               [Sm] [DONE]
+  Carries: SM-03
+  Depends: #FND-01
+  ---
+  engine.ts executeLoop sleeps 100ms polling. Already holds Promise.all —
+  await existing promises instead. Only poll on crash recovery path.
+
+  Deliverables:
+  - [ ] Replace sleep-poll with promise await in executeLoop
+  - [ ] Preserve poll-based crash recovery path
+
+## #FND-06: TypeBox route validation                               [Sm] [DONE]
+  Carries: SM-14
+  ---
+  routes.ts has manual input validation. Replace with ElysiaJS .body(schema)
+  using TypeBox schemas already defined in shared/.
+
+  Deliverables:
+  - [ ] Replace manual checks with .body(schema) on all routes
+  - [ ] Verify 400 responses for invalid inputs
+
+  NOTE (Gate 0 audit): .body(schema) never wired — manual checks remain.
+  Remaining work defers to API epic (#API-01+) when CRUD endpoints need schemas.
+
+## #FND-07: Field name and response shape drift batch fix          [Sm] [DONE]
+  Carries: S2.D4, SD-18
+  ---
+  Minor field name mismatches between spec and impl. Batch fix.
+
+  Deliverables:
+  - [ ] Audit all response shapes against spec Ch09
+  - [ ] Fix field names (snake_case alignment)
+  - [ ] PanicRequest schema alignment
+
+  NOTE (Gate 0 audit): PaginationMeta still uses camelCase (hasMore, nextCursor).
+  launch-run accepts both camelCase and snake_case for maxDurationMs.
+  List endpoints missing pagination wrapper entirely.
+  Remaining work defers to #API-05 (pagination) and #API-01+ (CRUD schemas).
+
+## #FND-08: Fix createInstance registration_token_hash regression  [Sm] [DONE]
+  Worklog: 020_WORKLOG_FND_EXTRA.txt
+  ---
+  Gate 0 audit found createInstance() INSERT omits registration_token_hash
+  column. Security regression from #FND-01 db split. Auth middleware returns
+  true when hash is NULL, silently bypassing instance authentication for all
+  newly created instances.
+
+  File: impl/control/src/material/db/instances.ts (line 47)
+  Fix: add registration_token_hash to INSERT column list and VALUES.
+
+  Deliverables:
+  - [ ] Add registration_token_hash to createInstance INSERT
+  - [ ] Verify auth test covers non-null token hash path
+
+## #FND-09: Fix idempotency key scope and wire cleanup             [Sm] [DONE]
+  Worklog: 020_WORKLOG_FND_EXTRA.txt
+  Spec: Ch09 §9.7.2
+  ---
+  Three-way mismatch discovered in Gate 0 audit:
+    Code:   queries WHERE key = ? AND endpoint = ? (per-endpoint scope)
+    Schema: PRIMARY KEY (key) alone (global scope)
+    Spec:   §9.7.2 mandates global scope ("same key cannot be used across ANY endpoint")
+
+  Fix: align code with schema and spec — remove endpoint from WHERE clause.
+  Also: cleanExpiredIdempotencyKeys() has zero callers. Wire into
+  background reconciliation loop or server startup interval.
+
+  File: impl/control/src/api/middleware/idempotency.ts
+
+  Deliverables:
+  - [ ] Remove endpoint from checkIdempotencyKey WHERE clause
+  - [ ] Wire cleanExpiredIdempotencyKeys to a periodic caller
+  - [ ] Unit test: same key across different endpoints returns cached response
+
+## #FND-10: Graceful engine shutdown before DB close               [Md] [DONE]
+  Carries: #BL-14
+  Worklog: 020_WORKLOG_FND_EXTRA.txt
+  ---
+  #BL-14: engine loop continues after closeDatabase() during shutdown,
+  causing intermittent DATABASE_ERROR (Database not initialized) in E2E tests.
+  False negatives drain developer confidence in all future test runs.
+
+  Root cause: no coordination between engine executeLoop and DB lifecycle.
+  Fix: add shutdownRequested flag or AbortSignal checked in executeLoop.
+  Await engine completion before closing database.
+
+  File: impl/control/src/workflow/engine.ts, impl/control/src/main.ts
+
+  Deliverables:
+  - [ ] Engine shutdown signal (flag or AbortSignal)
+  - [ ] executeLoop checks signal before DB operations
+  - [ ] main.ts awaits engine stop before closeDatabase()
+  - [ ] E2E simulated test passes reliably (10+ consecutive runs)
+
+================================================================================
+SCRATCHPAD
+================================================================================
+
+Gate 0 Audit (2026-02-11):
+  4 HIGH, 5 MEDIUM quality issues. 12 spec drift items.
+  H1→#FND-08, H2+H3→#FND-09, #BL-14→#FND-10.
+  FND-06/FND-07 incomplete deliverables deferred to API epic.
+  H4 (panic schema) deferred to #AGENT-01.
+  M1-M5 deferred to downstream epics (see 020 worklog).

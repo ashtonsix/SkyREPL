@@ -5,6 +5,8 @@ Responsibilities:
 - Send periodic heartbeat to control plane (10s interval)
 - Track last acknowledgment time
 - Detect degraded state (2m no ack) -- logged only for Slice 1
+- Detect PANIC state (15m no ack) -- begin checkpoint, send HeartbeatPanicStart
+- Self-terminate at 20m no ack -- send HeartbeatPanicComplete, shutdown
 - Report allocation state and dropped log count
 """
 
@@ -24,6 +26,9 @@ from http_client import http_post
 
 HEARTBEAT_INTERVAL_MS = int(os.getenv("SKYREPL_HEARTBEAT_INTERVAL_MS", "10000"))
 HEARTBEAT_DEGRADED_MS = 2 * 60 * 1000  # 2 minutes
+HEARTBEAT_PANIC_MS = 15 * 60 * 1000  # 15 minutes — enter PANIC (§11.5)
+PANIC_CHECKPOINT_BUDGET_MS = 5 * 60 * 1000  # 5 minutes — checkpoint budget
+HEARTBEAT_SELF_TERM_MS = 20 * 60 * 1000  # 20 minutes — self-terminate
 
 # Module-level state
 _instance_id: str = ""
@@ -32,6 +37,7 @@ _shutdown_event: Optional[threading.Event] = None
 
 _last_ack_time: float = 0.0
 _degraded_since: Optional[float] = None
+_panic_started: bool = False
 _expected_control_plane_id: Optional[str] = None
 _lock = threading.Lock()
 
@@ -78,9 +84,10 @@ def heartbeat_thread() -> None:
     Background thread: send heartbeat every 10s.
 
     Immediate heartbeat on startup, then periodic.
-    Tracks degraded state (2m no ack) with log warnings.
+    Tracks degraded state (2m no ack), PANIC state (15m),
+    and self-terminates at 20m.
     """
-    global _last_ack_time, _degraded_since
+    global _last_ack_time, _degraded_since, _panic_started
 
     # Immediate first heartbeat
     if _send_heartbeat():
@@ -106,15 +113,35 @@ def heartbeat_thread() -> None:
             _degraded_since = time.time()
             _log("WARN", f"Control plane unreachable for {HEARTBEAT_DEGRADED_MS / 1000}s, entering DEGRADED state")
 
+        # Check self-termination threshold (20m) — must be checked before panic
+        # start to handle case where both thresholds crossed in same iteration
+        if time_since_ack_ms >= HEARTBEAT_SELF_TERM_MS and _panic_started:
+            _log("WARN", f"No heartbeat ack for {HEARTBEAT_SELF_TERM_MS / 1000 / 60:.0f}m, initiating self-termination")
+            _send_panic_complete()
+            _self_terminate()
+            break
+
+        # Check panic threshold (15m) — begin self-termination sequence
+        if time_since_ack_ms >= HEARTBEAT_PANIC_MS and not _panic_started:
+            _panic_started = True
+            _log("WARN", f"No heartbeat ack for {HEARTBEAT_PANIC_MS / 1000 / 60:.0f}m, entering PANIC state")
+            _send_panic_start(time_since_ack_ms)
+            _run_checkpoint_stub()
+
         # Build workflow state
         workflow_state = "idle"
-        if _degraded_since is not None:
+        if _panic_started:
+            workflow_state = "panic:self_termination_pending"
+        elif _degraded_since is not None:
             workflow_state = "degraded:control_plane_unreachable"
 
         # Send heartbeat
         if _send_heartbeat(workflow_state):
             with _lock:
                 _last_ack_time = time.time()
+                if _panic_started:
+                    _log("INFO", "Control plane recovered during PANIC state, cancelling self-termination")
+                    _panic_started = False
                 if _degraded_since is not None:
                     _log("INFO", f"Control plane recovered after {time.time() - _degraded_since:.1f}s degraded")
                     _degraded_since = None
@@ -198,11 +225,16 @@ def record_heartbeat_ack(control_plane_id: Optional[str] = None) -> None:
 
     Called by sse.py when heartbeat_ack message received.
     Updates last_ack_time and validates control_plane_id.
+    Resets panic state if active (recovery from panic).
     """
-    global _last_ack_time, _degraded_since, _expected_control_plane_id
+    global _last_ack_time, _degraded_since, _panic_started, _expected_control_plane_id
 
     with _lock:
         _last_ack_time = time.time()
+
+        if _panic_started:
+            _log("INFO", "Control plane recovered via SSE ack during PANIC state, cancelling self-termination")
+            _panic_started = False
 
         if _degraded_since is not None:
             _log("INFO", f"Control plane recovered via SSE ack after {time.time() - _degraded_since:.1f}s")
@@ -213,6 +245,72 @@ def record_heartbeat_ack(control_plane_id: Optional[str] = None) -> None:
                 _expected_control_plane_id = control_plane_id
             elif control_plane_id != _expected_control_plane_id:
                 _log("WARN", f"Control plane ID mismatch in SSE ack: expected={_expected_control_plane_id}, got={control_plane_id}")
+
+
+# =============================================================================
+# Panic / Self-Termination Helpers (§11.5)
+# =============================================================================
+
+
+def _get_current_run_id() -> Optional[int]:
+    """Get current run ID from executor, if available."""
+    if _executor and hasattr(_executor, "current_run_id"):
+        return getattr(_executor, "current_run_id", None)
+    return None
+
+
+def _send_panic_start(time_since_ack_ms: float) -> None:
+    """Best-effort POST to /v1/agent/heartbeat-panic-start."""
+    run_id = _get_current_run_id()
+    payload = {
+        "instance_id": int(_instance_id) if _instance_id else 0,
+        "run_id": run_id or 0,
+        "time_since_ack_ms": int(time_since_ack_ms),
+    }
+    try:
+        resp = http_post("/v1/agent/heartbeat-panic-start", payload, timeout=5)
+        resp.read()
+    except Exception as e:
+        _log("WARN", f"Failed to send panic start (best-effort): {e}")
+
+
+def _run_checkpoint_stub() -> None:
+    """
+    Checkpoint stub. Actual artifact upload via presigned URLs
+    (primary + failover) lands in #AGENT-04.
+    """
+    _log("INFO", "Checkpoint stub — actual implementation in #AGENT-04")
+
+
+def _send_panic_complete() -> None:
+    """Best-effort POST to /v1/agent/heartbeat-panic-complete."""
+    run_id = _get_current_run_id()
+    payload = {
+        "instance_id": int(_instance_id) if _instance_id else 0,
+        "run_id": run_id or 0,
+        "checkpoint_exit_code": None,
+        "artifacts_uploaded": 0,
+    }
+    try:
+        resp = http_post("/v1/agent/heartbeat-panic-complete", payload, timeout=5)
+        resp.read()
+    except Exception as e:
+        _log("WARN", f"Failed to send panic complete (best-effort): {e}")
+
+
+def _self_terminate() -> None:
+    """
+    Terminate the agent process.
+
+    Signals the main thread to shut down via _shutdown_event.
+    In dev/test: agent.py handles actual exit.
+    In production: the shutdown handler would issue 'shutdown -h now'.
+    """
+    global _shutting_down
+    _log("WARN", "Self-terminating agent due to prolonged control plane unreachability")
+    _shutting_down = True
+    if _shutdown_event:
+        _shutdown_event.set()
 
 
 # =============================================================================

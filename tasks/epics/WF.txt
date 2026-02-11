@@ -1,0 +1,130 @@
+================================================================================
+EPIC WF — Workflow Patterns
+================================================================================
+Spec: Ch06 (Workflows)
+
+Scope:
+  Engine-internal work. Enables complex intents (terminate needs
+  compensation, Tailscale needs IAR). Currently only Conditional
+  Branch pattern is implemented.
+
+Pseudo subsumed:
+  workflow/{compensation,patterns,engine,state-transitions}.ts.l1+l2.txt
+
+================================================================================
+TASK INDEX
+================================================================================
+
+  #WF-01  Compensation framework                                  [PENDING]
+  #WF-02  IAR (Idempotent-Atomic-Retriable) pattern               [PENDING]
+  #WF-03  Subworkflow contract                                    [PENDING]
+  #WF-04  PFO (Parallel Fan-Out) pattern                          [PENDING]
+  #WF-05  pause() / resume() / retry() API                        [PENDING]
+  #WF-06  runSingleStep helper                                    [PENDING]
+  #WF-07  Cancellation across all patterns                        [PENDING]
+
+================================================================================
+TASK DETAIL
+================================================================================
+
+## #WF-01: Compensation framework                                 [Lg] [PENDING]
+  Spec: Ch06 §6.5, §6.8
+  Pseudo: control/src/workflow/compensation.ts.l1.txt + .l2.txt (STILL USEFUL)
+  Depends: #FND-01
+  ---
+  Two-phase compensation with proper state machine integration. Each node
+  can declare a compensation action. On failure, compensations run in
+  reverse order. Replaces the raw-SQL bypass (SM-11, fixed but fragile).
+
+  Deliverables:
+  - [ ] Compensation executor in workflow/compensation.ts
+  - [ ] Node compensation declaration in blueprint
+  - [ ] Reverse-order compensation on workflow failure
+  - [ ] Single-node compensation for spawn failures
+  - [ ] Integration test: 3-node workflow fails at node 3, compensates 2→1
+
+## #WF-02: IAR (Idempotent-Atomic-Retriable) pattern              [Lg] [PENDING]
+  Spec: Ch06 §6.3
+  Pseudo: control/src/workflow/patterns.ts.l1.txt + .l2.txt
+  Depends: #FND-01
+  ---
+  IAR pattern: each node is idempotent, atomic, and retriable. Enables
+  safe retry of entire workflow segments after transient failures.
+
+  Deliverables:
+  - [ ] IAR pattern executor in patterns.ts
+  - [ ] Idempotency check at node entry (skip if already succeeded)
+  - [ ] Atomic rollback on node failure
+  - [ ] Unit test: IAR node with transient failure → automatic recovery
+
+## #WF-03: Subworkflow contract                                   [Lg] [PENDING]
+  Spec: Ch06 §6.4
+  Depends: #WF-01
+  ---
+  Allow workflows to spawn child workflows with lifecycle binding.
+  Parent waits for child completion. Child failure propagates to parent.
+  Depth-limited (currently engine has depth check but no real support).
+
+  Deliverables:
+  - [ ] Subworkflow spawn from node context
+  - [ ] Parent-child lifecycle binding (cancel parent → cancel children)
+  - [ ] Failure propagation
+  - [ ] Depth limit enforcement
+  - [ ] Integration test: parent with 2 child subworkflows
+
+## #WF-04: PFO (Parallel Fan-Out) pattern                         [Lg] [PENDING]
+  Spec: Ch06 §6.3
+  Depends: #WF-02
+  ---
+  Parallel execution of independent nodes with join semantics.
+  All-succeed or fail-fast modes.
+
+  Deliverables:
+  - [ ] PFO pattern executor in patterns.ts
+  - [ ] Concurrent node execution (Promise.all with error handling)
+  - [ ] Join modes: all-succeed, first-failure-cancels-rest
+  - [ ] Unit tests for both join modes
+
+## #WF-05: pause() / resume() / retry() API                       [Md] [PENDING]
+  Spec: Ch06 §6.7
+  Depends: #WF-01
+  ---
+  Currently throw "not implemented". Wire to engine state machine.
+
+  Deliverables:
+  - [ ] engine.pause(workflowId) — freeze execution
+  - [ ] engine.resume(workflowId) — continue from paused state
+  - [ ] engine.retry(workflowId) — re-execute failed nodes
+  - [ ] State machine: running ↔ paused, failed → retrying → running
+  - [ ] Unit tests for each operation
+
+## #WF-06: runSingleStep helper                                   [Sm] [PENDING]
+  Spec: Ch06 §6.1
+  Depends: #WF-01
+  ---
+  Convenience wrapper that creates a 1-node workflow, hides DAG overhead.
+  Useful for simple atomic operations.
+
+  Deliverables:
+  - [ ] runSingleStep(executor, context) helper function
+  - [ ] Returns result directly (not workflow ID)
+  - [ ] Unit test: single-step workflow succeeds/fails correctly
+
+## #WF-07: Cancellation across all patterns                       [Md] [PENDING]
+  Spec: Ch06 §6.7
+  Depends: #WF-04
+  ---
+  Verify and harden cancel propagation through CB, IAR, PFO, and
+  subworkflows. Currently only CB cancellation is tested.
+
+  Deliverables:
+  - [ ] Cancel propagation for IAR in-progress nodes
+  - [ ] Cancel propagation for PFO concurrent nodes
+  - [ ] Cancel propagation through subworkflow chain
+  - [ ] Integration test: cancel during PFO fan-out
+
+================================================================================
+SCRATCHPAD
+================================================================================
+
+(Design notes, session logs, open questions)

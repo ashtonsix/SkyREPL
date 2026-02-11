@@ -1,6 +1,6 @@
 // tests/preload-quiet.ts — Redirect console output to a log file during tests.
 //
-// Captures console.log/info/debug/warn to /tmp/skyrepl-test.log so `bun test` output
+// Captures console.log/info/debug/warn to /tmp/skyrepl-test-detail.log so `bun test` output
 // stays clean. Only console.error passes through to stderr (for real problems).
 // Set SKYREPL_TEST_VERBOSE=1 to disable and see everything.
 //
@@ -12,7 +12,7 @@ import { writeFileSync, appendFileSync } from "node:fs";
 import { plugin } from "bun";
 import { afterAll } from "bun:test";
 
-const logPath = "/tmp/skyrepl-test.log";
+const logPath = "/tmp/skyrepl-test-detail.log";
 
 if (!process.env.SKYREPL_TEST_VERBOSE) {
   // Truncate on first load

@@ -1,0 +1,119 @@
+================================================================================
+CONVENTIONS — Task Management Way-of-Working
+================================================================================
+
+================================================================================
+TASK IDENTIFIERS
+================================================================================
+
+Format: #EPIC-NN (e.g., #WF-01, #LIFE-07, #PROV-03)
+
+  - EPIC = 2-5 uppercase letters matching epic filename
+    (FND, LIFE, WF, AGENT, SNAP, API, CLI, ORPH, PROV, DX)
+  - NN = zero-padded sequential number, never reused
+  - Untriaged items: #BL-NN in tasks/BACKLOG.txt
+
+
+================================================================================
+TASK DEFINITION FORMAT
+================================================================================
+
+## #WF-01: Implement compensation framework                    [Lg] [PENDING]
+  Spec: Ch06 §6.5, §6.8
+  Pseudo: control/src/workflow/compensation.ts.l1.txt
+  Carries: SM-11
+  Depends: #FND-01
+  ---
+  Description of the task.
+
+  Deliverables:
+  - [ ] First deliverable
+  - [ ] Second deliverable
+
+
+FIELD REFERENCE:
+
+  Size (relative, not duration):
+    [Sm], [Md], [Lg], [Xl]
+
+  Status:
+    [PENDING]  → task defined, not started
+    [ACTIVE]   → currently in progress
+    [BLOCKED]  → waiting on dependency or external factor
+    [DONE]     → completed and merged
+    [CUT]      → intentionally not doing
+
+  Carries:
+    Maps old audit IDs (SM-01, SD-03, BT1) to this task for traceability.
+    Preserves historical context.
+
+  Depends:
+    Task IDs that must complete first (e.g., #FND-01, #LIFE-03).
+    Used to enforce ordering and identify critical path.
+
+  Pseudo:
+    impl-pseudo file(s) subsumed by this task.
+    DELETE the pseudo file when task completes.
+
+
+================================================================================
+EPIC FILES
+================================================================================
+
+  - One file per epic in tasks/epics/
+  - Canonical source of truth for task status
+  - Header includes:
+      - Epic name and description
+      - Spec chapters covered
+      - Summary of scope
+  - Tasks listed in priority order
+  - Scratch space for exercises
+  - Updated in-place as status changes
+
+
+================================================================================
+WORKLOGS
+================================================================================
+
+  - One per significant effort (multi-task)
+  - Numbered sequentially from 018
+  - Format: NNN_WORKLOG_TOPIC.txt
+  - Reference task IDs addressed:
+      "Working on #WF-01"
+      "Completed #AGENT-03"
+  - Hot worklogs live at repo root during active work
+  - Archived to tasks/archive/ when complete
+
+
+================================================================================
+CROSS-REFERENCES
+================================================================================
+
+Task IDs are usable everywhere:
+  - Epic files
+  - Worklogs
+  - Commit messages
+  - Code comments
+  - ROADMAP.txt
+
+Validated by: scripts/check-crossrefs.py
+
+Commit message format:
+  "#LIFE-07: implement terminate-instance intent"
+  "#WF-01 #WF-02: compensation and IAR workflow patterns"
+
+Old audit IDs (SM-01, SD-03, etc.):
+  - Preserved via "Carries:" field in task definitions
+  - NOT used for new references (use #EPIC-NN instead)
+
+
+================================================================================
+BACKLOG TRIAGE
+================================================================================
+
+  - New items land in tasks/BACKLOG.txt as #BL-NN
+  - Triaged into epics periodically (ID changes from #BL-NN to #EPIC-NN)
+  - Items that don't fit any epic stay in BACKLOG.txt until:
+      - An epic is created, OR
+      - They're cut as out-of-scope
+  - Backlog review cadence: after each phase gate or major milestone

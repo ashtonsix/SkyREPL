@@ -545,7 +545,7 @@ export const LaunchRunResponseSchema = Type.Object({
 export type LaunchRunResponse = Static<typeof LaunchRunResponseSchema>;
 
 export const WorkflowStatusResponseSchema = Type.Object({
-  workflowId: Type.Integer(),
+  workflow_id: Type.Integer(),
   type: Type.String(),
   status: Type.Union([
     Type.Literal('pending'),
@@ -556,19 +556,19 @@ export const WorkflowStatusResponseSchema = Type.Object({
     Type.Literal('cancelling'),
     Type.Literal('rolling_back'),
   ]),
-  currentNode: Nullable(Type.String()),
-  nodesTotal: Type.Integer({ minimum: 0 }),
-  nodesCompleted: Type.Integer({ minimum: 0 }),
-  nodesFailed: Type.Integer({ minimum: 0 }),
-  startedAt: Nullable(Type.Number()),
-  finishedAt: Nullable(Type.Number()),
+  current_node: Nullable(Type.String()),
+  nodes_total: Type.Integer({ minimum: 0 }),
+  nodes_completed: Type.Integer({ minimum: 0 }),
+  nodes_failed: Type.Integer({ minimum: 0 }),
+  started_at: Nullable(Type.Number()),
+  finished_at: Nullable(Type.Number()),
   output: Nullable(Type.Record(Type.String(), Type.Unknown())),
   error: Nullable(
     Type.Object({
       code: Type.String(),
       message: Type.String(),
       category: Type.String(),
-      nodeId: Type.Optional(Type.String()),
+      node_id: Type.Optional(Type.String()),
       details: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
     }),
   ),

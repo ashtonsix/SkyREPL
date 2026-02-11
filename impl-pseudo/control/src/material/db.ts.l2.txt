@@ -411,9 +411,9 @@ export function updateAllocationStatus(id: number, status: Allocation['status'])
 }
 
 /**
- * Atomic claim with compare-and-swap (CAS) for race protection.
+ * Atomic claim with atomic transition for race protection.
  *
- * CONCURRENCY: Uses two-phase CAS pattern:
+ * CONCURRENCY: Uses two-phase atomic transition pattern:
  * 1. SELECT to verify state and capture updated_at
  * 2. UPDATE with WHERE updated_at = original to detect concurrent modification
  *
@@ -434,7 +434,7 @@ export function claimAllocation(id: number, runId: number): Allocation | null {
       return null;
     }
 
-    // Phase 2: CAS update with updated_at guard
+    // Phase 2: atomic update with updated_at guard
     const now = Date.now();
     const result = db.prepare(`
       UPDATE allocations

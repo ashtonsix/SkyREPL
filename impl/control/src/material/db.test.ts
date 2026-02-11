@@ -121,13 +121,13 @@ afterEach(() => {
 // =============================================================================
 
 describe("schema & migrations", () => {
-  it("runs migrations and reports version 2", () => {
-    expect(getMigrationVersion()).toBe(2);
+  it("runs migrations and reports version 1", () => {
+    expect(getMigrationVersion()).toBe(1);
   });
 
   it("is idempotent on re-run", () => {
     runMigrations(); // second call
-    expect(getMigrationVersion()).toBe(2);
+    expect(getMigrationVersion()).toBe(1);
   });
 });
 

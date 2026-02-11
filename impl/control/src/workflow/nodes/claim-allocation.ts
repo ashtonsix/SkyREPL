@@ -1,5 +1,5 @@
 // workflow/nodes/claim-allocation.ts - Claim Allocation Node
-// Atomic claim of a warm-pool allocation for a run, with retry on CAS race loss.
+// Atomic claim of a warm-pool allocation for a run, with retry on race loss.
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
 import { getAllocation } from "../../material/db";
@@ -49,7 +49,7 @@ export const claimAllocationExecutor: NodeExecutor<ClaimAllocationInput, ClaimAl
     const maxRetries = TIMING.WARM_CLAIM_MAX_RETRIES;
     const retryDelay = TIMING.WARM_CLAIM_RETRY_DELAY_MS;
 
-    // Retry CAS claim up to maxRetries times (race lost = another workflow claimed it)
+    // Retry atomic claim up to maxRetries times (race lost = another workflow claimed it)
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       const result = claimAllocation(allocationId, runId);
       if (result.success) {

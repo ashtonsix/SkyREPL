@@ -20,7 +20,7 @@ export {
   setSystemTime,
 } from "bun:test";
 
-const logPath = "/tmp/skyrepl-test.log";
+const logPath = "/tmp/skyrepl-test-detail.log";
 const ts = () => new Date().toISOString().slice(11, 23);
 
 const describeStack: string[] = [];

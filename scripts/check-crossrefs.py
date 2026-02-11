@@ -15,7 +15,8 @@ import re
 import sys
 from pathlib import Path
 
-DIRS_TO_SCAN = ["spec", "impl", "impl-pseudo", "docs", "workshop"]
+DIRS_TO_SCAN = ["spec", "impl", "impl-pseudo", "docs", "workshop", "tasks"]
+EXCLUDE_SUBDIRS = {"tasks/archive"}
 
 
 def find_repo_root():
@@ -25,6 +26,12 @@ def find_repo_root():
             return p
         p = p.parent
     sys.exit("Could not find repo root (no spec/ directory found)")
+
+
+def is_excluded(filepath: Path, root: Path) -> bool:
+    """Check if filepath falls under an excluded subdirectory."""
+    rel = str(filepath.relative_to(root))
+    return any(rel.startswith(p + "/") or rel == p for p in EXCLUDE_SUBDIRS)
 
 
 def build_heading_registry(root: Path) -> dict[str, set[str]]:
@@ -37,6 +44,8 @@ def build_heading_registry(root: Path) -> dict[str, set[str]]:
         if not dirpath.exists():
             continue
         for filepath in dirpath.rglob("*.txt"):
+            if is_excluded(filepath, root):
+                continue
             try:
                 content = filepath.read_text()
             except (UnicodeDecodeError, PermissionError):
@@ -67,6 +76,8 @@ def scan_crossrefs(root: Path):
         if not dirpath.exists():
             continue
         for filepath in sorted(dirpath.rglob("*.txt")):
+            if is_excluded(filepath, root):
+                continue
             try:
                 lines = filepath.read_text().splitlines()
             except (UnicodeDecodeError, PermissionError):
@@ -191,6 +202,79 @@ def check_camelcase_convention(root: Path, registry: dict):
     return warnings
 
 
+# --- Task ID cross-reference validation ---
+
+TASK_ID_DEF_RE = re.compile(r"^## (#[A-Z]+-\d+):")
+TASK_ID_REF_RE = re.compile(r"#[A-Z]+-\d+\b")
+TASK_STATUS_RE = re.compile(r"\[CUT\]")
+
+
+def build_task_registry(root: Path) -> dict[str, dict]:
+    """Build {task_id: {file, cut}} from tasks/epics/*.txt and tasks/BACKLOG.txt."""
+    registry = {}
+    task_files = []
+    epics_dir = root / "tasks" / "epics"
+    if epics_dir.exists():
+        task_files.extend(sorted(epics_dir.glob("*.txt")))
+    backlog = root / "tasks" / "BACKLOG.txt"
+    if backlog.exists():
+        task_files.append(backlog)
+    for filepath in task_files:
+        try:
+            lines = filepath.read_text().splitlines()
+        except (UnicodeDecodeError, PermissionError):
+            continue
+        rel = str(filepath.relative_to(root))
+        for line in lines:
+            m = TASK_ID_DEF_RE.match(line)
+            if m:
+                task_id = m.group(1)
+                is_cut = bool(TASK_STATUS_RE.search(line))
+                registry[task_id] = {"file": rel, "cut": is_cut}
+    return registry
+
+
+def scan_task_refs(root: Path) -> list[dict]:
+    """Find all #EPIC-NN references (excluding their definitions)."""
+    refs = []
+    for dirname in DIRS_TO_SCAN:
+        dirpath = root / dirname
+        if not dirpath.exists():
+            continue
+        for filepath in sorted(dirpath.rglob("*.txt")):
+            if is_excluded(filepath, root):
+                continue
+            try:
+                lines = filepath.read_text().splitlines()
+            except (UnicodeDecodeError, PermissionError):
+                continue
+            rel = str(filepath.relative_to(root))
+            for lineno, line in enumerate(lines, 1):
+                # Skip task ID definitions (## #WF-01: ...)
+                if TASK_ID_DEF_RE.match(line):
+                    continue
+                for m in TASK_ID_REF_RE.finditer(line):
+                    refs.append({
+                        "source": rel,
+                        "line": lineno,
+                        "task_id": m.group(0),
+                    })
+    return refs
+
+
+def validate_task_refs(task_refs: list, task_registry: dict) -> list[dict]:
+    """Validate task ID references resolve and aren't dead."""
+    errors = []
+    for ref in task_refs:
+        tid = ref["task_id"]
+        if tid not in task_registry:
+            errors.append({**ref, "error": f"Task not found: {tid}"})
+        elif task_registry[tid]["cut"]:
+            # References to CUT tasks are informational, not errors
+            pass
+    return errors
+
+
 def main():
     root = find_repo_root()
     registry = build_heading_registry(root)
@@ -198,17 +282,29 @@ def main():
     errors = validate_crossrefs(root, refs, registry)
     convention_warnings = check_camelcase_convention(root, registry)
 
+    # Task ID validation
+    task_registry = build_task_registry(root)
+    task_refs = scan_task_refs(root)
+    task_errors = validate_task_refs(task_refs, task_registry)
+
     anchored = sum(1 for r in refs if r["type"] == "anchored")
     bare = sum(1 for r in refs if r["type"] == "bare")
     file_ref = sum(1 for r in refs if r["type"] == "file_ref")
 
-    print(f"Scanned: {anchored} anchored, {bare} bare, {file_ref} file-only")
+    print(f"Scanned: {anchored} anchored, {bare} bare, {file_ref} file-only, {len(task_refs)} task-refs")
+    print(f"Task registry: {len(task_registry)} tasks defined in {len(set(t['file'] for t in task_registry.values()))} epics")
 
     exit_code = 0
 
     if errors:
-        print(f"\n{len(errors)} ERROR(S):")
+        print(f"\n{len(errors)} CROSS-REF ERROR(S):")
         for e in errors:
+            print(f'  {e["source"]}:{e["line"]}: {e["error"]}')
+        exit_code = 1
+
+    if task_errors:
+        print(f"\n{len(task_errors)} TASK-REF ERROR(S):")
+        for e in task_errors:
             print(f'  {e["source"]}:{e["line"]}: {e["error"]}')
         exit_code = 1
 

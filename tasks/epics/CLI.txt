@@ -1,0 +1,145 @@
+================================================================================
+EPIC CLI — CLI & UX
+================================================================================
+Spec: Ch10 (CLI)
+
+Scope:
+  Complete the CLI surface beyond MVK. SSH, preflight, output modes,
+  remaining commands, shell completion.
+
+Pseudo subsumed:
+  ~18 cli/ files: commands/{artifact,cancel,extend,instance,list,logs,orphan,
+  setup,snapshot,usage}.ts.l1.txt, ssh.ts.l1+l2.txt, preflight.ts.l1.txt,
+  process.ts.l1.txt, ui/{formatters,progress,prompts}.ts.l1.txt
+
+================================================================================
+TASK INDEX
+================================================================================
+
+  #CLI-01  Output modes (--json, --quiet)                        [PENDING]
+  #CLI-02  Progress display during VM spawn                      [PENDING]
+  #CLI-03  Preflight warnings                                    [PENDING]
+  #CLI-04  repl logs <run-id> standalone viewer                  [PENDING]
+  #CLI-05  repl extend <run-id> <duration>                       [PENDING]
+  #CLI-06  SSH integration                                       [PENDING]
+  #CLI-07  Shell completion                                      [PENDING]
+  #CLI-08  Artifact, snapshot, orphan subcommands                [PENDING]
+  #CLI-09  repl setup / repl usage                               [PENDING]
+  #CLI-10  Error handling per spec                               [PENDING]
+
+================================================================================
+TASK DETAIL
+================================================================================
+
+## #CLI-01: Output modes (--json, --quiet)                          [Md] [PENDING]
+  Spec: Ch10 §10.13
+  ---
+  Machine-readable JSON output for scripting. Quiet mode suppresses
+  non-essential output.
+
+  Deliverables:
+  - [ ] --json flag: all commands output JSON to stdout
+  - [ ] --quiet flag: suppress progress/status, only show results
+  - [ ] Output formatter abstraction (table/json/quiet)
+
+## #CLI-02: Progress display during VM spawn                        [Md] [PENDING]
+  Carries: MVK-01
+  Spec: Ch10 §10.11
+  ---
+  CLI is silent for 10-30s during VM create + bootstrap. Subscribe to SSE
+  workflow stream and print node transitions.
+
+  Deliverables:
+  - [ ] SSE workflow stream subscription in CLI
+  - [ ] Node transition display (spinner or progress line)
+  - [ ] Graceful fallback if SSE unavailable
+
+## #CLI-03: Preflight warnings                                      [Md] [PENDING]
+  Carries: SE4
+  Spec: Ch10 §10.9
+  Pseudo: cli/src/preflight.ts.l1.txt
+  Depends: #API-04
+  ---
+  Pre-launch validation: provider health, quota check, config validation.
+
+  Deliverables:
+  - [ ] GET /v1/preflight call before launch
+  - [ ] Display warnings with severity (info/warn/error)
+  - [ ] --skip-preflight flag to bypass
+
+## #CLI-04: repl logs <run-id> standalone viewer                    [Sm] [PENDING]
+  Spec: Ch10 §10.5
+  ---
+  View logs for any run (not just during `repl run`).
+
+  Deliverables:
+  - [ ] `repl logs <run-id>` command
+  - [ ] WebSocket connection to log stream
+  - [ ] --follow flag for live tailing
+
+## #CLI-05: repl extend <run-id> <duration>                         [Sm] [PENDING]
+  Spec: Ch10 §10.8
+  Depends: #API-04
+  ---
+  Extend debug hold from CLI.
+
+  Deliverables:
+  - [ ] `repl extend <run-id> <duration>` command
+  - [ ] POST to extend endpoint
+
+## #CLI-06: SSH integration                                         [Lg] [PENDING]
+  Spec: Ch10 §10.12, Ch05 §5.4
+  Pseudo: cli/src/ssh.ts.l1.txt + .l2.txt
+  Depends: #PROV-05
+  ---
+  `repl ssh <instance-id>`. SSH proxy through Tailscale.
+
+  Deliverables:
+  - [ ] `repl ssh` command
+  - [ ] Tailscale-based SSH proxy
+  - [ ] Fallback to direct SSH when Tailscale unavailable
+  - [ ] Key management
+
+## #CLI-07: Shell completion                                        [Md] [PENDING]
+  Spec: Ch10 §10.15
+  ---
+  Bash/Zsh/Fish completion scripts.
+
+  Deliverables:
+  - [ ] Completion script generation
+  - [ ] `repl completion <shell>` command
+  - [ ] Subcommand and flag completion
+
+## #CLI-08: Artifact, snapshot, orphan subcommands                  [Md] [PENDING]
+  Depends: #SNAP-02, #ORPH-04
+  ---
+  `repl artifact list|download`, `repl snapshot list|create`,
+  `repl orphan list|clean`.
+
+  Deliverables:
+  - [ ] Artifact subcommands
+  - [ ] Snapshot subcommands
+  - [ ] Orphan subcommands
+
+## #CLI-09: repl setup / repl usage                                 [Sm] [PENDING]
+  ---
+  First-run setup wizard. Usage/billing summary.
+
+  Deliverables:
+  - [ ] `repl setup` interactive provider configuration
+  - [ ] `repl usage` resource usage summary
+
+## #CLI-10: Error handling per spec                                  [Sm] [PENDING]
+  Spec: Ch10 §10.14
+  ---
+  Consistent exit codes and error formatting across all commands.
+
+  Deliverables:
+  - [ ] Exit code conventions (0=ok, 1=error, 2=usage)
+  - [ ] Consistent error output formatting
+
+================================================================================
+SCRATCHPAD
+================================================================================
+
+(Design notes, session logs, open questions)

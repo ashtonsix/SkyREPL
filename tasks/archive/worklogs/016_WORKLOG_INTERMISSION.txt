@@ -77,7 +77,7 @@ STEP 5: Allocation state machine fixes ........................... [x] DONE
   Ref: audit §1.3 (SM-11, SM-12), §2.2 (SD-06)
   Changes:
     a. state-transitions.ts: add releaseAllocation() (CLAIMED →
-       AVAILABLE with CAS guard) for compensation use              [SM-11]
+       AVAILABLE with atomic guard) for compensation use              [SM-11]
     b. claim-allocation.ts compensate(): use releaseAllocation()
        instead of raw SQL                                          [SM-11]
     c. create-allocation.ts: create in AVAILABLE then immediately
@@ -151,7 +151,7 @@ Intermission is DONE when:
   1. [x] 282 tests pass (58 db/storage + 224 unit), 0 fail, no regressions
   2. [x] SD-01: TIMING.DEFAULT_MANIFEST_RETENTION_MS used, local shadow deleted
   3. [x] SM-25: executeLoop .catch → failWorkflowTransition + crash recovery path
-  4. [x] SM-11: releaseAllocation() with CAS guard, compensation uses it
+  4. [x] SM-11: releaseAllocation() with atomic guard, compensation uses it
   5. [x] SD-02: sealManifest detaches resources in transaction (clears current_manifest_id)
   6. [x] impl-pseudo/ reduced by 28 files (182→154), 16 marked STILL USEFUL
   7. [x] Spec updated: 7 edits across Ch02, Ch04, Ch05, Ch07, Ch08, Ch09
@@ -325,7 +325,7 @@ LOG
   Phase A: engine.ts fixes (SD-01, SM-25, SD-13, SD-EV2), scattered one-liners
     (SD-07, SD-09, SD-17, SM-18), dead code removal (SM-17, SM-22)
   Phase B: Timer leak fix (SM-24), validation 400s (SM-13)
-  Phase C: releaseAllocation CAS (SM-11), cold-path fix (SM-12), heartbeat
+  Phase C: releaseAllocation atomic guard (SM-11), cold-path fix (SM-12), heartbeat
     freshness (SD-06), sealManifest resource detach (SD-02)
   Phase D: getControlPlaneId dedup (SM-19), ProviderName consolidation (SM-10),
     deque in logs.py (SM-28), cleanupRun method (SM-27)

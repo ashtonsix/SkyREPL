@@ -1,0 +1,137 @@
+================================================================================
+EPIC ORPH — Orphan Management
+================================================================================
+Spec: Ch12 (Orphans)
+
+Scope:
+  Entire orphan detection and cleanup system. Currently not built at
+  all. Prevents cost leaks from forgotten/crashed resources.
+
+Pseudo subsumed:
+  orphan/{classifier,scanner,whitelist}.ts.l1+l2.txt
+  orphan/nodes/{expire-allocations,find-orphans,match-to-manifest,
+  terminate-orphans}.ts.l1.txt
+  background/orphan-cleanup.ts.l1.txt
+
+================================================================================
+TASK INDEX
+================================================================================
+
+  #ORPH-01  Detection algorithm (scanner + classifier)           [PENDING]
+  #ORPH-02  Resource naming convention enforcement               [PENDING]
+  #ORPH-03  Whitelist CRUD                                       [PENDING]
+  #ORPH-04  Safety constraints                                   [PENDING]
+  #ORPH-05  Background orphan cleanup scheduling                 [PENDING]
+  #ORPH-06  Failed spawn detection + cleanup                     [PENDING]
+  #ORPH-07  Database recovery scenario                           [PENDING]
+  #ORPH-08  Property test: kill at any step → no orphans         [PENDING]
+
+================================================================================
+TASK DETAIL
+================================================================================
+
+## #ORPH-01: Detection algorithm (scanner + classifier)             [Lg] [PENDING]
+  Spec: Ch12 §12.2
+  Pseudo: control/src/orphan/{scanner,classifier}.ts.l1+l2.txt
+  Depends: #PROV-01
+  ---
+  Compare provider.list() results against DB records. Classify each
+  provider resource as: known, orphaned, whitelisted, or unknown.
+
+  Deliverables:
+  - [ ] Scanner: query each provider's list API
+  - [ ] Classifier: match provider resources to DB records by naming convention
+  - [ ] Classification output: known/orphaned/whitelisted/unknown
+  - [ ] Unit tests for each classification case
+
+## #ORPH-02: Resource naming convention enforcement                  [Md] [PENDING]
+  Spec: Ch12 §12.1
+  Depends: #LIFE-01
+  ---
+  VM names encode control_id/manifest_id/instance_id for DB recovery.
+  Enforce consistent naming in all provider spawn calls.
+
+  Deliverables:
+  - [ ] Name format: repl-{control_id_short}-{manifest_id_short}-{instance_id}
+  - [ ] Enforce in OrbStack provider
+  - [ ] Provider contract: name format requirement
+  - [ ] Parsing function for name → resource IDs
+
+## #ORPH-03: Whitelist CRUD                                         [Md] [PENDING]
+  Spec: Ch12 §12.4
+  Depends: #FND-01
+  ---
+  API and persistence for whitelisted resources (user-managed VMs that
+  should not be cleaned up).
+
+  Deliverables:
+  - [ ] Whitelist DB table
+  - [ ] CRUD API endpoints
+  - [ ] CLI commands: `repl orphan whitelist add/remove/list`
+
+## #ORPH-04: Safety constraints                                     [Md] [PENDING]
+  Spec: Ch12 §12.7
+  Depends: #ORPH-01
+  ---
+  Confirmation prompts, dry-run mode, minimum age thresholds.
+  Prevent accidental mass deletion.
+
+  Deliverables:
+  - [ ] --dry-run flag: show what would be cleaned without acting
+  - [ ] Age threshold: only orphan resources older than N minutes
+  - [ ] Confirmation prompt for destructive operations
+  - [ ] --force flag to bypass confirmation
+
+## #ORPH-05: Background orphan cleanup scheduling                   [Md] [PENDING]
+  Spec: Ch12 §12.11
+  Pseudo: control/src/background/orphan-cleanup.ts.l1.txt
+  Depends: #ORPH-01
+  ---
+  Periodic orphan scan integrated with background scheduler.
+
+  Deliverables:
+  - [ ] Wire orphanScanTask in main.ts background scheduler
+  - [ ] Configurable scan interval
+  - [ ] Auto-cleanup with safety constraints
+
+## #ORPH-06: Failed spawn detection + cleanup                       [Md] [PENDING]
+  Spec: Ch12 §12.8
+  Depends: #ORPH-01, #LIFE-07
+  ---
+  Detect VMs from failed workflows (spawned but workflow crashed before
+  recording the instance). Clean up using provider API.
+
+  Deliverables:
+  - [ ] Failed spawn detection heuristic (provider VM exists, no DB record)
+  - [ ] Cleanup via terminate-instance or direct provider.terminate()
+
+## #ORPH-07: Database recovery scenario                             [Lg] [PENDING]
+  Spec: Ch12 §12.9
+  Depends: #ORPH-01
+  ---
+  Reconstruct DB state from provider API after database loss.
+  Uses naming convention to recover resource IDs.
+
+  Deliverables:
+  - [ ] Recovery workflow: scan all providers → parse names → reconstruct DB
+  - [ ] Partial recovery: handle unrecoverable resources gracefully
+  - [ ] Integration test: nuke DB, recover from provider state
+
+## #ORPH-08: Property test: kill at any step → no orphans           [Lg] [PENDING]
+  Spec: Ch12 §12.10
+  Depends: #ORPH-01, #LIFE-07
+  ---
+  Chaos test proving the orphan invariant: kill workflow at any step,
+  run orphan scan, verify zero orphaned resources.
+
+  Deliverables:
+  - [ ] Test harness: intercept workflow at each node, kill
+  - [ ] Orphan scan after each kill scenario
+  - [ ] Assert: orphan count == 0 in all cases
+  - [ ] Cover: launch-run, terminate-instance, create-snapshot workflows
+
+================================================================================
+SCRATCHPAD
+================================================================================
+
+(Design notes, session logs, open questions)

@@ -13,7 +13,7 @@ The TransitionResult type is the canonical pattern for all state transitions.
 It enables callers to distinguish between different failure modes:
 - NOT_FOUND: Resource doesn't exist
 - WRONG_STATE: Resource exists but in unexpected state
-- RACE_LOST: Resource was modified between read and write (CAS failure)
+- RACE_LOST: Resource was modified between read and write (race loss)
 
 ```typescript
 /**
@@ -42,9 +42,9 @@ export function transitionFailure<T>(
 }
 ```
 
-## TwoPhaseCASPattern
+## TwoPhaseAtomicTransitionPattern
 
-All state transitions use two-phase compare-and-swap (CAS):
+All state transitions use two-phase atomic transition:
 
 1. **Phase 1 (Read)**: SELECT to verify current state and capture updated_at
 2. **Phase 2 (Write)**: UPDATE with WHERE updated_at = original
@@ -56,7 +56,7 @@ This ensures:
 
 ```typescript
 /**
- * Generic two-phase CAS transition.
+ * Generic two-phase atomic transition.
  *
  * @param table - Table name
  * @param id - Row ID
@@ -88,7 +88,7 @@ export async function atomicTransition<T extends { id: number; status: string; u
       return transitionFailure<T>('WRONG_STATE', current);
     }
 
-    // Phase 2: CAS update with updated_at guard
+    // Phase 2: atomic update with updated_at guard
     const now = Date.now();
     const updateFields = { status: toStatus, updated_at: now, ...additionalUpdates };
     const setClause = Object.keys(updateFields).map(k => `${k} = ?`).join(', ');
@@ -149,7 +149,7 @@ const ALLOCATION_TRANSITIONS: Record<AllocationStatus, AllocationStatus[]> = {
  * Claim an available allocation for a run.
  *
  * Owner: Workflow (claim-allocation node)
- * Concurrency: Uses two-phase CAS to handle race between multiple workflows
+ * Concurrency: Uses two-phase atomic transition to handle race between multiple workflows
  */
 export async function claimAllocation(
   allocationId: number,
@@ -173,7 +173,7 @@ export async function claimAllocation(
       return transitionFailure<Allocation>('WRONG_STATE', current);
     }
 
-    // Phase 2: CAS update
+    // Phase 2: atomic update
     const now = Date.now();
     const result = db.prepare(`
       UPDATE allocations

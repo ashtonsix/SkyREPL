@@ -27,6 +27,35 @@ describe("Authentication Middleware", () => {
       expect(result).toBe(false);
     });
 
+    test("createInstance persists registration_token_hash (FND-08 regression)", () => {
+      const rawToken = crypto.randomBytes(16).toString("hex");
+      const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
+
+      const instance = createInstance({
+        provider: "orbstack",
+        provider_id: "test-hash-persist",
+        spec: "small",
+        region: "local",
+        ip: null,
+        workflow_state: "spawn:complete",
+        workflow_error: null,
+        current_manifest_id: null,
+        spawn_idempotency_key: null,
+        is_spot: 0,
+        spot_request_id: null,
+        init_checksum: null,
+        registration_token_hash: tokenHash,
+        last_heartbeat: Date.now(),
+      });
+
+      // Hash should be persisted directly via createInstance (not updateInstance)
+      const result = verifyInstanceToken(instance.id, rawToken);
+      expect(result).toBe(true);
+
+      // Wrong token should fail
+      expect(verifyInstanceToken(instance.id, "wrong")).toBe(false);
+    });
+
     test("returns true for instance with no token hash (backward compatibility)", () => {
       const instance = createInstance({
         provider: "orbstack",

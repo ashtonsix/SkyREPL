@@ -36,7 +36,7 @@ DELIVERABLES
    extensions, content-addressable sync.
 
    Improved over legacy: Non-idempotent spawn (now uses idempotency keys),
-   warm pool (CAS vs exclusive lock).
+   warm pool (atomic transition vs exclusive lock).
 
    Real gaps (deferred to BACKLOG.txt):
      - Circuit breaker: Per-request retry exists, missing cross-request aggregation

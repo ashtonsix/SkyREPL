@@ -98,9 +98,9 @@ SM-10: ProviderName defined in two places                              [LOW]
 SM-11: Compensation bypasses state machine with raw SQL                [HIGH]
   File: workflow/nodes/claim-allocation.ts:93-98
   Issue: compensate() does raw UPDATE to transition CLAIMED→AVAILABLE,
-    bypassing CAS guard in state-transitions.ts. CLAIMED→AVAILABLE is
+    bypassing atomic guard in state-transitions.ts. CLAIMED→AVAILABLE is
     NOT a valid transition. No concurrency protection.
-  Fix: Add releaseAllocation() to state-transitions.ts with CAS guard,
+  Fix: Add releaseAllocation() to state-transitions.ts with atomic guard,
     or compensate via failAllocation() + create new AVAILABLE.
 
 SM-12: Cold-path creates allocation directly in CLAIMED state          [HIGH]

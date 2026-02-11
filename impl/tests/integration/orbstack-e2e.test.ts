@@ -276,8 +276,8 @@ describeOrSkip("OrbStack E2E: repl run 'echo hello'", () => {
       const terminalStates = new Set(["completed", "failed", "cancelled"]);
       const finalStatus = await new Promise<{
         status: string;
-        nodesCompleted: number;
-        nodesTotal: number;
+        nodes_completed: number;
+        nodes_total: number;
         error: unknown;
       }>((resolve) => {
         const poll = async () => {
@@ -288,7 +288,7 @@ describeOrSkip("OrbStack E2E: repl run 'echo hello'", () => {
             const body = await res.json();
 
             console.log(
-              `[orbstack-e2e] Poll: status=${body.status} nodes=${body.nodesCompleted}/${body.nodesTotal}`
+              `[orbstack-e2e] Poll: status=${body.status} nodes=${body.nodes_completed}/${body.nodes_total}`
             );
 
             if (terminalStates.has(body.status)) {
@@ -326,7 +326,7 @@ describeOrSkip("OrbStack E2E: repl run 'echo hello'", () => {
       // Workflow completed
       expect(finalStatus.status).toBe("completed");
       // 8 completed + 1 skipped (claim-warm-allocation, cold path)
-      expect(finalStatus.nodesCompleted).toBe(8);
+      expect(finalStatus.nodes_completed).toBe(8);
 
       // Logs contain "hello"
       const allLogs = logChunks.join("");

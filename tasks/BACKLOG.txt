@@ -1,0 +1,113 @@
+================================================================================
+BACKLOG — Untriaged Items
+================================================================================
+Items here have not yet been assigned to an epic. They use #BL-NN identifiers.
+Once triaged, items move to the appropriate tasks/epics/ file with a new ID.
+
+(empty)
+
+================================================================================
+DEFERRED
+================================================================================
+
+## #BL-01: Circuit breaker — cross-request failure aggregation     [PENDING]
+  Carries: WS3.1
+  ---
+  Cross-request failure aggregation for provider API calls.
+
+## #BL-02: Budget enforcement — per-user quotas                    [PENDING]
+  Carries: WS3.2
+  ---
+  Per-user spending/resource quotas.
+
+## #BL-03: S3/MinIO connection diagnostics                         [PENDING]
+  Carries: SE5
+  ---
+  Storage backend connection health checks and diagnostics.
+
+## #BL-04: WAL checkpoint before database backup                   [PENDING]
+  Carries: SE6
+  ---
+  Ensure WAL is checkpointed before taking database snapshots/backups.
+
+## #BL-05: In-flight blob deduplication                            [PENDING]
+  Carries: L2/A.2
+  ---
+  Verification-only: confirm dedup works for concurrent identical uploads.
+
+## #BL-06: Materialization depth (shallow vs deep)                 [PENDING]
+  Carries: L2/A.7
+  ---
+  Resource materialization: when to shallow-copy vs deep-copy.
+
+## #BL-07: Single-process control plane — no HA                    [PENDING]
+  Carries: D1
+  ---
+  Acknowledged limitation. Track as future HA consideration.
+
+## #BL-08: Manifest cleanup should go through resource layer         [PENDING]
+  ---
+  Manifest cleanup currently reaches through to objects directly
+  (getManifestObjectIds, deleteObjectBatch). Proper layering:
+  manifests clean up resources, resources clean up their own objects.
+  Likely folds into #LIFE-05 (garbage collection) when triaged.
+
+## #BL-09: Workflow field name drift (error_json, manifest_id)       [RESOLVED → #FND-07]
+  ---
+  Spec Ch03 says `error_message` and `current_manifest_id` for workflows.
+  Impl uses `error_json` (structured errors — better) and `manifest_id`
+  (permanent FK, not transient ownership — more precise). Resolved: spec Ch03
+  updated to match impl (error_json, manifest_id).
+
+## #BL-10: Missing sealManifest() in db layer                        [PENDING]
+  ---
+  impl-pseudo defines sealManifest(id) with DRAFT→SEALED transition
+  and idempotency check. Currently absent from db.ts — callers must
+  use raw SQL. Likely folds into #LIFE-12 (manifest resource layer).
+
+## #BL-11: Missing allocation atomic transition helpers in db layer    [PENDING]
+  ---
+  impl-pseudo defines updateAllocationStatus() (updated_at bump + re-read)
+  and claimAllocation() (two-phase atomic transition concurrency pattern). Both absent
+  from db.ts. Risk of ad-hoc race protection without centralised atomic transitions.
+  Likely folds into #LIFE-01 (allocation lifecycle).
+
+## #BL-12: manifest_resources missing owner_type/owner_id columns    [PENDING]
+  ---
+  Spec Ch04 §4.2 defines owner_type (manifest/workflow/policy) and
+  owner_id for resource claiming protocol. Missing from both SQL schema
+  and db.ts ManifestResource type. resources.ts forward-declares them
+  (ownerType/ownerId) but they can't be populated from DB.
+  Likely folds into #LIFE-12 (manifest resource layer).
+
+## #BL-13: manifest_resources missing cleanup_processed_at field     [PENDING]
+  ---
+  impl-pseudo B21 defines cleanup_processed_at to prevent double-processing
+  of blob reference decrements during manifest cleanup. Absent from both
+  SQL schema and TypeScript types. Could cause ref count underflow.
+  Likely folds into #LIFE-05 (garbage collection).
+
+## #BL-14: Flaky E2E simulated test — shutdown race                    [RESOLVED → #FND-10]
+  ---
+  "echo hello: full workflow completes" occasionally fails with DATABASE_ERROR
+  (Database not initialized) during executeLoop → atomicTransition → getDatabase.
+  Engine loop continues after closeDatabase() during shutdown. Passes in isolation.
+  Triaged to #FND-10 (graceful engine shutdown before DB close).
+
+## #BL-15: Agent panic payload sends instance_id, control plane omits it [PENDING]
+  ---
+  Agent heartbeat.py sends instance_id in HeartbeatPanicStart/Complete payloads
+  (lines 266, 289) but control plane HeartbeatPanicStartRequest /
+  HeartbeatPanicCompleteRequest types in api/agent.ts omit the field.
+  Silently ignored by Elysia. Means control plane can't use instance_id for
+  auth during panic — falls back to run_id lookup which fails if agent is idle.
+  Likely folds into #AGENT-01 (panic handler).
+
+## #BL-16: Idempotency requests should include request timestamp       [PENDING]
+  ---
+  Retry requests arriving hours after the initial attempt could collide
+  with a recycled idempotency key whose TTL has expired and been cleaned.
+  Including a client-side request timestamp (e.g. X-Request-Timestamp or
+  a field in the body) lets the server reject stale retries outside a
+  validity window, preventing weird edge cases with long-delayed retries.
+  Likely folds into #API-06 (rate limiting / request validation).

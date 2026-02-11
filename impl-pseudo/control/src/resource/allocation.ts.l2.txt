@@ -3,7 +3,7 @@
 Cross-references:
 - Types: `../../../shared/src/types.ts.l2.txt` (AllocationStatus, TailscaleStatus)
 - Timing: `../../../shared/src/config/timing.ts.l2.txt` (TIMING constants)
-- Transitions: `../workflow/state-transitions.ts.l2.txt` (TransitionResult, atomicTransition, CAS pattern)
+- Transitions: `../workflow/state-transitions.ts.l2.txt` (TransitionResult, atomicTransition, atomic transition pattern)
 - Reconciliation: `../background/reconciliation.ts.l2.txt` (recoverStuckClaimedAllocations)
 - Hold expiry: `../background/hold-expiry.ts.l1.txt` (background hold clearing)
 - SSH (CLI): `../../../../cli/src/ssh.ts.l2.txt` (config generation, extend/release commands)
@@ -101,7 +101,7 @@ function isInWarmPool(status: AllocationStatus): boolean {
 
 ## RaceConditionActiveComplete
 
-Both handlers use `UPDATE ... WHERE status = 'ACTIVE'` (first-write-wins CAS).
+Both handlers use `UPDATE ... WHERE status = 'ACTIVE'` (first-write-wins atomic update).
 Only one succeeds; loser sees `changes === 0` and logs warning.
 
 Key properties:

@@ -112,7 +112,7 @@ BT8: sealManifest import — FIXED
 BT9: WorkflowDefinition format mismatch — FIXED
 
 — Slice 2 —
-EX1: CAS acronym overload — DONE (Step 2)
+EX1: CAS→atomic-transition rename — DONE (Step 2)
 EX2: Manifest double-seal — DONE (Step 5)
 EX4: Graceful shutdown + crash recovery — DONE (Step 6)
 EX5: Authentication — DONE (Step 4)
@@ -124,7 +124,7 @@ BT6: State transition duplication in db.ts — DONE (Step 2)
 S2.C1: Intent typing module — DONE (Step 1)
 S2.C2: Log streaming catch-up — DONE (Step 7)
 S2.C3: Log manifest ownership — DONE (Step 7)
-S2.D1: finalize CAS sealManifest — DONE (Step 2)
+S2.D1: finalize atomic sealManifest — DONE (Step 2)
 S2.D2: getLogUpdates poll column — DONE (Step 7)
 S2.D3: SSE id field for reconnection — DONE (Step 7)
 S2.P1: Provider scope expansion — DONE (Step 3, design only)
@@ -142,7 +142,7 @@ SD-17: LaunchRun response stream_url added — FIXED
 SD-09: HeartbeatMessage.workflow_state Type.String — FIXED
 SD-07: BootstrapConfig.agentUrl required — FIXED
 SD-EV2: timed_out removed from terminal states — FIXED
-SM-11: Compensation → releaseAllocation with CAS — FIXED
+SM-11: Compensation → releaseAllocation with atomic guard — FIXED
 SM-12: Cold-path AVAILABLE→CLAIMED not direct CLAIMED — FIXED
 SD-02: sealManifest resource detach — FIXED
 SD-06: Warm pool heartbeat freshness check — FIXED

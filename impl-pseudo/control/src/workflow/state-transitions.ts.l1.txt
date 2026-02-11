@@ -1,7 +1,7 @@
 # state-transitions.ts - State Machine Ownership & Transitions
 
 Defines ownership boundaries for state transitions across allocations, manifests, and workflows.
-See L2 for two-phase CAS pattern, TransitionResult type, atomic transition functions, crash recovery.
+See L2 for two-phase atomic transition pattern, TransitionResult type, atomic transition functions, crash recovery.
 
 ## TransitionResult Pattern
 
@@ -46,5 +46,5 @@ Retry: Creates NEW workflow with same inputs, NOT failed->running transition
 
 ## Atomic Transitions
 
-All transitions use two-phase CAS: SELECT to verify state, UPDATE with WHERE updated_at = original
+All transitions use two-phase atomic transition: SELECT to verify state, UPDATE with WHERE updated_at = original
 Optimistic locking detects concurrent modifications

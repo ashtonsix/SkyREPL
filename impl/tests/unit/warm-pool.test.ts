@@ -274,7 +274,7 @@ describe("BT5: findWarmAllocation scoring", () => {
 // Warm Claim with Retry
 // =============================================================================
 
-describe("Warm claim with CAS retry", () => {
+describe("Warm claim with atomic retry", () => {
   test("claimAllocation succeeds on first try for AVAILABLE allocation", () => {
     const instance = createTestInstance({ spec: "gpu-small" });
     const alloc = createAvailableAllocation(instance.id);

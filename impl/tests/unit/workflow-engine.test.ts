@@ -67,6 +67,9 @@ import {
   findReadyNodesFromArray,
   buildNodeContext,
   executeLoop,
+  requestEngineShutdown,
+  awaitEngineQuiescence,
+  resetEngineShutdown,
 } from "../../control/src/workflow/engine";
 
 import type {
@@ -785,6 +788,7 @@ describe("State Transitions", () => {
 
 describe("Engine Core", () => {
   beforeEach(() => {
+    resetEngineShutdown();
     initDatabase(":memory:");
     runMigrations();
 
@@ -792,7 +796,9 @@ describe("Engine Core", () => {
     // We register fresh blueprints and executors per test as needed
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    requestEngineShutdown();
+    await awaitEngineQuiescence(5_000);
     closeDatabase();
   });
 

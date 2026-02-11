@@ -180,7 +180,7 @@ ACTIVE→FAILED concrete triggers:
 
 Implementations MUST enforce transition validity and SSH access rules:
 
-- `validateAllocationTransition(current, new)`: MUST reject transitions not in VALID_TRANSITIONS. MUST return descriptive error on invalid transition. Implementations MAY use an atomicTransition pattern (CAS-guarded UPDATE with expected-state check, e.g., `UPDATE ... SET status=$new WHERE id=$id AND status=$expected RETURNING *`) as a valid enforcement mechanism.
+- `validateAllocationTransition(current, new)`: MUST reject transitions not in VALID_TRANSITIONS. MUST return descriptive error on invalid transition. Implementations MAY use an atomicTransition pattern (atomically guarded UPDATE with expected-state check, e.g., `UPDATE ... SET status=$new WHERE id=$id AND status=$expected RETURNING *`) as a valid enforcement mechanism.
 - `allowsSSHAccess(allocation)`: MUST return true when status is ACTIVE. MUST return true when status is COMPLETE AND debug_hold_until > NOW. MUST return false otherwise.
 - `isInWarmPool(status)`: Returns true when status is AVAILABLE.
 

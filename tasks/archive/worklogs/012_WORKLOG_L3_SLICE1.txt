@@ -522,7 +522,7 @@ Complexity: L | Dependencies: Steps 2, 3 | Gate: DAG executes, crash recovers
 
   5d. State transitions (state-transitions.ts)
       Single canonical source for allocation state transitions (BT6 fix).
-      validateTransition, transitionAllocation (with CAS), completed_at
+      validateTransition, transitionAllocation (with atomic guard), completed_at
       on ALL terminal states (BT2 fix).
 
   5e. Workflow + node types (engine.types.ts)
@@ -572,7 +572,7 @@ Complexity: L | Dependencies: Steps 4, 5 | Gate: end-to-end with mock agent
       spawn-instance: Two-phase spawn. Phase 1: insert instance record
         with workflow_state='spawn:pending', emit to manifest. Phase 2:
         call provider.spawn(), update record on success/failure.
-      claim-allocation: Atomic CAS claim (not used in cold path for MVK
+      claim-allocation: Atomic claim (not used in cold path for MVK
         but structurally present for CB correctness).
       wait-for-boot: Poll instance status via provider.get() until
         status='running'. For OrbStack, near-instant.
@@ -580,10 +580,10 @@ Complexity: L | Dependencies: Steps 4, 5 | Gate: end-to-end with mock agent
         set, workdir assigned. Emit to manifest (priority 90).
       sync-files: Generate blob download URLs. Send start_run message
         via SSE to agent. Wait for sync_complete log message.
-        Transition CLAIMED -> ACTIVE on success.
+        Atomic transition CLAIMED -> ACTIVE on success.
       await-completion: Block until run_complete message received from
         agent. Extract exit_code.
-      finalize-run: Transition ACTIVE -> COMPLETE. Set completed_at.
+      finalize-run: Atomic transition ACTIVE -> COMPLETE. Set completed_at.
         Seal manifest with expires_at (BT8 fix). Update run status.
 
   6c. Resource CRUD (instance.ts, run.ts)
@@ -981,13 +981,14 @@ IMPLEMENTATION SEQUENCE SUMMARY
              Key: snake_case wire format, wait-for-boot node added (9-node DAG),
              CB pattern for warm/cold convergence, updated_at on 3 DDL tables.
 [2026-02-09] Step 2 COMPLETE (material layer). db.ts 571→1184 lines, storage.ts
-             188→311 lines. 59 tests. WAL, CAS claims, auto updated_at, blob dedup.
+             188→311 lines. 59 tests. WAL, atomic claims, auto updated_at, blob dedup.
 [2026-02-09] Step 3 COMPLETE (shared types). Already realized during Steps 1/1.5.
              TypeBox schemas ARE the wire types. 6 files, ~2,048 lines.
 [2026-02-09] Step 4 COMPLETE (provider layer). orbstack.ts 678 lines, full orbctl
              integration. 34 new tests. 93 total tests pass.
 [2026-02-09] Step 5 COMPLETE (workflow engine). engine.ts 1077 lines, state-transitions.ts
              569 lines, patterns.ts 265 lines. 102 new tests. 195 total pass.
+             Atomic transition pattern for state changes.
 [2026-02-09] Step 6 COMPLETE (launch-run intent). 9-node DAG, all node executors.
              AgentBridge pattern for DI. 195 tests pass.
 [2026-02-09] Step 7 COMPLETE (API layer). Elysia routes, SSEManager, WebSocket log

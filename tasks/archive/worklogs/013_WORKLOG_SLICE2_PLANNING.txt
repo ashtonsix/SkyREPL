@@ -268,7 +268,7 @@ No replenishment after run completion. No expiry of stale AVAILABLE allocations.
 2. CLAIM PATH:
    resolve-instance calls findWarmAllocation with scoring.
    If found: return { warmAvailable: true, allocationId }.
-   claim-warm-allocation uses claimAllocation CAS (already implemented).
+   claim-warm-allocation uses claimAllocation atomic transition (already implemented).
    If race lost: retry 3x with 50ms backoff, then fall through to cold path.
 
 3. RECYCLE (in finalize):
@@ -335,7 +335,7 @@ Grouped into 8 candidate implementation steps:
 STEP 1: Foundation fixes (bug fixes, schema cleanup)
   - S2.D1 + BT8: Fix finalize sealManifest import (use state-transitions.ts)
   - BT6: Remove legacy allocation functions from db.ts
-  - EX1: Rename CAS -> "atomic transition" in state machine code
+  - EX1: Atomic transition terminology in state machine code
   - EX2: Fix double-seal (check manifest status before sealing in engine)
   - EX7: Make cancelWorkflow idempotent (return success if already cancelled)
   - EX8: Make finalize idempotent (detect already-complete allocation)

@@ -4,7 +4,7 @@
 
 SkyREPL: cloud compute orchestration for lifecycle management and reproducibility. Control plane (VPS) + CLI client + Python agent (on instances).
 
-**Current phase:** MVK complete. 367 tests pass (0 failures). Backlog: `BACKLOG.txt`. Completed: `WORKLOG_MVK.txt`.
+**Current phase:** Post-MVK, parallel epic development. See `tasks/ROADMAP.txt`.
 
 ## Dispatch
 
@@ -24,7 +24,7 @@ Agent teams (experimental): multiple independent sessions with shared task lists
 
 ## Specification
 
-~9,500 lines across 15 chapters in `spec/`. **Don't read spec chapters directly** — spawn subagents to extract what you need.
+15 chapters in `spec/`. **Don't read spec chapters directly** — spawn subagents to extract what you need.
 
 - Ch01-04: Foundation (Introduction, Material, Resources, Manifest)
 - Ch05-07: Execution (Allocations, Workflows, Intents)
@@ -46,32 +46,38 @@ Three-tier: **MANIFEST → RESOURCE → MATERIAL**
 
 ## Code Layout
 
-Two directories:
-
-- **`impl/`** — L3 working code (Bun workspace monorepo). Real `.ts`/`.py` files. Slices 1-2 + intermission complete.
-- **`impl-pseudo/`** — L1/L2 reference pseudocode (154 files). Stale files excised; 16 marked "STILL USEFUL"; ~39 unimplemented reference preserved.
-
-Structure (both dirs): `control/`, `cli/`, `shared/`, `agent/`, `tests/`
+- **`impl/`** — L3 working code (Bun workspace monorepo). Structure: `control/`, `cli/`, `shared/`, `agent/`, `tests/`.
+- **`impl-pseudo/`** — L1/L2 reference pseudocode. Subsumed as epics complete (tracked in `tasks/ROADMAP.txt`).
+- **`tasks/`** — Project management: epics, worklogs, roadmap, conventions. See `tasks/CONVENTIONS.txt` for task ID format and way of working.
 
 Stack: Bun runtime, bun:sqlite (WAL), ElysiaJS, TypeBox, Python stdlib-only agent.
 
 CLI entry point: `impl/cli/bin/repl` (added to PATH via `~/.zshrc`). Run `repl` from anywhere.
 
-**Source of truth:** Recent WORKLOG > spec > impl and impl-pseudo tied.
+**Source of truth:** Recent worklog > spec > impl and impl-pseudo tied.
 
 ## Testing
 
 Mix of automated and interactive whole-system testing:
 
-- **Automated:** `bun test` (unit + integration + simulated E2E). Fast and near-comprehensive.
+- **Automated:** `bun test` (unit + integration + simulated E2E). Near-comprehensive but slow (~2 min).
 - **Interactive:** `demo/` project with `repl.toml` profiles for breadth-first human/agent exploration. Catches friction and qualitative issues that automated tests miss.
+
+**Never run the full suite multiple times to grep different things.** Run once, write scrollback to disk, then read the file:
+```bash
+bun test 2>&1 | tee /tmp/skyrepl-test-output.txt
+```
+Then use Read/Grep on `/tmp/skyrepl-test-output.txt` for any analysis. The preload (`tests/preload-quiet.ts`) redirects console output to `/tmp/skyrepl-test-detail.log` and a shim (`tests/bun-test-shim.ts`) interleaves per-test `▶`/`◀` markers — useful for attributing log lines to tests and finding slow/hanging ones.
 
 ## OrbStack IP Exhaustion
 
 If `orbctl create` fails with "missing IP address", do NOT run the recovery script yourself. Ask the user to exit this Claude session, run `bash scripts/orbstack-reset-networking.sh` from the macOS host, then resume.
 
-## Worklogs
+## Task Tracking
 
-`WORKLOG_*.txt` (root) for active work. `worklogs/NNN_WORKLOG_*.txt` for archived.
+See `tasks/CONVENTIONS.txt` for full details. Quick reference:
 
-Short IDs: Ch8 (spec chapter), 007 (archived worklog), R2.Cr1 (issue severity).
+- **Task IDs:** `#EPIC-NN` (e.g., `#WF-01`, `#LIFE-07`). Defined in `tasks/epics/*.txt`.
+- **Epics:** FND, LIFE, WF, AGENT, SNAP, API, CLI, ORPH, PROV, DX.
+- **Worklogs:** hot at repo root, archived to `tasks/archive/`. Numbering from 018.
+- **Cross-refs:** validated by `scripts/check-crossrefs.py` (task IDs + spec anchors).

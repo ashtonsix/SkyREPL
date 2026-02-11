@@ -377,7 +377,7 @@ async function claimWarmInstance(
   const db = getDatabase();
 
   return transaction(() => {
-    // Lock old manifest (CAS-style: re-check status)
+    // Lock old manifest (atomic: re-check status)
     const manifest = queryOne<ManifestRow>(
       'SELECT * FROM manifests WHERE id = ?',
       [oldManifestId]

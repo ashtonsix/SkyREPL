@@ -76,21 +76,21 @@ STEP 1: Intent typing — schema-first node I/O ................ [x] DONE
 STEP 2: Foundation cleanup — legacy removal + sealManifest .... [x] DONE
   Items: BT6, S2.D1 (+BT8), EX1
   Files: db.ts (remove legacy), finalize.ts (fix import),
-         state-transitions.ts (rename CAS), claim-allocation.ts (dead import)
+         state-transitions.ts (rename atomic transition terminology), claim-allocation.ts (dead import)
   Why here: Small, bounded fixes that eliminate confusion before new code
     lands. BT6 legacy functions are dead code (imported but never called in
     claim-allocation.ts:5). S2.D1 is a one-import fix with correctness impact.
   Deliverables:
     - Remove claimAllocation() and updateAllocationStatus() from db.ts
     - Remove dead import from claim-allocation.ts:5
-    - finalize.ts: import sealManifest from state-transitions.ts (CAS version)
-    - Rename "CAS" to "atomic transition" in state machine code/comments
+    - finalize.ts: import sealManifest from state-transitions.ts (atomic version)
+    - Rename compare-and-swap terminology to "atomic transition" in state machine code/comments
       (reserve CAS for Content-Addressable Storage)
   Confirmed state:
-    - db.ts:432 updateAllocationStatus — raw status overwrite, no CAS
+    - db.ts:432 updateAllocationStatus — raw status overwrite, no atomic guard
     - db.ts:446-479 claimAllocation — transaction-based but superseded
     - claim-allocation.ts imports updateAllocationStatus but never calls it
-    - finalize.ts imports sealManifest from db.ts (no CAS guard) instead of
+    - finalize.ts imports sealManifest from db.ts (no atomic guard) instead of
       state-transitions.ts
     - state-transitions.ts:568 lines, comprehensive, canonical
 
@@ -170,7 +170,7 @@ STEP 6: Shutdown + crash recovery + cancel API ................ [x] DONE
     - shutdown() clears intervals then process.exit(0). No drain, no VM
       cleanup, no WAL checkpoint.
     - recoverWorkflows() exists but uses raw updateWorkflowNode() from db.ts
-      (not CAS state-transitions). Resets idempotent nodes to pending,
+      (not atomic state-transitions). Resets idempotent nodes to pending,
       fails non-idempotent.
     - No cancel API endpoint exists.
     - isIdempotent() already categorizes nodes (7 idempotent, 2 not).
@@ -215,7 +215,7 @@ STEP 8: Warm pool lifecycle ................................... [x] DONE
     - BT5: Scoring in findWarmAllocation — CASE: 100 (init_checksum match),
       50 (NULL/vanilla), 0 (mismatch, excluded). Tiebreaker: FIFO.
     - resolve-instance returns warmAvailable: true when match found
-    - claim-warm-allocation uses claimAllocation CAS with retry (3x, 50ms)
+    - claim-warm-allocation uses claimAllocation atomic transition with retry (3x, 50ms)
     - Replenishment in finalize: after completeAllocation, check health +
       MAX_ALLOCATIONS_PER_INSTANCE, create new AVAILABLE allocation
     - Background reconciliation: timeout stale CLAIMED, expire old AVAILABLE
@@ -253,7 +253,7 @@ Slice 2 is DONE when:
   1. [x] Intent schemas validate launch-run node I/O at submission + completion
   2. [x] instanceId/instance_id bug is a compile error (not a runtime surprise)
   3. [x] No legacy state transition functions in db.ts (BT6 complete)
-  4. [x] finalize uses CAS sealManifest (S2.D1 complete)
+  4. [x] finalize uses atomic sealManifest (S2.D1 complete)
   5. [x] Agent with wrong/missing token gets 401 on all agent endpoints
   6. [x] SIGTERM drains in-flight workflows, terminates VMs, checkpoints WAL
   7. [x] Kill mid-workflow → restart → workflow recovers (idempotent nodes
@@ -311,7 +311,7 @@ the number of files that depend on them. Doing these first means:
 
   Steps 1-3 are independent of each other (can parallelize).
   Steps 4-5 are independent of each other.
-  Step 7 (Logs) is independent of everything except Step 2 (needs CAS).
+  Step 7 (Logs) is independent of everything except Step 2 (needs atomic transitions).
   Step 8 depends on Steps 1, 2, 6.
 
 ### New findings from exploration (not in PE8)
@@ -325,7 +325,7 @@ the number of files that depend on them. Doing these first means:
   - sse-protocol.ts:503 has a dangling unsubscribe bug: `{} as WebSocket`
     will never match the subscribed fakeWs.
   - recoverWorkflows() uses raw updateWorkflowNode() from db.ts, not
-    CAS-based state-transitions. This is itself a BT6-class bug.
+    atomic state-transitions. This is itself a BT6-class bug.
 
 ## Log
 
@@ -341,7 +341,7 @@ the number of files that depend on them. Doing these first means:
   - Removed updateAllocationStatus() and claimAllocation() from db.ts (BT6 complete)
   - Fixed finalize.ts: sealManifest now imported from state-transitions.ts (S2.D1)
   - Removed dead updateAllocationStatus import from claim-allocation.ts
-  - Renamed "CAS" → "atomic transition" in state-transitions.ts comments (EX1)
+  - Renamed compare-and-swap → "atomic transition" in state-transitions.ts comments (EX1)
   - Updated db.test.ts to import claimAllocation and sealManifest from state-transitions
   - All 44 db unit tests pass (97 expect calls)
 
@@ -499,7 +499,7 @@ PHASE B: IMMUNITY (auth, idempotency, shutdown/recovery) — IN PROGRESS
     startup. For each running node: checks idempotent flag. If idempotent,
     calls resetNodeForRetry() (resets to PENDING, clears error). If not
     idempotent, calls failNode() with CRASH_RECOVERY error. Uses state-transitions
-    (CAS-based) instead of raw updateWorkflowNode from db.ts.
+    (atomic) instead of raw updateWorkflowNode from db.ts.
   - Created POST /v1/workflows/:id/cancel endpoint in control/src/api/routes.ts:
     Idempotent cancel operation. Checks workflow status, transitions to CANCELLED
     if running, returns success if already terminal. Fires cancel_run SSE message
@@ -560,7 +560,7 @@ PHASE C: FUNCTIONAL GAPS + HARDENING — IN PROGRESS
     spawn-instance + wait-for-boot nodes. If not found: returns
     { warmAvailable: false } and skips claim-warm-allocation node (cold path).
   - Modified workflow/nodes/claim-allocation.ts: Now reads allocationId from
-    resolve-instance output (not raw input). Retries CAS claimAllocation up to
+    resolve-instance output (not raw input). Retries atomic claimAllocation up to
     WARM_CLAIM_MAX_RETRIES (3) times with WARM_CLAIM_RETRY_DELAY_MS (50ms)
     between attempts. Breaks immediately on WRONG_STATE/NOT_FOUND (not retryable).
     Throws CAPACITY_UNAVAILABLE after exhausting retries.
@@ -578,7 +578,7 @@ PHASE C: FUNCTIONAL GAPS + HARDENING — IN PROGRESS
     WARM_CLAIM_MAX_RETRIES (3), MAX_ALLOCATIONS_PER_INSTANCE (10). Updated
     CLAIMED_TIMEOUT_MS from 10min to 5min for faster warm pool recycling.
   - Created tests/unit/warm-pool.test.ts: 32 tests (66 assertions) covering
-    BT5 scoring (13 tests), CAS claim retry (3 tests), resolve-instance warm/cold
+    BT5 scoring (13 tests), atomic claim retry (3 tests), resolve-instance warm/cold
     paths (2 tests), replenishment conditions (5 tests), background reconciliation
     helpers (4 tests), countInstanceAllocations (2 tests), full lifecycle E2E (1 test).
   - Tests: 278 pass (224 unit + 54 integration), 0 failures, 561 unit assertions

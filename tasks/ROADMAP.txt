@@ -1,0 +1,182 @@
+================================================================================
+ROADMAP — SkyREPL High-Level Steering
+================================================================================
+
+================================================================================
+VISION
+================================================================================
+
+Spec-complete MVP: all 4 intents, 3+ cloud providers, orphan safety, full CLI,
+docs ready for GTM. Beyond MVP: ongoing development guided by spec evolution,
+community feedback, production hardening.
+
+
+================================================================================
+PHASE GATES
+================================================================================
+
+Gate | Name                  | Key Requirements              | Criterion
+-----+-----------------------+-------------------------------+------------------
+G0   | Foundation Unblock    | #FND-01 through #FND-10       | db/ split exists, HIGH items resolved, gate audit clean, parallel tracks unblocked
+G1   | Self-Cleaning System  | #LIFE-01→#LIFE-12, #WF-01     | terminate-instance works E2E, background tasks running, compensation operational
+G2   | Agent Hardened        | #AGENT-01→#AGENT-07           | Agent handles panic, spot, artifacts, degraded mode. No orphaned agents possible.
+G3   | Multi-Provider        | #PROV-01→#PROV-04             | `repl run` works on AWS + Lambda + RunPod + OrbStack
+G4   | Feature Complete      | All LIFE/WF/ORPH/SNAP/API     | All 4 intents, orphan system, all workflow patterns, full API
+G5   | GTM Ready             | All CLI/DX tasks              | README, quickstart, provider guides, SSH, deployable to VPS
+
+
+================================================================================
+SPEC COVERAGE MATRIX
+================================================================================
+
+Ch | Name           | Epic(s)      | Status     | Key gaps
+---+----------------+--------------+------------+----------------------------------
+01 | Introduction   | —            | COMPLETE   | —
+02 | Material       | FND          | PARTIAL    | GC, TTL cache
+03 | Resources      | LIFE, SNAP   | STUB       | Materialization, reconciliation, snapshot/artifact
+04 | Manifest       | LIFE         | PARTIAL    | Claim protocol, cleanup intent
+05 | Allocations    | LIFE         | PARTIAL    | SSH, hold expiry, reconciliation
+06 | Workflows      | WF           | PARTIAL    | IAR, PFO, subworkflows, compensation
+07 | Intents        | LIFE, SNAP   | 1/4 BUILT  | terminate, snapshot, cleanup missing
+08 | Providers      | PROV         | 1/5 BUILT  | AWS, Lambda, RunPod, Tailscale
+09 | API            | API          | PARTIAL    | L1 CRUD, pagination, rate limiting, intent endpoints
+10 | CLI            | CLI          | MVK DONE   | SSH, preflight, output modes
+11 | Agent          | AGENT        | PARTIAL    | Panic, spot, artifacts, degraded
+12 | Orphans        | ORPH         | NOT BUILT  | Entire system
+13 | Types          | API          | PARTIAL    | Updated as epics land
+14 | Implementation | DX           | STUB       | Pointer chapter
+15 | Operations     | DX           | STUB       | Pointer chapter
+
+
+================================================================================
+DEPENDENCY GRAPH
+================================================================================
+
+        FND ──────────┬──────────┬──────────┬──────────┐
+         │            │          │          │          │
+         │            ▼          ▼          ▼          ▼
+         │          LIFE ──→  ORPH        WF        AGENT
+         │            │                    │
+         │            ├──────→ SNAP ──→  DX│
+         │            │                    │
+         │            │         ┌──────────┘
+         │            │         │
+         │            │         ▼
+         │            │       PROV
+         │            │
+         │            ▼
+         └──────→   API ──→  CLI
+
+
+================================================================================
+IMPL-PSEUDO SUBSUMPTION TRACKER
+================================================================================
+
+STILL USEFUL FILES (14):
+------------------------
+
+File                                                | Task      | Status
+----------------------------------------------------+-----------+---------
+control/src/workflow/compensation.ts.l1.txt         | #WF-01    | PENDING
+control/src/workflow/compensation.ts.l2.txt         | #WF-01    | PENDING
+control/src/background/reconciliation.ts.l1.txt     | #LIFE-11  | PENDING
+control/src/background/hold-expiry.ts.l1.txt        | #LIFE-03  | PENDING
+control/src/background/garbage-collection.ts.l1.txt | #LIFE-05  | PENDING
+control/src/resource/allocation.ts.l1.txt           | #LIFE-01  | PENDING
+control/src/resource/instance.ts.l1.txt             | #LIFE-01  | PENDING
+control/src/resource/run.ts.l1.txt                  | #LIFE-01  | PENDING
+control/src/resource/manifest.ts.l1.txt             | #LIFE-12  | PENDING
+control/src/material/external.ts.l1.txt             | #PROV-06  | PENDING
+control/src/api/middleware/idempotency.ts.l1.txt    | #FND-03   | DONE
+control/src/provider/type-boundaries.ts.l1.txt      | #PROV-07  | PENDING
+agent/executor.py.l1.txt                            | #AGENT-07 | PENDING
+agent/heartbeat.py.l1.txt                           | #FND-04   | DONE
+control/src/main.ts.l1.txt                          | #LIFE-02  | PENDING
+cli/src/commands/run.ts.l1.txt                      | #CLI-03   | PENDING
+
+
+UNIMPLEMENTED REFERENCE FILES (~39):
+------------------------------------
+
+LIFE Epic (Lifecycle):
+  - control/src/intent/terminate-instance.ts.l1.txt     → #LIFE-06
+  - control/src/resource/snapshot.ts.l1.txt             → (SNAP-01)
+  - control/src/resource/artifact.ts.l1.txt             → (SNAP-02)
+
+SNAP Epic (Snapshots & Artifacts):
+  - control/src/intent/snapshot-instance.ts.l1.txt      → #SNAP-01
+  - control/src/intent/cleanup-instances.ts.l1.txt      → #SNAP-03
+  - control/src/background/artifact-upload.ts.l1.txt    → #SNAP-02
+  - control/src/background/snapshot-gc.ts.l1.txt        → #SNAP-04
+
+WF Epic (Workflows):
+  - control/src/workflow/patterns/iar.ts.l1.txt         → #WF-02
+  - control/src/workflow/patterns/pfo.ts.l1.txt         → #WF-03
+  - control/src/workflow/patterns/subworkflow.ts.l1.txt → #WF-04
+  - control/src/workflow/rollback.ts.l1.txt             → #WF-05
+
+ORPH Epic (Orphan Management):
+  - control/src/orphan/detector.ts.l1.txt               → #ORPH-01
+  - control/src/orphan/reconciler.ts.l1.txt             → #ORPH-02
+  - control/src/orphan/guardian.ts.l1.txt               → #ORPH-03
+  - control/src/background/orphan-scan.ts.l1.txt        → #ORPH-04
+
+PROV Epic (Providers):
+  - control/src/provider/aws/ec2.ts.l1.txt              → #PROV-01
+  - control/src/provider/aws/lambda.ts.l1.txt           → #PROV-02
+  - control/src/provider/runpod/compute.ts.l1.txt       → #PROV-03
+  - control/src/provider/tailscale/vpn.ts.l1.txt        → #PROV-04
+  - control/src/provider/registry.ts.l1.txt             → #PROV-05
+  - control/src/provider/capability-detection.ts.l1.txt → #PROV-06
+
+AGENT Epic:
+  - agent/panic-handler.py.l1.txt                       → #AGENT-02
+  - agent/spot-handler.py.l1.txt                        → #AGENT-03
+  - agent/artifact-upload.py.l1.txt                     → #AGENT-04
+  - agent/degraded-mode.py.l1.txt                       → #AGENT-05
+  - agent/network-recovery.py.l1.txt                    → #AGENT-06
+
+API Epic:
+  - control/src/api/crud/instances.ts.l1.txt            → #API-01
+  - control/src/api/crud/runs.ts.l1.txt                 → #API-02
+  - control/src/api/crud/allocations.ts.l1.txt          → #API-03
+  - control/src/api/crud/manifests.ts.l1.txt            → #API-04
+  - control/src/api/pagination.ts.l1.txt                → #API-05
+  - control/src/api/rate-limiting.ts.l1.txt             → #API-06
+
+CLI Epic:
+  - cli/src/commands/ssh.ts.l1.txt                      → #CLI-01
+  - cli/src/preflight.ts.l1.txt                         → #CLI-02
+  - cli/src/output-modes.ts.l1.txt                      → #CLI-04
+
+DX Epic (Developer Experience):
+  - docs/quickstart.md.l1.txt                           → #DX-01
+  - docs/provider-guides/aws.md.l1.txt                  → #DX-02
+  - docs/provider-guides/lambda.md.l1.txt               → #DX-02
+  - docs/provider-guides/runpod.md.l1.txt               → #DX-02
+
+
+================================================================================
+ACTIVE TRACKS
+================================================================================
+
+Track | Epic  | Current task | Status
+------+-------+--------------+---------
+T1    | FND   | —            | COMPLETE — Gate 0 passed
+
+
+================================================================================
+PROGRESS LOG
+================================================================================
+
+2026-02-11  Restructured project management: tasks/ directory, 10 epics, 79 tasks.
+            Migrated from BACKLOG.txt + flat worklogs/ to epic-based tracking.
+2026-02-11  Refined tasks/: worklogs→archive, epic files restructured (scope/index/detail/scratchpad),
+            pre-commit hook for crossref validation, STATUS.txt archived.
+2026-02-11  FND #FND-01 through #FND-07 complete (worklogs 018, 019).
+2026-02-11  Gate 0 audit: 4 HIGH, 5 MED quality issues, 12 spec drift items.
+            3 remediation tasks added (#FND-08, #FND-09, #FND-10).
+            Subsumption tracker: 2 files→DONE, external.ts re-mapped to #PROV-06.
+            #BL-14 triaged to #FND-10. #BL-15 added (agent panic schema).
+2026-02-11  FND-08/09/10 complete (worklog 020). Gate 0 PASSED.
+            303 tests pass, 0 fail. Simulated E2E 10/10 consecutive passes.

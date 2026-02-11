@@ -4,7 +4,7 @@ Cross-references:
 - Engine: `../engine.ts.l2.txt` (§ExecuteNode, NodeExecutor, NodeContext)
 - Intent: `../../intent/launch-run.ts.l2.txt` (§claim-warm-allocation handler, CB triggerOnError)
 - Allocation: `../../resource/allocation.ts.l2.txt` (§claimWarmPoolAllocation, §CoreSchema)
-- Transitions: `../state-transitions.ts.l2.txt` (§claimAllocation, CAS pattern)
+- Transitions: `../state-transitions.ts.l2.txt` (§claimAllocation, atomic transition pattern)
 - Spec: Ch7 §7.1 (claim-warm-allocation node, CB with triggerOnError fallback)
 
 ## Imports
@@ -41,7 +41,7 @@ export interface ClaimAllocationOutput {
 ```typescript
 export const claimAllocationExecutor: NodeExecutor<ClaimAllocationInput, ClaimAllocationOutput> = {
   name: 'claim-allocation',
-  idempotent: true,  // CAS-based: re-execution is safe (already CLAIMED = success)
+  idempotent: true,  // atomic: re-execution is safe (already CLAIMED = success)
 
   async execute(ctx: NodeContext): Promise<ClaimAllocationOutput> {
     const input = ctx.input as ClaimAllocationInput;
@@ -88,10 +88,10 @@ export const claimAllocationExecutor: NodeExecutor<ClaimAllocationInput, ClaimAl
       };
     }
 
-    // ── Atomic CAS claim: AVAILABLE -> CLAIMED ────────────────────────
-    // Uses two-phase CAS from state-transitions.ts.
+    // ── Atomic claim: AVAILABLE -> CLAIMED ────────────────────────────
+    // Uses two-phase atomic transition from state-transitions.ts.
     // If another workflow claimed this allocation between resolve-instance
-    // and now, the CAS fails with WRONG_STATE or RACE_LOST.
+    // and now, the atomic transition fails with WRONG_STATE or RACE_LOST.
     const result = await claimAllocation(input.allocationId, input.runId);
 
     if (!result.success) {
@@ -190,5 +190,5 @@ claim-allocation FAILS
 |----------------------------|------------|--------------------------------------------------|
 | VALIDATION_ERROR           | Input      | Fail immediately (missing allocationId/runId)    |
 | INVALID_STATE_TRANSITION   | Pre-check  | Fail immediately (active allocation on instance) |
-| CAPACITY_UNAVAILABLE       | CAS claim  | CB triggerOnError routes to spawn-instance       |
+| CAPACITY_UNAVAILABLE       | Atomic claim | CB triggerOnError routes to spawn-instance     |
 | DATABASE_ERROR             | DB         | Fail immediately (non-retryable)                 |

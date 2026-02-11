@@ -68,7 +68,7 @@ export const createAllocationExecutor: NodeExecutor<CreateAllocationInput, Creat
     const workdir = input.workdir || `/home/user/run-${input.runId}`;
 
     // SM-12 fix: Create in AVAILABLE state first, then claim via state machine.
-    // This ensures all state transitions go through proper CAS-guarded functions.
+    // This ensures all state transitions go through proper atomic transition functions.
     const allocation = createAllocation({
       run_id: null,
       instance_id: instanceId,

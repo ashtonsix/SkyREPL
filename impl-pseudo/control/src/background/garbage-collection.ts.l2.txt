@@ -195,7 +195,7 @@ async function cleanOrphanedBlobs(): Promise<BlobCleanupMetrics> {
  * For dedupable buckets only (run-files, artifacts).
  * Keeps oldest blob, updates object references, deletes duplicates.
  *
- * CRITICAL: Uses transaction with CAS guard to prevent concurrent merges
+ * CRITICAL: Uses transaction with atomic guard to prevent concurrent merges
  * from corrupting object references or pointing to deleted blobs.
  */
 async function mergeDuplicateBlobs(): Promise<number> {
@@ -229,7 +229,7 @@ async function mergeDuplicateBlobs(): Promise<number> {
 }
 
 /**
- * Merge a single duplicate group with CAS guard.
+ * Merge a single duplicate group with atomic guard.
  *
  * CRITICAL: The transaction re-verifies the duplicate set hasn't changed
  * since the query. This prevents:
@@ -241,7 +241,7 @@ async function mergeDuplicateGroup(group: DuplicateGroup): Promise<number> {
   const db = getDatabase();
 
   return transaction(() => {
-    // CAS guard: Re-query the duplicate set
+    // Atomic guard: Re-query the duplicate set
     const currentBlobs = queryMany<{ id: number }>(`
       SELECT id FROM blobs
       WHERE bucket = ? AND checksum = ?

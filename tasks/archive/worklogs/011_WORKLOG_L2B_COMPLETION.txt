@@ -205,7 +205,7 @@ D15. Behavior traces (main effort, 4 traces) — DONE
    c. Cleanup-manifest: load resources → per-provider scoping → S3 deletion
       → blob GC handoff (was most troubled area in D9).
    d. Allocation state machine: AVAILABLE → CLAIMED → ACTIVE → COMPLETE
-      (+ FAILED transitions, CAS guards, warm pool claim).
+      (+ FAILED transitions, atomic guards, warm pool claim).
 
 D16. Triage + BACKLOG update — DONE
 
@@ -339,7 +339,7 @@ Legacy terms clean.
 D15 behavior traces (4 parallel):
   a. launch-run E2E — 6 blockers: missing workdir in allocation INSERT,
      allocation id: string→number, missing workflow_id in manifest INSERT,
-     3 tables missing updated_at for CAS guards (workflows, workflow_nodes, manifests)
+     3 tables missing updated_at for atomic guards (workflows, workflow_nodes, manifests)
   b. heartbeat — 1 blocker: agent heartbeat type used scalar active_ssh_sessions
      instead of active_allocations array
   c. cleanup-manifest — 5 issues (all deferred to BT1-BT4): DDL schema mismatch,
@@ -368,7 +368,7 @@ D16 triage: ~35 findings categorized.
     BT9: WorkflowDefinition format mismatch
 
 Root cause insight: The systemic updated_at ghost was caused by atomicTransition
-assuming all tables have updated_at for CAS guards. Rather than making
+assuming all tables have updated_at for atomic guards. Rather than making
 atomicTransition configurable, added updated_at to the 3 tables that need it
 (pure-additive DDL change that strengthens concurrency safety).
 

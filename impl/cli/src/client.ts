@@ -124,7 +124,7 @@ export class ApiClient {
    * Cancel a workflow.
    * POST /v1/workflows/:id/cancel
    */
-  async cancelWorkflow(id: string, reason?: string): Promise<{ workflowId: number; status: string; cancelled: boolean }> {
+  async cancelWorkflow(id: string, reason?: string): Promise<{ workflow_id: number; status: string; cancelled: boolean }> {
     const response = await fetch(`${this.baseUrl}/v1/workflows/${id}/cancel`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -135,7 +135,7 @@ export class ApiClient {
       const msg = (body as any)?.error?.message ?? `HTTP ${response.status}`;
       throw new Error(`cancel workflow failed: ${msg}`);
     }
-    return (await response.json()) as { workflowId: number; status: string; cancelled: boolean };
+    return (await response.json()) as { workflow_id: number; status: string; cancelled: boolean };
   }
 
   /**
@@ -237,18 +237,18 @@ export interface CheckBlobsResponse {
   urls: Record<string, string>;
 }
 
-// WorkflowStatus uses camelCase fields matching shared WorkflowStatusResponse.
+// WorkflowStatus uses snake_case fields matching the API wire format.
 // The 'progress' field is a CLI-specific extension for display purposes.
 export interface WorkflowStatus {
-  workflowId: number;
+  workflow_id: number;
   type: string;
   status: string;
-  currentNode: string | null;
-  nodesTotal: number;
-  nodesCompleted: number;
-  nodesFailed: number;
-  startedAt: number | null;
-  finishedAt: number | null;
+  current_node: string | null;
+  nodes_total: number;
+  nodes_completed: number;
+  nodes_failed: number;
+  started_at: number | null;
+  finished_at: number | null;
   progress: {
     completed_nodes: number;
     total_nodes: number;
@@ -259,7 +259,7 @@ export interface WorkflowStatus {
     code: string;
     message: string;
     category: string;
-    nodeId?: string;
+    node_id?: string;
     details?: unknown;
   } | null;
 }

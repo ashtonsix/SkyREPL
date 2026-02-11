@@ -1,0 +1,139 @@
+================================================================================
+EPIC AGENT — Agent Maturity
+================================================================================
+Spec: Ch11 (Agent)
+
+Scope:
+  Python agent hardening. Mostly independent after FND. Covers panic,
+  spot interruption, degraded mode, artifacts, and checkpoint support.
+
+Pseudo subsumed:
+  agent/{executor,heartbeat,spot,artifacts,checkpoint}.py.l1+l2.txt
+  agent/logs.py.l1.txt, agent/sse.py.l2.txt
+
+================================================================================
+TASK INDEX
+================================================================================
+
+  #AGENT-01  Panic diagnostics on shutdown                        [PENDING]
+  #AGENT-02  Command ack protocol                                 [PENDING]
+  #AGENT-03  SSE backpressure on slow consumers                   [PENDING]
+  #AGENT-04  Degraded mode                                        [PENDING]
+  #AGENT-05  Workdir cleanup between warm pool reuse              [PENDING]
+  #AGENT-06  Spot interruption handling                           [PENDING]
+  #AGENT-07  Artifact collection                                  [PENDING]
+  #AGENT-08  Checkpoint support                                   [PENDING]
+
+================================================================================
+TASK DETAIL
+================================================================================
+
+## #AGENT-01: Panic diagnostics on shutdown                        [Sm] [PENDING]
+  Carries: SD-12
+  Depends: #FND-04
+  Spec: Ch11 §11.14
+  ---
+  POST best-effort diagnostics (uptime, last command, memory, disk) to
+  /v1/panic on agent shutdown. Fires in panic state before self-termination.
+
+  Deliverables:
+  - [ ] Collect diagnostic payload (uptime, last command, memory, disk)
+  - [ ] POST to /v1/panic endpoint
+  - [ ] Best-effort: catch all exceptions, do not block shutdown
+
+## #AGENT-02: Command ack protocol                                 [Md] [PENDING]
+  Spec: Ch11 §11.4.5
+  Depends: #FND-01
+  ---
+  Reliable command delivery with acknowledgment. Agent sends ack after
+  receiving each SSE command. Control plane tracks unacked commands.
+
+  Deliverables:
+  - [ ] Ack message type in agent SSE protocol
+  - [ ] Agent sends ack after command dispatch
+  - [ ] Control plane tracks pending acks with timeout
+
+## #AGENT-03: SSE backpressure on slow consumers                   [Sm] [PENDING]
+  Carries: EX3
+  ---
+  Track SSE queue depth per connection. When backlogged, drop heartbeat
+  messages first to preserve command delivery.
+
+  Deliverables:
+  - [ ] Queue depth counter per SSE connection
+  - [ ] Priority: commands > logs > heartbeats
+  - [ ] Drop heartbeats when queue exceeds threshold
+
+## #AGENT-04: Degraded mode                                        [Md] [PENDING]
+  Spec: Ch11 §11.5
+  Depends: #FND-04
+  ---
+  Progressive degradation: healthy → degraded → panic.
+  Degraded: control plane unreachable but run still active.
+  Agent continues execution, buffers logs, retries control plane.
+
+  Deliverables:
+  - [ ] State machine: healthy ↔ degraded → panic
+  - [ ] Log buffering during degraded mode
+  - [ ] Automatic recovery to healthy when control plane returns
+  - [ ] Configurable degradation thresholds
+
+## #AGENT-05: Workdir cleanup between warm pool reuse              [Sm] [PENDING]
+  Spec: Ch11 §11.10
+  ---
+  Clean /tmp/repl-workdir between runs when instance is reused from
+  warm pool. Preserve agent state, clean run artifacts.
+
+  Deliverables:
+  - [ ] Workdir cleanup on new run start
+  - [ ] Preserve agent-level state files
+
+## #AGENT-06: Spot interruption handling                           [Lg] [PENDING]
+  Spec: Ch11 §11.9
+  Depends: #LIFE-07
+  Pseudo: agent/spot.py.l1.txt + .l2.txt
+  ---
+  Monitor /sys/class/dmi and cloud metadata service for spot termination
+  notices. On detection: flush logs, notify control plane, attempt graceful
+  save.
+
+  Deliverables:
+  - [ ] Spot detection thread (metadata polling)
+  - [ ] AWS spot termination notice detection
+  - [ ] Flush logs and notify control plane
+  - [ ] Graceful run interruption
+  - [ ] Integration test with simulated spot signal
+
+## #AGENT-07: Artifact collection                                  [Lg] [PENDING]
+  Spec: Ch11 §11.11
+  Depends: #LIFE-01
+  Pseudo: agent/artifacts.py.l1.txt + .l2.txt
+  ---
+  Collect output files matching artifact patterns. Upload via presigned
+  URLs to control plane blob storage.
+
+  Deliverables:
+  - [ ] Artifact pattern matching (glob patterns from run config)
+  - [ ] Presigned URL request from control plane
+  - [ ] Upload artifacts to blob storage
+  - [ ] Report artifact manifest to control plane
+
+## #AGENT-08: Checkpoint support                                   [Lg] [PENDING]
+  Spec: Ch11 §11.12
+  Depends: #SNAP-01
+  Pseudo: agent/checkpoint.py.l1.txt + .l2.txt
+  ---
+  Periodic state snapshots for crash recovery. Agent saves checkpoint
+  data, requests snapshot creation from control plane.
+
+  Deliverables:
+  - [ ] Checkpoint save/restore in executor
+  - [ ] Periodic checkpoint scheduling
+  - [ ] Snapshot creation request to control plane
+  - [ ] Recovery from last checkpoint on restart
+
+================================================================================
+SCRATCHPAD
+================================================================================
+
+(Design notes, session logs, open questions)

@@ -4,10 +4,11 @@ import { createServer } from "./api/routes";
 import { registerAgentRoutes, createRealAgentBridge } from "./api/agent";
 import { registerWebSocketRoutes, registerSSEWorkflowStream } from "./api/sse-protocol";
 import { initDatabase, runMigrations, findStaleClaimed, findExpiredAvailable, getInstance, queryOne } from "./material/db";
-import { createWorkflowEngine, recoverWorkflows } from "./workflow/engine";
+import { createWorkflowEngine, recoverWorkflows, requestEngineShutdown, awaitEngineQuiescence } from "./workflow/engine";
 import { registerLaunchRun } from "./intent/launch-run";
 import { setAgentBridge } from "./workflow/nodes/start-run";
 import { TIMING } from "@skyrepl/shared";
+import { cleanExpiredIdempotencyKeys } from "./api/middleware/idempotency";
 import type { WorkflowEngine } from "./workflow/engine";
 import { failAllocation } from "./workflow/state-transitions";
 import { getProvider } from "./provider/registry";
@@ -137,6 +138,13 @@ export function startBackgroundTasks(): void {
   }, TIMING.WARM_POOL_RECONCILE_INTERVAL_MS);
   intervalHandles.push(warmPoolHandle);
 
+  // Idempotency key cleanup (every 60 minutes)
+  const idempotencyHandle = setInterval(() => {
+    try { cleanExpiredIdempotencyKeys(); }
+    catch (err) { console.error("[control] cleanExpiredIdempotencyKeys error:", err); }
+  }, 60 * 60 * 1000);
+  intervalHandles.push(idempotencyHandle);
+
   // Remaining background tasks: not implemented for Slice 1
   console.log("[control] Background task holdExpiryCheck: not implemented for Slice 1");
   console.log("[control] Background task manifestCleanupCheck: not implemented for Slice 1");
@@ -244,16 +252,9 @@ export async function shutdown(): Promise<void> {
   }
   intervalHandles.length = 0;
 
-  // 3. Wait for in-flight workflows to quiesce (max 30s)
-  const { findActiveWorkflows } = await import("./material/db");
-  const drainStart = Date.now();
-  const DRAIN_TIMEOUT_MS = 30_000;
-  while (Date.now() - drainStart < DRAIN_TIMEOUT_MS) {
-    const active = findActiveWorkflows();
-    if (active.length === 0) break;
-    console.log(`[control] Draining ${active.length} active workflow(s)...`);
-    await new Promise(r => setTimeout(r, 2000));
-  }
+  // 3. Signal engine shutdown and wait for in-flight executeLoops to finish
+  requestEngineShutdown();
+  await awaitEngineQuiescence(30_000);
 
   // 4. Terminate orphaned VMs
   try {

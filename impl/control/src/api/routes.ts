@@ -1,6 +1,6 @@
 // api/routes.ts - Route Registration and Resource Handlers
 
-import { Elysia } from "elysia";
+import { Elysia, t } from "elysia";
 import {
   queryOne,
   queryMany,
@@ -21,6 +21,10 @@ import {
   httpStatusForError,
   errorToApiError,
 } from "@skyrepl/shared";
+import {
+  checkIdempotencyKey,
+  storeIdempotencyResponse,
+} from "./middleware/idempotency";
 
 // =============================================================================
 // Types
@@ -116,6 +120,9 @@ export function createServer(config: ServerConfig): Elysia {
 // Route Registration
 // =============================================================================
 
+/** Elysia params schema: coerces URL :id param from string to number */
+const IdParams = t.Object({ id: t.Numeric() });
+
 export function registerResourceRoutes(app: Elysia<any>): void {
   // ─── Runs ────────────────────────────────────────────────────────────
 
@@ -127,12 +134,8 @@ export function registerResourceRoutes(app: Elysia<any>): void {
     return { data: rows };
   });
 
-  app.get("/v1/runs/:id", ({ params, set }: { params: { id: string }; set: { status?: number | string } }) => {
-    const id = parseInt(params.id, 10);
-    if (isNaN(id)) {
-      set.status = 400;
-      return { error: { code: "INVALID_INPUT", message: "Invalid run ID", category: "validation" } };
-    }
+  app.get("/v1/runs/:id", ({ params, set }) => {
+    const id = params.id;
     const run = getRun(id);
     if (!run) {
       return new Response(
@@ -141,7 +144,7 @@ export function registerResourceRoutes(app: Elysia<any>): void {
       );
     }
     return { data: run };
-  });
+  }, { params: IdParams });
 
   // ─── Instances ───────────────────────────────────────────────────────
 
@@ -153,12 +156,8 @@ export function registerResourceRoutes(app: Elysia<any>): void {
     return { data: rows };
   });
 
-  app.get("/v1/instances/:id", ({ params, set }: { params: { id: string }; set: { status?: number | string } }) => {
-    const id = parseInt(params.id, 10);
-    if (isNaN(id)) {
-      set.status = 400;
-      return { error: { code: "INVALID_INPUT", message: "Invalid instance ID", category: "validation" } };
-    }
+  app.get("/v1/instances/:id", ({ params, set }) => {
+    const id = params.id;
     const instance = getInstance(id);
     if (!instance) {
       return new Response(
@@ -167,7 +166,7 @@ export function registerResourceRoutes(app: Elysia<any>): void {
       );
     }
     return { data: instance };
-  });
+  }, { params: IdParams });
 
   // ─── Allocations ─────────────────────────────────────────────────────
 
@@ -189,12 +188,8 @@ export function registerResourceRoutes(app: Elysia<any>): void {
     return { data: rows };
   });
 
-  app.get("/v1/workflows/:id", ({ params, query, set }: { params: { id: string }; query: Record<string, unknown>; set: { status?: number | string } }) => {
-    const id = parseInt(params.id, 10);
-    if (isNaN(id)) {
-      set.status = 400;
-      return { error: { code: "INVALID_INPUT", message: "Invalid workflow ID", category: "validation" } };
-    }
+  app.get("/v1/workflows/:id", ({ params, query, set }) => {
+    const id = params.id;
     const workflow = getWorkflow(id);
     if (!workflow) {
       return new Response(
@@ -217,14 +212,10 @@ export function registerResourceRoutes(app: Elysia<any>): void {
     }
 
     return result;
-  });
+  }, { params: IdParams });
 
-  app.get("/v1/workflows/:id/nodes", ({ params, set }: { params: { id: string }; set: { status?: number | string } }) => {
-    const id = parseInt(params.id, 10);
-    if (isNaN(id)) {
-      set.status = 400;
-      return { error: { code: "INVALID_INPUT", message: "Invalid workflow ID", category: "validation" } };
-    }
+  app.get("/v1/workflows/:id/nodes", ({ params, set }) => {
+    const id = params.id;
     const workflow = getWorkflow(id);
     if (!workflow) {
       return new Response(
@@ -235,13 +226,13 @@ export function registerResourceRoutes(app: Elysia<any>): void {
 
     const nodes = getWorkflowNodes(id);
     return { data: nodes };
-  });
+  }, { params: IdParams });
 }
 
 export function registerOperationRoutes(app: Elysia<any>): void {
   // ─── Launch Run ──────────────────────────────────────────────────────
 
-  app.post("/v1/workflows/launch-run", async ({ body, set }: { body: unknown; set: { status?: number | string } }) => {
+  app.post("/v1/workflows/launch-run", async ({ body, set, request }) => {
     const b = (body ?? {}) as Record<string, unknown>;
 
     // Validate required fields
@@ -264,6 +255,26 @@ export function registerOperationRoutes(app: Elysia<any>): void {
       };
     }
 
+    // HTTP-level idempotency via Idempotency-Key header (§9.7).
+    // Body-level idempotencyKey is handled separately by the workflow engine's
+    // deduplication logic (which is more lenient — returns existing workflow
+    // regardless of param differences).
+    const httpIdempotencyKey = request.headers.get("idempotency-key") ?? undefined;
+    let paramsHash: string | undefined;
+
+    if (httpIdempotencyKey) {
+      const bodyText = JSON.stringify(b);
+      const check = checkIdempotencyKey(httpIdempotencyKey, "launch-run", bodyText);
+      if (check.hit) {
+        set.status = check.status;
+        return check.body;
+      }
+      paramsHash = check.paramsHash;
+    }
+
+    // Pass body-level idempotency key to engine for workflow deduplication
+    const idempotencyKey = (b.idempotencyKey ?? b.idempotency_key) as string | undefined;
+
     // Build LaunchRunInput (runId will be assigned by launchRun after creating the Run record)
     const input: Omit<LaunchRunInput, "runId"> = {
       command: b.command as string,
@@ -278,7 +289,7 @@ export function registerOperationRoutes(app: Elysia<any>): void {
       initChecksum: (b.initChecksum ?? b.init_checksum ?? undefined) as string | undefined,
       files: (b.files as LaunchRunInput["files"]) ?? [],
       artifactPatterns: (b.artifactPatterns ?? b.artifact_patterns ?? []) as string[],
-      idempotencyKey: (b.idempotencyKey ?? b.idempotency_key) as string | undefined,
+      idempotencyKey: idempotencyKey,
     };
 
     try {
@@ -286,17 +297,45 @@ export function registerOperationRoutes(app: Elysia<any>): void {
       const workflow = await launchRun(input as LaunchRunInput);
       const workflowInput = workflow.input_json ? JSON.parse(workflow.input_json) : {};
       set.status = 202;
-      return {
+      const responseBody = {
         workflow_id: workflow.id,
         run_id: workflowInput.runId ?? null,
         status: workflow.status,
         status_url: `/v1/workflows/${workflow.id}/status`,
         stream_url: `/v1/workflows/${workflow.id}/stream`,
       };
+
+      // Store HTTP-level idempotency response
+      if (httpIdempotencyKey && paramsHash) {
+        storeIdempotencyResponse(
+          httpIdempotencyKey,
+          "launch-run",
+          paramsHash,
+          202,
+          JSON.stringify(responseBody),
+          workflow.id,
+        );
+      }
+
+      return responseBody;
     } catch (err) {
       if (err instanceof SkyREPLError) {
-        set.status = httpStatusForError(err);
-        return errorToApiError(err);
+        const status = httpStatusForError(err);
+        const errorBody = errorToApiError(err);
+
+        // Store HTTP-level idempotency response for client errors
+        if (httpIdempotencyKey && paramsHash && status < 500) {
+          storeIdempotencyResponse(
+            httpIdempotencyKey,
+            "launch-run",
+            paramsHash,
+            status,
+            JSON.stringify(errorBody),
+          );
+        }
+
+        set.status = status;
+        return errorBody;
       }
       console.error("[routes] launch-run error:", err);
       set.status = 500;
@@ -312,12 +351,8 @@ export function registerOperationRoutes(app: Elysia<any>): void {
 
   // ─── Workflow Cancel ──────────────────────────────────────────────────
 
-  app.post("/v1/workflows/:id/cancel", async ({ params, body, set }: { params: { id: string }; body: unknown; set: { status?: number | string } }) => {
-    const workflowId = parseInt(params.id, 10);
-    if (isNaN(workflowId)) {
-      set.status = 400;
-      return { error: { code: "INVALID_INPUT", message: "Workflow ID must be a number", category: "validation" } };
-    }
+  app.post("/v1/workflows/:id/cancel", async ({ params, body, set }) => {
+    const workflowId = params.id;
 
     const b = (body ?? {}) as Record<string, unknown>;
     const reason = (b.reason as string) ?? "user_requested";
@@ -356,20 +391,16 @@ export function registerOperationRoutes(app: Elysia<any>): void {
     }
 
     return {
-      workflowId,
+      workflow_id: workflowId,
       status: result.status,
       cancelled: result.success,
     };
-  });
+  }, { params: IdParams });
 
   // ─── Workflow Status ──────────────────────────────────────────────────
 
-  app.get("/v1/workflows/:id/status", ({ params, set }: { params: { id: string }; set: { status?: number | string } }) => {
-    const id = parseInt(params.id, 10);
-    if (isNaN(id)) {
-      set.status = 400;
-      return { error: { code: "INVALID_INPUT", message: "Invalid workflow ID", category: "validation" } };
-    }
+  app.get("/v1/workflows/:id/status", ({ params, set }) => {
+    const id = params.id;
 
     const workflow = getWorkflow(id);
     if (!workflow) {
@@ -385,15 +416,15 @@ export function registerOperationRoutes(app: Elysia<any>): void {
     const totalNodes = nodes.length;
 
     const result: Record<string, unknown> = {
-      workflowId: workflow.id,
+      workflow_id: workflow.id,
       type: workflow.type,
       status: workflow.status,
-      currentNode: workflow.current_node,
-      nodesTotal: totalNodes,
-      nodesCompleted: completedNodes,
-      nodesFailed: failedNodes,
-      startedAt: workflow.started_at,
-      finishedAt: workflow.finished_at,
+      current_node: workflow.current_node,
+      nodes_total: totalNodes,
+      nodes_completed: completedNodes,
+      nodes_failed: failedNodes,
+      started_at: workflow.started_at,
+      finished_at: workflow.finished_at,
       progress: {
         completed_nodes: completedNodes,
         total_nodes: totalNodes,
@@ -412,7 +443,7 @@ export function registerOperationRoutes(app: Elysia<any>): void {
             code: errorData.code ?? "INTERNAL_ERROR",
             message: errorData.message ?? "Workflow failed",
             category: errorData.category ?? "internal",
-            nodeId: failedNode.node_id,
+            node_id: failedNode.node_id,
             details: errorData.details,
           };
         } catch {
@@ -420,7 +451,7 @@ export function registerOperationRoutes(app: Elysia<any>): void {
             code: "INTERNAL_ERROR",
             message: "Workflow failed",
             category: "internal",
-            nodeId: failedNode.node_id,
+            node_id: failedNode.node_id,
           };
         }
       } else if (workflow.error_json) {
@@ -437,7 +468,7 @@ export function registerOperationRoutes(app: Elysia<any>): void {
     }
 
     return result;
-  });
+  }, { params: IdParams });
 
   // ─── Blob Check ───────────────────────────────────────────────────────
 
@@ -454,12 +485,8 @@ export function registerOperationRoutes(app: Elysia<any>): void {
 
   // ─── Blob Download (by ID) ──────────────────────────────────────────
 
-  app.get("/v1/blobs/:id/download", ({ params, set }: { params: { id: string }; set: { status?: number | string } }) => {
-    const id = parseInt(params.id, 10);
-    if (isNaN(id)) {
-      set.status = 400;
-      return { error: { code: "INVALID_INPUT", message: "Invalid blob ID", category: "validation" } };
-    }
+  app.get("/v1/blobs/:id/download", ({ params, set }) => {
+    const id = params.id;
     const blob = queryOne<{ id: number; payload: Buffer | null; size_bytes: number }>(
       "SELECT id, payload, size_bytes FROM blobs WHERE id = ?",
       [id]
@@ -478,7 +505,7 @@ export function registerOperationRoutes(app: Elysia<any>): void {
         "Content-Length": String(blob.size_bytes),
       },
     });
-  });
+  }, { params: IdParams });
 
   // ─── Blob Download (by checksum) ──────────────────────────────────
   // Agent bridge sends /v1/blobs/<checksum> as file URLs in start_run messages

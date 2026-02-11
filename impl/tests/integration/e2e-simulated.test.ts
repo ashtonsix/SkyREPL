@@ -21,7 +21,7 @@ import {
   execute,
   type Workflow,
 } from "../../control/src/material/db";
-import { createWorkflowEngine } from "../../control/src/workflow/engine";
+import { createWorkflowEngine, requestEngineShutdown, awaitEngineQuiescence, resetEngineShutdown } from "../../control/src/workflow/engine";
 import { registerLaunchRun } from "../../control/src/intent/launch-run";
 import { createServer } from "../../control/src/api/routes";
 import {
@@ -49,6 +49,8 @@ let baseUrl: string;
 let mockProvider: MockProvider;
 
 beforeAll(async () => {
+  resetEngineShutdown();
+
   tmpDir = await mkdtemp(join(tmpdir(), "skyrepl-sim-e2e-"));
   const dbPath = join(tmpDir, "test.db");
 
@@ -91,6 +93,9 @@ afterAll(async () => {
   clearProviderCache();
   delete process.env.SKYREPL_CONTROL_PLANE_URL;
   if (server) server.stop(true);
+  // Signal engine loops to stop, then wait for them before closing DB
+  requestEngineShutdown();
+  await awaitEngineQuiescence(5_000);
   closeDatabase();
   if (tmpDir) await rm(tmpDir, { recursive: true, force: true });
 });

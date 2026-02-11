@@ -53,7 +53,7 @@ T3 (WAL/SQLITE_BUSY):
 L2/A.1 (Atomic transitions):
   - Specific bugs found in reconciliation.ts, garbage-collection.ts
   - HIGH PRIORITY fixes identified with line numbers
-  - Pattern: state-transitions.ts has correct CAS pattern to follow
+  - Pattern: state-transitions.ts has correct atomic transition pattern to follow
 
 L2/A.4, L2/A.5, L2/A.8, L2/A.9:
   - Already implemented or specified
@@ -99,7 +99,7 @@ L2/A.1 Pattern Design:
   - TransitionResult<T> = { success, data } | { success: false, reason, current? }
   - Reasons: NOT_FOUND, WRONG_STATE, RACE_LOST
   - Template pseudocode for state-transitions.ts.l2.txt
-  - When to use CAS vs simple status check (idempotent ops)
+  - When to use atomic transitions vs simple status check (idempotent ops)
   - Special handling: ACTIVE→COMPLETE when already FAILED = treat as success
 
 Verification Results:
@@ -136,7 +136,7 @@ T3 - SQLITE_BUSY jitter:
 L2/A.1 - Atomic state transitions:
   state-transitions.ts.l2.txt:
     - Created (691 lines)
-    - Canonical CAS pattern documented
+    - Canonical atomic transition pattern documented
     - TransitionResult type with NOT_FOUND, WRONG_STATE, RACE_LOST
 
   reconciliation.ts.l1.txt:
@@ -147,7 +147,7 @@ L2/A.1 - Atomic state transitions:
     - Created (437 lines)
 
   garbage-collection.ts.l1.txt:
-    - Fixed lines 59-71: Dedup merger now has CAS guard
+    - Fixed lines 59-71: Dedup merger now has atomic guard
 
   cleanup-manifest.ts.l1.txt:
     - Fixed lines 109-111: Atomic IN clause for status check

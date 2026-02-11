@@ -1,0 +1,101 @@
+================================================================================
+EPIC API — API Completeness
+================================================================================
+Spec: Ch09 (API), Ch13 (Types)
+
+Scope:
+  Complete the HTTP API surface. Pagination, rate limiting, L1 CRUD,
+  intent endpoints, type alignment.
+
+Pseudo subsumed:
+  api/{routes,middleware,operations,resources}.ts.l1+l2.txt
+  shared/src/api/*.l1+l2.txt
+
+================================================================================
+TASK INDEX
+================================================================================
+
+  #API-01  L1 resource CRUD endpoints                            [PENDING]
+  #API-02  Cursor-based pagination                               [PENDING]
+  #API-03  Rate limiting middleware                              [PENDING]
+  #API-04  Intent endpoints (terminate/snapshot/extend/preflight) [PENDING]
+  #API-05  Type alignment sweep (Ch13)                           [PENDING]
+  #API-06  Update spec Ch09 for flat API layout                  [PENDING]
+
+================================================================================
+TASK DETAIL
+================================================================================
+
+## #API-01: L1 resource CRUD endpoints                              [Lg] [PENDING]
+  Spec: Ch09 §9.1
+  Depends: #LIFE-01
+  ---
+  Direct resource manipulation endpoints: GET/POST/PATCH/DELETE for
+  instances, allocations, runs, manifests, objects.
+
+  Deliverables:
+  - [ ] CRUD routes for each resource type
+  - [ ] TypeBox request/response schemas
+  - [ ] Filter and sort support
+  - [ ] Unit tests for each endpoint
+
+## #API-02: Cursor-based pagination                                 [Md] [PENDING]
+  Spec: Ch09 §9.1
+  Depends: #FND-01
+  ---
+  All list endpoints return paginated results with cursor tokens.
+
+  Deliverables:
+  - [ ] Pagination helper (cursor encode/decode, limit, next_cursor)
+  - [ ] Apply to all existing and new list endpoints
+  - [ ] Unit test: multi-page iteration
+
+## #API-03: Rate limiting middleware                                 [Md] [PENDING]
+  Spec: Ch09 §9.7
+  Depends: #FND-01
+  ---
+  Per-token rate limiting. In-memory sliding window counter.
+
+  Deliverables:
+  - [ ] Rate limit middleware with configurable limits
+  - [ ] Per-auth-token tracking
+  - [ ] 429 response with Retry-After header
+  - [ ] Unit test: rate limit triggers correctly
+
+## #API-04: Intent endpoints (terminate/snapshot/extend/preflight)  [Lg] [PENDING]
+  Spec: Ch09 §9.2
+  Depends: #LIFE-08, #SNAP-02
+  ---
+  Wire up intent API endpoints as intents are built.
+
+  Deliverables:
+  - [ ] POST /v1/intents/terminate-instance
+  - [ ] POST /v1/intents/create-snapshot
+  - [ ] POST /v1/runs/:id/extend
+  - [ ] GET /v1/preflight (provider health, config validation)
+
+## #API-05: Type alignment sweep (Ch13)                             [Md] [PENDING]
+  Carries: SD-EV4
+  ---
+  Audit all TypeBox schemas in shared/ against spec Ch13 definitions.
+  Fix mismatches.
+
+  Deliverables:
+  - [ ] Schema-by-schema comparison with Ch13
+  - [ ] Fix type mismatches
+  - [ ] Add missing type definitions
+
+## #API-06: Update spec Ch09 for flat API layout                    [Sm] [PENDING]
+  Carries: SD-EV3
+  ---
+  Spec describes nested API layout, impl uses flat. Update spec to
+  match impl (well-intentioned drift, spec should follow impl here).
+
+  Deliverables:
+  - [ ] Update Ch09 route descriptions to flat layout
+
+================================================================================
+SCRATCHPAD
+================================================================================
+
+(Design notes, session logs, open questions)

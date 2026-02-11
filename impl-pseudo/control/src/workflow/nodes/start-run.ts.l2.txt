@@ -292,5 +292,5 @@ const agentEventRegistry = new Map<string, (data: any) => void>();
 | VALIDATION_ERROR           | Input          | Fail immediately                             |
 | PROVIDER_API_ERROR         | SSE send       | Retry with backoff                           |
 | OPERATION_TIMEOUT          | Sync timeout   | Compensate + fail                            |
-| INVALID_STATE_TRANSITION   | Allocation CAS | Fail immediately (state inconsistency)       |
+| INVALID_STATE_TRANSITION   | Allocation atomic transition | Fail immediately (state inconsistency)       |
 | Agent sync failure         | Agent event    | Allocation -> FAILED, compensate + fail      |

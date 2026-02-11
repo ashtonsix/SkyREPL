@@ -1,8 +1,7 @@
 -- =============================================================================
--- 001_initial.sql
+-- 001_schema.sql
 -- =============================================================================
--- Initial schema for SkyREPL control plane database.
--- Source: impl-pseudo/control/migrations/001_initial.sql.l2.txt
+-- Complete schema for SkyREPL control plane database.
 
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -28,6 +27,7 @@ CREATE TABLE instances (
     is_spot INTEGER NOT NULL DEFAULT 0,
     spot_request_id TEXT,
     init_checksum TEXT,
+    registration_token_hash TEXT,
     created_at INTEGER NOT NULL,
     last_heartbeat INTEGER NOT NULL,
     FOREIGN KEY (current_manifest_id) REFERENCES manifests(id)
@@ -44,6 +44,8 @@ CREATE UNIQUE INDEX idx_instances_provider_id ON instances(provider, provider_id
     WHERE provider_id != '';
 CREATE UNIQUE INDEX idx_instances_spawn_key ON instances(spawn_idempotency_key)
     WHERE spawn_idempotency_key IS NOT NULL;
+CREATE INDEX idx_instances_token_hash ON instances(registration_token_hash)
+    WHERE registration_token_hash IS NOT NULL;
 
 CREATE TABLE runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

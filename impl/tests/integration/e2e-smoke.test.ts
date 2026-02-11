@@ -24,7 +24,7 @@ import {
   getWorkflowNodes,
   getRun,
 } from "../../control/src/material/db";
-import { createWorkflowEngine, recoverWorkflows } from "../../control/src/workflow/engine";
+import { createWorkflowEngine, recoverWorkflows, requestEngineShutdown, awaitEngineQuiescence, resetEngineShutdown } from "../../control/src/workflow/engine";
 import { registerLaunchRun } from "../../control/src/intent/launch-run";
 import { createServer } from "../../control/src/api/routes";
 import { registerAgentRoutes, createRealAgentBridge } from "../../control/src/api/agent";
@@ -41,6 +41,8 @@ let server: Server<unknown>;
 let baseUrl: string;
 
 beforeAll(async () => {
+  resetEngineShutdown();
+
   // Create temp directory for DB
   tmpDir = await mkdtemp(join(tmpdir(), "skyrepl-e2e-"));
   const dbPath = join(tmpDir, "test.db");
@@ -77,6 +79,10 @@ afterAll(async () => {
   if (server) {
     server.stop(true);
   }
+
+  // Signal engine shutdown and wait for loops before closing DB
+  requestEngineShutdown();
+  await awaitEngineQuiescence(5_000);
 
   // Close database
   closeDatabase();
@@ -174,12 +180,12 @@ describe("E2E Smoke: launch-run API flow", () => {
     expect(res.status).toBe(200);
 
     const body = await res.json();
-    expect(body.workflowId).toBe(workflowId);
+    expect(body.workflow_id).toBe(workflowId);
     expect(body.type).toBe("launch-run");
     expect(body.status).toBeDefined();
-    expect(body.nodesTotal).toBe(9);
-    expect(typeof body.nodesCompleted).toBe("number");
-    expect(typeof body.nodesFailed).toBe("number");
+    expect(body.nodes_total).toBe(9);
+    expect(typeof body.nodes_completed).toBe("number");
+    expect(typeof body.nodes_failed).toBe("number");
     expect(body.progress).toBeDefined();
     expect(body.progress.total_nodes).toBe(9);
     expect(typeof body.progress.percentage).toBe("number");
@@ -295,7 +301,7 @@ describe("E2E Smoke: launch-run API flow", () => {
     // At minimum, check-budget (which is a no-op) should have completed.
     // The workflow will fail at resolve-instance or spawn-instance since
     // there is no real OrbStack, but the engine should have started.
-    expect(body.nodesCompleted).toBeGreaterThanOrEqual(1);
+    expect(body.nodes_completed).toBeGreaterThanOrEqual(1);
 
     // Verify via direct DB access: check-budget node should be completed
     const nodes = getWorkflowNodes(workflowId);

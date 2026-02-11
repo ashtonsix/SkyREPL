@@ -128,9 +128,9 @@ async function runCancel(args: string[]): Promise<void> {
   try {
     const result = await client.cancelWorkflow(workflowId);
     if (result.cancelled) {
-      console.log(`Workflow ${result.workflowId} cancelled.`);
+      console.log(`Workflow ${result.workflow_id} cancelled.`);
     } else {
-      console.log(`Workflow ${result.workflowId} is already ${result.status}.`);
+      console.log(`Workflow ${result.workflow_id} is already ${result.status}.`);
     }
   } catch (err) {
     if (isConnectionRefused(err)) {

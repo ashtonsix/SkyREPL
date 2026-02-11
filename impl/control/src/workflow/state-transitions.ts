@@ -5,6 +5,7 @@ import type { Allocation, Workflow, WorkflowNode, Manifest } from "../material/d
 import { getDatabase, queryOne, transaction } from "../material/db";
 import type { SQLQueryBindings } from "bun:sqlite";
 import type { AllocationStatus } from "@skyrepl/shared";
+import { stateEvents, STATE_EVENT } from "./state-events";
 
 // =============================================================================
 // Transition Result Type
@@ -208,12 +209,21 @@ export function releaseAllocation(
 export function activateAllocation(
   allocationId: number
 ): TransitionResult<Allocation> {
-  return atomicTransition<Allocation>(
+  const result = atomicTransition<Allocation>(
     "allocations",
     allocationId,
     "CLAIMED",
     "ACTIVE"
   );
+  if (result.success) {
+    stateEvents.emit(STATE_EVENT.ALLOCATION_STATUS_CHANGED, {
+      allocationId,
+      runId: result.data.run_id,
+      fromStatus: "CLAIMED",
+      toStatus: "ACTIVE",
+    });
+  }
+  return result;
 }
 
 /**
@@ -284,13 +294,22 @@ export function failAllocation(
   allocationId: number,
   expectedStatus: "AVAILABLE" | "CLAIMED" | "ACTIVE"
 ): TransitionResult<Allocation> {
-  return atomicTransition<Allocation>(
+  const result = atomicTransition<Allocation>(
     "allocations",
     allocationId,
     expectedStatus,
     "FAILED",
     { completed_at: Date.now() }
   );
+  if (result.success) {
+    stateEvents.emit(STATE_EVENT.ALLOCATION_STATUS_CHANGED, {
+      allocationId,
+      runId: result.data.run_id,
+      fromStatus: expectedStatus,
+      toStatus: "FAILED",
+    });
+  }
+  return result;
 }
 
 /**
@@ -304,13 +323,24 @@ export function failAllocation(
 export function failAllocationAnyState(
   allocationId: number
 ): TransitionResult<Allocation> {
-  return atomicTransition<Allocation>(
+  // Read current status before transition for event payload
+  const before = queryOne<Allocation>("SELECT * FROM allocations WHERE id = ?", [allocationId]);
+  const result = atomicTransition<Allocation>(
     "allocations",
     allocationId,
     ["AVAILABLE", "CLAIMED", "ACTIVE"],
     "FAILED",
     { completed_at: Date.now() }
   );
+  if (result.success) {
+    stateEvents.emit(STATE_EVENT.ALLOCATION_STATUS_CHANGED, {
+      allocationId,
+      runId: result.data.run_id,
+      fromStatus: before?.status ?? "UNKNOWN",
+      toStatus: "FAILED",
+    });
+  }
+  return result;
 }
 
 // =============================================================================

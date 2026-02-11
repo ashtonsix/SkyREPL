@@ -1,0 +1,82 @@
+================================================================================
+EPIC SNAP — Snapshots & Artifacts
+================================================================================
+Spec: Ch03 (Resources), Ch07 (Intents)
+
+Scope:
+  create-snapshot intent, snapshot and artifact resource types.
+  Enables state preservation and output collection.
+
+Pseudo subsumed:
+  intent/snapshot.ts.l1+l2.txt, intent/snapshot.types.ts.l1.txt
+  resource/snapshot.ts.l1.txt, resource/artifact.ts.l1.txt
+  Related workflow node files
+
+================================================================================
+TASK INDEX
+================================================================================
+
+  #SNAP-01  create-snapshot intent (blueprint + nodes)            [PENDING]
+  #SNAP-02  create-snapshot API + CLI wiring                      [PENDING]
+  #SNAP-03  Snapshot resource type                                [PENDING]
+  #SNAP-04  Artifact resource type                                [PENDING]
+
+================================================================================
+TASK DETAIL
+================================================================================
+
+## #SNAP-01: create-snapshot intent (blueprint + nodes)            [Lg] [PENDING]
+  Spec: Ch07 §7.3
+  Pseudo: intent/snapshot.ts.l1.txt + .l2.txt, snapshot.types.ts.l1.txt
+  Depends: #LIFE-01, #WF-01
+  ---
+  Workflow to capture instance state as a reusable snapshot.
+  Nodes: validate-instance → pause-run → capture-state →
+  upload-snapshot → resume-run → finalize.
+
+  Deliverables:
+  - [ ] Workflow blueprint definition
+  - [ ] Node executors for snapshot capture
+  - [ ] Provider-specific snapshot implementation (OrbStack first)
+  - [ ] Compensation: resume run if capture fails
+
+## #SNAP-02: create-snapshot API + CLI wiring                      [Md] [PENDING]
+  Depends: #SNAP-01
+  ---
+  POST /v1/intents/create-snapshot endpoint.
+  `repl snapshot create <instance-id>` CLI command.
+
+  Deliverables:
+  - [ ] API endpoint with TypeBox validation
+  - [ ] CLI command
+  - [ ] E2E test
+
+## #SNAP-03: Snapshot resource type                                [Md] [PENDING]
+  Spec: Ch03
+  Pseudo: resource/snapshot.ts.l1.txt
+  Depends: #LIFE-01
+  ---
+  Snapshot materialization, lifecycle management, DB schema.
+
+  Deliverables:
+  - [ ] Snapshot DB table and migration
+  - [ ] Snapshot resource module (CRUD + state machine)
+  - [ ] Snapshot listing in API and CLI
+
+## #SNAP-04: Artifact resource type                                [Md] [PENDING]
+  Spec: Ch03
+  Pseudo: resource/artifact.ts.l1.txt
+  Depends: #AGENT-07
+  ---
+  Artifact materialization, lifecycle, download support.
+
+  Deliverables:
+  - [ ] Artifact DB table and migration
+  - [ ] Artifact resource module
+  - [ ] Download endpoint (blob retrieval)
+
+================================================================================
+SCRATCHPAD
+================================================================================
+
+(Design notes, session logs, open questions)

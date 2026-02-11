@@ -1,0 +1,141 @@
+================================================================================
+EPIC PROV — Cloud Providers
+================================================================================
+Spec: Ch08 (Providers)
+
+Scope:
+  Multi-provider support. Currently only OrbStack (local dev).
+  AWS, Lambda Labs, RunPod, and Tailscale feature provider.
+
+Pseudo subsumed:
+  provider/compute/{aws,lambda,runpod}.ts.l1+l2.txt
+  provider/feature/{tailscale}.ts.l1+l2.txt
+  provider/{contracts,extensions,registry,types,type-boundaries}.ts.l1+l2.txt
+  agent/tailscale.py.l1+l2.txt
+
+================================================================================
+TASK INDEX
+================================================================================
+
+  #PROV-01  Validate provider abstraction (dry-run AWS)          [PENDING]
+  #PROV-02  AWS provider implementation                          [PENDING]
+  #PROV-03  Lambda Labs provider                                 [PENDING]
+  #PROV-04  RunPod provider                                      [PENDING]
+  #PROV-05  Tailscale feature provider (control side)            [PENDING]
+  #PROV-06  Tailscale agent-side integration                     [PENDING]
+  #PROV-07  Provider type enhancement pattern                    [PENDING]
+  #PROV-08  Provider workflow hooks                              [PENDING]
+
+================================================================================
+TASK DETAIL
+================================================================================
+
+## #PROV-01: Validate provider abstraction (dry-run AWS)            [Lg] [PENDING]
+  Depends: #LIFE-07
+  Pseudo: control/src/provider/type-boundaries.ts.l1.txt (STILL USEFUL)
+  ---
+  Before building full providers, validate the ComputeProvider interface
+  against AWS EC2 API. Identify abstraction gaps and fix them.
+
+  Deliverables:
+  - [ ] Dry-run: implement AWS provider skeleton with real API calls
+  - [ ] Identify interface gaps (capabilities, config shape, error mapping)
+  - [ ] Fix ComputeProvider interface if needed
+  - [ ] Document provider implementation guide
+
+## #PROV-02: AWS provider implementation                            [Xl] [PENDING]
+  Spec: Ch08 §8.1
+  Pseudo: provider/compute/aws.ts.l1.txt + .l2.txt
+  Depends: #PROV-01
+  ---
+  Full AWS EC2 provider: lifecycle, security groups, IAM roles, spot
+  support, multiple regions.
+
+  Deliverables:
+  - [ ] EC2 instance lifecycle (spawn, terminate, list, status)
+  - [ ] Security group management
+  - [ ] IAM role attachment
+  - [ ] Spot instance support with interruption handling
+  - [ ] Multi-region support
+  - [ ] Integration test on real AWS (gated, not in CI)
+
+## #PROV-03: Lambda Labs provider                                   [Lg] [PENDING]
+  Spec: Ch08 §8.1
+  Pseudo: provider/compute/lambda.ts.l1.txt
+  Depends: #PROV-01
+  ---
+  Lambda Labs Cloud API provider.
+
+  Deliverables:
+  - [ ] Instance lifecycle via Lambda Labs API
+  - [ ] GPU type selection
+  - [ ] Availability checking
+  - [ ] Integration test on real Lambda Labs (gated)
+
+## #PROV-04: RunPod provider                                        [Lg] [PENDING]
+  Spec: Ch08 §8.1
+  Pseudo: provider/compute/runpod.ts.l1.txt
+  Depends: #PROV-01
+  ---
+  RunPod API provider.
+
+  Deliverables:
+  - [ ] Pod lifecycle via RunPod API
+  - [ ] GPU type/template selection
+  - [ ] Integration test on real RunPod (gated)
+
+## #PROV-05: Tailscale feature provider (control side)              [Lg] [PENDING]
+  Carries: SE1, SE2, SE3, T2
+  Spec: Ch08 §8.4
+  Pseudo: provider/feature/tailscale.ts.l1.txt + .l2.txt
+  Depends: #WF-02, #PROV-01
+  ---
+  Tailscale JIT installation, device tracking, Funnel routing.
+  Needs IAR pattern for reliable installation retry.
+
+  Deliverables:
+  - [ ] Tailscale API client (device management)
+  - [ ] JIT installation workflow node
+  - [ ] Device limit tracking
+  - [ ] Funnel port-based routing
+  - [ ] Container mode support (for RunPod)
+
+## #PROV-06: Tailscale agent-side integration                       [Md] [PENDING]
+  Pseudo: agent/tailscale.py.l1.txt + .l2.txt
+  Depends: #PROV-05
+  ---
+  Agent-side Tailscale: install, authenticate, configure, report status.
+
+  Deliverables:
+  - [ ] Tailscale installation on instance
+  - [ ] Auth key exchange with control plane
+  - [ ] Status reporting (connected, IP, hostname)
+
+## #PROV-07: Provider type enhancement pattern                      [Md] [PENDING]
+  Spec: Ch08 §8.2
+  Pseudo: control/src/provider/type-boundaries.ts.l1.txt
+  Depends: #PROV-01
+  ---
+  Provider-specific type narrowing for DB rows. e.g., AWSInstance
+  extends Instance with aws-specific fields.
+
+  Deliverables:
+  - [ ] Type enhancement mechanism in provider framework
+  - [ ] Apply to AWS provider as reference implementation
+
+## #PROV-08: Provider workflow hooks                                [Md] [PENDING]
+  Spec: Ch08 §8.3
+  Depends: #PROV-01
+  ---
+  Pre/post hooks for provider-specific workflow customization.
+
+  Deliverables:
+  - [ ] Hook registration in provider contracts
+  - [ ] Pre-spawn and post-spawn hooks
+  - [ ] Pre-terminate and post-terminate hooks
+
+================================================================================
+SCRATCHPAD
+================================================================================
+
+(Design notes, session logs, open questions)

@@ -2,7 +2,7 @@
 # garbage-collection.ts - Garbage Collection Task (Ch15)
 
 Background task to clean up orphaned blobs, merge duplicates, and expire objects/keys.
-See L2 for incremental execution, CAS-guarded dedup merger, and S3 deletion logic.
+See L2 for incremental execution, atomically guarded dedup merger, and S3 deletion logic.
 
 ## Purpose
 DB cascade can't reach S3, so GC is needed for S3 cleanup. Runs every 24h.
@@ -16,7 +16,7 @@ DB cascade can't reach S3, so GC is needed for S3 cleanup. Runs every 24h.
 ## Secondary Task: Dedup Merger
 - Find duplicate blobs (same bucket + checksum) for dedupable buckets (run-files, artifacts)
 - Merge: keep oldest, UPDATE objects to point to kept blob, DELETE duplicates
-- CAS guard: re-verify duplicate set in transaction to prevent concurrent merge corruption
+- Atomic guard: re-verify duplicate set in transaction to prevent concurrent merge corruption
 
 ## Tertiary Task: Object Expiry
 - Find expired objects (expires_at < now), DELETE FROM objects

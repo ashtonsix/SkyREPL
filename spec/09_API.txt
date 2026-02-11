@@ -26,6 +26,14 @@ control/src/api/
     └── idempotency.ts     # Idempotency key handling
 ```
 
+## 9.0.1 Field Naming Convention
+
+All request and response fields across inter-service communication (HTTP API,
+SSE messages, agent protocol) MUST use snake_case naming. This applies to
+JSON object keys in request bodies, response bodies, and SSE event data.
+Internal TypeScript/Python identifiers MAY use language-idiomatic casing
+(camelCase for TS, snake_case for Python), but wire format is always snake_case.
+
 ## 9.1 Layer 1 (Resource) API
 
 Direct CRUD on resources. All endpoints support pagination, filtering,

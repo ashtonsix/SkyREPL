@@ -17,6 +17,7 @@ import {
   type Manifest,
 } from "../material/db";
 import { activateAllocation, failAllocation } from "../workflow/state-transitions";
+import { stateEvents, STATE_EVENT } from "../workflow/state-events";
 import { sseManager } from "./sse-protocol";
 import type { AgentBridge } from "../workflow/nodes/start-run";
 import type { StartRunMessage } from "@skyrepl/shared";
@@ -344,6 +345,15 @@ export function registerAgentRoutes(app: Elysia<any>): void {
 
     updateRun(status.run_id, updates);
 
+    // Emit run:finished event for EventEmitter-based waiters
+    if (["completed", "failed", "timeout"].includes(status.status)) {
+      stateEvents.emit(STATE_EVENT.RUN_FINISHED, {
+        runId: status.run_id,
+        exitCode: status.exit_code ?? null,
+        spotInterrupted: false,
+      });
+    }
+
     // Close CLI WebSocket log subscribers with terminal status
     if (["completed", "failed", "timeout"].includes(status.status)) {
       sseManager.closeRunSubscribers(String(status.run_id), {
@@ -599,45 +609,78 @@ export function createRealAgentBridge(): AgentBridge {
       eventType: string,
       opts: { runId: number; timeout: number }
     ) {
-      const deadline = Date.now() + opts.timeout;
-
-      while (Date.now() < deadline) {
-        if (eventType === "sync_complete") {
-          // Check if allocation transitioned CLAIMED -> ACTIVE (means sync is done)
-          const alloc = queryOne<Allocation>(
-            "SELECT * FROM allocations WHERE run_id = ? AND (status = ? OR status = ?)",
-            [opts.runId, "ACTIVE", "FAILED"]
-          );
-          if (alloc) {
-            if (alloc.status === "FAILED") {
-              throw Object.assign(
-                new Error("File sync failed"),
-                { code: "SYNC_FAILED", category: "internal" }
-              );
-            }
-            return { success: true };
+      // First, check current state (event may have already fired before we started listening)
+      if (eventType === "sync_complete") {
+        const alloc = queryOne<Allocation>(
+          "SELECT * FROM allocations WHERE run_id = ? AND (status = ? OR status = ?)",
+          [opts.runId, "ACTIVE", "FAILED"]
+        );
+        if (alloc) {
+          if (alloc.status === "FAILED") {
+            throw Object.assign(
+              new Error("File sync failed"),
+              { code: "SYNC_FAILED", category: "internal" }
+            );
           }
-        } else if (eventType === "run_complete") {
-          // Check if run has finished
-          const run = queryOne<Run>(
-            "SELECT * FROM runs WHERE id = ? AND finished_at IS NOT NULL",
-            [opts.runId]
-          );
-          if (run) {
-            return {
-              exitCode: run.exit_code,
-              spotInterrupted: run.spot_interrupted === 1,
-            };
-          }
+          return { success: true };
         }
-
-        await new Promise((r) => setTimeout(r, 200));
+      } else if (eventType === "run_complete") {
+        const run = queryOne<Run>(
+          "SELECT * FROM runs WHERE id = ? AND finished_at IS NOT NULL",
+          [opts.runId]
+        );
+        if (run) {
+          return {
+            exitCode: run.exit_code,
+            spotInterrupted: run.spot_interrupted === 1,
+          };
+        }
       }
 
-      throw Object.assign(
-        new Error(`Timeout waiting for ${eventType}`),
-        { code: "OPERATION_TIMEOUT", category: "timeout" }
-      );
+      // Wait for event with timeout
+      return new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+          cleanup();
+          reject(Object.assign(
+            new Error(`Timeout waiting for ${eventType}`),
+            { code: "OPERATION_TIMEOUT", category: "timeout" }
+          ));
+        }, Math.max(0, opts.timeout));
+
+        const eventName = eventType === "sync_complete"
+          ? STATE_EVENT.ALLOCATION_STATUS_CHANGED
+          : STATE_EVENT.RUN_FINISHED;
+
+        const handler = (data: any) => {
+          if (eventType === "sync_complete") {
+            if (data.runId !== opts.runId) return; // Not our run
+            if (data.toStatus === "ACTIVE") {
+              cleanup();
+              resolve({ success: true });
+            } else if (data.toStatus === "FAILED") {
+              cleanup();
+              reject(Object.assign(
+                new Error("File sync failed"),
+                { code: "SYNC_FAILED", category: "internal" }
+              ));
+            }
+          } else if (eventType === "run_complete") {
+            if (data.runId !== opts.runId) return; // Not our run
+            cleanup();
+            resolve({
+              exitCode: data.exitCode,
+              spotInterrupted: data.spotInterrupted,
+            });
+          }
+        };
+
+        function cleanup() {
+          clearTimeout(timeoutId);
+          stateEvents.off(eventName, handler);
+        }
+
+        stateEvents.on(eventName, handler);
+      });
     },
   };
 }

@@ -13,7 +13,7 @@ import {
   updateWorkflowNode,
   findActiveWorkflows,
 } from "../../control/src/material/db";
-import { recoverWorkflows, registerNodeExecutor } from "../../control/src/workflow/engine";
+import { recoverWorkflows, registerNodeExecutor, requestEngineShutdown, awaitEngineQuiescence, resetEngineShutdown } from "../../control/src/workflow/engine";
 import type { NodeExecutor, NodeContext } from "../../control/src/workflow/engine.types";
 
 // =============================================================================
@@ -21,11 +21,14 @@ import type { NodeExecutor, NodeContext } from "../../control/src/workflow/engin
 // =============================================================================
 
 beforeEach(() => {
+  resetEngineShutdown();
   initDatabase(":memory:");
   runMigrations();
 });
 
-afterEach(() => {
+afterEach(async () => {
+  requestEngineShutdown();
+  await awaitEngineQuiescence(5_000);
   closeDatabase();
 });
 
@@ -96,7 +99,7 @@ describe("Crash Recovery", () => {
     // Run recovery
     await recoverWorkflows();
 
-    // Wait a very short time just for the CAS transitions to complete
+    // Wait a very short time just for the atomic transitions to complete
     await new Promise(r => setTimeout(r, 10));
 
     // Check node was reset to pending (immediately after recovery, before executeLoop runs)

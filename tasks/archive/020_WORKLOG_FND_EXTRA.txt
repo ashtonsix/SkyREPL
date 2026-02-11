@@ -1,0 +1,79 @@
+================================================================================
+020 WORKLOG — Gate 0 Audit Remediations: #FND-08, #FND-09, #FND-10
+================================================================================
+Working on: #FND-08, #FND-09, #FND-10
+Status: COMPLETE
+
+================================================================================
+TASKLOG
+================================================================================
+
+Step  Task     Description                                     Status
+----  -------  ----------------------------------------------  --------
+ 1    #FND-08  Fix createInstance registration_token_hash       DONE
+ 2    #FND-09  Fix idempotency scope + wire cleanup             DONE
+ 3    #FND-10  Graceful engine shutdown (root-cause #BL-14)     DONE
+ 4    —        Update FND-06/FND-07 task notes                  DONE (prior session)
+ 5    —        Update ROADMAP (tracks, subsumption, gate)       DONE (prior session)
+ 6    —        Verify all tests pass                            DONE
+
+Ordering rationale:
+  - #FND-08 first: 5 LOC security fix, zero risk
+  - #FND-09 second: idempotency scope alignment (code + schema + spec)
+  - #FND-10 third: shutdown race needs investigation before fix
+
+
+================================================================================
+CONTEXT — Gate 0 Audit Findings
+================================================================================
+
+Post-FND audit found 4 HIGH, 5 MEDIUM quality issues and 12 spec drift items.
+Three require pre-gate remediation; the rest defer to downstream epics.
+
+HIGH (fix now):
+  H1  #FND-08  createInstance INSERT omits registration_token_hash.
+               Auth bypassed (auth.ts returns true when hash is NULL).
+               Security regression from FND-01 db split.
+
+  H2  #FND-09  Idempotency: code queries (key, endpoint) but schema
+               has PRIMARY KEY (key) only. Spec mandates global scope.
+               Three-way mismatch.
+
+  H3  #FND-09  cleanExpiredIdempotencyKeys has zero callers. Keys
+               accumulate indefinitely.
+
+  —   #FND-10  #BL-14: engine loop continues after closeDatabase().
+               Causes intermittent DATABASE_ERROR in E2E tests.
+               False negatives drain all future work.
+
+DEFERRED (natural downstream homes):
+  H4  → #AGENT-01  Agent panic payload sends instance_id, control plane omits it
+  M1  → #LIFE-02   EventEmitter singleton no cleanup path
+  M2  → #API-05    PaginationMeta camelCase (hasMore, nextCursor)
+  M3  → #API-01+   TypeBox .body(schema) never wired; FND-06 incomplete
+  M4  → #WF-04     Subworkflow wait() still polls 100ms
+  M5  → #WF-01     handleCancellation redundant cancel transition
+
+
+================================================================================
+SESSION LOG
+================================================================================
+
+  2026-02-11  Created worklog from Gate 0 audit findings.
+              3 agents ran in parallel: code quality, spec drift, subsumption.
+              4 HIGH, 5 MEDIUM, 9 LOW code quality findings.
+              2 HIGH, 4 MEDIUM, 6 LOW spec drift items.
+              2 pseudo files fully subsumed, 1 re-mapped, ~60 stale on disk.
+
+  2026-02-11  All 3 remediations implemented:
+              #FND-08: Added registration_token_hash to createInstance INSERT.
+                       New test: createInstance persists hash directly (no updateInstance).
+              #FND-09: Removed endpoint from idempotency WHERE clause (global scope).
+                       Wired cleanExpiredIdempotencyKeys to hourly setInterval in main.ts.
+              #FND-10: Added engine shutdown coordination:
+                       - shutdownRequested flag + activeLoops tracking in engine.ts
+                       - executeLoop checks flag before DB access, breaks cleanly
+                       - main.ts calls requestEngineShutdown() + awaitEngineQuiescence()
+                       - All test files with workflow engines reset/await shutdown state
+                       - Simulated E2E: 10/10 consecutive passes (was intermittent before)
+              303 tests pass, 0 fail (excluding orbstack infrastructure tests).

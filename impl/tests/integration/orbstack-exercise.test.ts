@@ -215,8 +215,8 @@ async function pollUntilDone(
   timeoutMs: number
 ): Promise<{
   status: string;
-  nodesCompleted: number;
-  nodesTotal: number;
+  nodes_completed: number;
+  nodes_total: number;
   error: unknown;
 }> {
   const terminalStates = new Set(["completed", "failed", "cancelled"]);
@@ -230,7 +230,7 @@ async function pollUntilDone(
         const body = await res.json();
 
         console.log(
-          `[exercise:${label}] Poll: status=${body.status} nodes=${body.nodesCompleted}/${body.nodesTotal}`
+          `[exercise:${label}] Poll: status=${body.status} nodes=${body.nodes_completed}/${body.nodes_total}`
         );
 
         if (terminalStates.has(body.status)) {
@@ -250,8 +250,8 @@ async function pollUntilDone(
     setTimeout(() => {
       resolve({
         status: "timeout",
-        nodesCompleted: -1,
-        nodesTotal: -1,
+        nodes_completed: -1,
+        nodes_total: -1,
         error: `Poll timeout after ${timeoutMs}ms`,
       });
     }, timeoutMs - 5_000);

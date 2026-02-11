@@ -1,0 +1,491 @@
+================================================================================
+018 WORKLOG — #FND-01: Split db.ts into domain modules
+================================================================================
+Working on: #FND-01
+Status: DONE
+
+================================================================================
+TASKLOG
+================================================================================
+
+Step  Description                                          Status    Lines
+----  ---------------------------------------------------  --------  ----------
+ 1    Create db/ directory structure                        DONE      —
+ 2    Extract db/init.ts (connection + migrations)          DONE      db.ts:1-17,196-294
+ 3    Extract db/helpers.ts (query + transaction)           DONE      db.ts:253-294
+ 4    Extract db/instances.ts (Instance CRUD)               DONE      db.ts:22-39,296-451
+ 5    Extract db/allocations.ts (Allocation CRUD + warm)    DONE      db.ts:58-70,944-1048
+ 6    Extract db/runs.ts (Run CRUD)                         DONE      db.ts:41-56,453-528
+ 7    Extract db/workflows.ts (Workflow + Node CRUD)        DONE      db.ts:119-162,631-773
+ 8    Extract db/manifests.ts (Manifest + Resources)        DONE      db.ts:72-90,530-616
+ 9    Extract db/objects.ts (Blob + Object + Tags)          DONE      db.ts:92-117,775-942
+10    Extract db/orphans.ts (Orphan + Whitelist ops)        DONE      db.ts:179-184,1072-1125
+11    Extract db/usage.ts (UsageRecord ops)                 DONE      db.ts:164-177,1127-1194
+12    Create db/index.ts barrel re-export                   DONE      —
+13    Consolidate migrations (001+002 → single schema)      DONE      migrations/*
+14    Migration runner: directory scan instead of imports   DONE      —
+15    Add checkBlobsExist() batch lookup to objects.ts      DONE      —
+16    Add migration downgrade guard to init.ts              DONE      —
+17    Verify all 367 tests pass                             DONE      366/367 (1 flaky, #BL-14)
+18    Verify `repl reset && repl control start` works       DONE      —
+
+================================================================================
+SCOPE
+================================================================================
+
+Original #FND-01 scope: split 1204-line db.ts into domain modules.
+
+Expanded scope (per session): also reorganise impl/control/src/migrations/.
+No live deployments, so migrations can be rewritten freely. `repl reset` clears
+the database completely; next `repl control start` runs all migrations fresh.
+
+================================================================================
+DESIGN
+================================================================================
+
+1. MODULE STRUCTURE
+─────────────────────────────────────────────────────────────────────────────────
+
+  impl/control/src/material/db/
+  ├── init.ts           Connection mgmt, PRAGMA config, migration runner
+  ├── helpers.ts        queryOne, queryMany, execute, transaction, getDatabase
+  ├── instances.ts      Instance type + 6 CRUD functions
+  ├── allocations.ts    Allocation type + 8 functions (CRUD + warm pool + stale)
+  ├── runs.ts           Run type + 5 CRUD functions
+  ├── workflows.ts      Workflow + WorkflowNode types + 10 functions
+  ├── manifests.ts      Manifest + ManifestResource types + 7 functions
+  ├── objects.ts        Blob + StorageObject types + 13 functions (blob + object + tags)
+  ├── orphans.ts        OrphanScanResult type + 5 functions
+  ├── usage.ts          UsageRecord type + 4 functions
+  ├── index.ts          Barrel re-export (all public symbols)
+  └── walCheckpoint()   → init.ts
+
+  Total: 11 source files + 1 barrel.
+
+
+2. IMPORT PATH STRATEGY (ZERO CHURN)
+─────────────────────────────────────────────────────────────────────────────────
+
+  Current: import { foo } from "../material/db"     → resolves to db.ts
+  After:   import { foo } from "../material/db"     → resolves to db/index.ts
+
+  Bun/Node resolution: when db.ts is deleted and db/ directory + index.ts exists,
+  the bare specifier "../material/db" resolves to "../material/db/index.ts".
+
+  ALL 30+ consumer files keep their existing import paths unchanged.
+  The barrel in db/index.ts re-exports every public symbol.
+
+  Consumers wanting a specific module can import directly:
+    import { createInstance } from "../material/db/instances"
+  But this is optional — the barrel always works.
+
+
+3. DEPENDENCY DAG (no circular imports)
+─────────────────────────────────────────────────────────────────────────────────
+
+                     ┌──────────┐
+                     │  init.ts │  (connection, migrations)
+                     └────┬─────┘
+                          │
+                     ┌────▼─────┐
+                     │helpers.ts│  (queryOne, queryMany, execute, transaction)
+                     └────┬─────┘
+                          │
+          ┌───────┬───────┼───────┬────────┬────────┬────────┐
+          ▼       ▼       ▼       ▼        ▼        ▼        ▼
+     instances  allocs   runs   workflows manifests objects  orphans  usage
+          │                                  │        │
+          └──────────────────────────────────┘        │
+          (some functions do cross-table queries       │
+           e.g. warm pool JOINs instances+allocations) │
+                                                       │
+     objects.ts calls helpers.ts (updateBlobLastRef) ──┘
+
+  Rule: domain modules import from helpers.ts only. Never from each other.
+  Cross-table queries (e.g. findWarmAllocation JOINs instances+allocations)
+  live in the module of the "primary" table (allocations.ts for warm pool).
+
+
+4. MODULE CONTENTS (DETAILED)
+─────────────────────────────────────────────────────────────────────────────────
+
+  db/init.ts (from db.ts lines 1-17, 196-251, 1196-1204)
+  ──────────────────────────────────────────────────────────
+  Imports:   bun:sqlite Database, @skyrepl/shared errors
+  State:     `let connection: Database | null = null`
+  Exports:
+    - initDatabase(path)          L202-208
+    - closeDatabase()             L217-222
+    - getDatabase()               L210-215    (also re-exported by helpers.ts)
+    - getMigrationVersion()       L233-241
+    - runMigrations()             L243-251
+    - walCheckpoint()             L1200-1203
+  Notes:
+    - Loads consolidated migration SQL via `import with { type: "text" }`
+    - Sets PRAGMA: journal_mode=WAL, foreign_keys=ON, busy_timeout=5000
+
+
+  db/helpers.ts (from db.ts lines 253-294)
+  ──────────────────────────────────────────
+  Imports:   getDatabase from ./init, @skyrepl/shared errors + calculateBackoff
+  Exports:
+    - getDatabase       (re-export from init.ts for convenience)
+    - queryOne<T>()     L257-261
+    - queryMany<T>()    L263-266
+    - execute()         L268-271
+    - transaction<T>()  L273-294
+
+
+  db/instances.ts (from db.ts lines 22-39, 296-451)
+  ──────────────────────────────────────────────────
+  Imports:   getDatabase, queryOne, queryMany, execute from ./helpers
+  Types:     Instance (export interface)
+  Exports:
+    - getInstance(id)                  L300-302
+    - getInstanceByProviderId(p,pid)   L304-313
+    - createInstance(data)             L315-378
+    - updateInstance(id, updates)      L380-404
+    - listInstances(filter?)           L406-443
+    - deleteInstance(id)               L445-451
+
+
+  db/allocations.ts (from db.ts lines 58-70, 944-1070)
+  ──────────────────────────────────────────────────────
+  Note: lines 944-1070 are currently in the "Warm Pool Operations" and
+  related sections; CRUD is scattered. Actual allocation CRUD is in state-
+  transitions.ts today (createAllocation, getAllocation, deleteAllocation).
+
+  Wait — let me re-check. Actually, getAllocation, createAllocation,
+  deleteAllocation ARE exported from db.ts. Let me find their line numbers.
+
+  From db.ts grep:
+    - getAllocation(id)                  (need to find line)
+    - createAllocation(data)             (need to find line)
+    - deleteAllocation(id)               (need to find line)
+    - countInstanceAllocations(id)       L1020-1026
+    - findStaleClaimed(cutoff)           L1032-1037
+    - findExpiredAvailable(cutoff)       L1043-1048
+    - findWarmAllocation(spec,chk)       L955-1014
+    - getWarmPoolStats()                 L1050-1070
+
+  Types: Allocation (export interface)
+
+
+  db/runs.ts (from db.ts lines 41-56, 453-528)
+  ─────────────────────────────────────────────
+  Types:     Run (export interface)
+  Exports:
+    - getRun(id)                   L453-455
+    - createRun(data)              L457-483
+    - updateRun(id, updates)       L485-496
+    - listRuns(filter?)            L498-515
+    - deleteRun(id)                L517-528
+
+
+  db/workflows.ts (from db.ts lines 119-162, 631-773)
+  ────────────────────────────────────────────────────
+  Types:     Workflow, WorkflowNode (export interfaces)
+  Exports:
+    - getWorkflow(id)              L631-633
+    - createWorkflow(data)         L635-667
+    - updateWorkflow(id, updates)  L669-687
+    - getWorkflowNodes(wfId)       L689-694
+    - createWorkflowNode(data)     L696-725
+    - updateWorkflowNode(id, upd)  L727-745
+    - findReadyNodes(wfId)         L747-760
+    - findActiveWorkflows()        L762-764
+    - deleteWorkflow(id)           L766-773
+
+
+  db/manifests.ts (from db.ts lines 72-90, 530-616)
+  ──────────────────────────────────────────────────
+  Types:     Manifest, ManifestResource (export interfaces)
+             AddResourceOptions (internal interface)
+  Exports:
+    - getManifest(id)                    L530-532
+    - createManifest(data)               L534-556
+    - addResourceToManifest(mId, rt, rId, opts?)  L558-582
+    - getManifestResources(mId)          L584-589
+    - deleteManifest(id)                 L591-599
+    - listExpiredManifests(cutoff)       L601-606
+    - getManifestObjectIds(mId)          L608-616
+    - deleteObjectBatch(objectIds)       L618-629  (used by manifest cleanup)
+
+
+  db/objects.ts (from db.ts lines 92-117, 775-942)
+  ─────────────────────────────────────────────────
+  Types:     Blob, StorageObject (export interfaces)
+  Exports (Blob):
+    - getBlob(id)                        L779-781
+    - createBlob(data)                   L783-817
+    - findBlobByChecksum(bucket, chk)    L819-827
+    - updateBlobLastReferenced(id)       L829-832
+    - findOrphanedBlobs(cutoff)          L834-845
+    - deleteBlobBatch(blobIds)           L847-854
+    - deleteBlob(id)                     L856-868
+  Exports (Object):
+    - getObject(id)                      L874-876
+    - createObject(data)                 L878-906
+    - addObjectTag(objId, key, val)      L908-921
+    - findObjectByTag(key, val)          L923-934
+    - deleteObject(id)                   L936-938
+    - updateObjectTimestamp(objId)       L940-942
+
+
+  db/orphans.ts (from db.ts lines 179-184, 1072-1125)
+  ────────────────────────────────────────────────────
+  Types:     OrphanScanResult (export interface)
+  Exports:
+    - getTrackedInstanceIds()            L1076-1079
+    - getActiveManifestIds()             L1081-1089
+    - recordOrphanScan(result)           L1091-1097
+    - addToWhitelist(...)                L1099-1114
+    - isWhitelisted(provider, pid)       L1116-1125
+
+
+  db/usage.ts (from db.ts lines 164-177, 1127-1194)
+  ──────────────────────────────────────────────────
+  Types:     UsageRecord (export interface)
+  Exports:
+    - createUsageRecord(data)            L1131-1156
+    - finishUsageRecord(id, finishedAt)  L1158-1175
+    - getMonthlyCostByProvider(s,e)      L1177-1188
+    - getActiveUsageRecords()            L1190-1194
+
+
+  db/index.ts (barrel)
+  ────────────────────
+  Re-exports:
+    // from ./init
+    export { initDatabase, closeDatabase, getDatabase, getMigrationVersion,
+             runMigrations, walCheckpoint } from "./init";
+    // from ./helpers
+    export { queryOne, queryMany, execute, transaction } from "./helpers";
+    // from ./instances
+    export { type Instance, getInstance, getInstanceByProviderId,
+             createInstance, updateInstance, listInstances, deleteInstance
+           } from "./instances";
+    // ... (all domain modules)
+
+  Every existing import { X } from "material/db" continues to work.
+
+
+5. MIGRATION CONSOLIDATION
+─────────────────────────────────────────────────────────────────────────────────
+
+  Current state:
+    migrations/001_initial.sql   — 369 lines, creates 17 tables + 40 indexes
+    migrations/002_auth.sql      — 15 lines, adds registration_token_hash
+
+  No live deployments exist. `repl reset` destroys the database completely.
+  New `repl control start` runs all migrations fresh.
+
+  Decision: CONSOLIDATE into a single schema file.
+
+    migrations/001_schema.sql    — complete schema, version 1
+
+  Changes from current 001_initial.sql:
+    - Fold registration_token_hash + index directly into CREATE TABLE instances
+    - Remove "Source: impl-pseudo..." comment (pseudo file was excised)
+    - schema_version seeded as version 1 (since it's one unified schema)
+    - Preserve all table ordering for FK dependency resolution
+    - Delete 002_auth.sql
+
+  Migration runner changes (db/init.ts):
+    - Remove static `import ... with { type: "text" }` for SQL files
+    - At init time, scan migrations/ directory for NNN_*.sql files
+    - Sort by numeric prefix, read contents, populate array
+    - Convention: version number = numeric prefix (001 → 1, 002 → 2)
+    - Adding a migration = drop a file in the directory. No code changes.
+
+    Implementation sketch:
+      function discoverMigrations(): Migration[] {
+        const dir = join(import.meta.dir, "../../migrations");
+        const files = readdirSync(dir)
+          .filter(f => /^\d{3}_.*\.sql$/.test(f))
+          .sort();
+        return files.map(f => ({
+          version: parseInt(f.slice(0, 3), 10),
+          sql: readFileSync(join(dir, f), "utf-8"),
+        }));
+      }
+
+    Runner logic unchanged (version check, skip if applied).
+
+  Future strategy:
+    - Pre-production: schema can be freely rewritten as 001_schema.sql
+    - At production freeze: 001_schema.sql becomes the baseline
+    - New changes get 002_xxx.sql, 003_xxx.sql, etc.
+    - No code changes needed — just add the file
+
+
+6. DRIFT CORRECTIONS (from spec/impl-pseudo screen)
+─────────────────────────────────────────────────────────────────────────────────
+
+  6a. checkBlobsExist() — spec MUST (Ch02 §2.2)
+  ───────────────────────────────────────────────
+  Spec: "The system MUST return distinct lists of existing and missing checksums
+  when queried with a bucket identifier and list of checksums."
+  Currently only single-checksum findBlobByChecksum() exists.
+
+  Add to objects.ts:
+    export function checkBlobsExist(
+      bucket: string, checksums: string[]
+    ): { existing: string[], missing: string[] }
+
+  Implementation: single query with WHERE bucket = ? AND checksum IN (...)
+  then partition input list by which were found.
+
+  6b. Migration downgrade guard — impl-pseudo prescribed
+  ──────────────────────────────────────────────────────
+  Running old code against a newer schema version should fail fast, not
+  silently proceed. Add to init.ts runMigrations():
+    const currentVersion = getMigrationVersion();
+    const maxMigration = Math.max(...migrations.map(m => m.version));
+    if (currentVersion > maxMigration)
+      throw new SkyREPLError("MIGRATION_ERROR",
+        `DB schema v${currentVersion} is newer than code v${maxMigration}`);
+
+  Remaining drift items deferred to backlog: #BL-09 through #BL-13.
+
+
+7. CROSS-CUTTING CONCERNS (FUTURE-PROOFING)
+─────────────────────────────────────────────────────────────────────────────────
+
+  7a. Event emission (#FND-02 dependency)
+  ────────────────────────────────────────
+  #FND-02 will add EventEmitter to replace AgentBridge polling.
+  Preparation: helpers.ts will export `getDatabase` and `transaction`,
+  which are the hooks where event emission will be added later.
+  No event emitter code added now — that's #FND-02's job.
+
+  7b. Cross-table queries
+  ────────────────────────
+  Some functions JOIN across domain boundaries:
+    - findWarmAllocation: allocations JOIN instances  → lives in allocations.ts
+    - getWarmPoolStats: allocations JOIN instances    → lives in allocations.ts
+    - getActiveManifestIds: queries manifests table   → lives in orphans.ts
+    - getTrackedInstanceIds: queries instances table  → lives in orphans.ts
+    - findOrphanedBlobs: blobs LEFT JOIN objects      → lives in objects.ts
+    - createObject calls updateBlobLastReferenced     → objects.ts imports from
+                                                        helpers (not blobs.ts)
+
+  Rule: cross-table queries live in the module of the "consumer" domain.
+  They use raw SQL against the DB directly (via getDatabase + queryOne/queryMany).
+  No domain module imports from another domain module.
+
+  7c. Tables with no CRUD functions yet
+  ──────────────────────────────────────
+  Several tables exist in the schema but have no TypeScript functions:
+    - instance_panic_logs    → #AGENT-02 will add functions
+    - idempotency_keys       → #FND-03 will add functions
+    - api_keys               → #API-08 will add functions
+    - rate_limit_log         → #API-08 will add functions
+    - manifest_cleanup_state → #LIFE-05 will add functions
+
+  These tables stay in the schema. New db/ modules will be created when
+  their epic lands. The barrel re-export makes this additive.
+
+  7d. Pagination and filter builders (API epic)
+  ──────────────────────────────────────────────
+  #API-01 through #API-05 will need cursor pagination and filter builders.
+  These will be added to helpers.ts when that epic starts.
+  Current list functions (listInstances, listRuns) use ad-hoc WHERE builders;
+  they'll be refactored to use the shared helper when it exists.
+
+  7e. Transaction composition for multi-table writes
+  ──────────────────────────────────────────────────
+  Callers like workflow engine do multi-table transactions via:
+    transaction(() => {
+      createAllocation(...);
+      addResourceToManifest(...);
+    });
+  This pattern continues to work because all domain functions call
+  getDatabase() internally. The transaction() wrapper from helpers.ts
+  provides the IMMEDIATE transaction boundary.
+
+
+8. TEST STRATEGY
+─────────────────────────────────────────────────────────────────────────────────
+
+  db.test.ts stays as a single file (for now). It tests the public API
+  surface via the barrel import. No test file splitting needed because:
+    - All 28 test cases import from "../material/db" → barrel works
+    - Tests exercise cross-module integration (create instance, then allocation)
+    - Splitting would add ceremony without value at this point
+
+  storage.ts and storage.test.ts: unchanged. storage.ts imports 6 functions
+  from db — these continue to resolve via the barrel.
+
+  All 367 existing tests must pass with zero import path changes.
+
+
+9. FILE COUNTS
+─────────────────────────────────────────────────────────────────────────────────
+
+  Created:   11 files (db/init.ts, helpers.ts, instances.ts, allocations.ts,
+             runs.ts, workflows.ts, manifests.ts, objects.ts, orphans.ts,
+             usage.ts, index.ts)
+  Created:    1 file (migrations/001_schema.sql)
+  Deleted:    1 file (material/db.ts → replaced by material/db/)
+  Deleted:    2 files (migrations/001_initial.sql, migrations/002_auth.sql)
+  Modified:   0 consumer files (barrel re-export = zero import churn)
+
+  Net: +9 files (11 + 1 created, 3 deleted)
+
+
+================================================================================
+DECISIONS LOG
+================================================================================
+
+  D1. Module granularity: 10 domain modules (not 6 as originally proposed).
+      Added orphans.ts and usage.ts because those functions form clean
+      clusters with their own types and table ownership. Keeps modules
+      small (50-150 lines each) and aligned with epic boundaries.
+
+  D2. Migration consolidation: merge to single 001_schema.sql.
+      No live deployments → no migration history to preserve.
+      Simpler to maintain one complete schema file.
+      Migration runner infrastructure preserved for future use.
+
+  D3. No domain-to-domain imports: cross-table queries use raw SQL
+      via helpers. Prevents circular dependencies as module count grows.
+
+  D4. Barrel re-export for zero import churn. All 30+ consumer files
+      keep existing import paths. Optional direct imports available
+      (e.g., from "material/db/instances") but not required.
+
+  D5. deleteObjectBatch and getManifestObjectIds go to objects.ts (table
+      ownership). Manifest cleanup currently reaches through to objects
+      directly — that's a layering smell (manifests → resources → objects),
+      but fixing it is cleanup pipeline work (#LIFE-05), not db scope.
+      See #BL-08.
+
+  D6. db.test.ts stays monolithic. Splitting tests adds overhead without
+      improving coverage or maintainability at current scale.
+
+
+================================================================================
+OPEN QUESTIONS
+================================================================================
+
+  (None — design is self-consistent and forward-compatible.)
+
+
+================================================================================
+SESSION LOG
+================================================================================
+
+  2026-02-11  Created worklog. Explored db.ts (1204 lines, 79 exports),
+              migrations (001_initial + 002_auth), import graph (30+ consumers),
+              future epic requirements. Drafted module structure, migration
+              consolidation plan, and forward-proofing analysis.
+  2026-02-11  Spec/impl-pseudo drift screen: 3 agents checked Ch02, Ch03,
+              impl-pseudo. Found 8 BAD items. 2 cheap fixes added to FND-01
+              scope (checkBlobsExist, downgrade guard). 5 deferred to backlog
+              (#BL-09 through #BL-13).
+  2026-02-11  Implementation complete. Created 11 db/ domain modules + barrel,
+              consolidated migration (001_schema.sql), directory-scan runner,
+              checkBlobsExist(), downgrade guard. Deleted db.ts + 2 old migrations.
+              366/367 tests pass (1 pre-existing flaky E2E → #BL-14).
+              `repl control reset && repl control start` clean.

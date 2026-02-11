@@ -51,7 +51,7 @@ export interface FinalizeOutput {
 ```typescript
 export const finalizeExecutor: NodeExecutor<FinalizeInput, FinalizeOutput> = {
   name: 'finalize',
-  idempotent: true,  // Transitions are CAS-based: re-execution is safe
+  idempotent: true,  // Transitions are atomic: re-execution is safe
 
   async execute(ctx: NodeContext): Promise<FinalizeOutput> {
     const input = ctx.input as FinalizeInput;
@@ -73,7 +73,7 @@ export const finalizeExecutor: NodeExecutor<FinalizeInput, FinalizeOutput> = {
     });
 
     // ── Step 1: Transition allocation ACTIVE -> COMPLETE ──────────────
-    // Uses CAS from state-transitions.ts. If allocation is already FAILED
+    // Uses atomic transition from state-transitions.ts. If allocation is already FAILED
     // (e.g., heartbeat timeout race), completeAllocation treats it as success.
     const now = Date.now();
 
@@ -235,7 +235,7 @@ export const finalizeExecutor: NodeExecutor<FinalizeInput, FinalizeOutput> = {
 | Error              | Source           | Response                                 |
 |--------------------|------------------|------------------------------------------|
 | VALIDATION_ERROR   | Input            | Fail immediately                         |
-| Allocation CAS     | State transition | Log warning, continue (skip_and_continue)|
+| Allocation atomic  | State transition | Log warning, continue (skip_and_continue)|
 | Snapshot failure   | Subworkflow      | Log warning, continue (non-fatal)        |
 | Manifest seal fail | State transition | Log warning, check if already sealed     |
 | DATABASE_ERROR     | DB               | Fail (but finalize has skip_and_continue) |

@@ -57,8 +57,42 @@ import {
 export const MAX_SUBWORKFLOW_DEPTH = 3;
 export const MAX_PARALLEL_BRANCHES = 16;
 
-/** Polling interval when waiting for running nodes to complete */
+/** Polling interval for crash recovery: nodes running in DB but not tracked locally */
 const POLL_INTERVAL_MS = 100;
+
+// =============================================================================
+// Engine Shutdown Coordination
+// =============================================================================
+
+let shutdownRequested = false;
+const activeLoops = new Set<Promise<void>>();
+
+export function requestEngineShutdown(): void {
+  shutdownRequested = true;
+}
+
+export function isEngineShutdownRequested(): boolean {
+  return shutdownRequested;
+}
+
+export async function awaitEngineQuiescence(timeoutMs = 30_000): Promise<void> {
+  if (activeLoops.size === 0) return;
+  const deadline = Date.now() + timeoutMs;
+  while (activeLoops.size > 0 && Date.now() < deadline) {
+    await Promise.race([
+      Promise.allSettled([...activeLoops]),
+      sleep(Math.min(1000, deadline - Date.now())),
+    ]);
+  }
+  if (activeLoops.size > 0) {
+    console.warn(`[workflow] Engine quiescence timeout: ${activeLoops.size} loop(s) still active`);
+  }
+}
+
+export function resetEngineShutdown(): void {
+  shutdownRequested = false;
+  activeLoops.clear();
+}
 
 // =============================================================================
 // Node Executor Registry
@@ -226,11 +260,33 @@ export async function submit(
 // =============================================================================
 
 export async function executeLoop(workflowId: number): Promise<void> {
+  // Track in-flight node execution promises (fire-and-forget with tracking)
+  const inFlight = new Map<string, Promise<void>>();
+
+  const loopPromise = _executeLoopInner(workflowId, inFlight);
+  activeLoops.add(loopPromise);
+  try {
+    await loopPromise;
+  } finally {
+    activeLoops.delete(loopPromise);
+  }
+}
+
+async function _executeLoopInner(
+  workflowId: number,
+  inFlight: Map<string, Promise<void>>,
+): Promise<void> {
   try {
     // Transition workflow to 'running'
     startWorkflow(workflowId);
 
     while (true) {
+      // Check engine shutdown signal before any DB access
+      if (shutdownRequested) {
+        console.log(`[workflow] Engine shutdown requested, abandoning workflow ${workflowId}`);
+        break;
+      }
+
       // Reload workflow from DB
       const workflow = getWorkflow(workflowId);
       if (!workflow) {
@@ -262,8 +318,13 @@ export async function executeLoop(workflowId: number): Promise<void> {
         const failed = allNodes.filter((n) => n.status === "failed").length;
 
         if (running > 0) {
-          // Wait for currently executing nodes to finish
-          await sleep(POLL_INTERVAL_MS);
+          if (inFlight.size > 0) {
+            // Await any in-flight node completion (replaces sleep polling)
+            await Promise.race([...inFlight.values()]);
+          } else {
+            // Crash recovery: nodes running in DB but not tracked locally
+            await sleep(POLL_INTERVAL_MS);
+          }
           continue;
         }
         if (pending === 0 && failed === 0) {
@@ -278,10 +339,18 @@ export async function executeLoop(workflowId: number): Promise<void> {
         }
       }
 
-      // Execute ready nodes concurrently
-      await Promise.all(
-        readyNodes.map((node) => executeNode(workflowId, node))
-      );
+      // Fire-and-forget: start ready nodes, track promises
+      for (const node of readyNodes) {
+        const p = executeNode(workflowId, node).finally(() => {
+          inFlight.delete(node.node_id);
+        });
+        inFlight.set(node.node_id, p);
+      }
+
+      // Wait for at least one node to complete before re-checking for newly-unblocked nodes
+      if (inFlight.size > 0) {
+        await Promise.race([...inFlight.values()]);
+      }
     }
   } catch (err) {
     // Catch any unhandled error: fail the workflow
@@ -871,7 +940,7 @@ export async function cancelWorkflow(
     return { success: false, status: workflow.status };
   }
 
-  // CAS-guarded cancellation (B5 fix)
+  // Atomically guarded cancellation (B5 fix)
   const result = cancelWorkflowTransition(workflowId);
   if (result.success) {
     // Update error_json separately after successful transition
@@ -1123,7 +1192,7 @@ export function createWorkflowEngine(): WorkflowEngine {
 // =============================================================================
 
 /**
- * Seal a manifest using CAS-based state transition.
+ * Seal a manifest using atomic state transition.
  * Computes expiresAt from manifest retention_ms or default 30 days.
  * Idempotent: returns success if manifest is already sealed (EX2 fix).
  */

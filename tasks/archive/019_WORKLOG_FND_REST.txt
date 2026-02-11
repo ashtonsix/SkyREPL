@@ -1,0 +1,153 @@
+================================================================================
+019 WORKLOG — #FND-02 through #FND-07: Remaining Foundation Tasks
+================================================================================
+Working on: #FND-02, #FND-03, #FND-04, #FND-05, #FND-06, #FND-07
+Status: DONE
+
+================================================================================
+TASKLOG
+================================================================================
+
+Step  Task     Description                                     Status
+----  -------  ----------------------------------------------  --------
+ 1    #FND-05  Engine: await promises instead of polling        DONE
+ 2    #FND-02  AgentBridge: EventEmitter replaces DB polling    DONE
+ 3    #FND-07  Field name and response shape drift batch fix    DONE
+ 4    #FND-06  TypeBox route validation                         DONE
+ 5    #FND-03  Idempotency middleware                           DONE
+ 6    #FND-04  Agent panic timeout and self-termination         DONE
+ 7    —        Verify all tests pass                            DONE
+ 8    —        Verify `repl control reset && start` works       DONE
+
+Ordering rationale:
+  - #FND-05 first: trivial, unblocks engine efficiency
+  - #FND-02 second: EventEmitter benefits from #FND-05's cleaner loop
+  - #FND-07 + #FND-06: response shape fixes, then schema validation
+  - #FND-03: idempotency middleware (independent)
+  - #FND-04: agent Python changes (fully independent)
+
+================================================================================
+DESIGN NOTES
+================================================================================
+
+1. #FND-05 — Engine await promises (<20 LOC)
+─────────────────────────────────────────────
+  File: impl/control/src/workflow/engine.ts
+
+  Current: executeLoop has `await sleep(100)` polling when nodes are running.
+  Fix: await the Promise.all of running node promises directly instead
+  of sleeping. Keep polling as crash-recovery fallback only.
+
+  Approach: the promises from node execution are already tracked in
+  executeLoop. Replace the sleep with awaiting those promises. The loop
+  already handles timeouts via Promise.race.
+
+
+2. #FND-02 — EventEmitter for AgentBridge (~150 LOC)
+─────────────────────────────────────────────────────
+  Files:
+    - NEW: impl/control/src/workflow/state-events.ts  (~40 LOC)
+    - MOD: impl/control/src/workflow/state-transitions.ts (emit calls)
+    - MOD: impl/control/src/api/agent.ts (waitForEvent rewrite)
+
+  Current: agent.ts waitForEvent() polls DB every 200ms for allocation
+  status changes (CLAIMED→ACTIVE/FAILED) and run completion.
+
+  Approach:
+    - Create lightweight state-events.ts with typed EventEmitter
+    - Emit events from state-transitions.ts after successful transitions
+    - Rewrite waitForEvent() to listen for events with timeout fallback
+    - Events: "allocation:STATUS_CHANGED", "run:FINISHED"
+    - Use Bun's built-in EventEmitter (Node.js-compatible)
+
+
+3. #FND-07 — Field name drift (20-40 LOC)
+──────────────────────────────────────────
+  Files:
+    - MOD: impl/control/src/api/routes.ts (response shapes → snake_case)
+    - MOD: spec/09_API.txt (add normative snake_case mandate)
+
+  Current: inconsistent mix of camelCase and snake_case in API responses.
+  Spec Ch09 examples already use snake_case (workflow_id, max_duration_ms).
+  Impl has some camelCase fields (workflowId, currentNode, statusUrl).
+
+  Direction: snake_case for ALL inter-service communication.
+  Rationale: API consumers could be any language; TypeScript used to
+  implement cli/control shouldn't influence wire format.
+
+  Spec update: add normative statement to Ch09 mandating snake_case
+  for all request/response fields across all inter-service comms.
+
+  Impl fix: audit routes.ts response objects, convert camelCase → snake_case.
+
+
+4. #FND-06 — TypeBox + ElysiaJS route validation (60-100 LOC)
+──────────────────────────────────────────────────────────────
+  Files:
+    - MOD: impl/control/src/api/routes.ts (replace manual checks, wire schemas)
+    - MOD: impl/shared/src/api/ (may need new schemas)
+
+  Current: 7 manual isNaN() checks on route params, plus manual body
+  validation for launch-run. LaunchRunInput TypeBox schema already exists.
+
+  Approach:
+    - Wire existing LaunchRunInput schema via Elysia .body()
+    - Add TypeBox schemas for route ID params via Elysia .params()
+    - Remove 7 manual isNaN checks + manual body field checks
+    - Let Elysia error handler return 400 for validation failures
+    - Both TypeBox (schema defs) and ElysiaJS (.body/.params wiring)
+
+
+5. #FND-03 — Idempotency middleware (50-80 LOC)
+────────────────────────────────────────────────
+  Files:
+    - NEW: impl/control/src/api/middleware/idempotency.ts
+    - MOD: impl/control/src/api/routes.ts (wire middleware)
+
+  Current: engine.ts has workflow-level idempotency check, but no
+  HTTP-level caching. Retried requests create duplicate workflows.
+
+  Approach:
+    - Middleware extracts Idempotency-Key header
+    - Check DB for existing key → return cached response
+    - On new key: execute handler, store response, return
+    - TTL: 24h success, 1h client error
+    - idempotency_keys table already in schema (from 001_schema.sql)
+
+  Pseudo: impl-pseudo/control/src/api/middleware/idempotency.ts.l1.txt
+
+
+6. #FND-04 — Agent panic timeout (80-120 LOC)
+──────────────────────────────────────────────
+  Files:
+    - MOD: impl/agent/heartbeat.py (add panic timer + shutdown)
+    - MOD: impl/agent/main.py (may need shutdown hook)
+
+  Current: heartbeat.py has 2m "degraded" warning but no panic.
+  Spec §11.5: t=15m no ack → PANIC, 5m checkpoint budget, t=20m self-term.
+  Timeline: 0→2m degraded→15m panic→20m self-term→25m CP force-term.
+
+  Approach:
+    - Track time since last ack in heartbeat thread
+    - At 15m: send HeartbeatPanicStartMessage (best-effort)
+    - Checkpoint budget: 5m (PANIC_CHECKPOINT_BUDGET_MS = 300000)
+    - Checkpoint execution is a STUB here — actual artifact upload via
+      presigned URLs (primary + failover) lands in #AGENT-04
+    - At 20m: send HeartbeatPanicCompleteMessage, call shutdown
+    - Schemas: HeartbeatPanicStartMessageSchema,
+      HeartbeatPanicCompleteMessageSchema (in shared/src/api/agent.ts)
+    - Self-termination: os.system("shutdown -h now") or sys.exit(1)
+
+  Pseudo: impl-pseudo/agent/heartbeat.py.l1.txt
+
+
+================================================================================
+SESSION LOG
+================================================================================
+
+  2026-02-11  Created worklog. Explored all 6 remaining FND tasks.
+              All fit single worklog (~350-500 LOC total).
+  2026-02-11  All 6 tasks implemented in parallel (4 agent tracks).
+              366 pass, 1 fail (pre-existing #BL-14 flaky E2E).
+              `repl control reset && start` verified.
+              FND epic complete.
