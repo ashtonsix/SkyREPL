@@ -62,6 +62,8 @@ import {
   getBlueprint,
   getNodeExecutor,
   determineRetryStrategy,
+  handleRetry,
+  executeNode,
   mapErrorToHttpStatus,
   calculateTopologySignature,
   findReadyNodesFromArray,
@@ -932,6 +934,78 @@ describe("Engine Core", () => {
 
       const decision = determineRetryStrategy(error, 0);
       expect(decision.shouldRetry).toBe(false);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // handleRetry - fallback path (SM-01)
+  // ---------------------------------------------------------------------------
+
+  describe("handleRetry fallback path (SM-01)", () => {
+    test("fallback retry at attempt=0 transitions through failed->pending correctly", async () => {
+      const wf = createTestWorkflow({ status: "running", started_at: Date.now() });
+      const node = createTestWorkflowNode(wf.id, "spot-node", "spot-type", {
+        status: "running",
+        attempt: 1,
+        started_at: Date.now(),
+      });
+
+      const error: NodeError = {
+        code: "SPOT_INTERRUPTED",
+        message: "Spot reclaimed",
+        category: "provider",
+      };
+
+      const decision: RetryDecision = {
+        shouldRetry: true,
+        strategy: "fallback",
+        delayMs: 0,
+        maxAttempts: 1,
+      };
+
+      // The node is in running state; handleRetry for fallback with attempt===0
+      // should call failNode first (running->failed), then resetNodeForRetry (failed->pending).
+      const nodeWithAttempt0 = { ...node, attempt: 0 };
+
+      await handleRetry(wf.id, nodeWithAttempt0, error, decision);
+
+      // After handleRetry, the node should be back to pending (failed -> pending via resetNodeForRetry)
+      const nodes = getWorkflowNodes(wf.id);
+      const updatedNode = nodes.find(n => n.node_id === "spot-node");
+      expect(updatedNode!.status).toBe("pending");
+      expect(updatedNode!.retry_reason).toBe("spot_retry");
+    });
+
+    test("fallback retry at attempt>0 fails node and logs fallback pattern", async () => {
+      const wf = createTestWorkflow({ status: "running", started_at: Date.now() });
+      const node = createTestWorkflowNode(wf.id, "spot-node-2", "spot-type", {
+        status: "running",
+        attempt: 2,
+        started_at: Date.now(),
+      });
+
+      const error: NodeError = {
+        code: "SPOT_INTERRUPTED",
+        message: "Spot reclaimed",
+        category: "provider",
+      };
+
+      const decision: RetryDecision = {
+        shouldRetry: true,
+        strategy: "fallback",
+        delayMs: 0,
+        maxAttempts: 1,
+      };
+
+      // When attempt > 0, should fail the node and apply conditional branch (log warning)
+      const nodeWithAttempt1 = { ...node, attempt: 1 };
+      await handleRetry(wf.id, nodeWithAttempt1, error, decision);
+
+      const nodes = getWorkflowNodes(wf.id);
+      const updatedNode = nodes.find(n => n.node_id === "spot-node-2");
+      expect(updatedNode!.status).toBe("failed");
+      const errorJson = JSON.parse(updatedNode!.error_json!);
+      expect(errorJson.retried_with).toBe("fallback");
     });
   });
 

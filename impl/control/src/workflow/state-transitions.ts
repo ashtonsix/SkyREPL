@@ -393,6 +393,14 @@ export function sealManifest(
       ).run(manifestId, manifestId, resourceType);
     }
 
+    // Mark manifest-owned resources as released so isManifestExpired and
+    // listExpiredManifests correctly identify this manifest as expired
+    // (Step 9: manifest cleanup deadlock fix)
+    db.prepare(
+      `UPDATE manifest_resources SET owner_type = 'released'
+       WHERE manifest_id = ? AND owner_type = 'manifest'`
+    ).run(manifestId);
+
     const sealed = queryOne<Manifest>("SELECT * FROM manifests WHERE id = ?", [manifestId]);
     return transitionSuccess(sealed!);
   });

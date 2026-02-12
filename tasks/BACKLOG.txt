@@ -113,3 +113,55 @@ DEFERRED
   a field in the body) lets the server reject stale retries outside a
   validity window, preventing weird edge cases with long-delayed retries.
   Likely folds into #API-06 (rate limiting / request validation).
+
+## #BL-17: Reconsider batch artifact upload optimization               [PENDING]
+  ---
+  G2 audit reverted batch artifact upload (DB-13) to single-file POST.
+  Batch uploading many small artifacts in one request is a valid optimization
+  but premature before the single-file path is proven and presigned URL
+  migration (DB-12/IX-4) is designed. Revisit after artifact pipeline matures.
+
+## #BL-18: Wire executor workflow_state to heartbeat                   [PENDING]
+  ---
+  Agent heartbeat sends coarse workflow_state (DN-3 in G2 audit).
+  Executor knows per-run state (preparing, running, uploading) but
+  heartbeat.py doesn't propagate it. Wire executor state through to
+  heartbeat payload for better control-plane visibility.
+
+## #BL-19: Spec coverage: SSE backpressure + FIFO eviction            [PENDING]
+  ---
+  Design analysis needed. SSE backpressure (IO-1) and FIFO eviction
+  (IO-2, MAX_PENDING_COMMANDS=50) are significant operational safety
+  features in sse-protocol.ts but have no spec coverage. Need to define
+  normative requirements for backpressure handling, priority hierarchy,
+  and slow consumer disconnect behavior.
+
+## #BL-20: Spec coverage: degraded mode behaviors                     [PENDING]
+  ---
+  Design analysis needed. Heartbeat exponential backoff (IO-3) and
+  disk-buffered log replay on recovery (IO-4) are implemented but
+  unspecified. Need to define normative requirements for degraded mode
+  backoff strategy, disk buffering, and recovery flush behavior.
+
+## #BL-21: Spec coverage: instance monitoring heartbeat fields         [PENDING]
+  ---
+  Design analysis needed. Extra heartbeat fields (IO-5: cpu_percent,
+  memory_percent, disk_percent, gpu_utilization, gpu_memory_percent)
+  are pragmatic additions without spec coverage. Decide whether these
+  are normative requirements or optional telemetry extensions.
+
+## #BL-22: Design analysis: categoryRegistry taxonomy                 [PENDING]
+  ---
+  Registry uses compute/storage/tunnel categories (IO-10) but spec
+  only describes compute + feature. Need to reconcile: is the multi-
+  category pattern the right abstraction? May need to remove unused
+  categories or formalize them in spec §8.
+
+## #BL-23: Design analysis: CLI/API "object zoo" pattern              [PENDING]
+  ---
+  The data model layer handles schemaless objects well (objects table
+  with type + metadata_json + tags), but the API + CLI surface grows
+  one-off endpoints per resource type (IO-11..14). Need a coherent
+  pattern: generic /v1/objects CRUD with type filters? Per-type
+  convenience endpoints? Both? Affects artifacts, snapshots, logs,
+  and future resource types.

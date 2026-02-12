@@ -135,7 +135,7 @@ LEGEND:
 - `await-completion`: Block until run_complete message received
 - `finalize-run`: Transition allocation to COMPLETE, trigger snapshot if requested
 
-> See also: impl-pseudo/control/src/intent/launch-run.ts.l2.txt §EntryPoint
+> See also: impl/control/src/intent/launch-run.ts
 
 **syncFiles handler details:**
 
@@ -240,7 +240,7 @@ This reduces cold start time (e.g., from minutes to seconds) for repeat runs wit
 3. **DRAIN-SSH**: Notify users, wait drain_timeout_ms, force disconnect
 4. **CLEANUP-FEATURES**: Parallel teardown of all FeatureInstallations (Tailscale,
    GPU drivers, monitoring). Uses Parallel-Fan-Out; partial failures don't block.
-5. **TERMINATE-PROVIDER**: Call provider.terminate(), wait for confirmation
+5. **TERMINATE-PROVIDER**: Call provider.terminate(), wait for confirmation (MAY skip provider call if instance was never fully spawned)
 6. **CLEANUP-RECORDS**: Update status, close usage records
 
 **cleanup-features node**: Queries all FeatureInstallation objects for instance, applies Parallel-Fan-Out pattern to spawn cleanup-feature subnode per feature. All branches converge at terminate-provider. Partial failures SHOULD NOT block termination.
@@ -379,7 +379,7 @@ interface SnapshotCapability {
 CLEANUP PRIORITY ORDER (highest first):
   ┌───────────────────────────────────────────────────────────────────────┐
   │  90: Allocations  │ Release instance slots                            │
-  │  80: Runs         │ Delete files, logs, records                       │
+  │  80: Runs         │ Delete files, logs; preserve run record for audit │
   │  70: Artifacts    │ Delete S3 objects                                 │
   │  65: Features     │ Tailscale machines, other feature provider rsrcs  │
   │  60: Other Objects│ Generic objects                                   │

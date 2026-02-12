@@ -54,6 +54,10 @@ export const claimAllocationExecutor: NodeExecutor<ClaimAllocationInput, ClaimAl
       const result = claimAllocation(allocationId, runId);
       if (result.success) {
         ctx.emitResource("allocation", result.data.id, 90);
+        // Step 13: Also emit the instance so it's tracked in the new manifest.
+        // On the warm path, the instance was emitted to the previous workflow's
+        // manifest by spawn-instance; re-emitting ensures it's tracked here too.
+        ctx.emitResource("instance", result.data.instance_id, 50);
 
         return {
           allocationId: result.data.id,

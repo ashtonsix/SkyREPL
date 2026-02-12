@@ -126,11 +126,12 @@ export function getTTL(provider: ProviderName, key: string): number | null {
 
   for (const [prefix, ttl] of Object.entries(config.byPrefix)) {
     if (key.startsWith(prefix)) {
-      return ttl;
+      if (ttl === null) return null; // explicitly unmanaged
+      return Math.min(ttl, config.maxTtl);
     }
   }
 
-  return config.default;
+  return Math.min(config.default, config.maxTtl);
 }
 
 export async function setWithAutoTTL<T>(
@@ -161,15 +162,17 @@ export async function invokeHook(
   provider: ProviderName,
   hook: keyof ProviderLifecycleHooks,
   ...args: unknown[]
-): Promise<void> {
+): Promise<{ success: boolean; error?: unknown }> {
   const hooks = providerHooks.get(provider);
-  if (!hooks?.[hook]) return; // No-op if not registered
+  if (!hooks?.[hook]) return { success: true }; // No-op if not registered
 
   try {
     await (hooks[hook] as Function)(...args);
+    return { success: true };
   } catch (error) {
-    // Hooks should not crash control plane
+    // Hooks should not crash control plane, but callers must know about failures
     console.error(`HOOK/${provider}/${hook}/error`, { error });
+    return { success: false, error };
   }
 }
 

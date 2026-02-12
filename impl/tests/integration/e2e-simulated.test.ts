@@ -64,7 +64,7 @@ beforeAll(async () => {
   // Register mock provider (overrides real orbstack in cache)
   mockProvider = new MockProvider();
   clearProviderCache();
-  registerProvider({ provider: mockProvider });
+  await registerProvider({ provider: mockProvider });
 
   const app = createServer({
     port: 0,
@@ -114,7 +114,7 @@ async function launchRun(
     body: JSON.stringify({
       command,
       spec: "ubuntu",
-      provider: "orbstack",
+      provider: "mock",
       region: "local",
       workdir: "/workspace",
       maxDurationMs: 60_000,

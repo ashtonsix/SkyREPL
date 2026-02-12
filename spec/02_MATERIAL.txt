@@ -670,7 +670,7 @@ For mutable content (e.g., logs):
 
 The system MUST provide a mechanism to check for existing blobs by checksum before uploading. The system MUST return distinct lists of existing and missing checksums when queried with a bucket identifier and list of checksums. The system MUST support batch deduplication queries to minimize round-trips. The system SHOULD use the blobs table index on (bucket, checksum) for efficient lookups.
 
-> See also: impl-pseudo/control/src/material/storage.ts.l2.txt §BlobDeduplication
+> See also: impl/control/src/material/storage.ts
 
 **Manifest Cleanup (Simplified):**
 
@@ -745,7 +745,7 @@ Objects reference blobs by checksum. Deduplication is decided per-upload:
 
 See implementation for full SQL patterns (inline vs S3, dedup vs no-dedup variants).
 
-> See also: impl-pseudo/control/src/material/storage.ts.l2.txt §PresignedURLs
+> See also: impl/control/src/material/storage.ts
 
 **Multi-Tenant Isolation:** Blobs scoped by bucket for clean tenant deletion,
 cost attribution, and security isolation. Trade-off: storage duplication across tenants.

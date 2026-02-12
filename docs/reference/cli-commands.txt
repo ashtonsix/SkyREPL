@@ -58,7 +58,7 @@ repl run status run-xyz789   # Specific run status
 repl run status run-xyz      # Prefix resolution
 ```
 
-> See also: impl-pseudo/cli/src/commands/run.ts.l2.txt §RunStatusSubcommand
+> See also: impl/cli/src/commands/run.ts
 
 **Output:** Run ID, status, workflow state, instance info, allocation, timestamps, duration.
 

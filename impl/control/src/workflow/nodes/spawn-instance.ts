@@ -3,7 +3,7 @@
 
 import crypto from "crypto";
 import type { NodeExecutor, NodeContext } from "../engine.types";
-import { createInstance, updateInstance, getInstance } from "../../material/db";
+import { createInstanceRecord, updateInstanceRecord, getInstanceRecord } from "../../resource/instance";
 import { getProvider } from "../../provider/registry";
 import type { ProviderName } from "../../provider/types";
 import type { SpawnInstanceOutput, LaunchRunWorkflowInput } from "../../intent/launch-run.schema";
@@ -37,7 +37,7 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
     const input = ctx.workflowInput as LaunchRunWorkflowInput & { manifestId?: number; spot?: boolean };
 
     // Phase 1: DB Insert — create instance record in pending state
-    const instance = createInstance({
+    const instance = createInstanceRecord({
       provider: input.provider || "orbstack",
       provider_id: "", // filled after spawn
       spec: input.spec,
@@ -72,7 +72,7 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
     const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
 
     // Store token hash in DB immediately after instance creation
-    updateInstance(instance.id, {
+    updateInstanceRecord(instance.id, {
       registration_token_hash: tokenHash,
     });
 
@@ -91,7 +91,7 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
     });
 
     // Phase 3: DB Update — record provider-assigned IDs
-    updateInstance(instance.id, {
+    updateInstanceRecord(instance.id, {
       provider_id: providerResult.id,
       ip: providerResult.ip || null,
       workflow_state: "spawn:complete",
@@ -110,7 +110,7 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
     const output = ctx.output as SpawnInstanceOutput | undefined;
     if (!output?.instanceId) return;
 
-    const instance = getInstance(output.instanceId);
+    const instance = getInstanceRecord(output.instanceId);
     if (!instance) return;
 
     // If provider_id was assigned, terminate the actual VM
@@ -127,7 +127,7 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
       }
     }
 
-    updateInstance(output.instanceId, {
+    updateInstanceRecord(output.instanceId, {
       workflow_state: "spawn:compensated",
     });
   },

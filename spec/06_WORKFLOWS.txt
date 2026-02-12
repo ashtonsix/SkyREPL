@@ -32,7 +32,7 @@ Benefits:
 - No orchestration overhead (no DAG, no compensation logic)
 - Clean API for simple operations
 
-> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §SingleStepHelper
+> See also: impl/control/src/workflow/engine.ts
 
 ## 6.2 Engine Architecture
 
@@ -54,7 +54,7 @@ Benefits:
 - `priority?` ('low' | 'normal' | 'high')
 - `timeout?` (number): per-workflow timeout override
 
-> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt WorkflowEngine Interface
+> See also: impl/control/src/workflow/engine.ts WorkflowEngine Interface
 
 ### 6.2.1 Retry Semantics
 
@@ -71,7 +71,7 @@ Retry MUST:
 **Rationale**: Preserves failed workflow for audit trail, avoids state machine
 violations, enables clean retry without contaminating original workflow state.
 
-> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §Retry
+> See also: impl/control/src/workflow/engine.ts
 
 ### Execution Loop
 
@@ -104,7 +104,7 @@ Key invariant: ready nodes execute concurrently via parallel dispatch.
 
 > Why separate table: rationale extracted to docs/design/rationale-resources.txt
 
-> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §ExecuteLoop
+> See also: impl/control/src/workflow/engine.ts
 
 ### Node Execution Model
 
@@ -120,7 +120,7 @@ Key invariant: ready nodes execute concurrently via parallel dispatch.
 - Subworkflow: `spawnSubworkflow(type, input)` -> SubworkflowHandle
 - Utilities: `getNodeOutput(nodeId)`, `log(level, message, data?)` (emits OTel span events)
 
-> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §ExecuteNode
+> See also: impl/control/src/workflow/engine.ts
 
 ### Two-Phase Spawn in Node Execution
 
@@ -205,7 +205,7 @@ FUNCTION recoverWorkflows():
     RESUME execution loop for this workflow
 ```
 
-> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §CrashRecovery
+> See also: impl/control/src/workflow/engine.ts
 
 ## 6.3 Pattern Library
 
@@ -350,7 +350,7 @@ children are still emitting resources. This ensures complete resource tracking.
 Subworkflow completion MUST release its own manifest. Parent resource claiming MUST
 query child's SEALED manifest and use atomic claim operations.
 
-> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §Subworkflows
+> See also: impl/control/src/workflow/engine.ts
 
 ### Max Depth
 
@@ -443,7 +443,7 @@ immediate failure.
    - Compensation applied to failed node only
    - Manifest preserved with resources for cleanup
 
-> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §RetryStrategy
+> See also: impl/control/src/workflow/engine.ts
 
 ### 6.6.2 Workflow -> API Error Mapping
 
@@ -498,7 +498,7 @@ Error-to-HTTP mapping MUST use error category: validation->400, auth->401/403,
 not_found->404, conflict->409, rate_limit->429, timeout->504, provider->502,
 internal->500.
 
-> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §ErrorMapping
+> See also: impl/control/src/workflow/engine.ts
 
 ### 6.6.3 Workflow Timeout
 
@@ -546,7 +546,7 @@ Cancellation MUST:
 2. Set workflow status to 'cancelling' with cancel_reason
 3. Rely on agent response (run_complete) or heartbeat timeout for resolution
 
-> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §Cancellation
+> See also: impl/control/src/workflow/engine.ts
 
 ## 6.8 Compensation Behavior
 
@@ -558,7 +558,7 @@ On timeout: log error, allow orphan scan to catch remaining resources.
 
 ### 6.8.2 Compensation Retry
 
-Compensation MUST retry on retryable errors (RATE_LIMITED, NETWORK_ERROR) up to
+Compensation MUST retry on retryable errors (RATE_LIMITED, NETWORK_ERROR, PROVIDER_API_ERROR) up to
 MAX_RETRIES with exponential backoff from RETRY_BASE_DELAY. Each attempt MUST
 be wrapped with the 5-minute compensation timeout.
 
@@ -571,4 +571,4 @@ rely on orphan scan for cleanup.
 
 > Observability rationale and topology signatures extracted to workshop/ux/observability-features.txt
 
-> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §Observability
+> See also: impl/control/src/workflow/engine.ts

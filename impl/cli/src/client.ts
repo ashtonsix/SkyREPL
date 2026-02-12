@@ -195,6 +195,38 @@ export class ApiClient {
     return (await response.json()) as { workflow_id: number; instance_id: number; status: string };
   }
 
+  /**
+   * List artifacts for a run.
+   * GET /v1/runs/:id/artifacts
+   */
+  async listArtifacts(runId: string): Promise<{ data: ArtifactEntry[] }> {
+    const response = await fetch(`${this.baseUrl}/v1/runs/${runId}/artifacts`);
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const msg = (body as any)?.error?.message ?? `HTTP ${response.status}`;
+      throw new Error(`list artifacts failed: ${msg}`);
+    }
+    return (await response.json()) as { data: ArtifactEntry[] };
+  }
+
+  /**
+   * Download an artifact.
+   * GET /v1/artifacts/:id/download
+   */
+  async downloadArtifact(artifactId: string): Promise<{ data: Buffer; filename: string }> {
+    const response = await fetch(`${this.baseUrl}/v1/artifacts/${artifactId}/download`);
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const msg = (body as any)?.error?.message ?? `HTTP ${response.status}`;
+      throw new Error(`download artifact failed: ${msg}`);
+    }
+    const disposition = response.headers.get('Content-Disposition') ?? '';
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    const filename = match?.[1] ?? `artifact-${artifactId}`;
+    const data = Buffer.from(await response.arrayBuffer());
+    return { data, filename };
+  }
+
   // Stubs for future slices (not needed for Slice 1)
   async checkBlobs(_checksums: string[]): Promise<CheckBlobsResponse> {
     throw new Error('checkBlobs not implemented');
@@ -288,6 +320,15 @@ export interface WorkflowEvent {
   type: string;
   message?: string;
   details?: unknown;
+}
+
+export interface ArtifactEntry {
+  id: number;
+  run_id: number;
+  path: string | null;
+  checksum: string | null;
+  size_bytes: number;
+  created_at: number;
 }
 
 export interface WorkflowCompletionResult {

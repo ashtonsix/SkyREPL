@@ -236,7 +236,7 @@ export async function submit(
       output_json: null,
       error_json: null,
       depends_on: dependsOn,
-      attempt: 1,
+      attempt: 0,
       retry_reason: null,
       started_at: null,
       finished_at: null,
@@ -255,6 +255,10 @@ export async function submit(
         code: "INTERNAL_ERROR",
         message: `executeLoop crashed: ${err?.message ?? err}`,
       }));
+      // Step 11: seal manifest on crash path so it doesn't stay DRAFT forever
+      if (manifest.id) {
+        sealManifestSafe(manifest.id);
+      }
     } catch (_) { /* already terminal or DB unavailable */ }
   });
 
@@ -377,6 +381,11 @@ async function _executeLoopInner(
         message: err instanceof Error ? err.message : String(err),
       });
       failWorkflowTransition(workflowId, errorJson);
+      // Step 11: seal manifest on crash path so it doesn't stay DRAFT forever
+      const wf = getWorkflow(workflowId);
+      if (wf?.manifest_id) {
+        sealManifestSafe(wf.manifest_id);
+      }
     } catch (failErr) {
       console.error("[workflow] Failed to fail workflow after error", {
         workflowId,
@@ -455,11 +464,16 @@ export async function executeNode(
     // Normalize error to NodeError shape
     const nodeError = normalizeToNodeError(error);
 
+    // Re-read node from DB to get post-startNode attempt value (SM-05 fix)
+    const freshNodes = getWorkflowNodes(workflowId);
+    const freshNode = freshNodes.find(n => n.node_id === node.node_id);
+    const currentAttempt = freshNode?.attempt ?? node.attempt;
+
     // Determine retry strategy
-    const decision = determineRetryStrategy(nodeError, node.attempt);
+    const decision = determineRetryStrategy(nodeError, currentAttempt);
 
     if (decision.shouldRetry) {
-      await handleRetry(workflowId, node, nodeError, decision);
+      await handleRetry(workflowId, freshNode ?? node, nodeError, decision);
     } else {
       // No retry - fail the node
       failNode(node.id, JSON.stringify(nodeError));
@@ -830,6 +844,7 @@ export async function handleRetry(
     case "fallback":
       // Spot interrupted: retry spot once, then fallback to on-demand
       if (node.attempt === 0) {
+        failNode(node.id, JSON.stringify({ code: error.code, message: error.message, retried_with: "fallback_spot_retry" }));
         resetNodeForRetry(node.id, "spot_retry");
       } else {
         // Fail the node, apply conditional branch for on-demand fallback
@@ -932,20 +947,35 @@ async function handleWorkflowFailure(
   workflowId: number,
   nodes: WorkflowNode[]
 ): Promise<void> {
-  // Run reverse-order compensation on completed nodes
-  try {
-    const { compensateWorkflow } = await import("./compensation");
-    await compensateWorkflow(workflowId);
-  } catch (err) {
-    console.warn("[workflow] Compensation rollback failed", {
-      workflowId,
-      error: err instanceof Error ? err.message : String(err),
-    });
+  // Single-node compensation scope (§6.5, §7, §9):
+  // Only the failed node gets compensated — completed nodes are NOT rolled back.
+  // Note: inline compensation already happens in executeNode when the node first
+  // fails. This is a safety net for cases where the failed node wasn't compensated
+  // inline (e.g., crash recovery).
+  const failedNodes = nodes.filter((n) => n.status === "failed");
+  for (const failedNode of failedNodes) {
+    try {
+      const { compensateFailedNode } = await import("./compensation");
+      const result = await compensateFailedNode(workflowId, failedNode.node_id);
+      if (!result.success) {
+        console.warn("[workflow] Compensation failed for node", {
+          workflowId,
+          nodeId: failedNode.node_id,
+          error: result.error?.message,
+        });
+      }
+    } catch (err) {
+      console.warn("[workflow] Compensation error for failed node", {
+        workflowId,
+        nodeId: failedNode.node_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // Find the first failed node for error context
-  const failedNode = nodes.find((n) => n.status === "failed");
-  const errorJson = failedNode?.error_json ?? JSON.stringify({
+  const firstFailedNode = failedNodes[0];
+  const errorJson = firstFailedNode?.error_json ?? JSON.stringify({
     code: "WORKFLOW_FAILED",
     message: "One or more nodes failed",
   });
@@ -1301,14 +1331,25 @@ export function createWorkflowEngine(): WorkflowEngine {
       const workflow = getWorkflow(workflowId);
       if (!workflow) throw new Error(`Workflow ${workflowId} not found`);
 
+      // SD-G1-07: Only failed workflows can be retried
+      if (workflow.status !== "failed") {
+        throw Object.assign(
+          new Error(`Cannot retry workflow ${workflowId}: status is ${workflow.status}, expected 'failed'`),
+          { code: "INVALID_STATE", category: "validation" }
+        );
+      }
+
       const originalInput = workflow.input_json ? JSON.parse(workflow.input_json) : {};
       const originalKey = workflow.idempotency_key;
       const newKey = originalKey ? `${originalKey}:retry:${Date.now()}` : undefined;
 
+      // SD-G1-06: Preserve parent_workflow_id and timeout from the original workflow
       const result = await submit({
         type: workflow.type,
         input: originalInput,
         idempotencyKey: newKey,
+        parentWorkflowId: workflow.parent_workflow_id ?? undefined,
+        timeout: workflow.timeout_ms ?? undefined,
       });
       return result.workflowId;
     },
@@ -1387,8 +1428,9 @@ export async function runSingleStep(
 // =============================================================================
 
 /**
- * Seal a manifest using atomic state transition.
- * Computes expiresAt from manifest retention_ms or default 30 days.
+ * Seal a manifest using workflow-type-specific retention policy.
+ * Looks up the workflow that owns this manifest to determine the correct
+ * retention duration via sealManifestWithPolicy (SD-G1-04 fix).
  * Idempotent: returns success if manifest is already sealed (EX2 fix).
  */
 function sealManifestSafe(manifestId: number): void {
@@ -1398,12 +1440,17 @@ function sealManifestSafe(manifestId: number): void {
   // Already sealed — idempotent success
   if (manifest.status === "SEALED") return;
 
-  const now = Date.now();
-  const expiresAt = manifest.retention_ms != null
-    ? now + manifest.retention_ms
-    : now + TIMING.DEFAULT_MANIFEST_RETENTION_MS;
+  // Find the workflow that owns this manifest to determine retention policy
+  const workflow = queryOne<Workflow>(
+    "SELECT * FROM workflows WHERE manifest_id = ?",
+    [manifestId]
+  );
 
-  const result = sealManifestTransition(manifestId, expiresAt);
+  const workflowType = workflow?.type ?? "unknown";
+
+  // Dynamic import to avoid potential circular dependency
+  const { sealManifestWithPolicy } = require("../resource/manifest") as typeof import("../resource/manifest");
+  const result = sealManifestWithPolicy(manifestId, workflowType);
   if (!result.success) {
     console.warn(`[workflow] Failed to seal manifest ${manifestId}: ${result.reason}`);
   }

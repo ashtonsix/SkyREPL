@@ -69,6 +69,9 @@ const LOG_REPLAY_BUFFER_SIZE = 500;
 /** Maximum number of pending commands to retain per instance (FIFO eviction if exceeded) */
 const MAX_PENDING_COMMANDS = 50;
 
+/** Sustained backpressure duration before disconnecting a slow agent (5 min) */
+const SSE_BACKPRESSURE_DISCONNECT_MS = 5 * 60 * 1000;
+
 interface CommandDeliveryState {
   command: ControlToAgentMessage;
   sentAt: number;
@@ -93,6 +96,9 @@ export class SSEManager {
 
   /** Unacknowledged commands: instanceId -> Map<commandId, CommandDeliveryState> */
   private unackedCommands = new Map<string, Map<number, CommandDeliveryState>>();
+
+  /** Backpressure tracking: instanceId -> timestamp when backpressure first detected */
+  private backpressureSince = new Map<string, number>();
 
   /** Per-run monotonic sequence counter for log messages */
   private logSequenceCounters = new Map<string, number>();
@@ -199,6 +205,56 @@ export class SSEManager {
     });
   }
 
+  /**
+   * Enqueue data to an agent's SSE stream with backpressure handling.
+   * Commands (isCommand=true) are never dropped.
+   * Non-commands (heartbeat_ack) are dropped when the consumer is slow.
+   * Connection is closed after sustained backpressure (5 min).
+   */
+  enqueueToAgent(
+    instanceId: string,
+    controller: ReadableStreamDefaultController<Uint8Array>,
+    data: Uint8Array,
+    isCommand: boolean
+  ): boolean {
+    const desiredSize = controller.desiredSize;
+    const backpressured = desiredSize !== null && desiredSize <= 0;
+
+    if (backpressured) {
+      if (!this.backpressureSince.has(instanceId)) {
+        this.backpressureSince.set(instanceId, Date.now());
+        console.warn("[sse] Backpressure detected on agent SSE", { instanceId, desiredSize });
+      }
+
+      // Drop non-command messages (heartbeat_ack) under backpressure
+      if (!isCommand) {
+        return false;
+      }
+
+      // Disconnect after sustained overload
+      const since = this.backpressureSince.get(instanceId)!;
+      if (Date.now() - since >= SSE_BACKPRESSURE_DISCONNECT_MS) {
+        console.warn("[sse] Disconnecting slow consumer after sustained backpressure", { instanceId });
+        try { controller.close(); } catch { /* already closed */ }
+        this.agentStreams.delete(instanceId);
+        this.backpressureSince.delete(instanceId);
+        return false;
+      }
+    } else if (this.backpressureSince.has(instanceId)) {
+      console.info("[sse] Backpressure cleared on agent SSE", { instanceId });
+      this.backpressureSince.delete(instanceId);
+    }
+
+    try {
+      controller.enqueue(data);
+      return true;
+    } catch {
+      this.agentStreams.delete(instanceId);
+      this.backpressureSince.delete(instanceId);
+      return false;
+    }
+  }
+
   /** Send a command to an agent via SSE */
   async sendCommand(
     instanceId: string,
@@ -222,30 +278,33 @@ export class SSEManager {
       return false;
     }
 
-    try {
-      const encoder = new TextEncoder();
-      const data = `event: ${command.type}\ndata: ${JSON.stringify(command)}\n\n`;
-      controller.enqueue(encoder.encode(data));
+    const encoder = new TextEncoder();
+    const data = `event: ${command.type}\ndata: ${JSON.stringify(command)}\n\n`;
+    const isCommand = command.type !== "heartbeat_ack";
 
-      // After successful send, track for ack (only for commands with command_id)
-      const commandId = (command as any).command_id;
-      if (commandId != null) {
-        if (!this.unackedCommands.has(instanceId)) {
-          this.unackedCommands.set(instanceId, new Map());
-        }
-        this.unackedCommands.get(instanceId)!.set(commandId, {
-          command,
-          sentAt: Date.now(),
-          retryCount: 0,
-        });
+    if (!this.enqueueToAgent(instanceId, controller, encoder.encode(data), isCommand)) {
+      if (!isCommand) {
+        // Heartbeat_ack dropped due to backpressure — not an error
+        return true;
       }
-
-      return true;
-    } catch (error) {
-      console.error("[sse] Failed to send SSE command", { instanceId, error });
-      this.agentStreams.delete(instanceId);
+      console.error("[sse] Failed to send SSE command", { instanceId, type: command.type });
       return false;
     }
+
+    // After successful send, track for ack (only for commands with command_id)
+    const commandId = (command as any).command_id;
+    if (commandId != null) {
+      if (!this.unackedCommands.has(instanceId)) {
+        this.unackedCommands.set(instanceId, new Map());
+      }
+      this.unackedCommands.get(instanceId)!.set(commandId, {
+        command,
+        sentAt: Date.now(),
+        retryCount: 0,
+      });
+    }
+
+    return true;
   }
 
   /** Check if there are pending commands for an instance */
@@ -294,18 +353,17 @@ export class SSEManager {
         continue;
       }
 
-      // Retry: re-send the command
+      // Retry: re-send the command (commands are always high-priority)
       const controller = this.agentStreams.get(instanceId);
       if (controller) {
-        try {
-          const encoder = new TextEncoder();
-          const data = `event: ${state.command.type}\ndata: ${JSON.stringify(state.command)}\n\n`;
-          controller.enqueue(encoder.encode(data));
+        const encoder = new TextEncoder();
+        const data = `event: ${state.command.type}\ndata: ${JSON.stringify(state.command)}\n\n`;
+        if (this.enqueueToAgent(instanceId, controller, encoder.encode(data), true)) {
           state.sentAt = now;
           state.retryCount++;
           retries++;
           console.info("[sse] Retrying unacked command", { instanceId, commandId, retryCount: state.retryCount });
-        } catch {
+        } else {
           toRemove.push(commandId);
         }
       } else {
@@ -333,6 +391,7 @@ export class SSEManager {
   /** Clean up command tracking when agent disconnects */
   cleanupInstance(instanceId: string): void {
     this.unackedCommands.delete(instanceId);
+    this.backpressureSince.delete(instanceId);
   }
 
   // --- CLI WebSocket: Log Streaming -----------------------------------------

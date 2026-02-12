@@ -55,6 +55,15 @@ export function slugToId(slug: string): number {
 /** Alias for idToSlug */
 export const formatId = idToSlug;
 
+/** Parse user-provided ID input (base-36 slug) to integer */
+export function parseInputId(input: string): number {
+  const id = parseInt(input, 36);
+  if (!Number.isFinite(id) || id <= 0) {
+    throw new Error(`Invalid ID: "${input}"`);
+  }
+  return id;
+}
+
 // =============================================================================
 // INSTANCE SPEC
 // =============================================================================

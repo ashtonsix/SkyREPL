@@ -2,7 +2,7 @@
 // Waits for agent to report run completion, then updates run record.
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
-import { updateRun } from "../../material/db";
+import { updateRunRecord } from "../../resource/run";
 import { getAgentBridge } from "./start-run";
 import { TIMING } from "@skyrepl/shared";
 import type {
@@ -63,7 +63,7 @@ export const waitCompletionExecutor: NodeExecutor<WaitCompletionInput, WaitCompl
       (result as { spotInterrupted?: boolean })?.spotInterrupted ?? false;
 
     // Update run record with completion data
-    updateRun(input.runId, {
+    updateRunRecord(input.runId, {
       exit_code: exitCode,
       spot_interrupted: spotInterrupted ? 1 : 0,
       finished_at: now,

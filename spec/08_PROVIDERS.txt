@@ -165,7 +165,7 @@ Contract compliance tests MUST verify:
 - list filters by region correctly
 - generateBootstrap returns valid script with content, format, and SHA-256 checksum
 
-> See also: impl-pseudo/control/src/provider/types.ts.l2.txt §ProviderInterface
+> See also: impl/control/src/provider/types.ts
 
 ### 8.1.3 Capability Flags
 
@@ -278,7 +278,7 @@ const PROVIDER_CAPABILITIES: Record<ProviderName, ProviderCapabilities> = {
   },
 };
 ```
-> See also: impl-pseudo/control/src/provider/types.ts.l2.txt §CapabilityFlags
+> See also: impl/control/src/provider/types.ts
 
 ### 8.1.4 Core Method Types
 
@@ -337,7 +337,7 @@ interruptionBehavior? (terminate|stop|hibernate), requestType? (one-time|persist
 SpotRequest (requestId, status, instanceId?, spotPrice?).
 SpotPriceInfo (spec, region, availabilityZone?, price, timestamp, savingsPercent?).
 
-> See also: impl-pseudo/control/src/provider/types.ts.l2.txt §CoreMethodTypes
+> See also: impl/control/src/provider/types.ts
 
 ### 8.1.5 Error Taxonomy
 
@@ -376,9 +376,9 @@ conflict (state conflict), internal (provider internal).
 - mapProviderError(provider, error): Maps provider-specific errors to the taxonomy.
   If already a ProviderError, return as-is. Otherwise wrap as PROVIDER_INTERNAL.
 
-> See also: impl-pseudo/control/src/provider/errors.ts.l2.txt §ProviderErrorBaseClass
-> See also: impl-pseudo/control/src/provider/errors.ts.l2.txt §SpecificErrorClasses
-> See also: impl-pseudo/control/src/provider/errors.ts.l2.txt §ErrorHandlingHelpers
+> See also: impl/control/src/provider/errors.ts
+> See also: impl/control/src/provider/errors.ts
+> See also: impl/control/src/provider/errors.ts
 
 ### 8.1.6 Bootstrap Generation
 
@@ -397,7 +397,7 @@ other providers use whichever format their platform supports. The checksum enabl
 warm pool matching -- instances with identical bootstrap checksums are interchangeable.
 
 > See also: impl-pseudo/control/src/provider/compute/aws.ts.l2.txt §BootstrapGeneration
-> See also: impl-pseudo/control/src/provider/compute/orbstack.ts.l2.txt §OrbStackBootstrapGeneration
+> See also: impl/control/src/provider/compute/orbstack.ts
 
 ## 8.2 Type Enhancement Pattern
 
@@ -442,7 +442,7 @@ platform-specific fields. Key examples:
 - **OrbStackInstance**: adds vmName, arch, distro, distroVersion, resource allocation,
   host integration.
 
-> See also: impl-pseudo/control/src/provider/types.ts.l2.txt §ProviderSpecificEnhancedTypes
+> See also: impl/control/src/provider/types.ts
 
 ### 8.2.2 Materialization Pattern (Generic -> Provider-Specific)
 
@@ -543,7 +543,7 @@ Provider workflows MUST also declare:
 Provider workflows are registered via a global registry. Registration MUST fail
 if a workflow with the same provider:type key already exists.
 
-> See also: impl-pseudo/control/src/provider/contracts.ts.l2.txt §ProviderWorkflowConstraints
+> See also: impl/control/src/provider/contracts.ts
 
 ### 8.3.2 Abstract Contracts
 
@@ -573,7 +573,7 @@ Three standard contracts define provider-agnostic behavior:
 - Input MUST include: providerId, name, spec, initChecksum?
 - Output MUST include: snapshotId (internal), providerSnapshotId, sizeBytes?
 
-> See also: impl-pseudo/control/src/provider/contracts.ts.l2.txt §AbstractContracts
+> See also: impl/control/src/provider/contracts.ts
 
 ### 8.3.3 Provider Workflow Extensibility
 
@@ -632,8 +632,8 @@ During instance spawn, features listed in SpawnOptions MUST be processed: featur
 requiring bootstrap MUST have their commands included in the bootstrap script.
 During termination, all attached features MUST be detached before compute termination.
 
-> See also: impl-pseudo/control/src/provider/types.ts.l2.txt §FeatureProviderInterface
-> See also: impl-pseudo/control/src/provider/types.ts.l2.txt §FeatureLifecycleIntegration
+> See also: impl/control/src/provider/types.ts
+> See also: impl/control/src/provider/types.ts
 
 ### 8.4.2 Feature vs Compute Providers
 
@@ -688,7 +688,7 @@ This data is NOT persisted -- it is re-fetched on control plane restart. No data
 table is needed. Implementations SHOULD use a simple get-or-fetch pattern with
 TTL-based expiration.
 
-> See also: impl-pseudo/control/src/provider/extensions.ts.l2.txt §InMemoryCache
+> See also: impl/control/src/provider/extensions.ts
 
 ### 8.5.2 Lifecycle Hooks: Heartbeat Expectations Model
 
@@ -717,8 +717,8 @@ explicitly communicates what it needs and providers respond with receipts.
   budget_threshold, drift_detected, provider_event.
 - nextHeartbeat?: { preferredInterval } -- timing negotiation
 
-> See also: impl-pseudo/control/src/provider/extensions.ts.l2.txt §LifecycleHooksInterface
-> See also: impl-pseudo/control/src/provider/extensions.ts.l2.txt §HeartbeatExpectationsModel
+> See also: impl/control/src/provider/extensions.ts
+> See also: impl/control/src/provider/extensions.ts
 
 ### 8.5.3 Heartbeat Flow Example
 
@@ -768,7 +768,7 @@ const receipts = await provider.onHeartbeat(expectations);
   nextHeartbeat: { preferredInterval: 30000 }
 }
 ```
-> See also: impl-pseudo/control/src/provider/extensions.ts.l2.txt §HeartbeatExpectationsModel
+> See also: impl/control/src/provider/extensions.ts
 
 ### 8.5.4 Benefits of Expectations Model
 
@@ -846,7 +846,7 @@ Providers SHOULD define TTL configurations for cached state categories:
 
 Default TTL SHOULD be 5 minutes. Maximum TTL MUST NOT exceed 1 hour.
 
-> See also: impl-pseudo/control/src/provider/extensions.ts.l2.txt §TTLConfiguration
+> See also: impl/control/src/provider/extensions.ts
 
 ### 8.5.9 Hooks vs Workflows Distinction
 
@@ -892,8 +892,8 @@ A ProviderRegistration MAY include:
 Complex providers (AWS) register multiple workflows and contracts. Simpler
 providers (Lambda, RunPod) MAY register with empty workflow/contract lists.
 
-> See also: impl-pseudo/control/src/provider/registry.ts.l2.txt §DynamicProviderRegistration
-> See also: impl-pseudo/control/src/provider/extensions.ts.l2.txt §HookRegistry
+> See also: impl/control/src/provider/registry.ts
+> See also: impl/control/src/provider/extensions.ts
 > See also: impl-pseudo/control/src/provider/compute/aws.ts.l2.txt §FullAWSRegistration
 
 ### 8.5.11 Contract Testing Pattern
@@ -915,10 +915,10 @@ Tests MUST verify:
 
 Capability-gated tests MUST skip gracefully for providers without the feature.
 
-> See also: impl-pseudo/control/src/provider/registry.ts.l2.txt §ComputeProviderRegistry
-> See also: impl-pseudo/control/src/provider/registry.ts.l2.txt §RuntimeAccess
-> See also: impl-pseudo/control/src/provider/registry.ts.l2.txt §TestUtilities
-> See also: impl-pseudo/control/src/provider/registry.ts.l2.txt §ContractTestingPattern
+> See also: impl/control/src/provider/registry.ts
+> See also: impl/control/src/provider/registry.ts
+> See also: impl/control/src/provider/registry.ts
+> See also: impl/control/src/provider/registry.ts
 
 ### 8.5.12 Provider Implementation Spectrum
 

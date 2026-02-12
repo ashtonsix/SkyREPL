@@ -10,6 +10,7 @@ import {
   addResourceToManifest,
   getManifest,
   getManifestResources,
+  listExpiredManifests,
   createWorkflow,
   execute,
   queryMany,
@@ -631,6 +632,167 @@ describe("manifest: isManifestExpired", () => {
 
   test("returns false for non-existent manifest", () => {
     expect(isManifestExpired(99999)).toBe(false);
+  });
+
+  test("returns false when manifest has unclaimed resources (owner_type='manifest')", () => {
+    const workflow = createTestWorkflow();
+    const manifest = createTestManifest(workflow.id);
+    const instance = createTestInstance();
+
+    // Add resource, seal, then manually revert owner_type to 'manifest'
+    // to test the safety-net check. Normally sealing marks resources as
+    // 'released' (Step 9), but this tests the edge case where a resource
+    // somehow retains owner_type='manifest'.
+    addResourceToManifest(manifest.id, "instance", String(instance.id));
+    sealTestManifest(manifest.id, Date.now() - 1000);
+
+    // Revert owner_type to simulate pre-Step-9 state or data corruption
+    execute(
+      `UPDATE manifest_resources SET owner_type = 'manifest'
+       WHERE manifest_id = ? AND resource_type = 'instance'`,
+      [manifest.id]
+    );
+
+    // Despite being past expires_at, should NOT be expired because of unclaimed resources
+    expect(isManifestExpired(manifest.id)).toBe(false);
+  });
+
+  test("returns true when all resources are claimed (owner_type='workflow') and time expired", () => {
+    const workflow = createTestWorkflow();
+    const manifest = createTestManifest(workflow.id);
+    const instance = createTestInstance();
+
+    // Add resource with owner_type='workflow' (claimed by a workflow)
+    addResourceToManifest(manifest.id, "instance", String(instance.id), {
+      ownerType: "workflow",
+      ownerId: workflow.id,
+    });
+
+    // Seal with an already-past expiry
+    sealTestManifest(manifest.id, Date.now() - 1000);
+
+    // Should be expired: time is past and no unclaimed resources
+    expect(isManifestExpired(manifest.id)).toBe(true);
+  });
+
+  test("returns true when manifest has no resources and time expired", () => {
+    const workflow = createTestWorkflow();
+    const manifest = createTestManifest(workflow.id);
+
+    // No resources added — seal with past expiry
+    sealTestManifest(manifest.id, Date.now() - 1000);
+
+    expect(isManifestExpired(manifest.id)).toBe(true);
+  });
+
+  test("Step 9: sealing marks resources as released, unblocking expiry", () => {
+    const workflow = createTestWorkflow();
+    const manifest = createTestManifest(workflow.id);
+    const instance = createTestInstance();
+
+    // Add resource (owner_type defaults to 'manifest')
+    addResourceToManifest(manifest.id, "instance", String(instance.id));
+
+    // Verify resource is owner_type='manifest' before seal
+    const before = getManifestResources(manifest.id);
+    expect(before[0].owner_type).toBe("manifest");
+
+    // Seal with an already-past expiry
+    sealTestManifest(manifest.id, Date.now() - 1000);
+
+    // After sealing, owner_type should be 'released'
+    const after = getManifestResources(manifest.id);
+    expect(after[0].owner_type).toBe("released");
+
+    // Manifest should now be expired (released resources don't block)
+    expect(isManifestExpired(manifest.id)).toBe(true);
+  });
+});
+
+// =============================================================================
+// listExpiredManifests (SD-G1-03)
+// =============================================================================
+
+describe("manifest: listExpiredManifests", () => {
+  test("returns manifests with no unclaimed resources", () => {
+    const workflow = createTestWorkflow();
+    const manifest = createTestManifest(workflow.id);
+
+    // Seal with past expiry, no resources
+    sealTestManifest(manifest.id, Date.now() - 1000);
+
+    const expired = listExpiredManifests(Date.now());
+    expect(expired.length).toBe(1);
+    expect(expired[0].id).toBe(manifest.id);
+  });
+
+  test("excludes manifests with unclaimed resources (owner_type='manifest')", () => {
+    const workflow = createTestWorkflow();
+    const manifest = createTestManifest(workflow.id);
+    const instance = createTestInstance();
+
+    // Add resource, seal, then manually revert owner_type to 'manifest'
+    // to test the safety-net check (sealing now marks them as 'released').
+    addResourceToManifest(manifest.id, "instance", String(instance.id));
+    sealTestManifest(manifest.id, Date.now() - 1000);
+
+    execute(
+      `UPDATE manifest_resources SET owner_type = 'manifest'
+       WHERE manifest_id = ? AND resource_type = 'instance'`,
+      [manifest.id]
+    );
+
+    const expired = listExpiredManifests(Date.now());
+    expect(expired.length).toBe(0);
+  });
+
+  test("includes manifests where all resources are claimed (owner_type='workflow')", () => {
+    const workflow = createTestWorkflow();
+    const manifest = createTestManifest(workflow.id);
+    const instance = createTestInstance();
+
+    // Add resource claimed by a workflow
+    addResourceToManifest(manifest.id, "instance", String(instance.id), {
+      ownerType: "workflow",
+      ownerId: workflow.id,
+    });
+
+    // Seal with past expiry
+    sealTestManifest(manifest.id, Date.now() - 1000);
+
+    const expired = listExpiredManifests(Date.now());
+    expect(expired.length).toBe(1);
+    expect(expired[0].id).toBe(manifest.id);
+  });
+
+  test("excludes non-expired manifests", () => {
+    const workflow = createTestWorkflow();
+    const manifest = createTestManifest(workflow.id);
+
+    // Seal with future expiry
+    sealTestManifest(manifest.id, Date.now() + 3_600_000);
+
+    const expired = listExpiredManifests(Date.now());
+    expect(expired.length).toBe(0);
+  });
+
+  test("Step 9: sealed manifest with released resources appears in expired list", () => {
+    const workflow = createTestWorkflow();
+    const manifest = createTestManifest(workflow.id);
+    const instance = createTestInstance();
+
+    // Add resource (owner_type='manifest'), then seal (marks as 'released')
+    addResourceToManifest(manifest.id, "instance", String(instance.id));
+    sealTestManifest(manifest.id, Date.now() - 1000);
+
+    // Verify sealing changed owner_type to 'released'
+    const resources = getManifestResources(manifest.id);
+    expect(resources[0].owner_type).toBe("released");
+
+    // Should appear in expired list (released resources don't block)
+    const expired = listExpiredManifests(Date.now());
+    expect(expired.length).toBe(1);
+    expect(expired[0].id).toBe(manifest.id);
   });
 });
 

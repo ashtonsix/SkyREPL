@@ -32,6 +32,7 @@ export {
   idToSlug,
   slugToId,
   formatId,
+  parseInputId,
   parseStatus,
   buildWorkflowState,
   buildStatus,

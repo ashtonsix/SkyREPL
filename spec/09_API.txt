@@ -1189,7 +1189,7 @@ type WorkflowStreamEvent =
   | { event: 'heartbeat'; data: { timestamp: number } };
 ```
 
-> See also: impl-pseudo/shared/src/api/workflows.ts.l2.txt §WorkflowEngineTypes
+> See also: impl/shared/src/api/workflows.ts
 
 ### 9.2.9 GET /v1/preflight
 
@@ -1494,7 +1494,7 @@ specification.
 | GET    | /v1/agent/files/:path      | Download file for run             | External |
 | POST   | /v1/instances/:id/panic    | Emergency diagnostics on shutdown | Internal |
 
-> See also: impl-pseudo/control/src/api/agent.ts.l2.txt §RouteRegistration
+> See also: impl/control/src/api/agent.ts
 
 ### 9.5.2 POST /v1/agent/heartbeat
 
@@ -1879,7 +1879,7 @@ interface HeartbeatAckMessage {
 - Agent shuts down if reconnection fails after max retries
 - start_run combines file download + run execution in single message
 
-> See also: impl-pseudo/control/src/api/sse-protocol.ts.l2.txt §SSEManager
+> See also: impl/control/src/api/sse-protocol.ts
 
 ### 9.5.7 GET /v1/agent/files/:path (Deprecated)
 
@@ -2063,7 +2063,7 @@ type ErrorCategory =
   | 'internal';     // 500 - Server error
 ```
 
-> See also: impl-pseudo/shared/src/errors.ts.l2.txt §ErrorCategoryToHTTPStatusMapping
+> See also: impl/shared/src/errors.ts
 
 ### 9.6.2 Error Taxonomy
 
@@ -2374,7 +2374,7 @@ CREATE TABLE idempotency_keys (
 CREATE INDEX idx_idempotency_expires ON idempotency_keys(expires_at);
 ```
 
-> See also: impl-pseudo/control/src/api/routes.ts.l2.txt §ServerSetup
+> See also: impl/control/src/api/routes.ts
 
 **Expiry Policy (example defaults, configurable):**
 - Successful requests: long retention (e.g., 24 hours)

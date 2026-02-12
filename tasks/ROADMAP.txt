@@ -42,10 +42,10 @@ Ch | Name           | Epic(s)      | Status     | Key gaps
 05 | Allocations    | LIFE         | PARTIAL    | SSH, reconciliation done; hold expiry done
 06 | Workflows      | WF           | COMPLETE   | All 4 patterns, compensation, subworkflows, pause/resume
 07 | Intents        | LIFE, SNAP   | 3/4 BUILT  | terminate + cleanup done; snapshot missing
-08 | Providers      | PROV         | 1/5 BUILT  | AWS, Lambda, RunPod, Tailscale
+08 | Providers      | PROV         | 1/5 BUILT  | AWS validated (skeleton); Lambda, RunPod, Tailscale
 09 | API            | API          | PARTIAL    | L1 CRUD, pagination, rate limiting, intent endpoints
 10 | CLI            | CLI          | MVK DONE   | SSH, preflight, output modes
-11 | Agent          | AGENT        | PARTIAL    | Panic, spot, artifacts, degraded
+11 | Agent          | AGENT        | PARTIAL    | Spot, checkpoint remaining (5/8 done)
 12 | Orphans        | ORPH         | NOT BUILT  | Entire system
 13 | Types          | API          | PARTIAL    | Updated as epics land
 14 | Implementation | DX           | STUB       | Pointer chapter
@@ -76,80 +76,106 @@ DEPENDENCY GRAPH
 IMPL-PSEUDO SUBSUMPTION TRACKER
 ================================================================================
 
-STILL USEFUL FILES (6):
+As of 2026-02-12: 67 files remain (62 deleted during G1b, 6 deleted during G2 audit)
+
+STILL USEFUL FILES (2):
 ------------------------
 
 File                                                | Task      | Status
 ----------------------------------------------------+-----------+---------
-control/src/background/reconciliation.ts.l1.txt     | #LIFE-11  | DONE
-control/src/resource/manifest.ts.l1.txt             | #LIFE-12  | DONE
 control/src/material/external.ts.l1.txt             | #PROV-06  | PENDING
-control/src/api/middleware/idempotency.ts.l1.txt    | #FND-03   | DONE
 control/src/provider/type-boundaries.ts.l1.txt      | #PROV-07  | PENDING
-agent/executor.py.l1.txt                            | #AGENT-07 | PENDING
-agent/heartbeat.py.l1.txt                           | #FND-04   | DONE
-cli/src/commands/run.ts.l1.txt                      | #CLI-03   | PENDING
 
 
-UNIMPLEMENTED REFERENCE FILES (~39):
+PARTIALLY SUBSUMED (2):
+-----------------------
+
+File                                                | Task      | Remaining
+----------------------------------------------------+-----------+---------------------------
+control/src/api/agent/agent.ts.l1.txt              | #AGENT-06 | spot-interrupt endpoints
+control/src/provider/compute/aws.ts.l2.txt         | #PROV-02  | idempotency, hooks, warm pool
+
+
+UNIMPLEMENTED REFERENCE FILES (63):
 ------------------------------------
 
-LIFE Epic (Lifecycle):
-  - control/src/intent/terminate-instance.ts.l1.txt     → #LIFE-06
-  - control/src/resource/snapshot.ts.l1.txt             → (SNAP-01)
-  - control/src/resource/artifact.ts.l1.txt             → (SNAP-02)
+AGENT Epic (6 files):
+  - agent/checkpoint.py.l1.txt, .l2.txt                 → #AGENT-08
+  - agent/checkpoint.py.l1.txt, .l2.txt                 → #AGENT-08
+  - agent/spot.py.l1.txt, .l2.txt                       → #AGENT-06
+  - agent/tailscale.py.l1.txt, .l2.txt                  → #PROV-04
 
-SNAP Epic (Snapshots & Artifacts):
-  - control/src/intent/snapshot-instance.ts.l1.txt      → #SNAP-01
-  - control/src/intent/cleanup-instances.ts.l1.txt      → #SNAP-03
-  - control/src/background/artifact-upload.ts.l1.txt    → #SNAP-02
-  - control/src/background/snapshot-gc.ts.l1.txt        → #SNAP-04
-
-WF Epic (Workflows):
-  - control/src/workflow/patterns/iar.ts.l1.txt         → #WF-02
-  - control/src/workflow/patterns/pfo.ts.l1.txt         → #WF-03
-  - control/src/workflow/patterns/subworkflow.ts.l1.txt → #WF-04
-  - control/src/workflow/rollback.ts.l1.txt             → #WF-05
-
-ORPH Epic (Orphan Management):
-  - control/src/orphan/detector.ts.l1.txt               → #ORPH-01
-  - control/src/orphan/reconciler.ts.l1.txt             → #ORPH-02
-  - control/src/orphan/guardian.ts.l1.txt               → #ORPH-03
-  - control/src/background/orphan-scan.ts.l1.txt        → #ORPH-04
-
-PROV Epic (Providers):
-  - control/src/provider/aws/ec2.ts.l1.txt              → #PROV-01
-  - control/src/provider/aws/lambda.ts.l1.txt           → #PROV-02
-  - control/src/provider/runpod/compute.ts.l1.txt       → #PROV-03
-  - control/src/provider/tailscale/vpn.ts.l1.txt        → #PROV-04
-  - control/src/provider/registry.ts.l1.txt             → #PROV-05
-  - control/src/provider/capability-detection.ts.l1.txt → #PROV-06
-
-AGENT Epic:
-  - agent/panic-handler.py.l1.txt                       → #AGENT-02
-  - agent/spot-handler.py.l1.txt                        → #AGENT-03
-  - agent/artifact-upload.py.l1.txt                     → #AGENT-04
-  - agent/degraded-mode.py.l1.txt                       → #AGENT-05
-  - agent/network-recovery.py.l1.txt                    → #AGENT-06
-
-API Epic:
-  - control/src/api/crud/instances.ts.l1.txt            → #API-01
-  - control/src/api/crud/runs.ts.l1.txt                 → #API-02
-  - control/src/api/crud/allocations.ts.l1.txt          → #API-03
-  - control/src/api/crud/manifests.ts.l1.txt            → #API-04
-  - control/src/api/pagination.ts.l1.txt                → #API-05
-  - control/src/api/rate-limiting.ts.l1.txt             → #API-06
-
-CLI Epic:
-  - cli/src/commands/ssh.ts.l1.txt                      → #CLI-01
+CLI Epic (18 files):
+  - cli/src/commands/artifact.ts.l1.txt                 → #SNAP-02
+  - cli/src/commands/cancel.ts.l1.txt                   → (MVK done, file superseded)
+  - cli/src/commands/extend.ts.l1.txt                   → #CLI-05
+  - cli/src/commands/list.ts.l1.txt                     → (MVK done, file superseded)
+  - cli/src/commands/logs.ts.l1.txt                     → #CLI-06
+  - cli/src/commands/orphan.ts.l1.txt                   → #ORPH-05
+  - cli/src/commands/setup.ts.l1.txt                    → #DX-03
+  - cli/src/commands/snapshot.ts.l1.txt                 → #SNAP-01
+  - cli/src/commands/usage.ts.l1.txt                    → (future: usage tracking)
   - cli/src/preflight.ts.l1.txt                         → #CLI-02
-  - cli/src/output-modes.ts.l1.txt                      → #CLI-04
+  - cli/src/process.ts.l1.txt                           → (impl exists at different path)
+  - cli/src/ssh.ts.l1.txt, .l2.txt                      → #CLI-01
+  - cli/src/ssh_fallback.sh.l1.txt                      → #CLI-01
+  - cli/src/ssh_proxy.sh.l1.txt                         → #CLI-01
+  - cli/src/ui/formatters.ts.l1.txt                     → #CLI-04
+  - cli/src/ui/progress.ts.l1.txt                       → #CLI-04
+  - cli/src/ui/prompts.ts.l1.txt                        → (impl exists at different path)
 
-DX Epic (Developer Experience):
-  - docs/quickstart.md.l1.txt                           → #DX-01
-  - docs/provider-guides/aws.md.l1.txt                  → #DX-02
-  - docs/provider-guides/lambda.md.l1.txt               → #DX-02
-  - docs/provider-guides/runpod.md.l1.txt               → #DX-02
+CONTROL/API (4 files):
+  - control/src/api/middleware.ts.l2.txt                → (impl exists, split into files)
+  - control/src/api/operations.ts.l2.txt                → #API-01-06
+  - control/src/api/operations/workflows.ts.l1.txt      → (future: workflow CRUD)
+  - control/src/api/resources/resources.ts.l1.txt       → #API-01
+
+CONTROL/BACKGROUND (3 files):
+  - control/src/background/garbage-collection.ts.l2.txt → #FND-05
+  - control/src/background/manifest-cleanup.ts.l1.txt   → (impl exists: cleanup-manifest.ts)
+  - control/src/background/orphan-cleanup.ts.l1.txt     → #ORPH-04
+
+CONTROL/INTENT (3 files):
+  - control/src/intent/snapshot.ts.l1.txt, .l2.txt      → #SNAP-01
+  - control/src/intent/snapshot.types.ts.l1.txt         → #SNAP-01
+
+CONTROL/MATERIAL (6 files):
+  - control/src/material/db.ts.l1.txt, .l2.txt          → (impl exists, split into db/ subdir)
+  - control/src/material/db.types.ts.l1.txt, .l2.txt    → (impl exists, split into db/ subdir)
+  - control/src/material/external.ts.l1.txt, .l2.txt    → #PROV-06 (STILL USEFUL)
+
+CONTROL/ORPHAN (10 files):
+  - control/src/orphan/classifier.ts.l1.txt, .l2.txt    → #ORPH-02
+  - control/src/orphan/nodes/expire-allocations.ts.l1.txt → #ORPH-03
+  - control/src/orphan/nodes/find-orphans.ts.l1.txt     → #ORPH-01
+  - control/src/orphan/nodes/match-to-manifest.ts.l1.txt → #ORPH-02
+  - control/src/orphan/nodes/terminate-orphans.ts.l1.txt → #ORPH-03
+  - control/src/orphan/scanner.ts.l1.txt, .l2.txt       → #ORPH-01
+  - control/src/orphan/whitelist.ts.l1.txt, .l2.txt     → #ORPH-02
+
+CONTROL/PROVIDER (5 files):
+  - control/src/provider/compute/lambda.ts.l1.txt       → #PROV-02
+  - control/src/provider/compute/runpod.ts.l1.txt       → #PROV-03
+  - control/src/provider/feature/tailscale.ts.l1.txt, .l2.txt → #PROV-04
+  - control/src/provider/type-boundaries.ts.l1.txt      → #PROV-07 (STILL USEFUL)
+
+CONTROL/RESOURCE (2 files):
+  - control/src/resource/snapshot.ts.l1.txt             → #SNAP-01
+  - control/src/resource/types.ts.l2.txt                → (impl exists, distributed across resource files)
+
+CONTROL/WORKFLOW (2 files):
+  - control/src/workflow/nodes/sync-files.ts.l1.txt     → #SNAP-01
+  - control/src/workflow/nodes/transition-hold.ts.l1.txt → (future: hold pattern)
+
+CONTROL/OTHER (1 file):
+  - control/src/network.ts.l1.txt                       → (unused, network utilities)
+
+MIGRATIONS (2 files):
+  - control/migrations/001_initial.sql.l1.txt, .l2.txt  → (impl exists at different path)
+
+SHARED (3 files):
+  - shared/src/api/resources.ts.l1.txt, .l2.txt         → #API-01
+  - shared/src/utils.ts.l1.txt                          → (impl exists, distributed)
 
 
 ================================================================================
@@ -188,3 +214,24 @@ PROGRESS LOG
             #LIFE-07→12, #WF-02→07 all [DONE]. 12 tasks across 5 phases.
             655 tests pass, 0 fail (168 new). WF epic COMPLETE (7/7 tasks).
             Backlog items BL-10/12 resolved into #LIFE-12.
+2026-02-12  G2 Readiness COMPLETE — worklog 023.
+            8 steps: compensation scope fix, engine bugs, manifest safety,
+            terminate guards, retry hardening, LIFE-13, impl-pseudo purge, E2E fix.
+            #LIFE-13 [DONE] → LIFE epic COMPLETE (13/13 tasks).
+            677 tests pass, 0 fail (22 new). 62 impl-pseudo files deleted.
+            78 broken spec→impl cross-ref anchors fixed (stripped to file-only).
+2026-02-12  G2 PASSED — worklog 024.
+            5 tasks across 3 phases: SSE backpressure (#AGENT-03), degraded mode
+            (#AGENT-04), artifact collection (#AGENT-07), artifact API+CLI (#SNAP-04),
+            AWS provider validation (#PROV-01). Artifact E2E complete: agent collects
+            files → uploads → control stores → CLI lists + downloads.
+            734 tests pass, 0 fail (57 new across 3 test files).
+            Key finding: Provider interface validated against AWS EC2 — no changes needed.
+2026-02-12  G2 close-out audit — worklog 025.
+            Spec drift: 13 DRIFT-BAD, 6 DRIFT-MOTIVATED, 15 DRIFT-NEUTRAL.
+            12 FIX NOW items executed: slug conversion (FX-1), ack clearing (FX-2),
+            spawn key (FX-3), single-file upload (FX-4), maxTtl enforcement (FX-5),
+            invokeHook result (FX-6), await onStartup (FX-7), spec round-trip (FX-8),
+            static imports (FX-9), manifest warn (FX-10), filename sanitize (FX-11).
+            6 pseudo files deleted (67 remain). 7 backlog entries added (#BL-17..23).
+            Integrity check script: scripts/check-integer-pks.sh.

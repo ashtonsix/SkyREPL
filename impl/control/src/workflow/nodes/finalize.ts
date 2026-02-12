@@ -1,17 +1,16 @@
 // workflow/nodes/finalize.ts - Finalize Node
-// Completes allocation, updates run, seals manifest.
-// After completion, optionally replenishes the warm pool with a new AVAILABLE allocation.
+// Completes allocation, updates run, replenishes warm pool.
+// Manifest sealing is handled by handleWorkflowComplete in engine.ts.
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
+import { updateRunRecord } from "../../resource/run";
+import { getInstanceRecord } from "../../resource/instance";
 import {
-  updateRun,
-  getManifest,
-  getInstance,
   getAllocation,
   createAllocation,
   countInstanceAllocations,
 } from "../../material/db";
-import { completeAllocation, sealManifest } from "../state-transitions";
+import { completeAllocation } from "../state-transitions";
 import { getProvider } from "../../provider/registry";
 import type { ProviderName } from "../../provider/types";
 import { TIMING } from "@skyrepl/shared";
@@ -84,38 +83,14 @@ export const finalizeExecutor: NodeExecutor<FinalizeInput, FinalizeOutput> = {
     }
 
     // Update run final state
-    updateRun(input.runId, {
+    updateRunRecord(input.runId, {
       workflow_state: "launch-run:finalized",
     });
 
-    // Seal manifest (idempotent: skip if already sealed)
-    let manifestSealed = false;
-    try {
-      // Get manifest to compute expires_at
-      const manifest = getManifest(input.manifestId);
-      if (manifest) {
-        // Already sealed — idempotent success
-        if (manifest.status === "SEALED") {
-          manifestSealed = true;
-        } else {
-          const now = Date.now();
-          const expiresAt = manifest.retention_ms != null ? now + manifest.retention_ms : now + (30 * 24 * 60 * 60 * 1000); // default 30 days
-          const result = sealManifest(input.manifestId, expiresAt);
-          manifestSealed = result.success;
-          if (!result.success) {
-            ctx.log("warn", "Failed to seal manifest", {
-              manifestId: input.manifestId,
-              reason: result.reason,
-            });
-          }
-        }
-      }
-    } catch (err) {
-      ctx.log("warn", "Failed to seal manifest", {
-        manifestId: input.manifestId,
-        error: String(err),
-      });
-    }
+    // Manifest sealing is handled by handleWorkflowComplete in engine.ts
+    // using sealManifestSafe which applies the correct workflow-type retention
+    // policy (Step 10: finalize retention policy fix).
+    const manifestSealed = false;
 
     // Conditional snapshot (deferred for Slice 1 -- subworkflow not yet available)
     let snapshotId: number | undefined;
@@ -128,7 +103,7 @@ export const finalizeExecutor: NodeExecutor<FinalizeInput, FinalizeOutput> = {
     if (!replenished) {
       // No replenishment — terminate instance
       try {
-        const instance = getInstance(input.instanceId);
+        const instance = getInstanceRecord(input.instanceId);
         if (instance?.provider_id) {
           const provider = await getProvider(instance.provider as ProviderName);
           await provider.terminate(instance.provider_id);
@@ -197,7 +172,7 @@ function tryReplenishWarmPool(ctx: NodeContext, input: FinalizeInput): boolean {
       return false;
     }
 
-    const instance = getInstance(input.instanceId);
+    const instance = getInstanceRecord(input.instanceId);
     if (!instance) {
       ctx.log("debug", "Skipping replenishment: instance not found");
       return false;

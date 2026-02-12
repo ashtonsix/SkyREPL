@@ -29,7 +29,7 @@ TASK INDEX
   #LIFE-10  cleanup-manifest background trigger                  [DONE]
   #LIFE-11  Allocation reconciliation                            [DONE]
   #LIFE-12  Resource claiming protocol                           [DONE]
-  #LIFE-13  Enforce resource layer boundary                      [PENDING]
+  #LIFE-13  Enforce resource layer boundary                      [DONE]
 
 ================================================================================
 TASK DETAIL
@@ -184,7 +184,7 @@ TASK DETAIL
   - [x] Cross-manifest resource transfer (claimResourceAtomic, parentClaimSubworkflowResource)
   - [x] Unit tests for ownership invariants (28 tests)
 
-## #LIFE-13: Enforce resource layer boundary                       [Lg] [PENDING]
+## #LIFE-13: Enforce resource layer boundary                       [Lg] [DONE]
   Depends: #LIFE-01
   ---
   #LIFE-01 built resource/{allocation,instance,run}.ts but no callers use them.

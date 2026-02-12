@@ -115,7 +115,13 @@ export function deleteManifest(id: number): void {
 
 export function listExpiredManifests(cutoffTime: number): Manifest[] {
   return queryMany<Manifest>(
-    "SELECT * FROM manifests WHERE status = ? AND expires_at < ?",
+    `SELECT * FROM manifests
+     WHERE status = ? AND expires_at < ?
+     AND NOT EXISTS (
+       SELECT 1 FROM manifest_resources
+       WHERE manifest_resources.manifest_id = manifests.id
+       AND manifest_resources.owner_type = 'manifest'
+     )`,
     ["SEALED", cutoffTime]
   );
 }

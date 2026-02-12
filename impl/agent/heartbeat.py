@@ -30,6 +30,9 @@ HEARTBEAT_PANIC_MS = 15 * 60 * 1000  # 15 minutes — enter PANIC (§11.5)
 PANIC_CHECKPOINT_BUDGET_MS = 5 * 60 * 1000  # 5 minutes — checkpoint budget
 HEARTBEAT_SELF_TERM_MS = 20 * 60 * 1000  # 20 minutes — self-terminate
 
+# Degraded mode backoff: double interval each failure, cap at 60s
+DEGRADED_BACKOFF_MAX_S = 60
+
 # Module-level state
 _instance_id: str = ""
 _shutting_down: bool = False
@@ -81,13 +84,22 @@ def get_last_ack_time() -> float:
 
 def heartbeat_thread() -> None:
     """
-    Background thread: send heartbeat every 10s.
+    Background thread: send heartbeat every 10s (healthy) or with exponential
+    backoff (degraded).
 
     Immediate heartbeat on startup, then periodic.
     Tracks degraded state (2m no ack), PANIC state (15m),
     and self-terminates at 20m.
+
+    Degraded mode (#AGENT-04):
+      - Exponential backoff: interval doubles each cycle, capped at 60s
+      - Notifies logs module to buffer to disk
+      - On recovery: resets backoff, flushes disk-buffered logs
     """
     global _last_ack_time, _degraded_since, _panic_started
+
+    # Current sleep interval (increases during degraded mode)
+    current_interval_s = HEARTBEAT_INTERVAL_MS / 1000.0
 
     # Immediate first heartbeat
     if _send_heartbeat():
@@ -99,9 +111,9 @@ def heartbeat_thread() -> None:
     while not _shutting_down:
         # Sleep with shutdown check (use event for clean wakeup)
         if _shutdown_event:
-            _shutdown_event.wait(timeout=HEARTBEAT_INTERVAL_MS / 1000.0)
+            _shutdown_event.wait(timeout=current_interval_s)
         else:
-            time.sleep(HEARTBEAT_INTERVAL_MS / 1000.0)
+            time.sleep(current_interval_s)
 
         if _shutting_down:
             break
@@ -112,6 +124,7 @@ def heartbeat_thread() -> None:
         if time_since_ack_ms >= HEARTBEAT_DEGRADED_MS and _degraded_since is None:
             _degraded_since = time.time()
             _log("WARN", f"Control plane unreachable for {HEARTBEAT_DEGRADED_MS / 1000}s, entering DEGRADED state")
+            _notify_logs_degraded(True)
 
         # Check self-termination threshold (20m) — must be checked before panic
         # start to handle case where both thresholds crossed in same iteration
@@ -139,6 +152,8 @@ def heartbeat_thread() -> None:
         if _send_heartbeat(workflow_state):
             with _lock:
                 _last_ack_time = time.time()
+                was_degraded = _degraded_since is not None
+                was_panic = _panic_started
                 if _panic_started:
                     _log("INFO", "Control plane recovered during PANIC state, cancelling self-termination")
                     _panic_started = False
@@ -146,15 +161,25 @@ def heartbeat_thread() -> None:
                     _log("INFO", f"Control plane recovered after {time.time() - _degraded_since:.1f}s degraded")
                     _degraded_since = None
 
+            # Recovery: reset backoff interval and flush disk-buffered logs
+            if was_degraded or was_panic:
+                current_interval_s = HEARTBEAT_INTERVAL_MS / 1000.0
+                _notify_logs_degraded(False)
+                _flush_degraded_logs()
+        else:
+            # Heartbeat failed — apply exponential backoff when degraded
+            if _degraded_since is not None:
+                current_interval_s = min(current_interval_s * 2, DEGRADED_BACKOFF_MAX_S)
+
 
 def _send_heartbeat(workflow_state: str = "idle") -> bool:
     """POST /v1/agent/heartbeat. Returns True if ack received."""
     global _expected_control_plane_id
 
-    # Get pending acks from executor
+    # Get pending acks from executor (don't clear yet — clear after confirmed delivery)
     pending_acks: list = []
-    if _executor and hasattr(_executor, "get_and_clear_pending_acks"):
-        pending_acks = _executor.get_and_clear_pending_acks()  # type: ignore[attr-defined]
+    if _executor and hasattr(_executor, "get_pending_acks"):
+        pending_acks = _executor.get_pending_acks()  # type: ignore[attr-defined]
 
     # Get active allocations from executor
     active_allocations: list = []
@@ -193,6 +218,9 @@ def _send_heartbeat(workflow_state: str = "idle") -> bool:
         body = resp.read()
 
         if resp.status == 200:
+            # Clear acks only after confirmed delivery (DB-4 fix)
+            if pending_acks and _executor and hasattr(_executor, "clear_pending_acks"):
+                _executor.clear_pending_acks(pending_acks)  # type: ignore[attr-defined]
             try:
                 data = json.loads(body.decode("utf-8"))
                 received_id = data.get("control_plane_id")
@@ -215,6 +243,38 @@ def _send_heartbeat(workflow_state: str = "idle") -> bool:
 
 
 # =============================================================================
+# Degraded Mode Helpers (#AGENT-04)
+# =============================================================================
+
+
+def _notify_logs_degraded(degraded: bool) -> None:
+    """Notify logs module about degraded/healthy state change."""
+    try:
+        from logs import set_degraded
+        set_degraded(degraded)
+    except ImportError:
+        pass
+
+
+def _flush_degraded_logs() -> None:
+    """Flush disk-buffered logs after recovery from degraded mode."""
+    try:
+        from logs import flush_disk_buffer
+        flush_disk_buffer()
+    except ImportError:
+        pass
+
+
+def get_state() -> str:
+    """Return current heartbeat state: 'healthy', 'degraded', or 'panic'."""
+    if _panic_started:
+        return "panic"
+    if _degraded_since is not None:
+        return "degraded"
+    return "healthy"
+
+
+# =============================================================================
 # Heartbeat Ack (called from SSE dispatch)
 # =============================================================================
 
@@ -226,25 +286,34 @@ def record_heartbeat_ack(control_plane_id: Optional[str] = None) -> None:
     Called by sse.py when heartbeat_ack message received.
     Updates last_ack_time and validates control_plane_id.
     Resets panic state if active (recovery from panic).
+    On recovery from degraded: notifies logs module and flushes disk buffer.
     """
     global _last_ack_time, _degraded_since, _panic_started, _expected_control_plane_id
 
+    was_degraded = False
     with _lock:
         _last_ack_time = time.time()
 
         if _panic_started:
             _log("INFO", "Control plane recovered via SSE ack during PANIC state, cancelling self-termination")
             _panic_started = False
+            was_degraded = True
 
         if _degraded_since is not None:
             _log("INFO", f"Control plane recovered via SSE ack after {time.time() - _degraded_since:.1f}s")
             _degraded_since = None
+            was_degraded = True
 
         if control_plane_id:
             if _expected_control_plane_id is None:
                 _expected_control_plane_id = control_plane_id
             elif control_plane_id != _expected_control_plane_id:
                 _log("WARN", f"Control plane ID mismatch in SSE ack: expected={_expected_control_plane_id}, got={control_plane_id}")
+
+    # Recovery actions outside the lock to avoid deadlock
+    if was_degraded:
+        _notify_logs_degraded(False)
+        _flush_degraded_logs()
 
 
 # =============================================================================

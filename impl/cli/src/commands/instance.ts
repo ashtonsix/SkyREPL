@@ -1,5 +1,6 @@
 import { getControlPlaneUrl, isConnectionRefused, printTable, displayState } from '../config';
 import { ApiClient } from '../client';
+import { idToSlug, parseInputId } from '@skyrepl/shared';
 
 export async function instanceCommand(args: string[]): Promise<void> {
   const subcommand = args[0];
@@ -30,7 +31,7 @@ async function instanceList(): Promise<void> {
     const rows = data.map((inst: any) => {
       const created = inst.created_at ? new Date(inst.created_at).toISOString().slice(0, 16).replace('T', ' ') : '-';
       return [
-        String(inst.id),
+        idToSlug(inst.id),
         inst.provider || '-',
         inst.spec || '-',
         displayState(inst.workflow_state),
@@ -57,16 +58,12 @@ async function instanceTerminate(args: string[]): Promise<void> {
     process.exit(2);
   }
 
-  const instanceId = parseInt(idArg, 10);
-  if (isNaN(instanceId)) {
-    console.error(`Invalid instance ID: ${idArg}`);
-    process.exit(2);
-  }
+  const instanceId = parseInputId(idArg);
 
   const client = new ApiClient(getControlPlaneUrl());
   try {
     const result = await client.terminateInstance(instanceId);
-    console.log(`Terminating instance ${instanceId}... workflow ${result.workflow_id}`);
+    console.log(`Terminating instance ${idToSlug(instanceId)}... workflow ${idToSlug(result.workflow_id)}`);
   } catch (err) {
     if (isConnectionRefused(err)) {
       console.error(`Control plane not reachable at ${getControlPlaneUrl()}. Start it with \`repl control start\`.`);

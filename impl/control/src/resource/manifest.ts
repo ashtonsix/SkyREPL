@@ -201,10 +201,11 @@ export function parentClaimSubworkflowResource(
     if (!childManifest || childManifest.status !== "SEALED")
       return { success: false };
 
-    // Find an unclaimed resource of the requested type in the child manifest
+    // Find a released resource of the requested type in the child manifest.
+    // After sealing, resources have owner_type='released' (Step 9 fix).
     const resource = queryOne<ManifestResource>(
       `SELECT * FROM manifest_resources
-       WHERE manifest_id = ? AND resource_type = ? AND owner_type = 'manifest'
+       WHERE manifest_id = ? AND resource_type = ? AND owner_type = 'released'
        LIMIT 1`,
       [childManifest.id, resourceType]
     );
@@ -229,13 +230,26 @@ export function parentClaimSubworkflowResource(
 /**
  * Check whether a manifest has expired based on its expires_at timestamp.
  * Only SEALED manifests with a non-null expires_at can be expired.
+ * Per §4.1: manifest is NOT expired if it still has unclaimed resources
+ * (owner_type='manifest'). Resources with owner_type='workflow' or 'claimed'
+ * have been transferred and don't block expiry.
  */
 export function isManifestExpired(manifestId: number): boolean {
   const manifest = getManifest(manifestId);
   if (!manifest) return false;
   if (manifest.status !== "SEALED") return false;
   if (!manifest.expires_at) return false;
-  return Date.now() > manifest.expires_at;
+  if (Date.now() <= manifest.expires_at) return false;
+
+  // Check for unclaimed resources still owned by this manifest
+  const unclaimed = queryOne<{ cnt: number }>(
+    `SELECT COUNT(*) as cnt FROM manifest_resources
+     WHERE manifest_id = ? AND owner_type = 'manifest'`,
+    [manifestId]
+  );
+  if (unclaimed && unclaimed.cnt > 0) return false;
+
+  return true;
 }
 
 // =============================================================================

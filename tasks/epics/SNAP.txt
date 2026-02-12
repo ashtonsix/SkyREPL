@@ -19,7 +19,7 @@ TASK INDEX
   #SNAP-01  create-snapshot intent (blueprint + nodes)            [PENDING]
   #SNAP-02  create-snapshot API + CLI wiring                      [PENDING]
   #SNAP-03  Snapshot resource type                                [PENDING]
-  #SNAP-04  Artifact resource type                                [PENDING]
+  #SNAP-04  Artifact resource type                                [DONE]
 
 ================================================================================
 TASK DETAIL
@@ -63,17 +63,19 @@ TASK DETAIL
   - [ ] Snapshot resource module (CRUD + state machine)
   - [ ] Snapshot listing in API and CLI
 
-## #SNAP-04: Artifact resource type                                [Md] [PENDING]
+## #SNAP-04: Artifact resource type                                [Md] [DONE]
   Spec: Ch03
   Pseudo: resource/artifact.ts.l1.txt
   Depends: #AGENT-07
   ---
-  Artifact materialization, lifecycle, download support.
+  Artifact materialization via objects table (type='artifact'), lifecycle
+  managed through manifest ownership, download via blob retrieval.
 
   Deliverables:
-  - [ ] Artifact DB table and migration
-  - [ ] Artifact resource module
-  - [ ] Download endpoint (blob retrieval)
+  - [x] Artifact storage via objects table (no separate artifacts table needed)
+  - [x] API: GET /v1/runs/:id/artifacts, GET /v1/artifacts/:id/download
+  - [x] CLI: `repl artifact list <run-id>`, `repl artifact download <id>`
+  - [x] Download endpoint (blob retrieval)
 
 ================================================================================
 SCRATCHPAD

@@ -38,7 +38,7 @@ import {
   awaitEngineQuiescence,
 } from "../../control/src/workflow/engine";
 
-import { registerCleanupManifest } from "../../control/src/intent/cleanup-manifest";
+import { registerCleanupManifest, cleanupManifest } from "../../control/src/intent/cleanup-manifest";
 import { registerLaunchRun } from "../../control/src/intent/launch-run";
 import { listExpiredManifests } from "../../control/src/material/db";
 
@@ -125,7 +125,12 @@ function createDummyWorkflow(): Workflow {
   });
 }
 
-function createSealedManifestWithResources(options?: { expiresAt?: number }) {
+function createSealedManifestWithResources(options?: {
+  expiresAt?: number;
+  /** If true, resources are added with owner_type='workflow' (claimed), not 'manifest' (unclaimed).
+   *  This matters for listExpiredManifests which now excludes manifests with unclaimed resources. */
+  claimedResources?: boolean;
+}) {
   // Create a real workflow first (manifest has FK to workflows)
   const workflow = createDummyWorkflow();
   const manifest = createManifest(workflow.id);
@@ -158,9 +163,12 @@ function createSealedManifestWithResources(options?: { expiresAt?: number }) {
   });
 
   // Add resources to manifest
-  addResourceToManifest(manifest.id, "allocation", String(alloc.id), { cleanupPriority: 90 });
-  addResourceToManifest(manifest.id, "run", String(run.id), { cleanupPriority: 80 });
-  addResourceToManifest(manifest.id, "instance", String(instance.id), { cleanupPriority: 50 });
+  const ownerOpts = options?.claimedResources
+    ? { ownerType: "workflow" as const, ownerId: workflow.id }
+    : {};
+  addResourceToManifest(manifest.id, "allocation", String(alloc.id), { cleanupPriority: 90, ...ownerOpts });
+  addResourceToManifest(manifest.id, "run", String(run.id), { cleanupPriority: 80, ...ownerOpts });
+  addResourceToManifest(manifest.id, "instance", String(instance.id), { cleanupPriority: 50, ...ownerOpts });
 
   // Seal the manifest
   const expiresAt = options?.expiresAt ?? Date.now() - 1000; // Already expired by default
@@ -598,8 +606,8 @@ describe("Cleanup Manifest - Background Trigger (#LIFE-10)", () => {
   });
 
   test("spawns cleanup workflow for expired manifests", async () => {
-    // Create an expired sealed manifest
-    createSealedManifestWithResources({ expiresAt: Date.now() - 60_000 });
+    // Create an expired sealed manifest with claimed resources (eligible for cleanup)
+    createSealedManifestWithResources({ expiresAt: Date.now() - 60_000, claimedResources: true });
 
     // Run the background check
     await manifestCleanupCheck();
@@ -613,9 +621,9 @@ describe("Cleanup Manifest - Background Trigger (#LIFE-10)", () => {
   });
 
   test("respects max 10 limit per cycle", async () => {
-    // Create 15 expired manifests
+    // Create 15 expired manifests with claimed resources (eligible for cleanup)
     for (let i = 0; i < 15; i++) {
-      createSealedManifestWithResources({ expiresAt: Date.now() - 60_000 });
+      createSealedManifestWithResources({ expiresAt: Date.now() - 60_000, claimedResources: true });
     }
 
     // Run the background check
@@ -630,8 +638,8 @@ describe("Cleanup Manifest - Background Trigger (#LIFE-10)", () => {
   });
 
   test("skips manifests with active cleanup workflow", async () => {
-    // Create an expired sealed manifest
-    const { manifest } = createSealedManifestWithResources({ expiresAt: Date.now() - 60_000 });
+    // Create an expired sealed manifest with claimed resources (eligible for cleanup)
+    const { manifest } = createSealedManifestWithResources({ expiresAt: Date.now() - 60_000, claimedResources: true });
 
     // Submit a cleanup workflow for it first
     await submit({
@@ -662,8 +670,8 @@ describe("Cleanup Manifest - Background Trigger (#LIFE-10)", () => {
   });
 
   test("does not spawn for non-expired manifests", async () => {
-    // Create a manifest that expires in the future
-    createSealedManifestWithResources({ expiresAt: Date.now() + 3600_000 });
+    // Create a manifest that expires in the future (claimed resources so it would be eligible if expired)
+    createSealedManifestWithResources({ expiresAt: Date.now() + 3600_000, claimedResources: true });
 
     // Run the background check
     await manifestCleanupCheck();
@@ -674,5 +682,60 @@ describe("Cleanup Manifest - Background Trigger (#LIFE-10)", () => {
       []
     );
     expect(workflows.length).toBe(0);
+  });
+});
+
+// =============================================================================
+// Entry Point Validation Tests (SD-G1-09)
+// =============================================================================
+
+describe("Cleanup Manifest - Entry Point Validation", () => {
+  beforeEach(() => {
+    resetEngineShutdown();
+    initDatabase(":memory:");
+    runMigrations();
+    registerCleanupManifest();
+    registerLaunchRun();
+  });
+
+  afterEach(async () => {
+    requestEngineShutdown();
+    await awaitEngineQuiescence(5_000);
+    closeDatabase();
+  });
+
+  test("rejects DRAFT manifest with INVALID_STATE error", async () => {
+    const wf = createDummyWorkflow();
+    const manifest = createManifest(wf.id);
+
+    // manifest is DRAFT (not sealed)
+    try {
+      await cleanupManifest({ manifestId: manifest.id });
+      // Should not reach here
+      expect(true).toBe(false);
+    } catch (err: any) {
+      expect(err.code).toBe("INVALID_STATE");
+      expect(err.category).toBe("validation");
+      expect(err.message).toContain("DRAFT");
+      expect(err.message).toContain("expected SEALED");
+    }
+  });
+
+  test("rejects non-existent manifest with NOT_FOUND error", async () => {
+    try {
+      await cleanupManifest({ manifestId: 99999 });
+      expect(true).toBe(false);
+    } catch (err: any) {
+      expect(err.code).toBe("NOT_FOUND");
+    }
+  });
+
+  test("accepts SEALED manifest", async () => {
+    const { manifest } = createSealedManifestWithResources();
+
+    // Should not throw
+    const workflow = await cleanupManifest({ manifestId: manifest.id });
+    expect(workflow).toBeDefined();
+    expect(workflow.type).toBe("cleanup-manifest");
   });
 });

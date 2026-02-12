@@ -1,5 +1,6 @@
 import { getControlPlaneUrl, isConnectionRefused, printTable } from '../config';
 import { ApiClient } from '../client';
+import { idToSlug } from '@skyrepl/shared';
 
 export async function allocationCommand(args: string[]): Promise<void> {
   const subcommand = args[0];
@@ -27,9 +28,9 @@ async function allocationList(): Promise<void> {
     const rows = data.map((alloc: any) => {
       const created = alloc.created_at ? new Date(alloc.created_at).toISOString().slice(0, 16).replace('T', ' ') : '-';
       return [
-        String(alloc.id),
-        alloc.run_id != null ? String(alloc.run_id) : '-',
-        String(alloc.instance_id),
+        idToSlug(alloc.id),
+        alloc.run_id != null ? idToSlug(alloc.run_id) : '-',
+        idToSlug(alloc.instance_id),
         alloc.status || '-',
         created,
       ];

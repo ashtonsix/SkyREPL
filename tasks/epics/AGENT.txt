@@ -17,11 +17,11 @@ TASK INDEX
 
   #AGENT-01  Panic diagnostics on shutdown                        [DONE]
   #AGENT-02  Command ack protocol                                 [DONE]
-  #AGENT-03  SSE backpressure on slow consumers                   [PENDING]
-  #AGENT-04  Degraded mode                                        [PENDING]
+  #AGENT-03  SSE backpressure on slow consumers                   [DONE]
+  #AGENT-04  Degraded mode                                        [DONE]
   #AGENT-05  Workdir cleanup between warm pool reuse              [DONE]
   #AGENT-06  Spot interruption handling                           [PENDING]
-  #AGENT-07  Artifact collection                                  [PENDING]
+  #AGENT-07  Artifact collection                                  [DONE]
   #AGENT-08  Checkpoint support                                   [PENDING]
 
 ================================================================================
@@ -53,18 +53,19 @@ TASK DETAIL
   - [x] Agent sends ack after command dispatch
   - [x] Control plane tracks pending acks with timeout
 
-## #AGENT-03: SSE backpressure on slow consumers                   [Sm] [PENDING]
+## #AGENT-03: SSE backpressure on slow consumers                   [Sm] [DONE]
   Carries: EX3
   ---
   Track SSE queue depth per connection. When backlogged, drop heartbeat
   messages first to preserve command delivery.
 
   Deliverables:
-  - [ ] Queue depth counter per SSE connection
-  - [ ] Priority: commands > logs > heartbeats
-  - [ ] Drop heartbeats when queue exceeds threshold
+  - [x] Queue depth counter per SSE connection (via desiredSize backpressure)
+  - [x] Priority: commands > logs > heartbeats
+  - [x] Drop heartbeats when queue exceeds threshold
+  - [x] Disconnect after 5 min sustained overload
 
-## #AGENT-04: Degraded mode                                        [Md] [PENDING]
+## #AGENT-04: Degraded mode                                        [Md] [DONE]
   Spec: Ch11 §11.5
   Depends: #FND-04
   ---
@@ -73,10 +74,12 @@ TASK DETAIL
   Agent continues execution, buffers logs, retries control plane.
 
   Deliverables:
-  - [ ] State machine: healthy ↔ degraded → panic
-  - [ ] Log buffering during degraded mode
-  - [ ] Automatic recovery to healthy when control plane returns
-  - [ ] Configurable degradation thresholds
+  - [x] State machine: healthy ↔ degraded → panic
+  - [x] Log buffering during degraded mode (disk buffer, 10MB cap)
+  - [x] Automatic recovery to healthy when control plane returns
+  - [x] Configurable degradation thresholds
+  - [x] Exponential backoff for heartbeat during degraded (10s→60s cap)
+  - [x] Flush disk-buffered logs on recovery
 
 ## #AGENT-05: Workdir cleanup between warm pool reuse              [Sm] [DONE]
   Spec: Ch11 §11.10
@@ -104,19 +107,19 @@ TASK DETAIL
   - [ ] Graceful run interruption
   - [ ] Integration test with simulated spot signal
 
-## #AGENT-07: Artifact collection                                  [Lg] [PENDING]
+## #AGENT-07: Artifact collection                                  [Lg] [DONE]
   Spec: Ch11 §11.11
   Depends: #LIFE-01
   Pseudo: agent/artifacts.py.l1.txt + .l2.txt
   ---
-  Collect output files matching artifact patterns. Upload via presigned
-  URLs to control plane blob storage.
+  Collect output files matching artifact patterns. Upload via base64-encoded
+  POST to control plane blob storage (simpler than presigned URLs for local mode).
 
   Deliverables:
-  - [ ] Artifact pattern matching (glob patterns from run config)
-  - [ ] Presigned URL request from control plane
-  - [ ] Upload artifacts to blob storage
-  - [ ] Report artifact manifest to control plane
+  - [x] Artifact pattern matching (glob patterns from run config)
+  - [x] Agent-side collection: checksum, base64, batch upload (10 per POST)
+  - [x] Upload artifacts to blob storage (createBlobWithDedup)
+  - [x] Report artifact manifest to control plane (POST /v1/agent/artifacts)
 
 ## #AGENT-08: Checkpoint support                                   [Lg] [PENDING]
   Spec: Ch11 §11.12

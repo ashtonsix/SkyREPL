@@ -6,8 +6,10 @@ import { runCommand } from './commands/run';
 import { controlCommand } from './commands/control';
 import { instanceCommand } from './commands/instance';
 import { allocationCommand } from './commands/allocation';
+import { artifactCommand } from './commands/artifact';
 import { getControlPlaneUrl, isConnectionRefused, loadEnvFile, REPL_DIR, printTable, displayState } from './config';
 import { ApiClient } from './client';
+import { idToSlug, parseInputId } from '@skyrepl/shared';
 
 function printUsage(exitCode = 1) {
   const out = exitCode === 0 ? console.log : console.error;
@@ -21,6 +23,8 @@ function printUsage(exitCode = 1) {
   out('  control <subcommand>   Manage control plane (start|stop|restart|status|reset)');
   out('  instance list          List instances');
   out('  allocation list        List allocations');
+  out('  artifact list <run-id> List artifacts for a run');
+  out('  artifact download <id> Download an artifact');
   out('  help                   Show this help');
   out('');
   process.exit(exitCode);
@@ -65,6 +69,9 @@ async function main() {
     case 'allocation':
       await allocationCommand(commandArgs);
       break;
+    case 'artifact':
+      await artifactCommand(commandArgs);
+      break;
     default:
       console.error(`Unknown command: ${command}`);
       printUsage();
@@ -103,7 +110,7 @@ async function runList(): Promise<void> {
       let state = displayState(run.workflow_state);
       if (wfStatus === 'cancelled' && state !== 'completed') state = 'cancelled';
       if (wfStatus === 'failed' && state !== 'completed') state = 'failed';
-      return [String(run.id), cmd, state, exit, created];
+      return [idToSlug(run.id), cmd, state, exit, created];
     });
 
     printTable(['ID', 'COMMAND', 'STATE', 'EXIT', 'CREATED'], rows, [4, 37, 12, 5, 16]);
@@ -123,14 +130,15 @@ async function runCancel(args: string[]): Promise<void> {
     process.exit(2);
   }
 
-  const workflowId = args[0];
+  const workflowSlug = args[0];
+  const workflowIntId = parseInputId(workflowSlug);
   const client = new ApiClient(getControlPlaneUrl());
   try {
-    const result = await client.cancelWorkflow(workflowId);
+    const result = await client.cancelWorkflow(String(workflowIntId));
     if (result.cancelled) {
-      console.log(`Workflow ${result.workflow_id} cancelled.`);
+      console.log(`Workflow ${idToSlug(result.workflow_id)} cancelled.`);
     } else {
-      console.log(`Workflow ${result.workflow_id} is already ${result.status}.`);
+      console.log(`Workflow ${idToSlug(result.workflow_id)} is already ${result.status}.`);
     }
   } catch (err) {
     if (isConnectionRefused(err)) {
@@ -148,7 +156,8 @@ async function runAttach(args: string[]): Promise<void> {
     process.exit(2);
   }
 
-  const runId = args[0];
+  const runSlug = args[0];
+  const runIntId = parseInputId(runSlug);
   const baseUrl = getControlPlaneUrl();
   const client = new ApiClient(baseUrl);
 
@@ -156,7 +165,7 @@ async function runAttach(args: string[]): Promise<void> {
   let run: any = null;
   try {
     const result = await client.listRuns();
-    run = result.data.find((r: any) => String(r.id) === runId);
+    run = result.data.find((r: any) => r.id === runIntId);
   } catch (err) {
     if (isConnectionRefused(err)) {
       console.error(`Control plane not reachable at ${baseUrl}. Start it with \`repl control start\`.`);
@@ -168,28 +177,28 @@ async function runAttach(args: string[]): Promise<void> {
   }
 
   if (!run) {
-    console.error(`Run ${runId} not found.`);
+    console.error(`Run ${runSlug} not found.`);
     process.exit(2);
     return;
   }
 
   const state = displayState(run.workflow_state);
   if (state === 'completed' || state === 'failed' || state === 'cancelling') {
-    console.log(`Run ${runId} already ${state} (exit ${run.exit_code ?? '-'}). No live output to stream.`);
+    console.log(`Run ${runSlug} already ${state} (exit ${run.exit_code ?? '-'}). No live output to stream.`);
     return;
   }
 
   const cmdPreview = run.command?.length > 50 ? run.command.slice(0, 47) + '...' : run.command;
-  console.log(`Attaching to run ${runId} [${state}]: ${cmdPreview}`);
+  console.log(`Attaching to run ${runSlug} [${state}]: ${cmdPreview}`);
   console.log('Streaming logs... (Ctrl-C to detach)');
 
   process.on('SIGINT', () => {
-    console.log(`\nDetached from run ${runId}.`);
+    console.log(`\nDetached from run ${runSlug}.`);
     process.exit(0);
   });
 
   await client.streamLogs(
-    runId,
+    String(runIntId),
     (stream, data) => {
       if (stream === 'stderr') {
         process.stderr.write(data);
@@ -199,11 +208,11 @@ async function runAttach(args: string[]): Promise<void> {
     },
     (status, exitCode, _error) => {
       if (status === 'completed') {
-        console.log(`\nRun ${runId} completed (exit ${exitCode ?? 0}).`);
+        console.log(`\nRun ${runSlug} completed (exit ${exitCode ?? 0}).`);
       } else if (status === 'failed') {
-        console.log(`\nRun ${runId} failed (exit ${exitCode ?? '-'}).`);
+        console.log(`\nRun ${runSlug} failed (exit ${exitCode ?? '-'}).`);
       } else if (status === 'timeout') {
-        console.log(`\nRun ${runId} timed out.`);
+        console.log(`\nRun ${runSlug} timed out.`);
       }
     },
   );

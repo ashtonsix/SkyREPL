@@ -8,7 +8,7 @@ SkyREPL: cloud compute orchestration for lifecycle management and reproducibilit
 
 ## Dispatch
 
-You are an orchestrator. Delegate via subagents. Dispatch multiple agents in parallel when possible; use `run_in_background` for long-running ones.
+Prefer subagents for multi-file research and cross-cutting edits — they protect context and enable parallelism (`run_in_background` for long-running ones). But if a task is small enough that you'd just relay the agent's output verbatim, do it inline instead.
 
 | Task Profile                | Model   | Effort   |
 | --------------------------- | ------- | -------- |
@@ -22,9 +22,9 @@ Effort is global (`/effort`), not per-subagent. Default: opus high. Opus 4.6 ove
 
 Agent teams (experimental): multiple independent sessions with shared task lists + messaging. Use only when workers need to discuss/challenge each other (not for parallel independent work — subagents suffice).
 
-## Specification
+## Specification & Codebase
 
-15 chapters in `spec/`. **Don't read spec chapters directly** — spawn subagents to extract what you need.
+`spec/`, `impl/`, and `impl-pseudo/` are all large — prefer explore subagents for broad cross-file research. Grep/Read inline for targeted lookups.
 
 - Ch01-04: Foundation (Introduction, Material, Resources, Manifest)
 - Ch05-07: Execution (Allocations, Workflows, Intents)

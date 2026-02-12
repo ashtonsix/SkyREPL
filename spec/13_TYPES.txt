@@ -148,7 +148,7 @@ The types.ts file contains ONLY types that are:
 2. Fundamental primitives (IDs, timestamps, enums)
 3. Core domain objects (materialized resources)
 
-> See also: impl-pseudo/shared/src/types.ts.l2.txt §Primitives
+> See also: impl/shared/src/types.ts
 
 **Primitives:**
 
@@ -279,7 +279,7 @@ for completed/detached resources.
 ownership, not stored. Returns true when workflowState ends with ':complete'
 AND currentManifestId is null.
 
-> See also: impl-pseudo/shared/src/types.ts.l2.txt §StatusEnums
+> See also: impl/shared/src/types.ts
 
 ### 13.2.4 API Envelopes
 
@@ -309,7 +309,7 @@ Standard request/response wrappers for API consistency.
 - Timeout: REQUEST_TIMEOUT, OPERATION_TIMEOUT
 - Internal: INTERNAL_ERROR, DATABASE_ERROR
 
-> See also: impl-pseudo/shared/src/errors.ts.l2.txt §ErrorCodesByCategory
+> See also: impl/shared/src/errors.ts
 > See also: impl-pseudo/shared/src/api/resources.ts.l2.txt §RequestEnvelopes
 
 ## 13.3 Resource Types
@@ -464,7 +464,7 @@ timeout?, retryPolicy?, compensation? (compensation node type)
 - maxBranches? — for parallel-fan-out
 - maxRetries? — for retry-with-alternative
 
-> See also: impl-pseudo/shared/src/api/workflows.ts.l2.txt §WorkflowEngineTypes
+> See also: impl/shared/src/api/workflows.ts
 
 ### 13.4.2 Instance Types (Runtime State)
 
@@ -485,7 +485,7 @@ WorkflowEventType union:
   pattern_applied | subworkflow_started | subworkflow_completed |
   resource_emitted | resource_claimed
 
-> See also: impl-pseudo/shared/src/api/workflows.ts.l2.txt §WorkflowRuntimeTypes
+> See also: impl/shared/src/api/workflows.ts
 
 ### 13.4.3 NodeContext Interface
 
@@ -527,7 +527,7 @@ Utilities: sleep(ms), checkCancellation() (throws if workflow cancelled)
 need full workflow orchestration (DAG, patterns, compensation). Provides
 resource tracking and logging only.
 
-> See also: impl-pseudo/shared/src/api/workflows.ts.l2.txt §NodeContextInterface
+> See also: impl/shared/src/api/workflows.ts
 
 ### 13.4.4 Pattern Types and WorkflowEngine
 
@@ -558,7 +558,7 @@ resource tracking and logging only.
 - subscribe(workflowId, callback) -> unsubscribe function
 
 > See also: impl/control/src/workflow/patterns.ts
-> See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §WorkflowEngineInterface
+> See also: impl/control/src/workflow/engine.ts
 
 ### 13.4.5 Intent-Specific Input/Output Types
 
@@ -574,7 +574,7 @@ API contract types in shared/src/api/workflows.ts instead.
 - **CleanupManifestInput** — manifestId
 - **CleanupManifestOutput** — resourcesDeleted, s3ObjectsDeleted, instancesTerminated, errors (CleanupError[])
 
-> See also: impl-pseudo/shared/src/api/workflows.ts.l2.txt §IntentSpecificIOTypes
+> See also: impl/shared/src/api/workflows.ts
 
 ## 13.5 Type Relationship Diagram
 
@@ -681,7 +681,7 @@ Feature providers enable cross-provider capabilities like Tailscale VPN integrat
 
 Tailscale types: TailscaleConfig, TailscaleState (implementation-specific)
 
-> See also: impl-pseudo/control/src/provider/types.ts.l2.txt §FeatureProviderInterface
+> See also: impl/control/src/provider/types.ts
 
 ## 13.8 Provider Heartbeat Types
 
@@ -697,7 +697,7 @@ Types for heartbeat expectations model between control plane and providers.
   spot_interruption | budget_threshold | drift_detected | provider_event.
   Optional context.
 
-> See also: impl-pseudo/control/src/provider/extensions.ts.l2.txt §HeartbeatExpectationsModel
+> See also: impl/control/src/provider/extensions.ts
 
 ## 13.9 Type Naming Conventions and Anti-Patterns
 

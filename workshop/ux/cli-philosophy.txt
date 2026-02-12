@@ -57,7 +57,7 @@ cli/src/
     └── setup.ts         # repl init/setup
 ```
 
-> See also: impl-pseudo/cli/src/commands/run.ts.l2.txt §RunCommandHandler
+> See also: impl/cli/src/commands/run.ts
 
 ### Not CLI Responsibilities
 

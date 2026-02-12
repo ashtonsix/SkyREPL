@@ -145,26 +145,26 @@ export interface ProviderRegistration {
 // Dynamic registry for plugins (future extensibility)
 const dynamicProviders = new Map<string, ProviderRegistration>();
 
-export function registerProvider(registration: ProviderRegistration): void {
+export async function registerProvider(registration: ProviderRegistration): Promise<void> {
   const { provider, hooks } = registration;
+
+  // Call lifecycle hook before registration — fail registration if startup fails
+  if (hooks?.onStartup) {
+    await hooks.onStartup();
+  }
 
   // Store in dynamic registry
   dynamicProviders.set(provider.name, registration);
 
   // Cache the provider instance
   providerCache.set(provider.name as ProviderName, provider);
-
-  // Call lifecycle hook if present
-  if (hooks?.onStartup) {
-    hooks.onStartup();
-  }
 }
 
-export function unregisterProvider(name: string): void {
+export async function unregisterProvider(name: string): Promise<void> {
   // Call shutdown hook if present
   const registration = dynamicProviders.get(name);
   if (registration?.hooks?.onShutdown) {
-    registration.hooks.onShutdown();
+    await registration.hooks.onShutdown();
   }
 
   dynamicProviders.delete(name);

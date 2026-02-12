@@ -1,13 +1,13 @@
 // api/routes.ts - Route Registration and Resource Handlers
 
 import { Elysia, t } from "elysia";
+import { getRunRecord } from "../resource/run";
+import { getInstanceRecord } from "../resource/instance";
 import {
   queryOne,
   queryMany,
   getWorkflow,
   getWorkflowNodes,
-  getRun,
-  getInstance,
   type Workflow,
   type WorkflowNode,
   type Run,
@@ -137,7 +137,7 @@ export function registerResourceRoutes(app: Elysia<any>): void {
 
   app.get("/v1/runs/:id", ({ params, set }) => {
     const id = params.id;
-    const run = getRun(id);
+    const run = getRunRecord(id);
     if (!run) {
       return new Response(
         JSON.stringify({ error: { code: "RUN_NOT_FOUND", message: `Run ${id} not found`, category: "not_found" } }),
@@ -159,7 +159,7 @@ export function registerResourceRoutes(app: Elysia<any>): void {
 
   app.get("/v1/instances/:id", ({ params, set }) => {
     const id = params.id;
-    const instance = getInstance(id);
+    const instance = getInstanceRecord(id);
     if (!instance) {
       return new Response(
         JSON.stringify({ error: { code: "INSTANCE_NOT_FOUND", message: `Instance ${id} not found`, category: "not_found" } }),
@@ -514,6 +514,80 @@ export function registerOperationRoutes(app: Elysia<any>): void {
       };
     }
   });
+
+  // ─── Artifacts (SNAP-04) ────────────────────────────────────────────
+
+  app.get("/v1/runs/:id/artifacts", ({ params, set }) => {
+    const runId = params.id;
+    const run = queryOne<Run>("SELECT * FROM runs WHERE id = ?", [runId]);
+    if (!run) {
+      set.status = 404;
+      return { error: { code: "RUN_NOT_FOUND", message: `Run ${runId} not found`, category: "not_found" } };
+    }
+
+    // Find all artifact objects tagged with this run_id
+    const artifacts = queryMany<{
+      id: number;
+      blob_id: number;
+      metadata_json: string | null;
+      created_at: number;
+    }>(
+      `SELECT o.id, o.blob_id, o.metadata_json, o.created_at
+       FROM objects o
+       JOIN object_tags t ON o.id = t.object_id
+       WHERE o.type = 'artifact' AND t.tag = ?
+       ORDER BY o.created_at ASC`,
+      [`run_id:${runId}`]
+    );
+
+    const data = artifacts.map((a) => {
+      const meta = a.metadata_json ? JSON.parse(a.metadata_json) : {};
+      return {
+        id: a.id,
+        run_id: runId,
+        path: meta.path ?? null,
+        checksum: meta.checksum ?? null,
+        size_bytes: meta.size_bytes ?? 0,
+        created_at: a.created_at,
+      };
+    });
+
+    return { data };
+  }, { params: IdParams });
+
+  app.get("/v1/artifacts/:id/download", ({ params, set }) => {
+    const artifactId = params.id;
+    const obj = queryOne<{ id: number; blob_id: number; metadata_json: string | null }>(
+      "SELECT id, blob_id, metadata_json FROM objects WHERE id = ? AND type = 'artifact'",
+      [artifactId]
+    );
+    if (!obj) {
+      set.status = 404;
+      return { error: { code: "ARTIFACT_NOT_FOUND", message: `Artifact ${artifactId} not found`, category: "not_found" } };
+    }
+
+    const blob = queryOne<{ id: number; payload: Buffer | null; size_bytes: number }>(
+      "SELECT id, payload, size_bytes FROM blobs WHERE id = ?",
+      [obj.blob_id]
+    );
+    if (!blob || !blob.payload) {
+      set.status = 404;
+      return { error: { code: "ARTIFACT_DATA_NOT_FOUND", message: "Artifact data not available", category: "not_found" } };
+    }
+
+    const meta = obj.metadata_json ? JSON.parse(obj.metadata_json) : {};
+    const rawFilename = meta.path ? meta.path.split("/").pop() : `artifact-${artifactId}`;
+    // Sanitize filename: keep alphanumeric, dots, hyphens, underscores only
+    const filename = rawFilename.replace(/[^a-zA-Z0-9._-]/g, "_") || `artifact-${artifactId}`;
+
+    return new Response(new Uint8Array(blob.payload), {
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": String(blob.size_bytes),
+        "Content-Disposition": `attachment; filename="${filename}"`,
+      },
+    });
+  }, { params: IdParams });
 
   // ─── Blob Check ───────────────────────────────────────────────────────
 

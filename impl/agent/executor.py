@@ -133,12 +133,15 @@ class RunExecutor:
             self.processed_command_ids.append(command_id)
             return False
 
-    def get_and_clear_pending_acks(self) -> List[int]:
-        """Called by heartbeat thread after successful heartbeat POST."""
+    def get_pending_acks(self) -> List[int]:
+        """Return pending acks without clearing. Caller must clear after confirmed delivery."""
         with self._lock:
-            acks = list(self.pending_command_acks)
-            self.pending_command_acks.clear()
-            return acks
+            return list(self.pending_command_acks)
+
+    def clear_pending_acks(self, ack_ids: List[int]) -> None:
+        """Clear specific ack IDs after confirmed delivery via heartbeat POST."""
+        with self._lock:
+            self.pending_command_acks -= set(ack_ids)
 
     # -------------------------------------------------------------------------
     # start_run Handler
@@ -192,7 +195,16 @@ class RunExecutor:
             # Step 5: Execute command
             exit_code = self._execute_command(run_id, allocation_id, workdir, command)
 
-            # Step 6: Flush logs then report completion
+            # Step 6: Collect artifacts (best-effort, before log flush)
+            artifact_patterns = msg.get("artifacts", [])
+            if artifact_patterns:
+                try:
+                    from artifacts import collect_and_upload
+                    collect_and_upload(run_id, workdir, artifact_patterns)
+                except Exception as e:
+                    _log("WARN", f"Artifact collection failed (best-effort): {e}")
+
+            # Step 7: Flush logs then report completion
             # Flush all buffered logs before sending terminal status, otherwise
             # the control plane closes CLI WebSockets before logs are delivered.
             flush_all()

@@ -1,7 +1,8 @@
 // intent/launch-run.ts - Launch Run Intent
 
 import { TIMING } from "@skyrepl/shared";
-import { createRun, getWorkflow, type Workflow } from "../material/db";
+import { createRunRecord } from "../resource/run";
+import { getWorkflow, type Workflow } from "../material/db";
 import type { WorkflowBlueprint, NodeExecutor, NodeContext } from "../workflow/engine.types";
 import { submit, registerBlueprint, registerNodeExecutor } from "../workflow/engine";
 import type { LaunchRunInput, LaunchRunOutput } from "./launch-run.types";
@@ -22,7 +23,7 @@ import { finalizeExecutor } from "../workflow/nodes/finalize";
 
 export async function launchRun(input: LaunchRunInput): Promise<Workflow> {
   // Create a Run record in the database
-  const run = createRun({
+  const run = createRunRecord({
     command: input.command,
     workdir: input.workdir ?? "/workspace",
     max_duration_ms: input.maxDurationMs ?? TIMING.DEFAULT_WORKFLOW_TIMEOUT_MS,

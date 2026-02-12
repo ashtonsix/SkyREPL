@@ -36,8 +36,13 @@ LOG_BUFFER_MAX_SIZE = 1024 * 1024  # 1MB max buffer before overflow
 LOG_RETRY_BASE_S = 1
 LOG_RETRY_MAX_S = 32
 
+# Degraded mode disk buffer
+DEGRADED_LOG_PATH = os.getenv("SKYREPL_DEGRADED_LOG_PATH", "/tmp/skyrepl-degraded-logs.jsonl")
+DEGRADED_LOG_MAX_BYTES = 10 * 1024 * 1024  # 10MB cap
+
 # Module-level state
 _shutting_down: bool = False
+_degraded_mode: bool = False
 
 
 def configure(control_plane_url: str, auth_token: str = "") -> None:
@@ -50,6 +55,112 @@ def set_shutting_down(value: bool) -> None:
     """Signal log flusher to exit gracefully."""
     global _shutting_down
     _shutting_down = value
+
+
+def set_degraded(value: bool) -> None:
+    """Enter/exit degraded mode. When degraded, failed sends go to disk buffer."""
+    global _degraded_mode
+    _degraded_mode = value
+
+
+def is_degraded() -> bool:
+    """Return whether agent is in degraded mode."""
+    return _degraded_mode
+
+
+# =============================================================================
+# Degraded Mode Disk Buffer
+# =============================================================================
+
+
+def _write_to_disk_buffer(batch: List[dict]) -> None:
+    """Append log batch to disk buffer file. Truncates if over 10MB."""
+    import json as _json
+
+    try:
+        # Check current size and truncate if needed
+        try:
+            size = os.path.getsize(DEGRADED_LOG_PATH)
+        except FileNotFoundError:
+            size = 0
+
+        if size >= DEGRADED_LOG_MAX_BYTES:
+            # Truncate: keep the last half of the file
+            _truncate_disk_buffer()
+
+        with open(DEGRADED_LOG_PATH, "a") as f:
+            for entry in batch:
+                f.write(_json.dumps(entry) + "\n")
+    except Exception as e:
+        _log("WARN", f"Failed to write degraded log buffer: {e}")
+
+
+def _truncate_disk_buffer() -> None:
+    """Truncate disk buffer to keep only the newer half."""
+    try:
+        with open(DEGRADED_LOG_PATH, "r") as f:
+            lines = f.readlines()
+        # Keep last half
+        keep = lines[len(lines) // 2 :]
+        with open(DEGRADED_LOG_PATH, "w") as f:
+            f.writelines(keep)
+        _log("INFO", f"Truncated degraded log buffer: {len(lines)} → {len(keep)} entries")
+    except Exception as e:
+        _log("WARN", f"Failed to truncate degraded log buffer: {e}")
+
+
+def flush_disk_buffer() -> bool:
+    """
+    Flush disk-buffered logs to control plane after recovery.
+    Returns True if all flushed successfully.
+    """
+    import json as _json
+
+    if not os.path.exists(DEGRADED_LOG_PATH):
+        return True
+
+    try:
+        with open(DEGRADED_LOG_PATH, "r") as f:
+            lines = f.readlines()
+    except Exception as e:
+        _log("WARN", f"Failed to read degraded log buffer: {e}")
+        return False
+
+    if not lines:
+        _cleanup_disk_buffer()
+        return True
+
+    _log("INFO", f"Flushing {len(lines)} degraded-mode log entries to control plane")
+
+    batch: List[dict] = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            batch.append(_json.loads(line))
+        except _json.JSONDecodeError:
+            continue
+
+    if batch:
+        success = _send_log_batch(batch)
+        if not success:
+            _log("WARN", "Failed to flush degraded log buffer, will retry next recovery")
+            return False
+
+    _cleanup_disk_buffer()
+    _log("INFO", "Degraded log buffer flushed successfully")
+    return True
+
+
+def _cleanup_disk_buffer() -> None:
+    """Remove disk buffer file."""
+    try:
+        os.remove(DEGRADED_LOG_PATH)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        _log("WARN", f"Failed to clean up degraded log buffer: {e}")
 
 
 # =============================================================================
@@ -199,9 +310,11 @@ def _send_log_batch(batch: List[dict]) -> bool:
 
     For Slice 1, sends each entry individually (control plane expects single log).
     Returns True if sent successfully, False on persistent failure.
+    When degraded, failed entries are buffered to disk instead of being dropped.
     """
     delay = LOG_RETRY_BASE_S
-    max_attempts = 5
+    max_attempts = 2 if _degraded_mode else 5
+    failed_entries: List[dict] = []
 
     for entry in batch:
         # Ensure required fields
@@ -219,6 +332,7 @@ def _send_log_batch(batch: List[dict]) -> bool:
         if entry.get("sync_success") is not None:
             payload["sync_success"] = entry["sync_success"]
 
+        sent = False
         attempt_delay = delay
         for attempt in range(max_attempts):
             try:
@@ -226,6 +340,7 @@ def _send_log_batch(batch: List[dict]) -> bool:
                 # Read response body to release connection
                 resp.read()
                 if resp.status == 200:
+                    sent = True
                     break
                 elif resp.status >= 500:
                     _log("WARN", f"Log batch failed (5xx): {resp.status}, retrying in {attempt_delay}s")
@@ -236,12 +351,21 @@ def _send_log_batch(batch: List[dict]) -> bool:
                 _log("WARN", f"Log batch send error: {e}, retrying in {attempt_delay}s")
 
             if _shutting_down:
+                if _degraded_mode and not sent:
+                    failed_entries.append(entry)
                 return False
 
             time.sleep(attempt_delay)
             attempt_delay = min(attempt_delay * 2, LOG_RETRY_MAX_S)
 
-    return True
+        if not sent and _degraded_mode:
+            failed_entries.append(entry)
+
+    # Buffer failed entries to disk during degraded mode
+    if failed_entries:
+        _write_to_disk_buffer(failed_entries)
+
+    return len(failed_entries) == 0
 
 
 # =============================================================================

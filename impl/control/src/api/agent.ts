@@ -3,19 +3,20 @@
 // Agent→control: HTTP POST. Control→agent: SSE (managed by SSEManager).
 
 import { Elysia } from "elysia";
+import { updateRunRecord } from "../resource/run";
+import { getInstanceRecord } from "../resource/instance";
 import {
   queryOne,
   execute,
-  updateRun,
   createBlob,
   createObject,
   addObjectTag,
   addResourceToManifest,
-  getInstance,
   type Allocation,
   type Run,
   type Manifest,
 } from "../material/db";
+import { createBlobWithDedup, appendLogData } from "../material/storage";
 import { activateAllocation, failAllocation } from "../workflow/state-transitions";
 import { stateEvents, STATE_EVENT } from "../workflow/state-events";
 import { sseManager } from "./sse-protocol";
@@ -132,7 +133,7 @@ function requireAuth(
   if (!token) {
     // No token provided: check if this instance requires auth
     // Instances without a token hash allow unauthenticated access (backward compat)
-    const instance = getInstance(Number(instanceId));
+    const instance = getInstanceRecord(Number(instanceId));
     if (instance?.registration_token_hash) {
       return { error: "unauthorized", message: "Missing authentication token" };
     }
@@ -219,9 +220,6 @@ export function registerAgentRoutes(app: Elysia<any>): void {
       }
     }
 
-    // Append log data to the run's log stream (chunk buffering)
-    const { appendLogData } = await import("../material/storage");
-
     // For Slice 1, we need a blob_id per run+stream. Get or create log object.
     // Look up existing log object for this run+stream
     const existingLogObj = queryOne<{ id: number; blob_id: number }>(
@@ -305,6 +303,87 @@ export function registerAgentRoutes(app: Elysia<any>): void {
     };
   });
 
+  // ─── Artifact Upload (#AGENT-07) ──────────────────────────────────────
+
+  app.post("/v1/agent/artifacts", async ({ body, request, set }) => {
+    const req = body as {
+      run_id: number;
+      path: string;
+      checksum: string;
+      size_bytes: number;
+      content_base64: string;
+    };
+
+    // Auth check via run → allocation → instance
+    const run = queryOne<Run>("SELECT * FROM runs WHERE id = ?", [req.run_id]);
+    if (!run) {
+      set.status = 404;
+      return { error: "not_found", message: "Run not found" };
+    }
+    const allocation = queryOne<Allocation>(
+      "SELECT * FROM allocations WHERE run_id = ?",
+      [req.run_id]
+    );
+    if (allocation) {
+      const authError = requireAuth({ instance_id: allocation.instance_id }, request);
+      if (authError) {
+        set.status = 401;
+        return authError;
+      }
+    }
+
+    const manifestId = run.current_manifest_id ?? null;
+    const now = Date.now();
+
+    try {
+      // Decode base64 content
+      const data = Buffer.from(req.content_base64, "base64");
+
+      // Create or deduplicate blob
+      const blobId = createBlobWithDedup("artifacts", req.checksum, data);
+
+      // Create artifact object
+      const obj = createObject({
+        type: "artifact",
+        blob_id: blobId,
+        provider: null,
+        provider_object_id: null,
+        metadata_json: JSON.stringify({
+          run_id: req.run_id,
+          path: req.path,
+          checksum: req.checksum,
+          size_bytes: req.size_bytes,
+        }),
+        expires_at: null,
+        current_manifest_id: manifestId,
+        accessed_at: null,
+        updated_at: now,
+      });
+
+      // Tag for lookups
+      addObjectTag(obj.id, "run_id", String(req.run_id));
+      addObjectTag(obj.id, "artifact_path", req.path);
+
+      // Wire into manifest
+      if (manifestId) {
+        try {
+          addResourceToManifest(manifestId, "object", String(obj.id));
+        } catch {
+          console.warn("[agent] Manifest sealed during artifact upload", { objectId: obj.id, manifestId });
+        }
+      }
+
+      return { ack: true, artifacts_stored: 1 };
+    } catch (error) {
+      console.warn("[agent] Failed to store artifact", {
+        path: req.path,
+        error,
+      });
+      set.status = 500;
+      return { error: "storage_failed", message: "Failed to store artifact" };
+    }
+  });
+
   // ─── SSE Commands Stream ─────────────────────────────────────────────
 
   app.get("/v1/agent/commands", ({ query, request, set }) => {
@@ -355,7 +434,7 @@ export function registerAgentRoutes(app: Elysia<any>): void {
       updates.finished_at = Date.now();
     }
 
-    updateRun(status.run_id, updates);
+    updateRunRecord(status.run_id, updates);
 
     // Emit run:finished event for EventEmitter-based waiters
     if (["completed", "failed", "timeout"].includes(status.status)) {
@@ -473,7 +552,7 @@ export function registerAgentRoutes(app: Elysia<any>): void {
   // ─── Agent File Download ─────────────────────────────────────────────
 
   app.get("/v1/agent/download/:filename", async ({ params, set }) => {
-    const allowedFiles = ["agent.py", "executor.py", "heartbeat.py", "logs.py", "sse.py", "http_client.py"];
+    const allowedFiles = ["agent.py", "executor.py", "heartbeat.py", "logs.py", "sse.py", "http_client.py", "artifacts.py"];
     const filename = params.filename;
 
     if (!allowedFiles.includes(filename)) {
@@ -546,7 +625,7 @@ export async function handleSyncComplete(
   syncSuccess: boolean
 ): Promise<void> {
   if (!syncSuccess) {
-    updateRun(runId, { workflow_state: "launch-run:sync-failed" });
+    updateRunRecord(runId, { workflow_state: "launch-run:sync-failed" });
 
     // Fail the CLAIMED allocation so waitForEvent detects the failure immediately
     const alloc = queryOne<Allocation>(

@@ -73,7 +73,7 @@ beforeAll(async () => {
   // This test doesn't need a real provider — it exercises API routes, DB state,
   // and workflow failure paths. Tests that need working workflows use e2e-simulated.
   clearProviderCache();
-  registerProvider({
+  await registerProvider({
     provider: {
       name: "orbstack" as any,
       capabilities: {

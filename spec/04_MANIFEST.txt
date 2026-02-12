@@ -76,7 +76,7 @@ DRAFT -> SEALED (EXPIRED is derived from resource count)
 - Resources detached from workflow ownership
 - Other workflows can query and claim resources
 - Retention timer starts (expires_at = now + retention_ms)
-- retention_ms=null means never expires (e.g., snapshot manifests)
+- retention_ms=null means never expires (implementation uses 1-year for snapshots rather than null)
 - Transitions to: deleted (when expired and all resources cleaned up)
 
 **EXPIRED (Derived State)** - Not stored, computed from ownership:
@@ -116,7 +116,7 @@ STEPS:
      c. Preserve manifest_resources links (needed for cleanup tracking)
 ```
 
-> See also: impl-pseudo/control/src/resource/manifest.ts.l2.txt §SealManifest
+> See also: impl/control/src/resource/manifest.ts
 
 **isManifestExpired(manifestId) -> boolean**
 
@@ -129,7 +129,7 @@ Returns TRUE when ALL of:
 Returns FALSE otherwise (including when manifest not found or retention is null).
 ```
 
-> See also: impl-pseudo/control/src/resource/manifest.ts.l2.txt §ExpiryCheck
+> See also: impl/control/src/resource/manifest.ts
 
 **triggerCleanup(manifestId) -> workflowId**
 
@@ -151,7 +151,7 @@ node output wiring. No manifest ceremony is needed because all nodes share the
 same manifest. For example, a spawn-instance node emits an instance_id, which a
 subsequent allocate-run node receives as input and uses to create an allocation.
 
-> See also: impl-pseudo/control/src/resource/manifest.ts.l2.txt §ResourceClaiming
+> See also: impl/control/src/resource/manifest.ts
 
 ### Between-Workflow Resource Claiming
 
@@ -193,7 +193,7 @@ STEPS:
   4. Return { claimed: true, instance_id }
 ```
 
-> See also: impl-pseudo/control/src/resource/manifest.ts.l2.txt §ResourceClaiming
+> See also: impl/control/src/resource/manifest.ts
 
 ### Conflict Resolution
 
@@ -214,7 +214,7 @@ Within transaction:
   4. Return { success: true }
 ```
 
-> See also: impl-pseudo/control/src/resource/manifest.ts.l2.txt §AtomicClaim
+> See also: impl/control/src/resource/manifest.ts
 
 ### Subworkflow Manifest Independence
 
@@ -242,7 +242,7 @@ warm pool claim.
   4. Return resourceId on success, null on failure or no candidates
 ```
 
-> See also: impl-pseudo/control/src/resource/manifest.ts.l2.txt §SubworkflowManifest
+> See also: impl/control/src/resource/manifest.ts
 
 ## 4.3 Cleanup System
 
@@ -274,7 +274,7 @@ back to DEFAULT_MANIFEST_RETENTION_MS), update the manifest's retention_ms, then
 call sealManifest. This ensures workflow-type-specific retention without caller
 needing to know policy details.
 
-> See also: impl-pseudo/control/src/resource/manifest.ts.l2.txt §RetentionPolicy
+> See also: impl/control/src/resource/manifest.ts
 
 ### Cleanup Priority
 
@@ -323,7 +323,7 @@ whether a cleanup-manifest workflow is already running before spawning a new one
 (to prevent duplicate cleanup). The scanner SHOULD use a consecutive-failure
 counter (alert after 5 failures) and MUST NOT rethrow errors (next run catches up).
 
-> See also: impl-pseudo/control/src/resource/manifest.ts.l2.txt §ExpiryScanner
+> See also: impl/control/src/resource/manifest.ts
 
 ### Cost Attribution
 
@@ -332,7 +332,7 @@ Cost MUST be aggregated by resource type (compute for instances via usage_record
 storage for objects via blob size). The breakdown MUST include per-resource
 itemization and category totals (compute, storage, network).
 
-> See also: impl-pseudo/control/src/resource/manifest.ts.l2.txt §CostAttribution
+> See also: impl/control/src/resource/manifest.ts
 
 ## 4.4 Manifest Examples
 

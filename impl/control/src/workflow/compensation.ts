@@ -1,18 +1,15 @@
 // workflow/compensation.ts - Compensation Framework (#WF-01)
-// Provides saga-style compensation for failed workflow nodes.
-// Single-node compensation (inline during executeNode) and
-// full reverse-order rollback (during handleWorkflowFailure).
+// Single-node compensation only: compensate the failed node inline during
+// executeNode. No cascade through completed nodes (§6.5, §7, §9).
 
 import type { NodeContext } from "./engine.types";
 import {
-  getWorkflow,
   getWorkflowNodes,
   updateWorkflowNode,
   queryOne,
   type WorkflowNode,
 } from "../material/db";
 import { getNodeExecutor, buildNodeContext } from "./engine";
-import { startRollback } from "./state-transitions";
 import { TIMING } from "@skyrepl/shared";
 
 // =============================================================================
@@ -209,48 +206,3 @@ export async function compensateFailedNode(
   }
 }
 
-// =============================================================================
-// compensateWorkflow - Reverse-order compensation for entire workflow
-// =============================================================================
-
-export async function compensateWorkflow(
-  workflowId: number
-): Promise<void> {
-  // Transition workflow to rolling_back
-  const rollbackResult = startRollback(workflowId);
-  if (!rollbackResult.success) {
-    // If we can't transition (already rolling_back, failed, etc.), log and continue
-    // The workflow may already be in a terminal state or rolling_back
-    console.warn("[workflow] startRollback failed, continuing with compensation", {
-      workflowId,
-      reason: rollbackResult.reason,
-    });
-  }
-
-  // Get all nodes for the workflow
-  const nodes = getWorkflowNodes(workflowId);
-
-  // Find completed nodes and sort in reverse execution order (finished_at DESC)
-  // Secondary sort by id DESC for determinism when timestamps are equal
-  const completedNodes = nodes
-    .filter((n) => n.status === "completed")
-    .sort((a, b) => {
-      const aTime = a.finished_at ?? 0;
-      const bTime = b.finished_at ?? 0;
-      if (bTime !== aTime) return bTime - aTime;
-      return b.id - a.id;
-    });
-
-  // Compensate each completed node in reverse order
-  for (const node of completedNodes) {
-    const result = await compensateFailedNode(workflowId, node.node_id);
-    if (!result.success) {
-      console.warn("[workflow] Compensation failed during rollback", {
-        workflowId,
-        nodeId: node.node_id,
-        error: result.error?.message,
-      });
-      // Continue compensating remaining nodes — best effort
-    }
-  }
-}

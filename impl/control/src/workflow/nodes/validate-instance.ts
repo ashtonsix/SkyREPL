@@ -2,12 +2,13 @@
 // Checks that the target instance exists and acquires a termination lock.
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
-import { getInstance, updateInstance } from "../../material/db";
+import { getInstance, updateInstance, queryMany } from "../../material/db";
 import type {
   TerminateInstanceInput,
   ValidateInstanceOutput,
 } from "../../intent/terminate-instance.types";
-import { NotFoundError } from "@skyrepl/shared";
+import type { Allocation } from "../../material/db";
+import { NotFoundError, ConflictError } from "@skyrepl/shared";
 
 // =============================================================================
 // Node Executor
@@ -46,6 +47,27 @@ export const validateInstanceExecutor: NodeExecutor<TerminateInstanceInput, Vali
         currentState: instance.workflow_state,
       });
     } else {
+      // Check if termination is blocked by active debug holds
+      // NOTE: We only check for debug holds here, not non-terminal allocations.
+      // The drain-allocations node will handle draining non-terminal allocations.
+      const holdingAllocations = queryMany<Allocation>(
+        "SELECT * FROM allocations WHERE instance_id = ? AND status = 'COMPLETE' AND debug_hold_until IS NOT NULL AND debug_hold_until > ?",
+        [instance.id, Date.now()]
+      );
+
+      if (holdingAllocations.length > 0) {
+        throw new ConflictError(
+          "Instance termination blocked by active debug holds",
+          {
+            code: "RESOURCE_BUSY",
+            details: {
+              instanceId: instance.id,
+              holdingAllocations: holdingAllocations.length,
+            },
+          }
+        );
+      }
+
       // Acquire termination lock by transitioning to terminate:draining
       updateInstance(instance.id, {
         workflow_state: "terminate:draining",

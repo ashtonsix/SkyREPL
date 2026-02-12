@@ -2,7 +2,7 @@
 // Activates allocation and initiates file sync + run start via agent bridge.
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
-import { updateRun } from "../../material/db";
+import { updateRunRecord } from "../../resource/run";
 import type {
   StartRunOutput,
   LaunchRunWorkflowInput,
@@ -96,7 +96,7 @@ export const startRunExecutor: NodeExecutor<StartRunInput, StartRunOutput> = {
     };
 
     // Update run started_at (allocation stays CLAIMED until agent reports sync_complete)
-    updateRun(input.runId, {
+    updateRunRecord(input.runId, {
       started_at: Date.now(),
       workflow_state: "launch-run:syncing",
     });
@@ -122,7 +122,7 @@ export const startRunExecutor: NodeExecutor<StartRunInput, StartRunOutput> = {
     });
 
     // Update workflow state now that sync is confirmed
-    updateRun(input.runId, {
+    updateRunRecord(input.runId, {
       workflow_state: "launch-run:running",
     });
 

@@ -8,6 +8,8 @@ import {
   updateInstance,
   updateRun,
 } from "../../material/db";
+import { getProvider } from "../../provider/registry";
+import type { ProviderName } from "../../provider/types";
 import type { CleanupManifestInput } from "../../intent/cleanup-manifest.types";
 import type { SortAndGroupOutput, ResourceGroup } from "./sort-and-group";
 
@@ -189,8 +191,8 @@ async function cleanupInstance(
   resourceId: string
 ): Promise<"cleaned" | "skipped"> {
   const id = parseInt(resourceId, 10);
-  const existing = queryOne<{ id: number; workflow_state: string }>(
-    "SELECT id, workflow_state FROM instances WHERE id = ?",
+  const existing = queryOne<{ id: number; workflow_state: string; provider: string; provider_id: string | null }>(
+    "SELECT id, workflow_state, provider, provider_id FROM instances WHERE id = ?",
     [id]
   );
   if (!existing) {
@@ -201,8 +203,27 @@ async function cleanupInstance(
     return "skipped"; // Already terminated
   }
 
-  // For now, just mark as terminated. In the future this would spawn a
-  // terminate-instance subworkflow.
+  // Step 12: Actually terminate the VM via provider API (best-effort)
+  if (existing.provider_id) {
+    try {
+      const provider = await getProvider(existing.provider as ProviderName);
+      await provider.terminate(existing.provider_id);
+      ctx.log("info", "Terminated instance via provider", {
+        instanceId: id,
+        provider: existing.provider,
+        providerId: existing.provider_id,
+      });
+    } catch (err) {
+      ctx.log("warn", "Failed to terminate instance via provider (best-effort)", {
+        instanceId: id,
+        provider: existing.provider,
+        providerId: existing.provider_id,
+        error: String(err),
+      });
+    }
+  }
+
+  // Mark as terminated in DB
   updateInstance(id, { workflow_state: "terminate:complete" });
   ctx.log("info", "Marked instance as terminated for cleanup", {
     instanceId: id,

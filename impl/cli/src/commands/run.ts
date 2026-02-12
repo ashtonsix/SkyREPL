@@ -3,6 +3,7 @@ import { ApiClient } from '../client';
 import { findProjectConfig, parseDuration } from '../project';
 import type { Profile } from '../project';
 import type { WorkflowStatus } from '../client';
+import { idToSlug } from '@skyrepl/shared';
 
 // Terminal workflow states — when the workflow reaches one of these, we're done
 const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled']);
@@ -160,11 +161,11 @@ export async function runCommand(args: string[]): Promise<void> {
     process.exit(2);
   }
 
-  console.log(`Launched run ${runId}, workflow ${workflowId}`);
+  console.log(`Launched run ${idToSlug(runId)}, workflow ${idToSlug(workflowId)}`);
 
   // Ctrl-C: detach from run, don't cancel
   process.on('SIGINT', () => {
-    console.log(`\nRun ${runId} continuing in background. Use \`repl run cancel ${workflowId}\` to stop it.`);
+    console.log(`\nRun ${idToSlug(runId)} continuing in background. Use \`repl run cancel ${idToSlug(workflowId)}\` to stop it.`);
     process.exit(0);
   });
 
@@ -231,17 +232,17 @@ export async function runCommand(args: string[]): Promise<void> {
   // Print summary and exit
   console.log('');
   if (finalStatus.status === 'completed') {
-    console.log(`Workflow ${workflowId} completed.`);
+    console.log(`Workflow ${idToSlug(workflowId)} completed.`);
     process.exit(0);
   } else if (finalStatus.status === 'failed') {
     const errMsg = finalStatus.error?.message ?? 'unknown error';
-    console.log(`Workflow ${workflowId} failed: ${errMsg}`);
+    console.log(`Workflow ${idToSlug(workflowId)} failed: ${errMsg}`);
     process.exit(1);
   } else if (finalStatus.status === 'cancelled') {
-    console.log(`Workflow ${workflowId} was cancelled.`);
+    console.log(`Workflow ${idToSlug(workflowId)} was cancelled.`);
     process.exit(1);
   } else {
-    console.log(`Workflow ${workflowId} ended with status: ${finalStatus.status}`);
+    console.log(`Workflow ${idToSlug(workflowId)} ended with status: ${finalStatus.status}`);
     process.exit(1);
   }
 }

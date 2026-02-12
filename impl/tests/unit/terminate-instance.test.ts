@@ -272,6 +272,143 @@ describe("Terminate Instance - Node Executors", () => {
     test("is marked as idempotent", () => {
       expect(validateInstanceExecutor.idempotent).toBe(true);
     });
+
+    test("blocked by active debug hold", async () => {
+      const instance = createTestInstance();
+      const run = createTestRun();
+      const alloc = createTestAllocation(instance.id, "COMPLETE", run.id);
+
+      // Set debug hold in the future
+      const futureHold = Date.now() + 60000; // 1 minute from now
+      queryMany(
+        "UPDATE allocations SET debug_hold_until = ?, completed_at = ? WHERE id = ?",
+        [futureHold, Date.now(), alloc.id]
+      );
+
+      const ctx = createMockNodeContext({
+        workflowInput: { instanceId: instance.id },
+      });
+
+      await expect(validateInstanceExecutor.execute(ctx)).rejects.toThrow(
+        /blocked by active debug holds/i
+      );
+
+      // State should NOT have changed to terminate:draining
+      const updated = getInstance(instance.id);
+      expect(updated?.workflow_state).toBe("launch:complete");
+    });
+
+    test("proceeds with non-terminal allocation (ACTIVE) - will be drained later", async () => {
+      const instance = createTestInstance();
+      const run = createTestRun();
+      createTestAllocation(instance.id, "ACTIVE", run.id);
+
+      const ctx = createMockNodeContext({
+        workflowInput: { instanceId: instance.id },
+      });
+
+      const result = await validateInstanceExecutor.execute(ctx);
+
+      expect(result.instanceId).toBe(instance.id);
+
+      // Should have acquired the termination lock
+      const updated = getInstance(instance.id);
+      expect(updated?.workflow_state).toBe("terminate:draining");
+    });
+
+    test("proceeds with non-terminal allocation (CLAIMED) - will be drained later", async () => {
+      const instance = createTestInstance();
+      const run = createTestRun();
+      createTestAllocation(instance.id, "CLAIMED", run.id);
+
+      const ctx = createMockNodeContext({
+        workflowInput: { instanceId: instance.id },
+      });
+
+      const result = await validateInstanceExecutor.execute(ctx);
+
+      expect(result.instanceId).toBe(instance.id);
+
+      // Should have acquired the termination lock
+      const updated = getInstance(instance.id);
+      expect(updated?.workflow_state).toBe("terminate:draining");
+    });
+
+    test("proceeds with non-terminal allocation (AVAILABLE) - will be drained later", async () => {
+      const instance = createTestInstance();
+      createTestAllocation(instance.id, "AVAILABLE");
+
+      const ctx = createMockNodeContext({
+        workflowInput: { instanceId: instance.id },
+      });
+
+      const result = await validateInstanceExecutor.execute(ctx);
+
+      expect(result.instanceId).toBe(instance.id);
+
+      // Should have acquired the termination lock
+      const updated = getInstance(instance.id);
+      expect(updated?.workflow_state).toBe("terminate:draining");
+    });
+
+    test("proceeds when only terminal allocations exist without debug holds", async () => {
+      const instance = createTestInstance();
+      createTestAllocation(instance.id, "COMPLETE");
+      createTestAllocation(instance.id, "FAILED");
+
+      const ctx = createMockNodeContext({
+        workflowInput: { instanceId: instance.id },
+      });
+
+      const result = await validateInstanceExecutor.execute(ctx);
+
+      expect(result.instanceId).toBe(instance.id);
+
+      // Should have acquired the termination lock
+      const updated = getInstance(instance.id);
+      expect(updated?.workflow_state).toBe("terminate:draining");
+    });
+
+    test("proceeds when debug hold has expired", async () => {
+      const instance = createTestInstance();
+      const run = createTestRun();
+      const alloc = createTestAllocation(instance.id, "COMPLETE", run.id);
+
+      // Set debug hold in the past
+      const pastHold = Date.now() - 60000; // 1 minute ago
+      queryMany(
+        "UPDATE allocations SET debug_hold_until = ?, completed_at = ? WHERE id = ?",
+        [pastHold, Date.now() - 120000, alloc.id]
+      );
+
+      const ctx = createMockNodeContext({
+        workflowInput: { instanceId: instance.id },
+      });
+
+      const result = await validateInstanceExecutor.execute(ctx);
+
+      expect(result.instanceId).toBe(instance.id);
+
+      // Should have acquired the termination lock
+      const updated = getInstance(instance.id);
+      expect(updated?.workflow_state).toBe("terminate:draining");
+    });
+
+    test("proceeds when no allocations exist", async () => {
+      const instance = createTestInstance();
+
+      const ctx = createMockNodeContext({
+        workflowInput: { instanceId: instance.id },
+      });
+
+      const result = await validateInstanceExecutor.execute(ctx);
+
+      expect(result.instanceId).toBe(instance.id);
+
+      // Should have acquired the termination lock
+      const updated = getInstance(instance.id);
+      expect(updated?.workflow_state).toBe("terminate:draining");
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -459,7 +596,7 @@ describe("Terminate Instance - Node Executors", () => {
   describe("terminate-provider", () => {
     test("calls provider.terminate", async () => {
       const mockProvider = createMockProvider();
-      registerProvider({ provider: mockProvider });
+      await registerProvider({ provider: mockProvider });
 
       const ctx = createMockNodeContext({
         workflowInput: { instanceId: 1 },
@@ -483,7 +620,7 @@ describe("Terminate Instance - Node Executors", () => {
       expect(result.providerId).toBe("mock-vm-123");
       expect(terminateCalls).toContain("mock-vm-123");
 
-      unregisterProvider("mock-provider");
+      await unregisterProvider("mock-provider");
     });
 
     test("handles already-terminated gracefully (not found)", async () => {
@@ -491,7 +628,7 @@ describe("Terminate Instance - Node Executors", () => {
       mockProvider.terminate = async (providerId: string) => {
         throw new Error(`VM ${providerId} not found`);
       };
-      registerProvider({ provider: mockProvider });
+      await registerProvider({ provider: mockProvider });
 
       const ctx = createMockNodeContext({
         workflowInput: { instanceId: 1 },
@@ -514,7 +651,7 @@ describe("Terminate Instance - Node Executors", () => {
       expect(result.terminated).toBe(true);
       expect(result.providerId).toBe("mock-vm-gone");
 
-      unregisterProvider("mock-provider");
+      await unregisterProvider("mock-provider");
     });
 
     test("handles empty providerId gracefully", async () => {
@@ -549,7 +686,7 @@ describe("Terminate Instance - Node Executors", () => {
       mockProvider.terminate = async () => {
         throw new Error("Network timeout");
       };
-      registerProvider({ provider: mockProvider });
+      await registerProvider({ provider: mockProvider });
 
       const ctx = createMockNodeContext({
         workflowInput: { instanceId: 1 },
@@ -569,7 +706,7 @@ describe("Terminate Instance - Node Executors", () => {
 
       await expect(terminateProviderExecutor.execute(ctx)).rejects.toThrow("Network timeout");
 
-      unregisterProvider("mock-provider");
+      await unregisterProvider("mock-provider");
     });
   });
 
@@ -728,7 +865,7 @@ describe("Terminate Instance - Registration", () => {
 // =============================================================================
 
 describe("Terminate Instance - Workflow Execution", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     resetEngineShutdown();
     initDatabase(":memory:");
     runMigrations();
@@ -739,13 +876,13 @@ describe("Terminate Instance - Workflow Execution", () => {
 
     // Register mock provider
     const mockProvider = createMockProvider();
-    registerProvider({ provider: mockProvider });
+    await registerProvider({ provider: mockProvider });
   });
 
   afterEach(async () => {
     requestEngineShutdown();
     await awaitEngineQuiescence(5_000);
-    unregisterProvider("mock-provider");
+    await unregisterProvider("mock-provider");
     closeDatabase();
   });
 
@@ -835,7 +972,7 @@ describe("Terminate Instance - API", () => {
     terminateCalls = [];
 
     const mockProvider = createMockProvider();
-    registerProvider({ provider: mockProvider });
+    await registerProvider({ provider: mockProvider });
 
     const { createServer } = await import("../../control/src/api/routes");
     const app = createServer({ port: 0, corsOrigins: ["*"], maxBodySize: 10 * 1024 * 1024 });
@@ -850,7 +987,7 @@ describe("Terminate Instance - API", () => {
     }
     requestEngineShutdown();
     await awaitEngineQuiescence(5_000);
-    unregisterProvider("mock-provider");
+    await unregisterProvider("mock-provider");
     closeDatabase();
   });
 

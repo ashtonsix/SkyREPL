@@ -32,7 +32,7 @@ interface MockInstance extends ProviderInstance {
 // =============================================================================
 
 export class MockProvider implements Provider {
-  readonly name = "orbstack" as const; // Override real orbstack in cache
+  readonly name = "mock" as const;
   readonly capabilities: ProviderCapabilities = {
     snapshots: false,
     spot: false,

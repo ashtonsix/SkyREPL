@@ -405,10 +405,19 @@ describe("Workflow Patterns Basic (#WF-05, #WF-06)", () => {
     });
 
     test("retry generates a new idempotency key from the original", async () => {
+      let callCount = 0;
+
       registerNodeExecutor({
         name: "retry-idemp-node",
         idempotent: true,
         async execute() {
+          callCount++;
+          if (callCount === 1) {
+            throw Object.assign(new Error("First call fails"), {
+              code: "VALIDATION_ERROR",
+              category: "validation",
+            });
+          }
           return { done: true };
         },
       });
@@ -431,6 +440,10 @@ describe("Workflow Patterns Basic (#WF-05, #WF-06)", () => {
 
       await Bun.sleep(500);
 
+      // Workflow must be failed before retry is allowed (SD-G1-07)
+      const wf1 = getWorkflow(result1.workflowId);
+      expect(wf1!.status).toBe("failed");
+
       const newWorkflowId = await engine.retry(result1.workflowId);
       const wf2 = getWorkflow(newWorkflowId);
 
@@ -448,6 +461,161 @@ describe("Workflow Patterns Basic (#WF-05, #WF-06)", () => {
         expect(true).toBe(false); // Should not reach
       } catch (err) {
         expect((err as Error).message).toContain("not found");
+      }
+    });
+
+    // SD-G1-06: retry preserves parent_workflow_id and timeout
+    test("retry preserves parent_workflow_id and timeout", async () => {
+      let callCount = 0;
+
+      registerNodeExecutor({
+        name: "retry-preserve-node",
+        idempotent: true,
+        async execute() {
+          callCount++;
+          if (callCount === 1) {
+            throw Object.assign(new Error("First call fails"), {
+              code: "VALIDATION_ERROR",
+              category: "validation",
+            });
+          }
+          return { preserved: true };
+        },
+      });
+
+      registerBlueprint({
+        type: "test-retry-preserve",
+        entryNode: "step",
+        nodes: {
+          step: { type: "retry-preserve-node", dependsOn: [] },
+        },
+      });
+
+      const engine = createWorkflowEngine();
+
+      // Submit with explicit parentWorkflowId and timeout
+      // First create a "parent" workflow to reference
+      const parentResult = await submit({
+        type: "test-retry-preserve",
+        input: {},
+      });
+      await Bun.sleep(500);
+
+      // Reset callCount so the child workflow fails on its first call
+      callCount = 0;
+
+      const childResult = await submit({
+        type: "test-retry-preserve",
+        input: { child: true },
+        parentWorkflowId: parentResult.workflowId,
+        timeout: 42_000,
+      });
+
+      await Bun.sleep(500);
+
+      const failedChild = getWorkflow(childResult.workflowId);
+      expect(failedChild!.status).toBe("failed");
+      expect(failedChild!.parent_workflow_id).toBe(parentResult.workflowId);
+      expect(failedChild!.timeout_ms).toBe(42_000);
+
+      // Retry the failed child workflow
+      const retriedId = await engine.retry(childResult.workflowId);
+
+      await Bun.sleep(500);
+
+      const retriedWf = getWorkflow(retriedId);
+      expect(retriedWf!.status).toBe("completed");
+      // SD-G1-06: parent_workflow_id and timeout should be preserved
+      expect(retriedWf!.parent_workflow_id).toBe(parentResult.workflowId);
+      expect(retriedWf!.timeout_ms).toBe(42_000);
+    });
+
+    // SD-G1-07: retry rejects non-failed workflow (completed)
+    test("retry rejects completed workflow with INVALID_STATE", async () => {
+      registerNodeExecutor({
+        name: "retry-reject-completed-node",
+        idempotent: true,
+        async execute() {
+          return { ok: true };
+        },
+      });
+
+      registerBlueprint({
+        type: "test-retry-reject-completed",
+        entryNode: "step",
+        nodes: {
+          step: { type: "retry-reject-completed-node", dependsOn: [] },
+        },
+      });
+
+      const engine = createWorkflowEngine();
+      const result = await engine.submit({
+        type: "test-retry-reject-completed",
+        input: {},
+      });
+
+      await Bun.sleep(500);
+
+      const wf = getWorkflow(result.workflowId);
+      expect(wf!.status).toBe("completed");
+
+      try {
+        await engine.retry(result.workflowId);
+        expect(true).toBe(false); // Should not reach
+      } catch (err) {
+        const e = err as Error & { code?: string };
+        expect(e.message).toContain("Cannot retry workflow");
+        expect(e.message).toContain("completed");
+        expect(e.message).toContain("expected 'failed'");
+        expect(e.code).toBe("INVALID_STATE");
+      }
+    });
+
+    // SD-G1-07: retry rejects running workflow
+    test("retry rejects running workflow with INVALID_STATE", async () => {
+      let nodeStarted: () => void;
+      const nodeStartedPromise = new Promise<void>((r) => { nodeStarted = r; });
+
+      registerNodeExecutor({
+        name: "retry-reject-running-node",
+        idempotent: true,
+        async execute() {
+          nodeStarted!();
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+          return {};
+        },
+      });
+
+      registerBlueprint({
+        type: "test-retry-reject-running",
+        entryNode: "step",
+        nodes: {
+          step: { type: "retry-reject-running-node", dependsOn: [] },
+        },
+      });
+
+      const engine = createWorkflowEngine();
+      const result = await engine.submit({
+        type: "test-retry-reject-running",
+        input: {},
+      });
+
+      // Wait for the node to start executing
+      await nodeStartedPromise;
+
+      // Ensure workflow is running
+      const wf = getWorkflow(result.workflowId);
+      expect(wf!.status).toBe("running");
+
+      try {
+        await engine.retry(result.workflowId);
+        expect(true).toBe(false); // Should not reach
+      } catch (err) {
+        const e = err as Error & { code?: string };
+        expect(e.message).toContain("Cannot retry workflow");
+        expect(e.message).toContain("running");
+        expect(e.message).toContain("expected 'failed'");
+        expect(e.code).toBe("INVALID_STATE");
       }
     });
   });

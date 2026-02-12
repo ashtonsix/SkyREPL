@@ -27,6 +27,17 @@ export async function cleanupManifest(input: CleanupManifestInput): Promise<Work
     });
   }
 
+  // Validate manifest is SEALED (SD-G1-09: reject DRAFT manifests early)
+  if (manifest.status !== "SEALED") {
+    throw Object.assign(
+      new Error(`Manifest ${input.manifestId} status is ${manifest.status}, expected SEALED`),
+      {
+        code: "INVALID_STATE",
+        category: "validation",
+      }
+    );
+  }
+
   // Submit the workflow
   const result = await submit({
     type: "cleanup-manifest",

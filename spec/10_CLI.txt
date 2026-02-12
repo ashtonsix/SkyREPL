@@ -293,7 +293,7 @@ Events received:
 | workflow_completed   | Receipt summary                                 |
 | workflow_failed      | Error details and suggestions                   |
 
-> See also: impl-pseudo/cli/src/client.ts.l2.txt §UtilityFunctions
+> See also: impl/cli/src/client.ts
 
 ### TTY vs Non-TTY Output
 

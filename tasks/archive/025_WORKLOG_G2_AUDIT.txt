@@ -1,0 +1,692 @@
+================================================================================
+WORKLOG 025 — G2 Close-Out Audit
+================================================================================
+
+Status: COMPLETE
+Theme:  Spec drift, pseudo subsumption, quality review
+Gate:   G2 close-out (no new features)
+Prereq: Worklog 024 (G2 implementation) complete
+
+================================================================================
+AUDIT SCOPE
+================================================================================
+
+Covers all G2 changes from worklog 024:
+  Phase A: #AGENT-03 (SSE backpressure), #AGENT-04 (degraded mode)
+  Phase B: #AGENT-07 (artifact collection), #SNAP-04 (artifact API+CLI)
+  Phase C: #PROV-01 (AWS provider validation)
+
+Files audited:
+  impl/agent/artifacts.py, heartbeat.py, logs.py, executor.py, sse.py
+  impl/control/src/api/agent.ts, routes.ts, sse-protocol.ts
+  impl/control/src/provider/compute/aws.ts
+  impl/cli/src/client.ts, commands/artifact.ts, main.ts
+  impl-pseudo/ (all 73 remaining files triaged)
+
+
+################################################################################
+#                                                                              #
+#  SECTION 1 — SPEC DRIFT                                                     #
+#                                                                              #
+################################################################################
+
+Classification key:
+  COMPLIANT       — impl matches spec
+  DRIFT-NEUTRAL   — impl differs harmlessly (no action needed)
+  DRIFT-BAD       — impl violates a MUST/SHOULD without justification
+  DRIFT-MOTIVATED — impl intentionally diverges with good reason
+  MISSING         — spec requires it, impl doesn't have it (known deferral)
+  IMPL-ONLY       — impl adds behavior with no spec coverage
+
+================================================================================
+1.1  Ch11 — AGENT (artifacts, SSE, heartbeat, degraded mode)
+================================================================================
+
+Counts: 12 COMPLIANT, 5 DRIFT-NEUTRAL, 5 DRIFT-BAD, 4 DRIFT-MOTIVATED,
+        1 MISSING, 5 IMPL-ONLY
+
+--- DRIFT-BAD ---
+
+DB-1  No base-36 slug conversion anywhere (spec Ch02, docs/design/rationale-material.txt)
+      Spec: INTEGER AUTOINCREMENT PKs; user-facing as base-36 slugs.
+      Rationale doc: `id.toString(36)` for display, `parseInt(slug, 36)` to
+      parse. Pure 1:1 conversion. Benefits: shorter than UUIDs, sortable,
+      human-friendly. Example: 12345 → "9ix".
+      Impl: Raw integer IDs used everywhere — wire format, CLI display,
+      agent messages. No slug conversion exists in the codebase.
+      Files: shared/src/api/agent.ts:31,52,70, agent/artifacts.py:29,
+             cli/src/commands/*.ts (all display raw ints)
+      Impact: HIGH. Pervasive, systemic (predates G2). Where there's smoke
+      there's fire — drift found in one place, so probably exists in more.
+      Action: FIX IMPL (THOROUGH) —
+        1. Wire format: integer IDs (already correct, keep as-is)
+        2. CLI display: add slug conversion (id.toString(36)) everywhere
+        3. CLI parsing: accept slugs in commands (parseInt(slug, 36))
+        4. API responses: consider adding a `slug` field alongside `id`
+        5. Add integrity check in scripts/ to flag primary key violations
+           with pre-commit hook
+        6. Sweep all wire formats to verify integer PKs throughout
+
+DB-2  Heartbeat thresholds not env-configurable (spec 11.7:446)
+      Spec: SKYREPL_HEARTBEAT_DEGRADED_MS env var configurable.
+      Impl: heartbeat.py:28 hard-codes 2*60*1000.
+      Action: FIX IMPL — read from env vars.
+
+DB-3  tailscale_ip not nullable in shared schema (spec 11.4:226)
+      Spec: string | null. Impl: Type.String() (not nullable).
+      File: shared/src/api/agent.ts:139
+      Action: FIX IMPL — use Nullable(Type.String()).
+
+DB-4  Pending acks cleared before confirmed delivery (spec 11.4.5:248)
+      Spec: clear acks after control plane confirms.
+      Impl: executor.py:136-141 get_and_clear_pending_acks() clears
+      immediately. If heartbeat POST fails, ack IDs are lost.
+      Impact: Unnecessary command retries (dedup buffer protects execution).
+      Action: FIX IMPL — clear acks only after 200 response.
+
+DB-5  Env var prefix: spec uses REPL_, impl uses SKYREPL_ (spec 11.7:446-454)
+      Decision: SKYREPL_ preferred. Agent already uses SKYREPL_.
+      Control plane uses REPL_ per spec.
+      Action: SPEC FIX — update spec to use SKYREPL_ prefix. Align control
+      plane env var reading to accept SKYREPL_ prefix.
+
+DB-12 Artifact upload: base64 POST, not presigned URLs (spec 11.11:548)
+      Reclassified from DM-1. The control plane must provide a clean
+      migration path to a world where the agent doesn't know/care whether
+      it's uploading to S3 or control plane — should always be presigned URL.
+      Current base64 POST bakes in knowledge of storage backend.
+      Action: FIX IMPL (INTERMISSION) — design presigned URL interface.
+      Fine to defer the S3 implementation, but the agent-side interface
+      must be presigned-URL from the start so it doesn't need to change later.
+
+DB-13 Batch JSON artifact upload (spec 11.4:177)
+      Reclassified from DM-2. Batch upload for many small artifacts is an
+      interesting optimization, but premature — adds complexity to the
+      protocol before the single-file path is proven. Revert to single-file
+      upload now; add backlog entry to reconsider batch upload later.
+      Action: FIX IMPL (NOW) — revert to single-artifact upload per POST.
+      Add #BL-17 to reconsider batch artifact upload.
+
+--- DRIFT-MOTIVATED (acceptable) ---
+
+DM-3  RunCompleteMessage: uses /v1/agent/status, not run_complete POST (11.4:192)
+      Reason: Legacy path, marked deprecated.
+      Action: SPEC FIX — update spec to match impl (status endpoint approach).
+
+DM-4  SSE read(1) → readline() (spec 11.6:418)
+      Reason: Avoids per-byte overhead, readline() also avoids buffer deadlock.
+      Action: SPEC FIX — update spec to use readline() since it equally
+      solves the buffer deadlock concern with less overhead.
+
+--- DRIFT-NEUTRAL (with suggested resolution) ---
+
+DN-1  capture_artifacts SSE command not implemented (spec 11.3:84)
+      Resolution: Implement when spot interruption (#AGENT-06) lands — that's
+      the primary use case for mid-run artifact capture. Track in #AGENT-06.
+
+DN-2  tailscale_status sends None instead of enum (spec 11.4:231)
+      Resolution: Fix agent-side when Tailscale JIT (#PROV-05/#PROV-06) is
+      built. Send "not_installed" as default instead of None.
+
+DN-3  workflow_state in heartbeat is coarse (spec 11.4:232)
+      Resolution: Agent needs access to per-run workflow state from executor.
+      Wire executor → heartbeat state propagation. Track in backlog (#BL-18).
+
+DN-4  allocation_id in log messages unused by control plane (spec 11.4:168)
+      Resolution: Control plane should extract and store allocation_id for
+      log attribution. Small fix, fold into intermission stabilization.
+
+DN-5  Shutdown sequence missing Tailscale logout step (spec 11.14:595)
+      Resolution: Add when Tailscale feature provider (#PROV-05) is built.
+      The shutdown sequence already has the right hook point.
+
+--- MISSING (known deferral) ---
+
+MS-1  Panic checkpoint script (spec 11.5:398). Stub only. Tracked: #AGENT-08.
+
+--- IMPL-ONLY (add to backlog — may need spec coverage after design analysis) ---
+
+IO-1  SSE backpressure (sse-protocol.ts:66-256). Significant operational safety.
+      Backlog: #BL-19 — design analysis for spec coverage of backpressure
+      handling, priority hierarchy, slow consumer disconnect.
+
+IO-2  Pending command FIFO eviction (MAX_PENDING_COMMANDS=50).
+      Backlog: fold into #BL-19 (SSE protocol spec coverage).
+
+IO-3  Heartbeat exponential backoff in degraded mode (heartbeat.py:170-172).
+      Backlog: #BL-20 — design analysis for spec coverage of degraded mode
+      behaviors (backoff, disk buffering, recovery flush).
+
+IO-4  Disk-buffered log replay on recovery (logs.py:39-163).
+      Backlog: fold into #BL-20 (degraded mode spec coverage).
+
+IO-5  Extra heartbeat fields (cpu_percent, memory_percent, etc).
+      Backlog: #BL-21 — design analysis for spec coverage of instance
+      monitoring fields. Currently pragmatic but unspecified.
+
+
+================================================================================
+1.2  Ch08 — PROVIDERS (AWS skeleton, interface, errors)
+================================================================================
+
+Counts: 52 COMPLIANT, 5 DRIFT-NEUTRAL, 4 DRIFT-BAD, 0 DRIFT-MOTIVATED,
+        14 MISSING
+
+--- DRIFT-BAD ---
+
+DB-6  list() ignores region filter (aws.ts:421-465)
+      ListFilter.region is accepted but never applied as EC2 filter.
+      Action: DEFER to PROV epic (#PROV-02).
+
+DB-7  generateBootstrap drops tailscale feature (aws.ts:504-517)
+      BootstrapFeature.name includes "tailscale" but the switch has no case.
+      Spec: MUST process each requested feature.
+      Action: DEFER to PROV epic (#PROV-05).
+
+DB-8  ProviderRegistration.hooks is optional (registry.ts:141)
+      Spec line 884: MUST include hooks.
+      Action: DEFER to PROV epic (#PROV-02).
+
+DB-9  Missing spawn idempotency tag (aws.ts:351-357)
+      Spec uses skyrepl:spawn_key tag for reconciliation.
+      Impl uses repl-managed tag but no spawn key.
+      Action: FIX NOW — emit skyrepl:spawn_key from clientRequestId.
+
+--- MISSING (expected for PROV-01 skeleton, tracked for PROV-02) ---
+
+14 items: lifecycle hooks (onStartup, onShutdown, onHeartbeat),
+heartbeat task handlers (health_check, reconcile, cache_refresh, pool_maintenance),
+event-driven hooks (onSpotInterruption, onBudgetThreshold), feature detachment,
+Tailscale feature provider, AWS provider not registered in runtime registry.
+All deferred to PROV-02+.
+
+--- IMPL-ONLY (BAD — fix now) ---
+
+IO-6  maxTtl field defined but never enforced (extensions.ts:89,93).
+      Zombie field: exists in type + config, getTTL() never checks it.
+      If a prefix TTL exceeds 1 hour, the MUST NOT constraint is silently violated.
+      Action: FIX NOW — enforce maxTtl in getTTL(), or remove the field.
+
+IO-7  invokeHook swallows all errors (extensions.ts:168-173).
+      Disappearing errors: hook failures are console.error'd and discarded.
+      No caller knows the hook failed. No metrics, no alerting path.
+      Action: FIX NOW — at minimum return success/failure. Consider
+      structured error propagation (return Result type or rethrow for
+      non-optional hooks).
+
+IO-8  registerProvider calls onStartup fire-and-forget (registry.ts:158-159).
+      Request goes nowhere: hooks.onStartup() returns a Promise that is
+      never awaited. If startup validation fails (bad credentials, missing
+      SGs), the provider silently registers as functional.
+      Action: FIX NOW — await onStartup() during registration. If it
+      throws, fail registration (or mark provider as unhealthy).
+
+IO-9  mapToAWSInstance sets spec=instanceType, not SkyREPL spec string (aws.ts:720).
+      Zombie field: after round-tripping through AWS, the spec field loses
+      its original SkyREPL spec string and becomes an AWS instance type.
+      Downstream code that filters/matches on spec will break silently.
+      Action: FIX NOW — store original spec from SpawnOptions.
+
+--- IMPL-ONLY (backlog — design analysis needed) ---
+
+IO-10 categoryRegistry multi-category pattern (registry.ts:57-133).
+      Backlog: #BL-22 — design analysis: is compute/storage/tunnel the
+      right taxonomy? Spec only describes compute + feature. May need to
+      reconcile or remove unused categories.
+
+
+================================================================================
+1.3  Ch03/Ch09/Ch10 — ARTIFACTS (resource type, API, CLI)
+================================================================================
+
+Counts: 4 COMPLIANT, 5 DRIFT-NEUTRAL, 2 DRIFT-BAD, 4 DRIFT-MOTIVATED,
+        1 MISSING, 6 IMPL-ONLY (no spec coverage)
+
+--- DRIFT-BAD ---
+
+DB-10 Missing `keep` field in artifact metadata (spec 03:264-269)
+      Spec defines keep: boolean for retention-policy exemption.
+      Impl stores {run_id, path, checksum, size_bytes} — no keep field.
+      Action: FIX IMPL — add keep field (default: false) now.
+
+DB-11 No pagination on artifact list response (spec 09:676-682)
+      Spec: ListObjectsResponse includes pagination: {cursor, has_more}.
+      Impl: GET /v1/runs/:id/artifacts returns flat {data}.
+      Impact: Low (100-artifact cap bounds response).
+      Action: DEFER — add pagination when generic list patterns are built.
+
+--- DRIFT-MOTIVATED (acceptable) ---
+
+DM-5  Inline-only blob storage, no S3 tier (spec 03:261)
+DM-6  Direct download, no presigned URLs (spec 03:280-283)
+DM-7  Batch JSON upload, not multipart (spec 09:1651-1671)
+DM-8  Dedicated /v1/artifacts/:id/download, not generic /v1/objects/:id (spec 09:685)
+
+--- IMPL-ONLY ---
+
+IO-11 GET /v1/runs/:id/artifacts (dedicated endpoint, spec uses generic /v1/objects)
+IO-12 GET /v1/artifacts/:id/download (direct binary, spec uses presigned URL pattern)
+IO-13 repl artifact list CLI command (not in spec/10_CLI.txt)
+IO-14 repl artifact download CLI command (not in spec/10_CLI.txt)
+      Backlog: #BL-23 — design analysis for CLI/API approach to the "object
+      zoo". The data model layer handles the zoo well (schemaless objects
+      table with type + metadata_json + tags), but the API + CLI surface
+      currently grows one-off endpoints per resource type. Need a coherent
+      pattern: generic /v1/objects CRUD with type filters? Per-type
+      convenience endpoints? Both? This affects artifacts, snapshots, logs,
+      and future resource types.
+
+IO-15 50MB per-artifact / 100 per-run limits
+IO-16 checksum field in artifact metadata
+
+
+================================================================================
+1.4  SPEC DRIFT SUMMARY
+================================================================================
+
+                    Ch11    Ch08    Ch03/09/10    Total
+  COMPLIANT          12      52         4          68
+  DRIFT-NEUTRAL       5       5         5          15
+  DRIFT-BAD           7       4         2          13
+  DRIFT-MOTIVATED     2       0         4           6
+  MISSING             1      14         1          16
+  IMPL-ONLY           5       5         6          16
+  (Note: DM-1,DM-2 reclassified to DB-12,DB-13; DM-3,DM-4 get spec fixes)
+
+DRIFT-BAD actions (13 items, ranked by priority):
+
+  FIX NOW (G2 close-out):
+    DB-1   No slug conversion      THOROUGH sweep + integrity check script
+    DB-4   Ack cleared early       Clear after heartbeat POST 200
+    DB-9   Missing spawn key tag   Emit skyrepl:spawn_key in aws.ts
+    DB-13  Batch artifact upload   Revert to single-file; add #BL-17
+    IO-6   maxTtl zombie field     Enforce or remove
+    IO-7   invokeHook eats errors  Return success/failure at minimum
+    IO-8   onStartup fire&forget   Await during registration
+    IO-9   spec field round-trip   Store original spec, not instanceType
+
+  FIX INTERMISSION (MVK+ stabilization):
+    DB-2   Env var configurability  Read heartbeat thresholds from env
+    DB-3   tailscale_ip nullable   Nullable(Type.String())
+    DB-10  Missing keep field      Add to artifact metadata
+    DB-12  Presigned URL path      Design clean migration path
+
+  DEFER TO EPIC:
+    DB-5   Env prefix SKYREPL_     SPEC FIX (update spec to SKYREPL_ prefix)
+    DB-6   Region filter           PROV epic (#PROV-02)
+    DB-7   Tailscale bootstrap     PROV epic (#PROV-05)
+    DB-8   Hooks required          PROV epic (#PROV-02)
+    DB-11  No pagination           API epic
+
+  SPEC FIXES (update spec to match impl):
+    DM-3   /v1/agent/status approach (spec 11.4:192)
+    DM-4   readline() instead of read(1) (spec 11.6:418)
+
+  BACKLOG (design analysis, may update spec):
+    #BL-17 Reconsider batch artifact upload optimization
+    #BL-18 Wire executor workflow_state to heartbeat (DN-3)
+    #BL-19 Spec coverage: SSE backpressure + FIFO eviction (IO-1, IO-2)
+    #BL-20 Spec coverage: degraded mode behaviors (IO-3, IO-4)
+    #BL-21 Spec coverage: instance monitoring heartbeat fields (IO-5)
+    #BL-22 Design analysis: categoryRegistry taxonomy (IO-10)
+    #BL-23 Design analysis: CLI/API "object zoo" pattern (IO-11..14)
+
+
+################################################################################
+#                                                                              #
+#  SECTION 2 — PSEUDO SUBSUMPTION                                             #
+#                                                                              #
+################################################################################
+
+================================================================================
+2.1  FILES TO DELETE (subsumed by G2)
+================================================================================
+
+6 files safe to delete:
+
+  1. impl-pseudo/agent/artifacts.py.l1.txt
+     Reason: impl/agent/artifacts.py covers glob matching, checksum, upload.
+     Presigned URL design replaced by base64 POST (deliberate).
+
+  2. impl-pseudo/agent/artifacts.py.l2.txt
+     Reason: Same as above. All functional intent covered.
+
+  3. impl-pseudo/control/src/resource/artifact.ts.l1.txt
+     Reason: SNAP-04 uses objects table (type='artifact') pattern.
+     Presigned URLs deferred. keep flag noted as DB-10.
+
+  4. impl-pseudo/control/src/api/agent/sse-protocol.ts.l1.txt
+     Reason: Impl is a strict superset (backpressure, log replay, WS streams).
+
+  5. impl-pseudo/control/src/provider/compute/aws.ts.l1.txt
+     Reason: Impl + 10-item gap analysis covers all L1 content.
+
+  6. impl-pseudo/control/src/workflow/nodes/collect-artifacts.ts.l1.txt
+     Reason: Agent does direct base64 POST. No workflow node needed.
+
+================================================================================
+2.2  FILES TO KEEP (partially subsumed)
+================================================================================
+
+2 files:
+
+  7. impl-pseudo/control/src/api/agent/agent.ts.l1.txt → KEEP
+     Missing: spot-interrupt-start/complete, snapshot-ready endpoints.
+     Needed for: #AGENT-06, #SNAP-01.
+
+  8. impl-pseudo/control/src/provider/compute/aws.ts.l2.txt → KEEP
+     Missing: SpawnIdempotencyProtocol, Materialization/Projection,
+     LifecycleHooks, WarmVolumePool, HeartbeatTaskHandlers.
+     Needed for: #PROV-02.
+
+================================================================================
+2.3  FILES UNCHANGED (not related to G2)
+================================================================================
+
+65 files remain (already tracked in ROADMAP.txt subsumption table).
+No changes from G2. Full list in ROADMAP.txt §IMPL-PSEUDO SUBSUMPTION TRACKER.
+
+================================================================================
+2.4  ROADMAP UPDATE
+================================================================================
+
+After deletions: 73 - 6 = 67 files remain.
+Still useful: 2 (external.ts.l1, type-boundaries.ts.l1) — unchanged.
+Partially subsumed: 2 (agent.ts.l1, aws.ts.l2) — new category.
+
+
+################################################################################
+#                                                                              #
+#  SECTION 3 — QUALITY REVIEW                                                 #
+#                                                                              #
+################################################################################
+
+================================================================================
+3.1  AGENT: artifacts.py
+================================================================================
+
+Quality: GOOD. Clean, focused module. Best-effort semantics correct.
+
+Issues:
+  Q-1  [LOW] No timeout on glob.glob for pathological patterns.
+       If a user supplies "**/**/**" in a deep tree, this could hang.
+       Mitigation: the 100-artifact cap limits result count, not traversal.
+       Action: DEFER — not worth complexity for current phase.
+
+  Q-2  [LOW] _upload_batch fallback count (line 137).
+       On JSON decode failure, returns len(artifacts) assuming all stored.
+       This overcounts if the server stored fewer. Harmless for logging.
+       Action: ACCEPT.
+
+  Q-3  [MED] No dedup check before upload.
+       Agent re-uploads every matching file even if blob exists.
+       Control plane deduplicates, but bandwidth is wasted on re-runs.
+       Action: DEFER to S3 presigned-URL flow (natural dedup via check).
+
+================================================================================
+3.2  CONTROL: POST /v1/agent/artifacts (agent.ts:310-393)
+================================================================================
+
+Quality: GOOD. Follows existing log storage pattern exactly.
+
+Issues:
+  Q-4  [MED] Dynamic import on every request (line 339).
+       `await import("../material/storage")` runs for each artifact batch.
+       Should be a top-level import.
+       Action: FIX — move to static import.
+
+  Q-5  [LOW] No size validation on content_base64.
+       Agent enforces 50MB, but a malicious client could send larger.
+       Action: DEFER — agent is trusted (auth checked on line 332).
+
+  Q-6  [LOW] Manifest sealed silently (line 378).
+       If manifest is sealed, addResourceToManifest throws and is caught.
+       Artifact still stored, just not manifest-linked. Correct behavior
+       but should log when this happens.
+       Action: MINOR FIX — add console.warn in catch block.
+
+================================================================================
+3.3  CONTROL: Artifact endpoints (routes.ts:518-588)
+================================================================================
+
+Quality: GOOD. Clean implementation.
+
+Issues:
+  Q-7  [LOW] Content-Disposition filename injection (routes.ts:579-585).
+       meta.path could contain special characters. The filename is extracted
+       via .split("/").pop() which prevents path traversal, but characters
+       like quotes or newlines in filenames could break the header.
+       Action: MINOR FIX — sanitize filename (strip non-alphanumeric except .-_).
+
+  Q-8  [LOW] No ETag/caching headers on download response.
+       Action: DEFER — not needed for current phase.
+
+================================================================================
+3.4  CLI: artifact.ts
+================================================================================
+
+Quality: GOOD. Follows existing CLI patterns, clean error handling.
+
+Issues:
+  Q-9  [NITS] created_at multiplied by 1000 missing (line 41-42).
+       `new Date(a.created_at)` — if created_at is epoch seconds (not ms),
+       the date will be wrong (Jan 1970). Need to verify whether objects
+       table stores seconds or milliseconds.
+       Action: VERIFY — check objects.created_at unit. Fix if needed.
+
+================================================================================
+3.5  CONTROL: sse-protocol.ts
+================================================================================
+
+Quality: GOOD. Well-structured SSE manager with backpressure handling.
+
+Issues:
+  Q-10 [LOW] sendCommand returns true for dropped heartbeat_ack (line 288).
+       When backpressure drops a heartbeat_ack, sendCommand returns true
+       (not an error). This is intentional (heartbeat_ack is best-effort)
+       but the return value is misleading.
+       Action: ACCEPT — caller doesn't use the return value for ack tracking.
+
+  Q-11 [LOW] fakeWs in SSE workflow stream uses addEventListener (line 706).
+       This is a deliberate shim to bridge SSE→WS, but Bun's ServerWebSocket
+       doesn't have addEventListener (per MEMORY.md). The fakeWs is not a
+       Bun WS, it's a synthetic object, so this is fine. But it's worth
+       noting the abstraction mismatch.
+       Action: ACCEPT — synthetic object, not a real Bun WS.
+
+================================================================================
+3.6  CONTROL: provider/compute/aws.ts
+================================================================================
+
+Quality: GOOD. Well-documented skeleton with clear gap analysis.
+
+Issues:
+  Q-12 [MED] spec field round-trip semantics (IO-9).
+       mapToAWSInstance sets spec = inst.instanceType (e.g., "t4g.micro").
+       But ProviderInstance.spec should be the SkyREPL spec string
+       (e.g., "ubuntu:noble:arm64"). After spawn, the spec field loses
+       its original value.
+       Action: FIX — store original spec from SpawnOptions, not instanceType.
+
+  Q-13 [LOW] Placeholder AMI IDs (lines 289-293).
+       DEFAULT_AMI uses "ami-0000000000000000a" placeholders.
+       Action: ACCEPT for skeleton — PROV-02 will use real AMI catalog.
+
+  Q-14 [LOW] list() sends conflicting state filters (lines 447-452).
+       When filter.status is set AND includeTerminated is false, both
+       filters are applied. If status includes 'terminated', the second
+       filter contradicts it. EC2 takes intersection, so terminated is
+       excluded — which is surprising.
+       Action: MINOR FIX — skip the default exclusion when status is explicit.
+
+================================================================================
+3.7  AGENT: heartbeat.py
+================================================================================
+
+Quality: GOOD. Clean state machine with well-defined thresholds.
+
+Issues:
+  Q-15 [MED] Hard-coded thresholds (DB-2, already captured in spec drift).
+       HEARTBEAT_DEGRADED_MS, HEARTBEAT_PANIC_MS, HEARTBEAT_SELF_TERM_MS
+       should read from env vars per spec.
+       Action: FIX (covered by DB-2).
+
+
+################################################################################
+#                                                                              #
+#  SECTION 4 — REMEDIATION PLAN                                               #
+#                                                                              #
+################################################################################
+
+================================================================================
+4.1  FIX NOW (during G2 close-out)
+================================================================================
+
+Drift fixes:
+  FX-1  DB-1:  Base-36 slug sweep + integrity check script      [Lg]
+  FX-2  DB-4:  Clear acks after heartbeat POST succeeds          (~5 lines)
+  FX-3  DB-9:  Emit skyrepl:spawn_key tag in aws.ts spawn       (~3 lines)
+  FX-4  DB-13: Revert batch artifact upload to single-file      (~30 lines)
+  FX-5  IO-6:  Enforce maxTtl in getTTL() or remove field       (~5 lines)
+  FX-6  IO-7:  invokeHook returns success/failure                (~10 lines)
+  FX-7  IO-8:  Await onStartup() in registerProvider            (~5 lines)
+  FX-8  IO-9:  Store original spec in mapToAWSInstance           (~3 lines)
+
+Quality fixes:
+  FX-9  Q-4:   Static import of storage module in agent.ts      (~2 lines)
+  FX-10 Q-6:   Add console.warn for sealed manifest catch       (~1 line)
+  FX-11 Q-7:   Sanitize Content-Disposition filename             (~3 lines)
+  FX-12 Q-9:   Verify + fix created_at epoch unit in CLI         (~1 line)
+
+================================================================================
+4.2  FIX DURING INTERMISSION (MVK+ stabilization)
+================================================================================
+
+  IX-1  DB-2:   Heartbeat thresholds from env vars
+  IX-2  DB-3:   tailscale_ip nullable in shared schema
+  IX-3  DB-10:  Add keep field to artifact metadata
+  IX-4  DB-12:  Design presigned URL interface (agent-side)
+  IX-5  DN-4:   allocation_id extraction in log endpoint
+  IX-6  Q-14:   list() conflicting state filters in aws.ts
+
+================================================================================
+4.3  SPEC FIXES (update spec to match impl)
+================================================================================
+
+  SF-1  DB-5:  Env prefix → SKYREPL_ (spec Ch11 §11.7)
+  SF-2  DM-3:  /v1/agent/status approach (spec Ch11 §11.4)
+  SF-3  DM-4:  readline() not read(1) (spec Ch11 §11.6)
+
+================================================================================
+4.4  BACKLOG ADDITIONS
+================================================================================
+
+  #BL-17  Reconsider batch artifact upload optimization
+  #BL-18  Wire executor workflow_state to heartbeat (DN-3)
+  #BL-19  Spec coverage: SSE backpressure + FIFO eviction (IO-1, IO-2)
+  #BL-20  Spec coverage: degraded mode behaviors (IO-3, IO-4)
+  #BL-21  Spec coverage: instance monitoring heartbeat fields (IO-5)
+  #BL-22  Design analysis: categoryRegistry taxonomy (IO-10)
+  #BL-23  Design analysis: CLI/API "object zoo" pattern (IO-11..14)
+
+================================================================================
+4.5  PSEUDO DELETION
+================================================================================
+
+Delete 6 files (listed in §2.1). Update ROADMAP.txt subsumption tracker.
+
+
+################################################################################
+#                                                                              #
+#  EXECUTION LOG                                                               #
+#                                                                              #
+################################################################################
+
+Step 1: FX-2 (DB-4) — Clear acks after heartbeat POST succeeds
+  Files: impl/agent/executor.py, impl/agent/heartbeat.py
+  Split get_and_clear_pending_acks into get_pending_acks + clear_pending_acks.
+  Heartbeat now calls get_pending_acks before POST, clear_pending_acks only after 200.
+
+Step 2: FX-3 (DB-9) — Emit skyrepl:spawn_key tag
+  File: impl/control/src/provider/compute/aws.ts
+  Added skyrepl:spawn_key tag from options.clientRequestId in spawn().
+
+Step 3: FX-4 (DB-13) — Revert batch artifact upload to single-file
+  Files: impl/agent/artifacts.py, impl/control/src/api/agent.ts
+  Agent: replaced _upload_batch loop with per-file _upload_single function.
+  Control: changed POST /v1/agent/artifacts from array body to single-artifact body.
+
+Step 4: FX-5 (IO-6) — Enforce maxTtl in getTTL()
+  File: impl/control/src/provider/extensions.ts
+  getTTL now clamps both prefix-match and default TTLs to config.maxTtl.
+
+Step 5: FX-6 (IO-7) — invokeHook returns success/failure
+  File: impl/control/src/provider/extensions.ts
+  invokeHook now returns Promise<{ success: boolean; error?: unknown }>.
+
+Step 6: FX-7 (IO-8) — Await onStartup() in registerProvider
+  File: impl/control/src/provider/registry.ts
+  registerProvider/unregisterProvider made async. onStartup awaited before registration.
+
+Step 7: FX-8 (IO-9) — Store original spec in mapToAWSInstance
+  File: impl/control/src/provider/compute/aws.ts
+  mapToAWSInstance accepts optional originalSpec parameter. spawn() passes options.spec.
+
+Step 8: FX-9 (Q-4) — Static import of storage module
+  File: impl/control/src/api/agent.ts
+  Replaced dynamic await import("../material/storage") with top-level static import.
+
+Step 9: FX-10 (Q-6) — Console.warn for sealed manifest
+  File: impl/control/src/api/agent.ts
+  Added console.warn when addResourceToManifest fails due to sealed manifest.
+
+Step 10: FX-11 (Q-7) — Sanitize Content-Disposition filename
+  File: impl/control/src/api/routes.ts
+  Filename sanitized: non-alphanumeric chars (except .-_) replaced with underscore.
+
+Step 11: FX-12 (Q-9) — Verify created_at epoch unit
+  Result: NO FIX NEEDED. createObject uses Date.now() (milliseconds).
+  CLI new Date(a.created_at) correctly handles ms timestamps.
+
+Step 12: FX-1 (DB-1) — Base-36 slug sweep + integrity check
+  Files: impl/shared/src/types.ts, impl/shared/src/index.ts,
+         impl/cli/src/main.ts, impl/cli/src/commands/run.ts,
+         impl/cli/src/commands/artifact.ts, impl/cli/src/commands/allocation.ts,
+         impl/cli/src/commands/instance.ts
+  Added parseInputId() to shared/src/types.ts (base-36 parsing with validation).
+  Exported parseInputId from shared/src/index.ts.
+  CLI display: all String(id) → idToSlug(id) across 5 files.
+  CLI input: all parseInt(id, 10) → parseInputId(slug) for command arguments.
+  Created scripts/check-integer-pks.sh integrity check script.
+  Exclusion list: idempotency_keys, manifest_cleanup_state, object_tags, manifest_resources.
+
+Step 13: Pseudo deletion (§4.5)
+  Deleted 6 files from impl-pseudo/:
+    agent/artifacts.py.l1.txt, agent/artifacts.py.l2.txt,
+    control/src/resource/artifact.ts.l1.txt,
+    control/src/api/agent/sse-protocol.ts.l1.txt,
+    control/src/provider/compute/aws.ts.l1.txt,
+    control/src/workflow/nodes/collect-artifacts.ts.l1.txt
+
+Step 14: Backlog additions (§4.4)
+  Added #BL-17 through #BL-23 to tasks/BACKLOG.txt (7 entries).
+  Note: #BL-16 already existed; audit-proposed entries renumbered to #BL-17..23.
+
+Step 15: ROADMAP update
+  Updated subsumption tracker: 73→67 files.
+  Added "PARTIALLY SUBSUMED (2)" category (agent.ts.l1, aws.ts.l2).
+  Updated progress log with G2 close-out audit entry.
+
+Step 16: Integrity check validation
+  scripts/check-integer-pks.sh passes clean (0 issues found).
+
+Step 17: Quality review
+  - Fixed backlog numbering: worklog body referenced #BL-16..22 (proposed),
+    updated all references to #BL-17..23 (actual) across §1.1, §1.2, §1.4, §4.4.
+  - Added missing `await` on registerProvider/unregisterProvider in 3 test files
+    (e2e-simulated, e2e-exercise, terminate-instance). Fixed non-async beforeEach
+    at line 868 of terminate-instance.test.ts.
+  - Fixed artifact-pipeline.test.ts: agentDir path used process.cwd()/impl/agent
+    but process.cwd() is already impl/. Changed to process.cwd()/agent.
+
+Test results: 734 pass, 14 skip, 1 fail (pre-existing flaky cancel timing test).

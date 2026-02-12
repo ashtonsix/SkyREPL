@@ -2,7 +2,7 @@
 // Polls the provider until instance reaches running state, then updates DB.
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
-import { updateInstance, getInstance } from "../../material/db";
+import { updateInstanceRecord, getInstanceRecord } from "../../resource/instance";
 import { getProvider } from "../../provider/registry";
 import type { ProviderName } from "../../provider/types";
 import { TIMING } from "@skyrepl/shared";
@@ -55,7 +55,7 @@ export const waitForBootExecutor: NodeExecutor<WaitForBootInput, WaitForBootOutp
       if (instanceInfo && instanceInfo.status === "running") {
         const ip = instanceInfo.ip || null;
         // Update instance record with confirmed IP
-        updateInstance(input.instance_id, {
+        updateInstanceRecord(input.instance_id, {
           ip,
           workflow_state: "boot:complete",
           last_heartbeat: Date.now(),
@@ -99,9 +99,9 @@ export const waitForBootExecutor: NodeExecutor<WaitForBootInput, WaitForBootOutp
     }
 
     // Update instance state if record still exists
-    const instance = getInstance(input.instance_id);
+    const instance = getInstanceRecord(input.instance_id);
     if (instance) {
-      updateInstance(input.instance_id, {
+      updateInstanceRecord(input.instance_id, {
         workflow_state: "boot:compensated",
       });
     }
