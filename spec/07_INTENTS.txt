@@ -261,7 +261,7 @@ Each feature MAY provide optional teardownHandler invoked during cleanup-feature
 4. Force-disconnect remaining sessions
 5. Return count of forced disconnects
 
-> See also: impl-pseudo/control/src/intent/terminate.ts.l2.txt §EntryPoint
+> See also: impl/control/src/intent/terminate-instance.ts
 
 ## 7.3 create-snapshot Intent
 
@@ -435,7 +435,7 @@ Cleanup MUST be resilient - partial failures SHOULD NOT prevent remaining cleanu
 | S3_ERROR           | log_and_continue    | Don't block cleanup for S3 blip    |
 | DATABASE_ERROR     | fail_workflow       | Critical - manifest state corrupt  |
 
-> See also: impl-pseudo/control/src/intent/cleanup-manifest.ts.l2.txt §Types
+> See also: impl/control/src/intent/cleanup-manifest.ts
 
 ## 7.5 Pattern Library Usage Notes
 

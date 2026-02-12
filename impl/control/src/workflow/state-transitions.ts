@@ -405,6 +405,7 @@ export function sealManifest(
 export type WorkflowStatus =
   | "pending"
   | "running"
+  | "paused"
   | "completed"
   | "failed"
   | "cancelled"
@@ -444,8 +445,8 @@ export function completeWorkflow(
 }
 
 /**
- * Fail a running or rolling-back workflow.
- * [pending, running, rolling_back] -> failed. Sets finished_at, error_json.
+ * Fail a running, paused, or rolling-back workflow.
+ * [pending, running, paused, rolling_back] -> failed. Sets finished_at, error_json.
  */
 export function failWorkflow(
   workflowId: number,
@@ -454,15 +455,15 @@ export function failWorkflow(
   return atomicTransition<Workflow>(
     "workflows",
     workflowId,
-    ["pending", "running", "rolling_back"],
+    ["pending", "running", "paused", "rolling_back"],
     "failed",
     { error_json: error, finished_at: Date.now() }
   );
 }
 
 /**
- * Cancel a running workflow.
- * running -> cancelled. Sets finished_at.
+ * Cancel a running or paused workflow.
+ * [running, paused] -> cancelled. Sets finished_at.
  */
 export function cancelWorkflow(
   workflowId: number
@@ -470,9 +471,39 @@ export function cancelWorkflow(
   return atomicTransition<Workflow>(
     "workflows",
     workflowId,
-    "running",
+    ["running", "paused"],
     "cancelled",
     { finished_at: Date.now() }
+  );
+}
+
+/**
+ * Pause a running workflow.
+ * running -> paused.
+ */
+export function pauseWorkflow(
+  workflowId: number
+): TransitionResult<Workflow> {
+  return atomicTransition<Workflow>(
+    "workflows",
+    workflowId,
+    "running",
+    "paused"
+  );
+}
+
+/**
+ * Resume a paused workflow.
+ * paused -> running.
+ */
+export function resumeWorkflow(
+  workflowId: number
+): TransitionResult<Workflow> {
+  return atomicTransition<Workflow>(
+    "workflows",
+    workflowId,
+    "paused",
+    "running"
   );
 }
 

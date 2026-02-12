@@ -59,11 +59,12 @@ DEFERRED
   (permanent FK, not transient ownership — more precise). Resolved: spec Ch03
   updated to match impl (error_json, manifest_id).
 
-## #BL-10: Missing sealManifest() in db layer                        [PENDING]
+## #BL-10: Missing sealManifest() in db layer                        [RESOLVED → #LIFE-12]
   ---
   impl-pseudo defines sealManifest(id) with DRAFT→SEALED transition
   and idempotency check. Currently absent from db.ts — callers must
   use raw SQL. Likely folds into #LIFE-12 (manifest resource layer).
+  Resolved: sealManifestWithPolicy() in resource/manifest.ts.
 
 ## #BL-11: Missing allocation atomic transition helpers in db layer    [RESOLVED → #LIFE-01]
   ---
@@ -73,13 +74,13 @@ DEFERRED
   Resolved: resource/allocation.ts provides validateAllocationTransition,
   claimWarmPoolAllocation (with retry), and all state machine transitions.
 
-## #BL-12: manifest_resources missing owner_type/owner_id columns    [PENDING]
+## #BL-12: manifest_resources missing owner_type/owner_id columns    [RESOLVED → #LIFE-12]
   ---
   Spec Ch04 §4.2 defines owner_type (manifest/workflow/policy) and
   owner_id for resource claiming protocol. Missing from both SQL schema
   and db.ts ManifestResource type. resources.ts forward-declares them
   (ownerType/ownerId) but they can't be populated from DB.
-  Likely folds into #LIFE-12 (manifest resource layer).
+  Resolved: columns added in #LIFE-06 DDL migration, used by resource/manifest.ts.
 
 ## #BL-13: manifest_resources missing cleanup_processed_at field     [RESOLVED → #LIFE-05]
   ---

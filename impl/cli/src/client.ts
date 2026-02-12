@@ -175,6 +175,26 @@ export class ApiClient {
     return (await response.json()) as { data: any[] };
   }
 
+  /**
+   * Terminate an instance.
+   * POST /v1/intents/terminate-instance
+   */
+  async terminateInstance(instanceId: number): Promise<{ workflow_id: number; instance_id: number; status: string }> {
+    const response = await fetch(`${this.baseUrl}/v1/intents/terminate-instance`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instanceId }),
+    });
+
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const msg = (body as any)?.error?.message ?? `HTTP ${response.status}`;
+      throw new Error(`terminate-instance failed: ${msg}`);
+    }
+
+    return (await response.json()) as { workflow_id: number; instance_id: number; status: string };
+  }
+
   // Stubs for future slices (not needed for Slice 1)
   async checkBlobs(_checksums: string[]): Promise<CheckBlobsResponse> {
     throw new Error('checkBlobs not implemented');

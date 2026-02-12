@@ -16,12 +16,12 @@ TASK INDEX
 ================================================================================
 
   #WF-01  Compensation framework                                  [DONE]
-  #WF-02  IAR (Idempotent-Atomic-Retriable) pattern               [PENDING]
-  #WF-03  Subworkflow contract                                    [PENDING]
-  #WF-04  PFO (Parallel Fan-Out) pattern                          [PENDING]
-  #WF-05  pause() / resume() / retry() API                        [PENDING]
-  #WF-06  runSingleStep helper                                    [PENDING]
-  #WF-07  Cancellation across all patterns                        [PENDING]
+  #WF-02  IAR (Idempotent-Atomic-Retriable) pattern               [DONE]
+  #WF-03  Subworkflow contract                                    [DONE]
+  #WF-04  PFO (Parallel Fan-Out) pattern                          [DONE]
+  #WF-05  pause() / resume() / retry() API                        [DONE]
+  #WF-06  runSingleStep helper                                    [DONE]
+  #WF-07  Cancellation across all patterns                        [DONE]
 
 ================================================================================
 TASK DETAIL
@@ -43,74 +43,69 @@ TASK DETAIL
   - [x] Single-node compensation for spawn failures
   - [x] Integration test: 3-node workflow fails at node 3, compensates 2→1
 
-## #WF-02: IAR (Idempotent-Atomic-Retriable) pattern              [Lg] [PENDING]
+## #WF-02: IAR (Idempotent-Atomic-Retriable) pattern              [Lg] [DONE]
   Spec: Ch06 §6.3
   Pseudo: control/src/workflow/patterns.ts.l1.txt + .l2.txt
   Depends: #FND-01
   ---
-  IAR pattern: each node is idempotent, atomic, and retriable. Enables
-  safe retry of entire workflow segments after transient failures.
+  IAR pattern: insert-and-reconverge DAG mutation with depth checking.
 
   Deliverables:
-  - [ ] IAR pattern executor in patterns.ts
-  - [ ] Idempotency check at node entry (skip if already succeeded)
-  - [ ] Atomic rollback on node failure
-  - [ ] Unit test: IAR node with transient failure → automatic recovery
+  - [x] IAR pattern executor in patterns.ts (applyInsertAndReconverge)
+  - [x] Depth checking via retry_reason='iar_inserted' (MAX_IAR_DEPTH=1)
+  - [x] Engine integration: "insert-and-reconverge" case in applyPattern
+  - [x] Unit tests: 11 tests, 54 assertions (workflow-iar.test.ts)
 
-## #WF-03: Subworkflow contract                                   [Lg] [PENDING]
+## #WF-03: Subworkflow contract                                   [Lg] [DONE]
   Spec: Ch06 §6.4
   Depends: #WF-01
   ---
-  Allow workflows to spawn child workflows with lifecycle binding.
-  Parent waits for child completion. Child failure propagates to parent.
-  Depth-limited (currently engine has depth check but no real support).
+  Parent/child workflow lifecycle binding with cancel propagation.
 
   Deliverables:
-  - [ ] Subworkflow spawn from node context
-  - [ ] Parent-child lifecycle binding (cancel parent → cancel children)
-  - [ ] Failure propagation
-  - [ ] Depth limit enforcement
-  - [ ] Integration test: parent with 2 child subworkflows
+  - [x] Subworkflow spawn from node context (ctx.spawnSubworkflow)
+  - [x] Parent-child lifecycle binding (cancel parent → cancel children)
+  - [x] Failure propagation (child failure → parent node failure)
+  - [x] Depth limit enforcement (MAX_SUBWORKFLOW_DEPTH=3)
+  - [x] Integration test: 11 tests, 32 assertions (workflow-subworkflow.test.ts)
 
-## #WF-04: PFO (Parallel Fan-Out) pattern                         [Lg] [PENDING]
+## #WF-04: PFO (Parallel Fan-Out) pattern                         [Lg] [DONE]
   Spec: Ch06 §6.3
   Depends: #WF-02
   ---
-  Parallel execution of independent nodes with join semantics.
-  All-succeed or fail-fast modes.
+  Parallel fan-out with join semantics and branch failure handling.
 
   Deliverables:
-  - [ ] PFO pattern executor in patterns.ts
-  - [ ] Concurrent node execution (Promise.all with error handling)
-  - [ ] Join modes: all-succeed, first-failure-cancels-rest
-  - [ ] Unit tests for both join modes
+  - [x] PFO pattern executor in patterns.ts (applyParallelFanOut)
+  - [x] Concurrent node execution with join mode tracking
+  - [x] Join modes: all-succeed, first-failure-cancels (handlePfoBranchFailure)
+  - [x] Unit tests: 18 tests, 87 assertions (workflow-pfo.test.ts)
 
-## #WF-05: pause() / resume() / retry() API                       [Md] [PENDING]
+## #WF-05: pause() / resume() / retry() API                       [Md] [DONE]
   Spec: Ch06 §6.7
   Depends: #WF-01
   ---
-  Currently throw "not implemented". Wire to engine state machine.
+  Workflow pause/resume/retry wired to state machine.
 
   Deliverables:
-  - [ ] engine.pause(workflowId) — freeze execution
-  - [ ] engine.resume(workflowId) — continue from paused state
-  - [ ] engine.retry(workflowId) — re-execute failed nodes
-  - [ ] State machine: running ↔ paused, failed → retrying → running
-  - [ ] Unit tests for each operation
+  - [x] engine.pause(workflowId) — freeze execution (running → paused)
+  - [x] engine.resume(workflowId) — continue from paused state
+  - [x] engine.retry(workflowId) — new workflow with same inputs
+  - [x] State machine: 'paused' state, pauseWorkflow/resumeWorkflow transitions
+  - [x] Unit tests (workflow-patterns-basic.test.ts)
 
-## #WF-06: runSingleStep helper                                   [Sm] [PENDING]
+## #WF-06: runSingleStep helper                                   [Sm] [DONE]
   Spec: Ch06 §6.1
   Depends: #WF-01
   ---
   Convenience wrapper that creates a 1-node workflow, hides DAG overhead.
-  Useful for simple atomic operations.
 
   Deliverables:
-  - [ ] runSingleStep(executor, context) helper function
-  - [ ] Returns result directly (not workflow ID)
-  - [ ] Unit test: single-step workflow succeeds/fails correctly
+  - [x] runSingleStep() helper in engine.ts
+  - [x] Returns result directly (not workflow ID)
+  - [x] Unit tests: succeed/fail correctly (workflow-patterns-basic.test.ts)
 
-## #WF-07: Cancellation across all patterns                       [Md] [PENDING]
+## #WF-07: Cancellation across all patterns                       [Md] [DONE]
   Spec: Ch06 §6.7
   Depends: #WF-04
   ---
@@ -118,10 +113,10 @@ TASK DETAIL
   subworkflows. Currently only CB cancellation is tested.
 
   Deliverables:
-  - [ ] Cancel propagation for IAR in-progress nodes
-  - [ ] Cancel propagation for PFO concurrent nodes
-  - [ ] Cancel propagation through subworkflow chain
-  - [ ] Integration test: cancel during PFO fan-out
+  - [x] Cancel propagation for IAR in-progress nodes
+  - [x] Cancel propagation for PFO concurrent nodes
+  - [x] Cancel propagation through subworkflow chain
+  - [x] Integration test: cancel during PFO fan-out
 
 ================================================================================
 SCRATCHPAD

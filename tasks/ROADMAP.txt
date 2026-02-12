@@ -21,9 +21,11 @@ G0   | Foundation Unblock    | #FND-01 through #FND-10       | db/ split exists,
 G1a  | Lifecycle Core        | #LIFE-01→06, #WF-01,          | Resource layers operational, compensation framework, background tasks wired,
      |                       | #AGENT-01/02/05               | agent quick wins landed
 G1b  | Self-Cleaning System  | #LIFE-07→12, #WF-02→07        | terminate-instance works E2E, cleanup-manifest, remaining WF patterns
-G2   | Agent Hardened        | #AGENT-03→08                  | Agent handles spot, artifacts, degraded mode, checkpoints
-G3   | Multi-Provider        | #PROV-01→#PROV-04             | `repl run` works on AWS + Lambda + RunPod + OrbStack
-G4   | Feature Complete      | All LIFE/WF/ORPH/SNAP/API     | All 4 intents, orphan system, all workflow patterns, full API
+G2   | Artifact Pipeline &   | #AGENT-03/04/07, #SNAP-04,    | Artifact E2E (collect → upload → download), provider interface validated
+     | Provider Readiness    | #PROV-01, #LIFE-13            | against AWS dry-run, LIFE epic closed
+G3   | Multi-Provider        | #PROV-02→04, #AGENT-06         | `repl run` works on AWS + Lambda + RunPod + OrbStack, spot handling
+G4   | Feature Complete      | #SNAP-01→03, #AGENT-08,       | All 4 intents, orphan system, full API, remaining PROV/SNAP/AGENT
+     |                       | All ORPH/API, #PROV-05→08     |
 G5   | GTM Ready             | All CLI/DX tasks              | README, quickstart, provider guides, SSH, deployable to VPS
 
 
@@ -36,10 +38,10 @@ Ch | Name           | Epic(s)      | Status     | Key gaps
 01 | Introduction   | —            | COMPLETE   | —
 02 | Material       | FND          | PARTIAL    | GC, TTL cache
 03 | Resources      | LIFE, SNAP   | STUB       | Materialization, reconciliation, snapshot/artifact
-04 | Manifest       | LIFE         | PARTIAL    | Claim protocol, cleanup intent
-05 | Allocations    | LIFE         | PARTIAL    | SSH, hold expiry, reconciliation
-06 | Workflows      | WF           | PARTIAL    | IAR, PFO, subworkflows, compensation
-07 | Intents        | LIFE, SNAP   | 1/4 BUILT  | terminate, snapshot, cleanup missing
+04 | Manifest       | LIFE         | PARTIAL    | Claim protocol done; retention policies done
+05 | Allocations    | LIFE         | PARTIAL    | SSH, reconciliation done; hold expiry done
+06 | Workflows      | WF           | COMPLETE   | All 4 patterns, compensation, subworkflows, pause/resume
+07 | Intents        | LIFE, SNAP   | 3/4 BUILT  | terminate + cleanup done; snapshot missing
 08 | Providers      | PROV         | 1/5 BUILT  | AWS, Lambda, RunPod, Tailscale
 09 | API            | API          | PARTIAL    | L1 CRUD, pagination, rate limiting, intent endpoints
 10 | CLI            | CLI          | MVK DONE   | SSH, preflight, output modes
@@ -79,8 +81,8 @@ STILL USEFUL FILES (6):
 
 File                                                | Task      | Status
 ----------------------------------------------------+-----------+---------
-control/src/background/reconciliation.ts.l1.txt     | #LIFE-11  | PENDING
-control/src/resource/manifest.ts.l1.txt             | #LIFE-12  | PENDING
+control/src/background/reconciliation.ts.l1.txt     | #LIFE-11  | DONE
+control/src/resource/manifest.ts.l1.txt             | #LIFE-12  | DONE
 control/src/material/external.ts.l1.txt             | #PROV-06  | PENDING
 control/src/api/middleware/idempotency.ts.l1.txt    | #FND-03   | DONE
 control/src/provider/type-boundaries.ts.l1.txt      | #PROV-07  | PENDING
@@ -154,11 +156,13 @@ DX Epic (Developer Experience):
 ACTIVE TRACKS
 ================================================================================
 
-Track | Epic(s)     | Current task | Status
-------+-------------+--------------+---------
-T1    | FND         | —            | COMPLETE — Gate 0 passed
-T2    | LIFE/WF     | —            | COMPLETE — Gate 1a passed (worklog 021)
-T3    | AGENT       | —            | COMPLETE — Gate 1a satellite (worklog 021)
+Track | Epic(s)            | Current task | Status
+------+--------------------+--------------+---------
+T1    | FND                | —            | COMPLETE — Gate 0 passed
+T2    | LIFE/WF            | —            | COMPLETE — Gate 1a passed (worklog 021)
+T3    | AGENT              | —            | COMPLETE — Gate 1a satellite (worklog 021)
+T4    | LIFE/WF            | —            | COMPLETE — Gate 1b passed (worklog 022)
+T5    | MULTI              | —          | ACTIVE — G2 readiness (wl 023) + impl (wl 024)
 
 
 ================================================================================
@@ -180,3 +184,7 @@ PROGRESS LOG
             #LIFE-01→06, #WF-01, #AGENT-01/02/05 all [DONE].
             487 tests pass, 0 fail. 8 impl-pseudo files subsumed and deleted.
             Backlog items BL-08/11/13/15 resolved into completed epic tasks.
+2026-02-12  Gate 1b (Self-Cleaning System) PASSED — worklog 022.
+            #LIFE-07→12, #WF-02→07 all [DONE]. 12 tasks across 5 phases.
+            655 tests pass, 0 fail (168 new). WF epic COMPLETE (7/7 tasks).
+            Backlog items BL-10/12 resolved into #LIFE-12.

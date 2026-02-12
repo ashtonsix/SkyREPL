@@ -6,6 +6,8 @@ import { registerWebSocketRoutes, registerSSEWorkflowStream } from "./api/sse-pr
 import { initDatabase, runMigrations, findStaleClaimed, findExpiredAvailable, getInstance, queryOne, queryMany, listExpiredManifests, findOrphanedBlobs, deleteBlobBatch, deleteObjectBatch } from "./material/db";
 import { createWorkflowEngine, recoverWorkflows, requestEngineShutdown, awaitEngineQuiescence } from "./workflow/engine";
 import { registerLaunchRun } from "./intent/launch-run";
+import { registerTerminateInstance } from "./intent/terminate-instance";
+import { registerCleanupManifest } from "./intent/cleanup-manifest";
 import { setAgentBridge } from "./workflow/nodes/start-run";
 import { TIMING } from "@skyrepl/shared";
 import { cleanExpiredIdempotencyKeys } from "./api/middleware/idempotency";
@@ -79,6 +81,13 @@ export function setupWorkflowEngine(): void {
 
   // Register the launch-run blueprint and all its node executors
   registerLaunchRun();
+
+  // Register the terminate-instance blueprint and all its node executors
+  registerTerminateInstance();
+
+  // Register the cleanup-manifest blueprint and all its node executors
+  registerCleanupManifest();
+
   setAgentBridge(createRealAgentBridge());
 
   // Recover any workflows that were running when we last crashed
@@ -171,6 +180,14 @@ export function startBackgroundTasks(): void {
   }, TIMING.BLOB_GC_INTERVAL_MS);
   intervalHandles.push(gcHandle);
 
+  // Allocation reconciliation (#LIFE-11): safety net for stuck allocations
+  const reconcileHandle = setInterval(() => {
+    reconciliationTask().catch((err) =>
+      console.error("[control] reconciliationTask error:", err)
+    );
+  }, TIMING.RECONCILIATION_INTERVAL_MS);
+  intervalHandles.push(reconcileHandle);
+
   console.log("[control] Background tasks started");
 }
 
@@ -215,17 +232,44 @@ export async function holdExpiryCheck(): Promise<void> {
 }
 
 export async function manifestCleanupCheck(): Promise<void> {
+  const { submit } = await import("./workflow/engine");
   const now = Date.now();
   const expiredManifests = listExpiredManifests(now);
 
+  const MAX_CLEANUPS_PER_CYCLE = 10;
+  let spawned = 0;
+
   for (const manifest of expiredManifests) {
-    console.log(`[manifest-cleanup] Manifest ${manifest.id} expired (sealed, past retention)`);
-    // TODO(#LIFE-09): Submit cleanup-manifest workflow for each expired manifest
+    if (spawned >= MAX_CLEANUPS_PER_CYCLE) break;
+
+    // Check if a cleanup workflow is already running for this manifest
+    const existing = queryOne<{ id: number }>(
+      `SELECT id FROM workflows WHERE type = 'cleanup-manifest' AND input_json LIKE '%"manifestId":${manifest.id}%' AND status IN ('created','pending','running')`,
+      []
+    );
+    if (existing) {
+      continue; // Skip — cleanup already in progress
+    }
+
+    try {
+      await submit({
+        type: "cleanup-manifest",
+        input: { manifestId: manifest.id },
+      });
+      spawned++;
+    } catch (err) {
+      console.warn(`[manifest-cleanup] Failed to submit cleanup for manifest ${manifest.id}:`, err);
+    }
+  }
+
+  if (spawned > 0) {
+    console.log(`[manifest-cleanup] Spawned ${spawned} cleanup workflow(s) for expired manifests`);
   }
 }
 
 export async function reconciliationTask(): Promise<void> {
-  // Stub: no-op for Slice 1
+  const { runReconciliation } = await import("./background/reconciliation");
+  await runReconciliation();
 }
 
 /**

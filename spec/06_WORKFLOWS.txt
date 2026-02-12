@@ -231,7 +231,7 @@ ctx.applyPattern('insert-and-reconverge', {
 });
 ```
 
-> See also: impl-pseudo/control/src/workflow/patterns.ts.l2.txt §InsertAndReconverge
+> See also: impl/control/src/workflow/patterns.ts
 
 ### 6.3.2 Conditional-Branch (CB)
 
@@ -273,7 +273,7 @@ ctx.applyPattern('conditional-branch', {
 });
 ```
 
-> See also: impl-pseudo/control/src/workflow/patterns.ts.l2.txt §ConditionalBranch
+> See also: impl/control/src/workflow/patterns.ts
 
 ### 6.3.3 Parallel-Fan-Out (PFO)
 
@@ -299,7 +299,7 @@ ctx.applyPattern('parallel-fan-out', {
 });
 ```
 
-> See also: impl-pseudo/control/src/workflow/patterns.ts.l2.txt §ParallelFanOut
+> See also: impl/control/src/workflow/patterns.ts
 
 ### 6.3.4 Retry-with-Alternative (RWA)
 
@@ -325,7 +325,7 @@ ctx.applyPattern('retry-with-alternative', {
 });
 ```
 
-> See also: impl-pseudo/control/src/workflow/patterns.ts.l2.txt §RetryWithAlternative
+> See also: impl/control/src/workflow/patterns.ts
 
 
 ## 6.4 Subworkflow Contract

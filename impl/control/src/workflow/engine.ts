@@ -38,6 +38,8 @@ import {
   completeWorkflow as completeWorkflowTransition,
   failWorkflow as failWorkflowTransition,
   cancelWorkflow as cancelWorkflowTransition,
+  pauseWorkflow as pauseWorkflowTransition,
+  resumeWorkflow as resumeWorkflowTransition,
   startNode,
   completeNode,
   failNode,
@@ -48,6 +50,10 @@ import {
 import {
   applyConditionalBranch,
   applyRetryWithAlternative,
+  applyInsertAndReconverge,
+  applyParallelFanOut,
+  type InsertAndReconvergeConfig,
+  type ParallelFanOutConfig,
 } from "./patterns";
 
 // =============================================================================
@@ -302,6 +308,12 @@ async function _executeLoopInner(
         break;
       }
 
+      // Check for paused state — spin-wait until resumed, cancelled, or shutdown
+      if (workflow.status === "paused") {
+        await sleep(POLL_INTERVAL_MS);
+        continue;
+      }
+
       // Check workflow-level timeout
       if (workflow.timeout_at && Date.now() > workflow.timeout_at) {
         await handleWorkflowTimeout(workflowId);
@@ -319,8 +331,8 @@ async function _executeLoopInner(
 
         if (running > 0) {
           if (inFlight.size > 0) {
-            // Await any in-flight node completion (replaces sleep polling)
-            await Promise.race([...inFlight.values()]);
+            // Await any in-flight node completion, with periodic wake-up for timeout checks
+            await Promise.race([...inFlight.values(), sleep(POLL_INTERVAL_MS)]);
           } else {
             // Crash recovery: nodes running in DB but not tracked locally
             await sleep(POLL_INTERVAL_MS);
@@ -348,8 +360,9 @@ async function _executeLoopInner(
       }
 
       // Wait for at least one node to complete before re-checking for newly-unblocked nodes
+      // Include periodic wake-up so timeout/cancellation checks run even during long-running nodes
       if (inFlight.size > 0) {
-        await Promise.race([...inFlight.values()]);
+        await Promise.race([...inFlight.values(), sleep(POLL_INTERVAL_MS)]);
       }
     }
   } catch (err) {
@@ -451,6 +464,11 @@ export async function executeNode(
       // No retry - fail the node
       failNode(node.id, JSON.stringify(nodeError));
 
+      // PFO first-failure-cancels: if this is a PFO branch, check join mode
+      if (node.retry_reason === "pfo_branch") {
+        handlePfoBranchFailure(workflowId, node.node_id);
+      }
+
       // Compensate the failed node if handler exists
       if (executor?.compensate) {
         const { compensateFailedNode } = await import("./compensation");
@@ -501,15 +519,13 @@ export function buildNodeContext(
       }
     },
 
-    claimResource(
+    async claimResource(
       _targetManifestId: number,
-      _resourceType: string,
-      _resourceId: string
+      resourceType: string,
+      resourceId: string
     ): Promise<boolean> {
-      // NOT YET IMPLEMENTED — deferred to future slice
-      // Stub for Slice 1 - resource claiming across manifests not yet needed
-      console.warn("[workflow] claimResource not yet implemented");
-      return Promise.resolve(false);
+      const { claimResourceAtomic } = await import("../resource/manifest");
+      return claimResourceAtomic(manifestId, resourceType, resourceId);
     },
 
     applyPattern(pattern: string, config: unknown): void {
@@ -533,6 +549,18 @@ export function buildNodeContext(
               rwaConfig.alternativeNode
             );
           }
+          break;
+        case "insert-and-reconverge":
+          applyInsertAndReconverge(
+            workflowId,
+            config as InsertAndReconvergeConfig
+          );
+          break;
+        case "parallel-fan-out":
+          applyParallelFanOut(
+            workflowId,
+            config as ParallelFanOutConfig
+          );
           break;
         default:
           console.warn("[workflow] Unknown pattern", { pattern });
@@ -595,17 +623,25 @@ export function buildNodeContext(
         );
       }
 
+      const parentId = workflowId; // capture parent workflow ID to avoid shadowing
+
       const result = await submit({
         type,
         input: input as Record<string, unknown>,
-        parentWorkflowId: workflowId,
+        parentWorkflowId: parentId,
       });
 
       return {
         workflowId: result.workflowId,
         async wait(): Promise<SubworkflowResult> {
-          // Poll until subworkflow completes
+          // Poll until subworkflow completes, with parent cancellation awareness
           while (true) {
+            // Check if parent was cancelled or failed
+            const parent = getWorkflow(parentId);
+            if (parent && (parent.status === "cancelled" || parent.status === "failed")) {
+              await cancelWorkflow(result.workflowId, "parent_cancelled");
+            }
+
             const sub = getWorkflow(result.workflowId);
             if (!sub) {
               return { status: "failed", error: "Subworkflow not found" };
@@ -621,6 +657,7 @@ export function buildNodeContext(
                   ? JSON.parse(sub.output_json)
                   : undefined,
                 error: sub.error_json ?? undefined,
+                manifestId: sub.manifest_id ?? undefined,
               };
             }
             await sleep(POLL_INTERVAL_MS);
@@ -820,6 +857,45 @@ export async function handleRetry(
 }
 
 // =============================================================================
+// PFO Branch Failure Handling
+// =============================================================================
+
+function handlePfoBranchFailure(workflowId: number, failedBranchNodeId: string): void {
+  const allNodes = getWorkflowNodes(workflowId);
+
+  // Find the PFO join node: any node whose depends_on includes this branch
+  // AND whose retry_reason starts with "pfo_join:"
+  const joinNode = allNodes.find((n) => {
+    if (!n.retry_reason?.startsWith("pfo_join:")) return false;
+    const deps: string[] = n.depends_on ? JSON.parse(n.depends_on) : [];
+    return deps.includes(failedBranchNodeId);
+  });
+
+  if (!joinNode) return;
+
+  // Extract join mode from retry_reason
+  const joinMode = joinNode.retry_reason!.replace("pfo_join:", "");
+
+  if (joinMode !== "first-failure-cancels") return;
+
+  // Cancel all other pending/running PFO branch siblings
+  const joinDeps: string[] = joinNode.depends_on ? JSON.parse(joinNode.depends_on) : [];
+
+  for (const siblingNodeId of joinDeps) {
+    if (siblingNodeId === failedBranchNodeId) continue;
+
+    const sibling = allNodes.find((n) => n.node_id === siblingNodeId);
+    if (!sibling) continue;
+
+    if (sibling.status === "pending") {
+      skipNode(sibling.id);
+    }
+    // Note: running siblings will eventually complete or fail on their own;
+    // the DAG engine handles the final failure via handleWorkflowFailure.
+  }
+}
+
+// =============================================================================
 // Workflow Completion Helpers
 // =============================================================================
 
@@ -914,6 +990,15 @@ export async function handleWorkflowTimeout(
     skipNode(node.id);
   }
 
+  // Cancel child workflows (#WF-03: timeout propagation)
+  const childWorkflows = queryMany<Workflow>(
+    "SELECT * FROM workflows WHERE parent_workflow_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')",
+    [workflowId]
+  );
+  for (const child of childWorkflows) {
+    await cancelWorkflow(child.id, "parent_timeout");
+  }
+
   // Seal manifest
   const workflow = getWorkflow(workflowId);
   if (workflow?.manifest_id) {
@@ -955,8 +1040,8 @@ export async function cancelWorkflow(
     return { success: true, status: workflow.status };
   }
 
-  // Only running workflows can be cancelled
-  if (workflow.status !== "running") {
+  // Only running or paused workflows can be cancelled
+  if (workflow.status !== "running" && workflow.status !== "paused") {
     return { success: false, status: workflow.status };
   }
 
@@ -981,6 +1066,15 @@ export async function handleCancellation(workflowId: number): Promise<void> {
     if (node.status === "pending") {
       skipNode(node.id);
     }
+  }
+
+  // Cancel child workflows (#WF-03: cancel propagation)
+  const childWorkflows = queryMany<Workflow>(
+    "SELECT * FROM workflows WHERE parent_workflow_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')",
+    [workflowId]
+  );
+  for (const child of childWorkflows) {
+    await cancelWorkflow(child.id, "parent_cancelled");
   }
 
   // Seal manifest
@@ -1189,22 +1283,103 @@ export function createWorkflowEngine(): WorkflowEngine {
 
     cancel: cancelWorkflow,
 
-    async pause(_workflowId: number): Promise<void> {
-      // NOT YET IMPLEMENTED — deferred to future slice
-      throw new Error("pause() not implemented - deferred for future slice");
+    async pause(workflowId: number): Promise<void> {
+      const result = pauseWorkflowTransition(workflowId);
+      if (!result.success) {
+        throw new Error(`Cannot pause workflow ${workflowId}: ${result.reason}`);
+      }
     },
 
-    async resume(_workflowId: number): Promise<void> {
-      // NOT YET IMPLEMENTED — deferred to future slice
-      throw new Error("resume() not implemented - deferred for future slice");
+    async resume(workflowId: number): Promise<void> {
+      const result = resumeWorkflowTransition(workflowId);
+      if (!result.success) {
+        throw new Error(`Cannot resume workflow ${workflowId}: ${result.reason}`);
+      }
     },
 
     async retry(workflowId: number): Promise<number> {
-      // NOT YET IMPLEMENTED — deferred to future slice
-      // Deferred: creates a new workflow with same inputs
-      throw new Error("retry() not implemented - deferred for future slice");
+      const workflow = getWorkflow(workflowId);
+      if (!workflow) throw new Error(`Workflow ${workflowId} not found`);
+
+      const originalInput = workflow.input_json ? JSON.parse(workflow.input_json) : {};
+      const originalKey = workflow.idempotency_key;
+      const newKey = originalKey ? `${originalKey}:retry:${Date.now()}` : undefined;
+
+      const result = await submit({
+        type: workflow.type,
+        input: originalInput,
+        idempotencyKey: newKey,
+      });
+      return result.workflowId;
     },
   };
+}
+
+// =============================================================================
+// runSingleStep Convenience Wrapper (#WF-06)
+// =============================================================================
+
+/**
+ * Convenience wrapper: create a 1-node workflow, execute it, and return the result.
+ * Hides DAG ceremony for simple atomic operations.
+ */
+export async function runSingleStep(
+  type: string,
+  nodeType: string,
+  input: Record<string, unknown>,
+  options?: { idempotencyKey?: string; timeout?: number; parentWorkflowId?: number }
+): Promise<{ workflowId: number; output: unknown; status: string }> {
+  // Register a temporary blueprint for this single-step invocation
+  const blueprintType = `_single-step:${nodeType}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+
+  registerBlueprint({
+    type: blueprintType,
+    entryNode: "step",
+    nodes: {
+      step: { type: nodeType, dependsOn: [] },
+    },
+  });
+
+  try {
+    const result = await submit({
+      type: blueprintType,
+      input,
+      idempotencyKey: options?.idempotencyKey,
+      timeout: options?.timeout,
+      parentWorkflowId: options?.parentWorkflowId,
+    });
+
+    // Poll for completion
+    const pollTimeout = options?.timeout ?? TIMING.DEFAULT_WORKFLOW_TIMEOUT_MS;
+    const deadline = Date.now() + pollTimeout;
+
+    while (Date.now() < deadline) {
+      const workflow = getWorkflow(result.workflowId);
+      if (!workflow) {
+        throw new Error(`Workflow ${result.workflowId} not found during polling`);
+      }
+
+      if (workflow.status === "completed") {
+        const output = workflow.output_json ? JSON.parse(workflow.output_json) : {};
+        // Extract the single node's output from the output map
+        const nodeOutput = (output as Record<string, unknown>).step ?? output;
+        return { workflowId: result.workflowId, output: nodeOutput, status: "completed" };
+      }
+
+      if (workflow.status === "failed" || workflow.status === "cancelled") {
+        const error = workflow.error_json ? JSON.parse(workflow.error_json) : { message: "Unknown error" };
+        return { workflowId: result.workflowId, output: error, status: workflow.status };
+      }
+
+      await sleep(POLL_INTERVAL_MS);
+    }
+
+    // Timed out waiting for completion
+    return { workflowId: result.workflowId, output: null, status: "timeout" };
+  } finally {
+    // Unregister the temporary blueprint to avoid registry bloat
+    blueprints.delete(blueprintType);
+  }
 }
 
 // =============================================================================

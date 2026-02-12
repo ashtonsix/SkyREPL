@@ -1,0 +1,339 @@
+================================================================================
+WORKLOG 024 — Artifact Pipeline & Provider Readiness
+================================================================================
+
+Status: PLANNING
+Theme:  Artifact collection E2E, provider abstraction validation
+Gate:   G2
+Tests:  670+ → target 730+
+Prereq: Worklog 023 (G2 readiness) complete
+
+================================================================================
+RATIONALE
+================================================================================
+
+Scope challenge vs. roadmap
+----------------------------
+The roadmap defines G2 as "Agent Hardened" (#AGENT-03→08). This worklog proposes
+a tighter, higher-value gate instead:
+
+  CUT: #AGENT-06 (Spot interruption handling) [Lg]
+    Reason: OrbStack has no spot instances. Building spot handling before cloud
+    providers exist (G3) means testing against simulated signals with zero
+    real-world validation. Defer to G3 when AWS/RunPod exist to test against.
+
+  CUT: #AGENT-08 (Checkpoint support) [Lg]
+    Reason: Hard-depends on #SNAP-01 (create-snapshot intent, [Lg], unbuilt).
+    Including it means pulling an [Xl] cross-epic dependency into G2. Defer
+    until SNAP-01 exists — natural fit for G3 or G4.
+
+  ADD: #PROV-01 (Validate provider abstraction) [Lg]
+    Reason: Longest pole in the project. Every cloud provider (PROV-02→08) and
+    the orphan system (ORPH-01→08) depend on PROV-01. Starting it now means G3
+    can be pure implementation, not validation+implementation. De-risks 16 tasks.
+
+  ADD: #SNAP-04 (Artifact resource type) [Md]
+    Reason: Pairs with AGENT-07 to complete the artifact pipeline E2E.
+    Users need to get output from runs — this is the most immediately
+    useful feature after G1b.
+
+Result: 5 tasks (1 [Sm], 2 [Md], 2 [Lg]) across 3 epics. #LIFE-13 moved to
+worklog 023 (G2 readiness). Deferred AGENT-06 and AGENT-08 carry to G3.
+
+
+================================================================================
+DEPENDENCY GRAPH
+================================================================================
+
+  AGENT-03 ──────────────────────────────────────────┐
+  AGENT-04 ──────────────────────────────────────────┤ (all independent
+  PROV-01  ──────────────────────────────────────────┤  once wl 023 complete)
+                                                     │
+  AGENT-07 ──→ SNAP-04 ─────────────────────────────┘
+
+Critical path: AGENT-07 → SNAP-04 (only sequential dependency in gate)
+Everything else is independent and parallelizable.
+
+
+================================================================================
+SCOPE
+================================================================================
+
+Phase A — Agent Robustness               (2 tasks: 1 [Sm], 1 [Md])
+Phase B — Artifact Pipeline              (2 tasks: 1 [Lg], 1 [Md])
+Phase C — Provider Validation            (1 task:  1 [Lg])
+
+Natural split point: after Phase B if session exhausted.
+Phase C can be deferred to a G2b without blocking G3 critical path
+(G3 would just start with PROV-01 instead).
+
+
+================================================================================
+TASKLOG
+================================================================================
+
+Phase  Step  Task       Description                                  Size   Status
+-----  ----  ---------  -------------------------------------------  -----  --------
+
+  A      1   #AGENT-03  SSE backpressure on slow consumers            [Sm]  PENDING
+  A      2   #AGENT-04  Degraded mode                                 [Md]  PENDING
+
+  B      3   #AGENT-07  Artifact collection (agent + control)         [Lg]  PENDING
+  B      4   #SNAP-04   Artifact resource type + API + CLI            [Md]  PENDING
+
+  C      5   #PROV-01   Validate provider abstraction (dry-run AWS)   [Lg]  PENDING
+
+
+================================================================================
+DONE DEFINITION
+================================================================================
+
+  - All 5 tasks marked [DONE] in their epic files
+  - Tests pass (target: 730+, up from 670+)
+  - Epic files updated: status [PENDING] → [DONE]
+  - ROADMAP.txt progress log entry added
+  - No regressions in existing tests
+  - Artifact E2E: agent collects files → uploads → CLI can list + download
+  - Provider validation: AWS skeleton compiles, interface gaps documented
+
+
+################################################################################
+#                                                                              #
+#  PHASE A — AGENT ROBUSTNESS                                                 #
+#                                                                              #
+################################################################################
+
+Step 1:  #AGENT-03 — SSE backpressure on slow consumers             [Sm] PENDING
+Step 2:  #AGENT-04 — Degraded mode                                  [Md] PENDING
+
+--------------------------------------------------------------------------------
+Design Notes
+--------------------------------------------------------------------------------
+
+AGENT-03: SSE backpressure on slow consumers
+  Spec: Ch11. Carries: EX3.
+  The control plane sends commands to agents via SSE (GET /v1/agent/commands).
+  If a slow consumer can't keep up, the write buffer grows unbounded.
+
+  Implementation:
+    - Track queue depth per SSE connection in sse-protocol.ts
+    - Priority hierarchy: commands > status > heartbeat_ack
+    - When queue exceeds HIGH_WATER_MARK (e.g., 64 messages):
+      1. Drop heartbeat_ack messages first
+      2. If still overloaded, drop older status messages
+      3. Commands are NEVER dropped (they're idempotent + acked)
+    - Emit warning log when dropping begins
+    - Optionally: disconnect consumer after sustained overload (e.g., 5 min)
+  Pseudo: agent/sse.py.l2.txt (agent side), api/sse-protocol.ts (control side).
+  ~30-50 LOC, 3-5 tests.
+
+AGENT-04: Degraded mode
+  Spec: Ch11 §11.5. Carries: nothing (fresh task).
+  Progressive degradation: healthy → degraded → panic.
+  Currently agent either works or crashes — no middle ground.
+
+  Implementation (agent-side, Python):
+    State machine in agent heartbeat loop:
+      - healthy: control plane reachable, heartbeat succeeding
+      - degraded: control plane unreachable but run still active
+        → buffer logs to disk (ring buffer, max 10MB)
+        → continue executing current run
+        → retry heartbeat with exponential backoff (5s → 10s → 30s → 60s cap)
+        → if control plane returns: flush buffered logs, return to healthy
+      - panic: degraded for > PANIC_TIMEOUT (default 5 min)
+        → trigger panic diagnostics (#AGENT-01, already built)
+        → self-terminate
+
+  Control-plane awareness:
+    The control plane already has heartbeat timeout enforcement (#LIFE-02).
+    No control-plane changes needed — degraded mode is purely agent-side.
+
+  Pseudo: agent/heartbeat.py.l1.txt + .l2.txt.
+  ~80-120 LOC (Python), 5-8 tests.
+
+Both Phase A tasks are independent and can be dispatched in parallel.
+
+--------------------------------------------------------------------------------
+Scratch
+--------------------------------------------------------------------------------
+
+(SSE protocol message types, degraded mode thresholds, resource layer import audit)
+
+--------------------------------------------------------------------------------
+Execution Log
+--------------------------------------------------------------------------------
+
+(filled during execution)
+
+
+################################################################################
+#                                                                              #
+#  PHASE B — ARTIFACT PIPELINE                                                #
+#                                                                              #
+################################################################################
+
+Step 3:  #AGENT-07 — Artifact collection                           [Lg] PENDING
+Step 4:  #SNAP-04  — Artifact resource type + API + CLI            [Md] PENDING
+
+--------------------------------------------------------------------------------
+Design Notes
+--------------------------------------------------------------------------------
+
+AGENT-07: Artifact collection
+  Spec: Ch11 §11.11. Depends: #LIFE-01 (DONE).
+  Pseudo: agent/artifacts.py.l1.txt + .l2.txt.
+
+  Agent side (Python):
+    - Run config includes artifact_patterns: list of glob patterns
+      (e.g., ["output/**", "*.csv", "model.pt"])
+    - After run completion (before finalize), agent:
+      1. Scan workdir for matching files
+      2. For each file: compute checksum, determine size
+      3. Request upload URL from control plane
+      4. Upload artifact bytes
+      5. Report artifact manifest (list of uploaded artifact metadata)
+    - Errors: best-effort. Log failures, don't fail the run for artifact issues.
+
+  Control-plane side (TypeScript):
+    - Wire POST /v1/agent/artifacts endpoint (currently stubbed in agent.ts)
+      → receives artifact metadata from agent
+      → stores artifact in blob storage (reuses existing storage.ts)
+      → records in manifest_resources (resource_type='artifact')
+    - Add artifact upload endpoint: POST /v1/artifacts/upload
+      → accepts multipart file upload
+      → stores in blob storage, returns artifact ID
+    - OR simpler: reuse existing blob/check + blob upload flow
+      → agent uses POST /v1/blobs/check then uploads missing blobs
+      → then POST /v1/agent/artifacts to register blob → artifact mapping
+
+  The simpler blob-reuse approach is preferred — less new surface area.
+
+  ~200-300 LOC across agent + control plane, 15-20 tests.
+
+SNAP-04: Artifact resource type + API + CLI
+  Spec: Ch03. Depends: #AGENT-07.
+  Pseudo: resource/artifact.ts.l1.txt.
+
+  Scope (extended beyond original epic task to close the E2E loop):
+    DB:
+      - artifacts table: id, run_id, manifest_id, name, path, checksum,
+        size_bytes, blob_id, content_type, created_at
+      - DDL migration (append to 001_schema.sql or new migration)
+
+    Resource module: resource/artifact.ts
+      - createArtifact(runId, metadata) → id
+      - getArtifact(id) → Artifact | null
+      - listArtifactsByRun(runId) → Artifact[]
+      - deleteArtifact(id) → void (for cleanup-manifest use)
+
+    API endpoints:
+      - GET /v1/runs/:id/artifacts → list artifacts for a run
+      - GET /v1/artifacts/:id/download → download artifact content (via blob)
+
+    CLI commands (minimal, ~50 LOC in commands/):
+      - `repl artifact list <run-id>` → table of artifacts
+      - `repl artifact download <artifact-id> [--output=dir]` → download to local
+
+  The CLI wiring is small enough to fold into this task rather than creating
+  a separate CLI-08 subtask. Full CLI-08 (snapshot + orphan subcommands)
+  remains a future task.
+
+  ~150-200 LOC, 8-12 tests.
+
+Step 3 must complete before Step 4 (SNAP-04 depends on AGENT-07 output format).
+Steps 3-4 can overlap with Phase A (no dependency on A1-A2).
+
+--------------------------------------------------------------------------------
+Scratch
+--------------------------------------------------------------------------------
+
+(artifact upload flow options, blob reuse vs dedicated endpoint, artifact
+ metadata schema, CLI output format for artifact list)
+
+--------------------------------------------------------------------------------
+Execution Log
+--------------------------------------------------------------------------------
+
+(filled during execution)
+
+
+################################################################################
+#                                                                              #
+#  PHASE C — PROVIDER VALIDATION                                              #
+#                                                                              #
+################################################################################
+
+Step 5:  #PROV-01 — Validate provider abstraction (dry-run AWS)    [Lg] PENDING
+
+--------------------------------------------------------------------------------
+Design Notes
+--------------------------------------------------------------------------------
+
+PROV-01: Validate provider abstraction (dry-run AWS)
+  Spec: Ch08 §8.1. Depends: #LIFE-07 (DONE in G1b).
+  Pseudo: provider/type-boundaries.ts.l1.txt (STILL USEFUL).
+
+  Goal: Implement an AWS EC2 provider skeleton that compiles against the
+  ComputeProvider interface and makes real(ish) API calls. Identify and fix
+  any gaps in the abstraction before building full providers in G3.
+
+  Implementation:
+    1. NEW: provider/compute/aws.ts — AWS EC2 provider implementation
+       - spawn(): EC2 RunInstances call with security group, user-data bootstrap
+       - terminate(): EC2 TerminateInstances (idempotent: ignore already-terminated)
+       - list(): EC2 DescribeInstances with tag filter (repl-managed=true)
+       - get(): EC2 DescribeInstances by instance-id
+       - generateBootstrap(): cloud-init user-data script
+       - createSnapshot(): EC2 CreateImage (AMI)
+       - getSnapshotStatus(): EC2 DescribeImages
+       - deleteSnapshot(): EC2 DeregisterImage + delete backing snapshot
+       Capabilities: { snapshots: true, spot: true, gpu: true, multiRegion: true,
+                       persistentVolumes: true, idempotentSpawn: true }
+
+    2. AWS SDK dependency: @aws-sdk/client-ec2 (tree-shakeable, ESM)
+       Only this one package needed for dry-run validation.
+
+    3. Validation approach:
+       - Unit tests with mocked AWS calls (no real AWS account needed)
+       - Type-level: does the Provider<AWSInstance, AWSSnapshot> satisfy
+         ComputeProvider? If not, fix the interface.
+       - Behavioral: do error codes map cleanly to provider error taxonomy?
+       - Spot: does requestSpotInstance/cancelSpotRequest interface work?
+       - Bootstrap: does generateBootstrap produce valid cloud-init?
+
+    4. Interface gaps to probe (from spec §8.1):
+       - Security group management: does spawn() config handle this?
+       - IAM role attachment: is this a spawn option or separate step?
+       - Multi-region: does the provider interface support region selection?
+       - VPC/subnet selection: where does this live in the interface?
+       - Key pair management: how does SSH key injection work?
+
+    5. Output: documented list of interface changes needed (if any),
+       possibly a provider implementation guide in docs/.
+
+  Pseudo: provider/compute/aws.ts.l1.txt + .l2.txt, type-boundaries.ts.l1.txt.
+  ~300-400 LOC, 10-15 tests.
+
+  Note: This is NOT a production-ready AWS provider. PROV-02 builds the full
+  thing. This is interface validation with enough implementation to be confident
+  the abstraction works.
+
+--------------------------------------------------------------------------------
+Scratch
+--------------------------------------------------------------------------------
+
+(AWS SDK import strategy, interface gap candidates, mock approach for EC2 calls,
+ provider error taxonomy mapping for AWS error codes)
+
+--------------------------------------------------------------------------------
+Execution Log
+--------------------------------------------------------------------------------
+
+(filled during execution)
+
+
+================================================================================
+SESSION LOG
+================================================================================
+
+(filled during execution)

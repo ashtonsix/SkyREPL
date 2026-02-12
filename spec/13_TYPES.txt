@@ -557,7 +557,7 @@ resource tracking and logging only.
 - registerBlueprint(blueprint) -> void
 - subscribe(workflowId, callback) -> unsubscribe function
 
-> See also: impl-pseudo/control/src/workflow/patterns.ts.l2.txt §PatternTypes
+> See also: impl/control/src/workflow/patterns.ts
 > See also: impl-pseudo/control/src/workflow/engine.ts.l2.txt §WorkflowEngineInterface
 
 ### 13.4.5 Intent-Specific Input/Output Types

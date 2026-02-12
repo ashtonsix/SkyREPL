@@ -1,7 +1,0 @@
-# workflow-cleanup.types.ts
-
-## CleanupInput
-provider?: string, region?: string, dryRun?: boolean
-
-## CleanupOutput
-orphansTerminated: number, allocationsExpired: number, costSaved: number

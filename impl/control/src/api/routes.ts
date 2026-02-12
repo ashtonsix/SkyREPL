@@ -16,6 +16,7 @@ import {
 } from "../material/db";
 import { launchRun } from "../intent/launch-run";
 import type { LaunchRunInput } from "../intent/launch-run.types";
+import { terminateInstance } from "../intent/terminate-instance";
 import {
   SkyREPLError,
   httpStatusForError,
@@ -469,6 +470,50 @@ export function registerOperationRoutes(app: Elysia<any>): void {
 
     return result;
   }, { params: IdParams });
+
+  // ─── Terminate Instance ─────────────────────────────────────────────
+
+  app.post("/v1/intents/terminate-instance", async ({ body, set }) => {
+    const b = (body ?? {}) as Record<string, unknown>;
+
+    // Validate instanceId
+    const instanceId = Number(b.instanceId ?? b.instance_id);
+    if (!instanceId || !Number.isFinite(instanceId)) {
+      set.status = 400;
+      return {
+        error: {
+          code: "INVALID_INPUT",
+          message: "instanceId is required and must be a number",
+          category: "validation",
+        },
+      };
+    }
+
+    try {
+      const workflow = await terminateInstance({ instanceId });
+      set.status = 202;
+      return {
+        workflow_id: workflow.id,
+        instance_id: instanceId,
+        status: workflow.status,
+      };
+    } catch (err) {
+      if (err instanceof SkyREPLError) {
+        const status = httpStatusForError(err);
+        set.status = status;
+        return errorToApiError(err);
+      }
+      console.error("[routes] terminate-instance error:", err);
+      set.status = 500;
+      return {
+        error: {
+          code: "INTERNAL_ERROR",
+          message: err instanceof Error ? err.message : "Failed to terminate instance",
+          category: "internal",
+        },
+      };
+    }
+  });
 
   // ─── Blob Check ───────────────────────────────────────────────────────
 

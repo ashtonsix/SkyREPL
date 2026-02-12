@@ -149,6 +149,7 @@ export interface SubworkflowResult {
   status: "completed" | "failed" | "cancelled";
   output?: Record<string, unknown>;
   error?: string;
+  manifestId?: number;
 }
 
 // =============================================================================

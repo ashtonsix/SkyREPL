@@ -137,7 +137,7 @@ The system MUST spawn a cleanup-manifest workflow when a manifest is expired. Th
 manifest status is NOT changed (EXPIRED is derived, never stored). The manifest
 MUST be in SEALED state; triggering cleanup on a DRAFT manifest is an error.
 
-> See also: impl-pseudo/control/src/intent/cleanup-manifest.ts.l2.txt §EntryPoint
+> See also: impl/control/src/intent/cleanup-manifest.ts
 
 ## 4.2 Resource Claiming Protocol
 
@@ -295,7 +295,7 @@ The system MUST query manifest_resources ordered by cleanup_priority DESC
 (defaulting to 50), destroy each resource in order, remove each
 manifest_resources row, then delete the manifest itself.
 
-> See also: impl-pseudo/control/src/intent/cleanup-manifest.ts.l2.txt §NodeHandlers
+> See also: impl/control/src/intent/cleanup-manifest.ts
 
 ### Cleanup Workflow
 
@@ -312,7 +312,7 @@ Resource-type-specific cleanup handlers MUST perform:
 - **run**: Delete files, logs, then DB record
 - **object**: Delete from S3 (if applicable), then delete DB record
 
-> See also: impl-pseudo/control/src/intent/cleanup-manifest.ts.l2.txt §WorkflowDefinition
+> See also: impl/control/src/intent/cleanup-manifest.ts
 
 ### Expiry Scanner
 

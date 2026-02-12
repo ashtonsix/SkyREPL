@@ -8,8 +8,11 @@ export async function instanceCommand(args: string[]): Promise<void> {
     case 'list':
       await instanceList();
       break;
+    case 'terminate':
+      await instanceTerminate(args.slice(1));
+      break;
     default:
-      console.error('Usage: repl instance <list>');
+      console.error('Usage: repl instance <list|terminate>');
       process.exit(2);
   }
 }
@@ -43,6 +46,33 @@ async function instanceList(): Promise<void> {
       process.exit(2);
     }
     console.error(`Failed to list instances: ${err instanceof Error ? err.message : err}`);
+    process.exit(2);
+  }
+}
+
+async function instanceTerminate(args: string[]): Promise<void> {
+  const idArg = args[0];
+  if (!idArg) {
+    console.error('Usage: repl instance terminate <instance-id>');
+    process.exit(2);
+  }
+
+  const instanceId = parseInt(idArg, 10);
+  if (isNaN(instanceId)) {
+    console.error(`Invalid instance ID: ${idArg}`);
+    process.exit(2);
+  }
+
+  const client = new ApiClient(getControlPlaneUrl());
+  try {
+    const result = await client.terminateInstance(instanceId);
+    console.log(`Terminating instance ${instanceId}... workflow ${result.workflow_id}`);
+  } catch (err) {
+    if (isConnectionRefused(err)) {
+      console.error(`Control plane not reachable at ${getControlPlaneUrl()}. Start it with \`repl control start\`.`);
+      process.exit(2);
+    }
+    console.error(`Failed to terminate instance: ${err instanceof Error ? err.message : err}`);
     process.exit(2);
   }
 }
