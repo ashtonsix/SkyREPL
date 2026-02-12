@@ -15,7 +15,7 @@ Pseudo subsumed:
 TASK INDEX
 ================================================================================
 
-  #WF-01  Compensation framework                                  [PENDING]
+  #WF-01  Compensation framework                                  [DONE]
   #WF-02  IAR (Idempotent-Atomic-Retriable) pattern               [PENDING]
   #WF-03  Subworkflow contract                                    [PENDING]
   #WF-04  PFO (Parallel Fan-Out) pattern                          [PENDING]
@@ -27,9 +27,9 @@ TASK INDEX
 TASK DETAIL
 ================================================================================
 
-## #WF-01: Compensation framework                                 [Lg] [PENDING]
+## #WF-01: Compensation framework                                 [Lg] [DONE]
   Spec: Ch06 §6.5, §6.8
-  Pseudo: control/src/workflow/compensation.ts.l1.txt + .l2.txt (STILL USEFUL)
+  Pseudo: control/src/workflow/compensation.ts.l1.txt + .l2.txt
   Depends: #FND-01
   ---
   Two-phase compensation with proper state machine integration. Each node
@@ -37,11 +37,11 @@ TASK DETAIL
   reverse order. Replaces the raw-SQL bypass (SM-11, fixed but fragile).
 
   Deliverables:
-  - [ ] Compensation executor in workflow/compensation.ts
-  - [ ] Node compensation declaration in blueprint
-  - [ ] Reverse-order compensation on workflow failure
-  - [ ] Single-node compensation for spawn failures
-  - [ ] Integration test: 3-node workflow fails at node 3, compensates 2→1
+  - [x] Compensation executor in workflow/compensation.ts
+  - [x] Node compensation declaration in blueprint
+  - [x] Reverse-order compensation on workflow failure
+  - [x] Single-node compensation for spawn failures
+  - [x] Integration test: 3-node workflow fails at node 3, compensates 2→1
 
 ## #WF-02: IAR (Idempotent-Atomic-Retriable) pattern              [Lg] [PENDING]
   Spec: Ch06 §6.3

@@ -18,8 +18,10 @@ PHASE GATES
 Gate | Name                  | Key Requirements              | Criterion
 -----+-----------------------+-------------------------------+------------------
 G0   | Foundation Unblock    | #FND-01 through #FND-10       | db/ split exists, HIGH items resolved, gate audit clean, parallel tracks unblocked
-G1   | Self-Cleaning System  | #LIFE-01→#LIFE-12, #WF-01     | terminate-instance works E2E, background tasks running, compensation operational
-G2   | Agent Hardened        | #AGENT-01→#AGENT-07           | Agent handles panic, spot, artifacts, degraded mode. No orphaned agents possible.
+G1a  | Lifecycle Core        | #LIFE-01→06, #WF-01,          | Resource layers operational, compensation framework, background tasks wired,
+     |                       | #AGENT-01/02/05               | agent quick wins landed
+G1b  | Self-Cleaning System  | #LIFE-07→12, #WF-02→07        | terminate-instance works E2E, cleanup-manifest, remaining WF patterns
+G2   | Agent Hardened        | #AGENT-03→08                  | Agent handles spot, artifacts, degraded mode, checkpoints
 G3   | Multi-Provider        | #PROV-01→#PROV-04             | `repl run` works on AWS + Lambda + RunPod + OrbStack
 G4   | Feature Complete      | All LIFE/WF/ORPH/SNAP/API     | All 4 intents, orphan system, all workflow patterns, full API
 G5   | GTM Ready             | All CLI/DX tasks              | README, quickstart, provider guides, SSH, deployable to VPS
@@ -72,26 +74,18 @@ DEPENDENCY GRAPH
 IMPL-PSEUDO SUBSUMPTION TRACKER
 ================================================================================
 
-STILL USEFUL FILES (14):
+STILL USEFUL FILES (6):
 ------------------------
 
 File                                                | Task      | Status
 ----------------------------------------------------+-----------+---------
-control/src/workflow/compensation.ts.l1.txt         | #WF-01    | PENDING
-control/src/workflow/compensation.ts.l2.txt         | #WF-01    | PENDING
 control/src/background/reconciliation.ts.l1.txt     | #LIFE-11  | PENDING
-control/src/background/hold-expiry.ts.l1.txt        | #LIFE-03  | PENDING
-control/src/background/garbage-collection.ts.l1.txt | #LIFE-05  | PENDING
-control/src/resource/allocation.ts.l1.txt           | #LIFE-01  | PENDING
-control/src/resource/instance.ts.l1.txt             | #LIFE-01  | PENDING
-control/src/resource/run.ts.l1.txt                  | #LIFE-01  | PENDING
 control/src/resource/manifest.ts.l1.txt             | #LIFE-12  | PENDING
 control/src/material/external.ts.l1.txt             | #PROV-06  | PENDING
 control/src/api/middleware/idempotency.ts.l1.txt    | #FND-03   | DONE
 control/src/provider/type-boundaries.ts.l1.txt      | #PROV-07  | PENDING
 agent/executor.py.l1.txt                            | #AGENT-07 | PENDING
 agent/heartbeat.py.l1.txt                           | #FND-04   | DONE
-control/src/main.ts.l1.txt                          | #LIFE-02  | PENDING
 cli/src/commands/run.ts.l1.txt                      | #CLI-03   | PENDING
 
 
@@ -160,9 +154,11 @@ DX Epic (Developer Experience):
 ACTIVE TRACKS
 ================================================================================
 
-Track | Epic  | Current task | Status
-------+-------+--------------+---------
-T1    | FND   | —            | COMPLETE — Gate 0 passed
+Track | Epic(s)     | Current task | Status
+------+-------------+--------------+---------
+T1    | FND         | —            | COMPLETE — Gate 0 passed
+T2    | LIFE/WF     | —            | COMPLETE — Gate 1a passed (worklog 021)
+T3    | AGENT       | —            | COMPLETE — Gate 1a satellite (worklog 021)
 
 
 ================================================================================
@@ -180,3 +176,7 @@ PROGRESS LOG
             #BL-14 triaged to #FND-10. #BL-15 added (agent panic schema).
 2026-02-11  FND-08/09/10 complete (worklog 020). Gate 0 PASSED.
             303 tests pass, 0 fail. Simulated E2E 10/10 consecutive passes.
+2026-02-12  Gate 1a (Lifecycle Core) PASSED — worklog 021.
+            #LIFE-01→06, #WF-01, #AGENT-01/02/05 all [DONE].
+            487 tests pass, 0 fail. 8 impl-pseudo files subsumed and deleted.
+            Backlog items BL-08/11/13/15 resolved into completed epic tasks.

@@ -26,10 +26,19 @@ const ts = () => new Date().toISOString().slice(11, 23);
 const describeStack: string[] = [];
 
 const copyStatics = (from: any, to: any) => {
+  // Copy own properties
   for (const key of Object.getOwnPropertyNames(from)) {
     if (key !== "length" && key !== "name" && key !== "prototype") {
       try {
         to[key] = from[key];
+      } catch {}
+    }
+  }
+  // Forward known conditional modifiers (may be getters/prototype-based)
+  for (const key of ["skip", "skipIf", "only", "todo", "todoIf", "if", "each"]) {
+    if (key in from && !(key in to)) {
+      try {
+        to[key] = typeof from[key] === "function" ? from[key].bind(from) : from[key];
       } catch {}
     }
   }

@@ -17,24 +17,25 @@ Pseudo subsumed:
 TASK INDEX
 ================================================================================
 
-  #LIFE-01  Fill resource layer stubs                            [PENDING]
-  #LIFE-02  Heartbeat timeout enforcement                        [PENDING]
-  #LIFE-03  Hold expiry lifecycle                                [PENDING]
-  #LIFE-04  Manifest expiry scanner                              [PENDING]
-  #LIFE-05  Blob GC wiring                                       [PENDING]
-  #LIFE-06  DDL migration for cleanup-manifest schema            [PENDING]
+  #LIFE-01  Fill resource layer stubs                            [DONE]
+  #LIFE-02  Heartbeat timeout enforcement                        [DONE]
+  #LIFE-03  Hold expiry lifecycle                                [DONE]
+  #LIFE-04  Manifest expiry scanner                              [DONE]
+  #LIFE-05  Blob GC wiring                                       [DONE]
+  #LIFE-06  DDL migration for cleanup-manifest schema            [DONE]
   #LIFE-07  terminate-instance intent (blueprint + nodes)        [PENDING]
   #LIFE-08  terminate-instance API + CLI wiring                  [PENDING]
   #LIFE-09  cleanup-manifest intent (blueprint + nodes)          [PENDING]
   #LIFE-10  cleanup-manifest background trigger                  [PENDING]
   #LIFE-11  Allocation reconciliation                            [PENDING]
   #LIFE-12  Resource claiming protocol                           [PENDING]
+  #LIFE-13  Enforce resource layer boundary                      [PENDING]
 
 ================================================================================
 TASK DETAIL
 ================================================================================
 
-## #LIFE-01: Fill resource layer stubs                             [Lg] [PENDING]
+## #LIFE-01: Fill resource layer stubs                             [Lg] [DONE]
   Carries: SM-21
   Depends: #FND-01
   ---
@@ -43,12 +44,12 @@ TASK DETAIL
   Ref: impl-pseudo resource/{allocation,instance,run}.ts.l1.txt
 
   Deliverables:
-  - [ ] Allocation resource: CRUD, state queries, warm pool helpers
-  - [ ] Instance resource: lifecycle queries, provider state mapping
-  - [ ] Run resource: CRUD, exit code, completion tracking
-  - [ ] Unit tests for each resource module
+  - [x] Allocation resource: CRUD, state queries, warm pool helpers
+  - [x] Instance resource: lifecycle queries, provider state mapping
+  - [x] Run resource: CRUD, exit code, completion tracking
+  - [x] Unit tests for each resource module
 
-## #LIFE-02: Heartbeat timeout enforcement                         [Md] [PENDING]
+## #LIFE-02: Heartbeat timeout enforcement                         [Md] [DONE]
   Depends: #FND-01
   Pseudo: control/src/background/reconciliation.ts.l1.txt
   ---
@@ -56,11 +57,11 @@ TASK DETAIL
   Detect stalled agents, transition allocations to FAILED.
 
   Deliverables:
-  - [ ] Implement heartbeatTimeoutCheck in background scheduler
-  - [ ] Transition stalled allocations (no heartbeat > threshold)
-  - [ ] Integration test: simulate stalled heartbeat → allocation fails
+  - [x] Implement heartbeatTimeoutCheck in background scheduler
+  - [x] Transition stalled allocations (no heartbeat > threshold)
+  - [x] Integration test: simulate stalled heartbeat → allocation fails
 
-## #LIFE-03: Hold expiry lifecycle                                 [Md] [PENDING]
+## #LIFE-03: Hold expiry lifecycle                                 [Md] [DONE]
   Depends: #FND-01
   Spec: Ch05 §5.7
   Pseudo: control/src/background/hold-expiry.ts.l1.txt
@@ -69,11 +70,11 @@ TASK DETAIL
   max 24h. Atomic update pattern.
 
   Deliverables:
-  - [ ] Implement holdExpiryCheck
-  - [ ] Atomic transition: held → released on expiry
-  - [ ] Extend API support (hold extension from CLI)
+  - [x] Implement holdExpiryCheck
+  - [x] Atomic transition: held → released on expiry
+  - [x] Extend API support (hold extension from CLI)
 
-## #LIFE-04: Manifest expiry scanner                               [Md] [PENDING]
+## #LIFE-04: Manifest expiry scanner                               [Md] [DONE]
   Depends: #FND-01
   Pseudo: control/src/background/manifest-cleanup.ts.l1.txt
   ---
@@ -81,11 +82,11 @@ TASK DETAIL
   intent for expired manifests.
 
   Deliverables:
-  - [ ] Implement manifestCleanupCheck
-  - [ ] Scan for sealed manifests past retention period
-  - [ ] Queue cleanup-manifest intent for each
+  - [x] Implement manifestCleanupCheck
+  - [x] Scan for sealed manifests past retention period
+  - [ ] Queue cleanup-manifest intent for each (deferred to #LIFE-09)
 
-## #LIFE-05: Blob GC wiring                                        [Md] [PENDING]
+## #LIFE-05: Blob GC wiring                                        [Md] [DONE]
   Depends: #FND-01
   Pseudo: control/src/background/garbage-collection.ts.l1.txt
   ---
@@ -93,19 +94,19 @@ TASK DETAIL
   idempotency key expiry, dedup merger.
 
   Deliverables:
-  - [ ] Implement storageGarbageCollection
-  - [ ] Object expiry (unreferenced blobs past TTL)
-  - [ ] Idempotency key expiry
+  - [x] Implement storageGarbageCollection
+  - [x] Object expiry (unreferenced blobs past TTL)
+  - [x] Idempotency key expiry
 
-## #LIFE-06: DDL migration for cleanup-manifest schema             [Md] [PENDING]
+## #LIFE-06: DDL migration for cleanup-manifest schema             [Md] [DONE]
   Carries: BT1
   Depends: #FND-01
   ---
   5 DDL schema issues blocking cleanup-manifest intent. Fix migration.
 
   Deliverables:
-  - [ ] New migration fixing schema mismatches
-  - [ ] Verify cleanup-manifest tables match spec Ch04
+  - [x] New migration fixing schema mismatches
+  - [x] Verify cleanup-manifest tables match spec Ch04
 
 ## #LIFE-07: terminate-instance intent (blueprint + nodes)         [Xl] [PENDING]
   Spec: Ch07 §7.2
@@ -182,6 +183,54 @@ TASK DETAIL
   - [ ] Implement claim/release in manifest resource layer
   - [ ] Cross-manifest resource transfer
   - [ ] Unit tests for ownership invariants
+
+## #LIFE-13: Enforce resource layer boundary                       [Lg] [PENDING]
+  Depends: #LIFE-01
+  ---
+  #LIFE-01 built resource/{allocation,instance,run}.ts but no callers use them.
+  13 files still import directly from material/db, bypassing the resource layer
+  and breaking the manifest → resource → material hierarchy.
+
+  Callers to rewire (by directory):
+
+  workflow/nodes/ (8 files — highest priority, these ARE the business logic):
+    spawn-instance.ts    createInstance, updateInstance, getInstance
+    claim-allocation.ts  getAllocation
+    create-allocation.ts createAllocation, getAllocation, addResourceToManifest
+    resolve-instance.ts  queryOne, findWarmAllocation
+    finalize.ts          updateRun, getManifest, getInstance, getAllocation,
+                         createAllocation, countInstanceAllocations
+    wait-for-boot.ts     updateInstance, getInstance
+    wait-completion.ts   updateRun
+    start-run.ts         updateRun
+
+  intent/ (1 file):
+    launch-run.ts        createRun, getWorkflow
+
+  api/ (3 files):
+    routes.ts            various db queries
+    agent.ts             various db queries
+    middleware/auth.ts   getInstance
+
+  Excluded from rewiring (intentionally stay on material/db):
+    workflow/state-transitions.ts — IS the atomic transition layer, peer to resource
+    workflow/engine.ts — workflow infrastructure, manages workflow/node lifecycle
+    workflow/compensation.ts — workflow infrastructure
+    workflow/patterns.ts — workflow infrastructure
+    api/middleware/idempotency.ts — cross-cutting concern, raw query is appropriate
+
+  Deliverables:
+  - [ ] Rewire 8 node executor files to import from resource/ not material/db
+  - [ ] Rewire launch-run.ts intent to use resource layer
+  - [ ] Rewire API routes + agent.ts to use resource layer
+  - [ ] Add resource/manifest.ts if needed (or defer to #LIFE-12)
+  - [ ] Add lint rule or CLAUDE.md convention: node executors MUST NOT import
+        from material/db (resource/ only)
+  - [ ] No new tests needed — existing tests validate behavior is unchanged
+
+  Note: #LIFE-07 and #LIFE-09 (new node executors) should use resource/ imports
+  from the start. This task can run in parallel with those if the convention is
+  established first.
 
 ================================================================================
 SCRATCHPAD

@@ -69,6 +69,12 @@ const LOG_REPLAY_BUFFER_SIZE = 500;
 /** Maximum number of pending commands to retain per instance (FIFO eviction if exceeded) */
 const MAX_PENDING_COMMANDS = 50;
 
+interface CommandDeliveryState {
+  command: ControlToAgentMessage;
+  sentAt: number;
+  retryCount: number;
+}
+
 export class SSEManager {
   /** Active agent SSE connections: instanceId -> SSE controller */
   private agentStreams = new Map<string, ReadableStreamDefaultController<Uint8Array>>();
@@ -84,6 +90,9 @@ export class SSEManager {
 
   /** Command ID counter for acknowledgment protocol */
   private nextCommandId = 1;
+
+  /** Unacknowledged commands: instanceId -> Map<commandId, CommandDeliveryState> */
+  private unackedCommands = new Map<string, Map<number, CommandDeliveryState>>();
 
   /** Per-run monotonic sequence counter for log messages */
   private logSequenceCounters = new Map<string, number>();
@@ -217,6 +226,20 @@ export class SSEManager {
       const encoder = new TextEncoder();
       const data = `event: ${command.type}\ndata: ${JSON.stringify(command)}\n\n`;
       controller.enqueue(encoder.encode(data));
+
+      // After successful send, track for ack (only for commands with command_id)
+      const commandId = (command as any).command_id;
+      if (commandId != null) {
+        if (!this.unackedCommands.has(instanceId)) {
+          this.unackedCommands.set(instanceId, new Map());
+        }
+        this.unackedCommands.get(instanceId)!.set(commandId, {
+          command,
+          sentAt: Date.now(),
+          retryCount: 0,
+        });
+      }
+
       return true;
     } catch (error) {
       console.error("[sse] Failed to send SSE command", { instanceId, error });
@@ -239,6 +262,77 @@ export class SSEManager {
   /** Check if agent is connected via SSE */
   isAgentConnected(instanceId: string): boolean {
     return this.agentStreams.has(instanceId);
+  }
+
+  /** Process acknowledged command IDs from agent heartbeat */
+  processCommandAcks(instanceId: string, ackedIds: number[]): void {
+    const unacked = this.unackedCommands.get(instanceId);
+    if (!unacked) return;
+    for (const id of ackedIds) {
+      unacked.delete(id);
+    }
+    if (unacked.size === 0) {
+      this.unackedCommands.delete(instanceId);
+    }
+  }
+
+  /** Retry unacknowledged commands that have timed out. Returns number of retries attempted. */
+  retryUnackedCommands(instanceId: string, timeoutMs: number, maxRetries: number = 3): number {
+    const unacked = this.unackedCommands.get(instanceId);
+    if (!unacked) return 0;
+
+    const now = Date.now();
+    let retries = 0;
+    const toRemove: number[] = [];
+
+    for (const [commandId, state] of unacked) {
+      if (now - state.sentAt < timeoutMs) continue;
+
+      if (state.retryCount >= maxRetries) {
+        console.warn("[sse] Command ack timeout, max retries exhausted", { instanceId, commandId, retryCount: state.retryCount });
+        toRemove.push(commandId);
+        continue;
+      }
+
+      // Retry: re-send the command
+      const controller = this.agentStreams.get(instanceId);
+      if (controller) {
+        try {
+          const encoder = new TextEncoder();
+          const data = `event: ${state.command.type}\ndata: ${JSON.stringify(state.command)}\n\n`;
+          controller.enqueue(encoder.encode(data));
+          state.sentAt = now;
+          state.retryCount++;
+          retries++;
+          console.info("[sse] Retrying unacked command", { instanceId, commandId, retryCount: state.retryCount });
+        } catch {
+          toRemove.push(commandId);
+        }
+      } else {
+        // Agent disconnected — move command to pending queue for reconnect
+        const pending = this.pendingCommands.get(instanceId) ?? [];
+        pending.push(state.command);
+        while (pending.length > MAX_PENDING_COMMANDS) {
+          pending.shift();
+        }
+        this.pendingCommands.set(instanceId, pending);
+        toRemove.push(commandId);
+      }
+    }
+
+    for (const id of toRemove) {
+      unacked.delete(id);
+    }
+    if (unacked.size === 0) {
+      this.unackedCommands.delete(instanceId);
+    }
+
+    return retries;
+  }
+
+  /** Clean up command tracking when agent disconnects */
+  cleanupInstance(instanceId: string): void {
+    this.unackedCommands.delete(instanceId);
   }
 
   // --- CLI WebSocket: Log Streaming -----------------------------------------

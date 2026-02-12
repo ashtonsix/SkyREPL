@@ -310,6 +310,11 @@ class RunExecutor:
 
 def _cleanup_workdir(workdir: str) -> None:
     """Clean workdir before start_run. Critical for warm pool security."""
+    # Change cwd to home before deletion — process cwd may be inside workdir (§11.10)
+    try:
+        os.chdir(os.path.expanduser("~"))
+    except Exception:
+        pass
     if os.path.exists(workdir):
         try:
             shutil.rmtree(workdir)

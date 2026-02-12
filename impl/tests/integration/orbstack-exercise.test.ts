@@ -27,9 +27,7 @@ import {
   type Allocation,
   type Workflow,
 } from "../../control/src/material/db";
-import {
-  createWorkflowEngine,
-} from "../../control/src/workflow/engine";
+import { createWorkflowEngine } from "../../control/src/workflow/engine";
 import { clearProviderCache } from "../../control/src/provider/registry";
 import { registerLaunchRun } from "../../control/src/intent/launch-run";
 import { createServer } from "../../control/src/api/routes";
@@ -137,7 +135,7 @@ interface LogMessage {
 async function launchRun(
   baseUrl: string,
   command: string,
-  maxDurationMs = 60_000
+  maxDurationMs = 60_000,
 ): Promise<{ workflowId: number; runId: number }> {
   const res = await fetch(`${baseUrl}/v1/workflows/launch-run`, {
     method: "POST",
@@ -169,7 +167,7 @@ async function launchRun(
 function collectLogs(
   serverPort: number,
   runId: number,
-  timeoutMs: number
+  timeoutMs: number,
 ): { promise: Promise<LogMessage[]>; messages: LogMessage[] } {
   const messages: LogMessage[] = [];
   const wsUrl = `ws://localhost:${serverPort}/v1/runs/${runId}/logs`;
@@ -212,7 +210,7 @@ async function pollUntilDone(
   baseUrl: string,
   workflowId: number,
   label: string,
-  timeoutMs: number
+  timeoutMs: number,
 ): Promise<{
   status: string;
   nodes_completed: number;
@@ -224,13 +222,11 @@ async function pollUntilDone(
   return new Promise((resolve) => {
     const poll = async () => {
       try {
-        const res = await fetch(
-          `${baseUrl}/v1/workflows/${workflowId}/status`
-        );
+        const res = await fetch(`${baseUrl}/v1/workflows/${workflowId}/status`);
         const body = await res.json();
 
         console.log(
-          `[exercise:${label}] Poll: status=${body.status} nodes=${body.nodes_completed}/${body.nodes_total}`
+          `[exercise:${label}] Poll: status=${body.status} nodes=${body.nodes_completed}/${body.nodes_total}`,
         );
 
         if (terminalStates.has(body.status)) {
@@ -280,9 +276,7 @@ function extractVmName(workflowId: number): string | null {
 const TEST_TIMEOUT_MS = 180_000;
 const SINGLE_TEST_TIMEOUT_MS = 120_000;
 
-const describeOrSkip = hasOrbctl ? describe : describe.skip;
-
-describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
+describe.skipIf(!hasOrbctl || !process.env.ORBSTACK_TESTS)("OrbStack Exercise: punishing E2E scenarios", () => {
   let tmpDir: string;
   let server: Server<unknown>;
   let baseUrl: string;
@@ -321,7 +315,7 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
     process.env.SKYREPL_CONTROL_PLANE_URL = controlPlaneUrl;
 
     console.log(
-      `[exercise] Server on port ${server.port!}, reachable at ${controlPlaneUrl}`
+      `[exercise] Server on port ${server.port!}, reachable at ${controlPlaneUrl}`,
     );
   });
 
@@ -351,14 +345,14 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
     async () => {
       const { workflowId, runId } = await launchRun(baseUrl, "exit 42");
       console.log(
-        `[exercise:exit42] Launched workflow=${workflowId} run=${runId}`
+        `[exercise:exit42] Launched workflow=${workflowId} run=${runId}`,
       );
 
       // Collect logs (there may be none since exit 42 produces no output)
       const { promise: logDone } = collectLogs(
         server.port!,
         runId,
-        SINGLE_TEST_TIMEOUT_MS
+        SINGLE_TEST_TIMEOUT_MS,
       );
 
       // Poll until workflow reaches terminal state
@@ -366,7 +360,7 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
         baseUrl,
         workflowId,
         "exit42",
-        SINGLE_TEST_TIMEOUT_MS
+        SINGLE_TEST_TIMEOUT_MS,
       );
 
       await logDone;
@@ -389,7 +383,7 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
       // Allocation reached COMPLETE
       const alloc = queryOne<Allocation>(
         "SELECT * FROM allocations WHERE run_id = ?",
-        [runId]
+        [runId],
       );
       expect(alloc).toBeDefined();
       expect(alloc!.status).toBe("COMPLETE");
@@ -404,7 +398,7 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
 
       console.log(`[exercise:exit42] PASSED`);
     },
-    SINGLE_TEST_TIMEOUT_MS
+    SINGLE_TEST_TIMEOUT_MS,
   );
 
   // ─── Test 2: Stderr output ───────────────────────────────────────────────
@@ -414,17 +408,17 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
     async () => {
       const { workflowId, runId } = await launchRun(
         baseUrl,
-        "echo out && echo err >&2"
+        "echo out && echo err >&2",
       );
       console.log(
-        `[exercise:stderr] Launched workflow=${workflowId} run=${runId}`
+        `[exercise:stderr] Launched workflow=${workflowId} run=${runId}`,
       );
 
       // Collect logs
       const { promise: logDone, messages } = collectLogs(
         server.port!,
         runId,
-        SINGLE_TEST_TIMEOUT_MS
+        SINGLE_TEST_TIMEOUT_MS,
       );
 
       // Poll until done
@@ -432,7 +426,7 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
         baseUrl,
         workflowId,
         "stderr",
-        SINGLE_TEST_TIMEOUT_MS
+        SINGLE_TEST_TIMEOUT_MS,
       );
 
       await logDone;
@@ -453,12 +447,12 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
 
       // Filter log messages (exclude status messages)
       const logMessages = messages.filter(
-        (m) => m.stream && m.data !== undefined
+        (m) => m.stream && m.data !== undefined,
       );
 
       console.log(
         `[exercise:stderr] Log messages: ${logMessages.length}`,
-        logMessages.map((m) => `[${m.stream}] ${m.data?.trim()}`)
+        logMessages.map((m) => `[${m.stream}] ${m.data?.trim()}`),
       );
 
       // Stdout contains "out"
@@ -474,7 +468,7 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
 
       console.log(`[exercise:stderr] PASSED`);
     },
-    SINGLE_TEST_TIMEOUT_MS
+    SINGLE_TEST_TIMEOUT_MS,
   );
 
   // ─── Test 3: Large stdout (500 lines) ────────────────────────────────────
@@ -484,14 +478,14 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
     async () => {
       const { workflowId, runId } = await launchRun(baseUrl, "seq 1 500");
       console.log(
-        `[exercise:large] Launched workflow=${workflowId} run=${runId}`
+        `[exercise:large] Launched workflow=${workflowId} run=${runId}`,
       );
 
       // Collect logs
       const { promise: logDone, messages } = collectLogs(
         server.port!,
         runId,
-        SINGLE_TEST_TIMEOUT_MS
+        SINGLE_TEST_TIMEOUT_MS,
       );
 
       // Poll until done
@@ -499,7 +493,7 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
         baseUrl,
         workflowId,
         "large",
-        SINGLE_TEST_TIMEOUT_MS
+        SINGLE_TEST_TIMEOUT_MS,
       );
 
       await logDone;
@@ -520,7 +514,7 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
 
       // Concatenate all stdout log chunks
       const logChunks = messages.filter(
-        (m) => m.stream && m.data !== undefined
+        (m) => m.stream && m.data !== undefined,
       );
       const allOutput = logChunks.map((m) => m.data ?? "").join("");
       const lines = allOutput
@@ -529,7 +523,7 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
         .filter((l) => l.length > 0);
 
       console.log(
-        `[exercise:large] Total log chunks: ${logChunks.length}, total lines: ${lines.length}`
+        `[exercise:large] Total log chunks: ${logChunks.length}, total lines: ${lines.length}`,
       );
 
       // Verify all 500 numbers are present
@@ -542,7 +536,7 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
       }
 
       console.log(
-        `[exercise:large] Unique numbers found: ${numbersFound.size}/500`
+        `[exercise:large] Unique numbers found: ${numbersFound.size}/500`,
       );
 
       // All 500 numbers must be present
@@ -555,7 +549,7 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
 
       console.log(`[exercise:large] PASSED`);
     },
-    SINGLE_TEST_TIMEOUT_MS
+    SINGLE_TEST_TIMEOUT_MS,
   );
 
   // ─── Test 4: Multi-line ordered output ───────────────────────────────────
@@ -565,17 +559,17 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
     async () => {
       const { workflowId, runId } = await launchRun(
         baseUrl,
-        "echo line1 && sleep 0.1 && echo line2 && sleep 0.1 && echo line3"
+        "echo line1 && sleep 0.1 && echo line2 && sleep 0.1 && echo line3",
       );
       console.log(
-        `[exercise:order] Launched workflow=${workflowId} run=${runId}`
+        `[exercise:order] Launched workflow=${workflowId} run=${runId}`,
       );
 
       // Collect logs
       const { promise: logDone, messages } = collectLogs(
         server.port!,
         runId,
-        SINGLE_TEST_TIMEOUT_MS
+        SINGLE_TEST_TIMEOUT_MS,
       );
 
       // Poll until done
@@ -583,7 +577,7 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
         baseUrl,
         workflowId,
         "order",
-        SINGLE_TEST_TIMEOUT_MS
+        SINGLE_TEST_TIMEOUT_MS,
       );
 
       await logDone;
@@ -604,12 +598,12 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
 
       // Concatenate all log data in order received
       const logChunks = messages.filter(
-        (m) => m.stream && m.data !== undefined
+        (m) => m.stream && m.data !== undefined,
       );
       const allOutput = logChunks.map((m) => m.data ?? "").join("");
 
       console.log(
-        `[exercise:order] Output: ${JSON.stringify(allOutput.trim())}`
+        `[exercise:order] Output: ${JSON.stringify(allOutput.trim())}`,
       );
 
       // All three lines must be present
@@ -628,6 +622,6 @@ describeOrSkip("OrbStack Exercise: punishing E2E scenarios", () => {
 
       console.log(`[exercise:order] PASSED`);
     },
-    SINGLE_TEST_TIMEOUT_MS
+    SINGLE_TEST_TIMEOUT_MS,
   );
 });

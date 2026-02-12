@@ -232,17 +232,22 @@ CREATE INDEX idx_manifests_expires ON manifests(expires_at)
     WHERE status = 'SEALED' AND expires_at IS NOT NULL;
 
 CREATE TABLE manifest_resources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     manifest_id INTEGER NOT NULL,
     resource_type TEXT NOT NULL,
     resource_id TEXT NOT NULL,
     cleanup_priority INTEGER,
     added_at INTEGER NOT NULL,
+    owner_type TEXT DEFAULT 'manifest',
+    owner_id INTEGER,
+    cleanup_processed_at INTEGER,
     FOREIGN KEY (manifest_id) REFERENCES manifests(id) ON DELETE CASCADE,
-    PRIMARY KEY (manifest_id, resource_type, resource_id)
+    UNIQUE (manifest_id, resource_type, resource_id)
 );
 
 CREATE INDEX idx_manifest_resources_lookup ON manifest_resources(resource_type, resource_id);
 CREATE INDEX idx_manifest_resources_priority ON manifest_resources(manifest_id, cleanup_priority);
+CREATE INDEX idx_manifest_resources_owner ON manifest_resources(owner_type, owner_id);
 
 -- =============================================================================
 -- Usage Tracking
@@ -360,11 +365,9 @@ CREATE INDEX idx_orphan_scans_provider ON orphan_scans(provider, scanned_at DESC
 
 CREATE TABLE manifest_cleanup_state (
     manifest_id INTEGER PRIMARY KEY,
-    status TEXT NOT NULL,
-    current_step TEXT,
-    progress_json TEXT,
+    last_completed_priority INTEGER NOT NULL DEFAULT 0,
+    last_completed_resource_id INTEGER NOT NULL DEFAULT 0,
     started_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    finished_at INTEGER,
     FOREIGN KEY (manifest_id) REFERENCES manifests(id)
 );

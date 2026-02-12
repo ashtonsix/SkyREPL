@@ -12,6 +12,7 @@ Complexity lives in the control plane, not the agent.
 
 from __future__ import annotations
 
+import collections
 import fcntl
 import json
 import os
@@ -21,20 +22,23 @@ import threading
 import time
 from typing import Optional
 
-from sse import run_command_loop, set_shutting_down as sse_set_shutting_down, configure as sse_configure
+from sse import run_command_loop, set_shutting_down as sse_set_shutting_down, configure as sse_configure, get_reconnect_count
 from heartbeat import (
     heartbeat_thread,
     set_shutting_down as hb_set_shutting_down,
     set_executor as hb_set_executor,
     configure as hb_configure,
+    get_last_ack_time,
 )
 from logs import (
     log_flusher_thread,
     flush_all_logs,
     set_shutting_down as logs_set_shutting_down,
     configure as logs_configure,
+    get_log_buffer_size,
 )
 from executor import RunExecutor, configure as executor_configure
+from http_client import http_post
 
 # =============================================================================
 # Env File (lowest priority — won't overwrite existing vars)
@@ -89,6 +93,7 @@ _shutting_down: bool = False
 _agent_start_time: float = 0.0
 _executor: Optional[RunExecutor] = None
 _shutdown_event = threading.Event()
+_error_log_buffer: collections.deque = collections.deque(maxlen=200)
 
 
 # =============================================================================
@@ -109,6 +114,118 @@ def _setup_signal_handlers() -> None:
 
 
 # =============================================================================
+# Panic Diagnostics
+# =============================================================================
+
+
+def _get_recent_error_logs(max_lines: int = 50) -> list:
+    """Return recent error/warning log entries for panic diagnostics."""
+    with threading.Lock():
+        recent_logs = list(_error_log_buffer)
+        return recent_logs[-max_lines:]
+
+
+def _get_system_diagnostics() -> dict:
+    """
+    Collect system diagnostics (best-effort, Linux-only).
+    Returns dict with cpu_percent, memory_percent, disk_percent.
+    All percentages are returned as floats.
+    """
+    diagnostics = {
+        "cpu_percent": 0.0,
+        "memory_percent": 0.0,
+        "disk_percent": 0.0,
+        "active_threads": threading.active_count(),
+        "log_buffer_size": 0,
+    }
+
+    try:
+        diagnostics["log_buffer_size"] = get_log_buffer_size()
+    except Exception:
+        pass
+
+    # Memory percent from /proc/meminfo
+    try:
+        with open("/proc/meminfo") as f:
+            lines = f.readlines()
+            mem_total = 0
+            mem_available = 0
+            for line in lines:
+                if line.startswith("MemTotal:"):
+                    mem_total = int(line.split()[1])
+                elif line.startswith("MemAvailable:"):
+                    mem_available = int(line.split()[1])
+            if mem_total > 0:
+                diagnostics["memory_percent"] = float(((mem_total - mem_available) / mem_total) * 100)
+    except Exception:
+        pass
+
+    # Disk percent from os.statvfs
+    try:
+        stat = os.statvfs("/")
+        total = stat.f_blocks * stat.f_frsize
+        free = stat.f_bfree * stat.f_frsize
+        if total > 0:
+            diagnostics["disk_percent"] = float(((total - free) / total) * 100)
+    except Exception:
+        pass
+
+    return diagnostics
+
+
+def _send_panic_diagnostics(reason: str) -> None:
+    """
+    Send panic diagnostics to control plane (best-effort, 2s timeout).
+    Called at shutdown start to capture agent state before termination.
+
+    MUST NOT block shutdown or raise exceptions.
+    """
+    if not INSTANCE_ID:
+        return
+
+    try:
+        # Determine workflow state
+        workflow_state = "idle"
+        run_id = None
+        allocation_id = None
+        if _executor:
+            if hasattr(_executor, "current_run_id") and _executor.current_run_id:
+                workflow_state = "running"
+                run_id = _executor.current_run_id
+            if hasattr(_executor, "current_allocation_id"):
+                allocation_id = _executor.current_allocation_id
+
+        # Collect diagnostics
+        diagnostics = _get_system_diagnostics()
+
+        # Build payload
+        payload = {
+            "instance_id": int(INSTANCE_ID),
+            "reason": reason,
+            "last_state": {
+                "workflow_state": workflow_state,
+                "run_id": run_id,
+                "allocation_id": allocation_id,
+                "uptime_seconds": float(time.time() - _agent_start_time),
+                "last_heartbeat_ack": float(get_last_ack_time()),
+                "sse_reconnect_count": get_reconnect_count(),
+            },
+            "diagnostics": diagnostics,
+            "error_logs": _get_recent_error_logs(max_lines=50),
+            "timestamp": int(time.time() * 1000),
+        }
+
+        # POST with 2s timeout (MUST NOT block shutdown)
+        resp = http_post(f"/v1/instances/{INSTANCE_ID}/panic", payload, timeout=2)
+        resp.read()
+        _log("INFO", f"Panic diagnostics sent: {reason}")
+
+    except Exception as e:
+        # Best-effort: log but never raise
+        _log("WARN", f"Failed to send panic diagnostics (non-blocking): {e}")
+
+
+# =============================================================================
 # Shutdown Sequence
 # =============================================================================
 
@@ -117,10 +234,12 @@ def _initiate_shutdown(reason: str = "unknown") -> None:
     """
     Ordered shutdown sequence:
     1. Set shutting_down flag (stops all threads)
-    2. Terminate running run (if any)
-    3. Flush remaining logs
-    4. Wait grace period
-    5. Exit
+    2. Signal all modules to stop
+    3. Send panic diagnostics (2s timeout, best-effort)
+    4. Terminate running run (if any)
+    5. Flush remaining logs
+    6. Wait grace period
+    7. Exit
     """
     global _shutting_down
 
@@ -136,20 +255,23 @@ def _initiate_shutdown(reason: str = "unknown") -> None:
     logs_set_shutting_down(True)
     _shutdown_event.set()
 
-    # Step 1: Terminate running run
+    # Step 1: Send panic diagnostics (2s timeout, best-effort)
+    _send_panic_diagnostics(reason)
+
+    # Step 2: Terminate running run
     if _executor:
         try:
             _executor.terminate_current_run()
         except Exception as e:
             _log("WARN", f"Run termination failed: {e}")
 
-    # Step 2: Flush remaining logs
+    # Step 3: Flush remaining logs
     try:
         flush_all_logs()
     except Exception as e:
         _log("WARN", f"Log flush failed: {e}")
 
-    # Step 3: Grace period
+    # Step 4: Grace period
     _log("INFO", f"Waiting {SHUTDOWN_GRACE_PERIOD_S}s grace period")
     time.sleep(SHUTDOWN_GRACE_PERIOD_S)
 
@@ -237,7 +359,12 @@ def main() -> int:
 def _log(level: str, message: str) -> None:
     """Internal logging (not sent to control plane)."""
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] [{level}] [agent] {message}")
+    log_line = f"[{timestamp}] [{level}] [agent] {message}"
+    print(log_line)
+
+    # Append ERROR/WARN to ring buffer for panic diagnostics
+    if level in ("ERROR", "WARN"):
+        _error_log_buffer.append(log_line)
 
 
 if __name__ == "__main__":

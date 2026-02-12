@@ -19,9 +19,7 @@ import {
   getWorkflowNodes,
   getRun,
 } from "../../control/src/material/db";
-import {
-  createWorkflowEngine,
-} from "../../control/src/workflow/engine";
+import { createWorkflowEngine } from "../../control/src/workflow/engine";
 import { clearProviderCache } from "../../control/src/provider/registry";
 import { registerLaunchRun } from "../../control/src/intent/launch-run";
 import { createServer } from "../../control/src/api/routes";
@@ -116,9 +114,7 @@ function getReachableUrl(port: number): string {
 
 const TEST_TIMEOUT_MS = 120_000;
 
-const describeOrSkip = hasOrbctl ? describe : describe.skip;
-
-describeOrSkip("OrbStack E2E: repl run 'echo hello'", () => {
+describe.skipIf(!hasOrbctl || !process.env.ORBSTACK_TESTS)("OrbStack E2E: repl run 'echo hello'", () => {
   let tmpDir: string;
   let server: Server<unknown>;
   let baseUrl: string;
@@ -158,7 +154,7 @@ describeOrSkip("OrbStack E2E: repl run 'echo hello'", () => {
     process.env.SKYREPL_CONTROL_PLANE_URL = controlPlaneUrl;
 
     console.log(
-      `[orbstack-e2e] Server on port ${server.port}, reachable at ${controlPlaneUrl}`
+      `[orbstack-e2e] Server on port ${server.port}, reachable at ${controlPlaneUrl}`,
     );
   });
 
@@ -238,7 +234,7 @@ describeOrSkip("OrbStack E2E: repl run 'echo hello'", () => {
       expect(runId).toBeGreaterThan(0);
 
       console.log(
-        `[orbstack-e2e] Launched workflow=${workflowId} run=${runId}`
+        `[orbstack-e2e] Launched workflow=${workflowId} run=${runId}`,
       );
 
       // Step 2: Collect logs via WebSocket
@@ -283,12 +279,12 @@ describeOrSkip("OrbStack E2E: repl run 'echo hello'", () => {
         const poll = async () => {
           try {
             const res = await fetch(
-              `${baseUrl}/v1/workflows/${workflowId}/status`
+              `${baseUrl}/v1/workflows/${workflowId}/status`,
             );
             const body = await res.json();
 
             console.log(
-              `[orbstack-e2e] Poll: status=${body.status} nodes=${body.nodes_completed}/${body.nodes_total}`
+              `[orbstack-e2e] Poll: status=${body.status} nodes=${body.nodes_completed}/${body.nodes_total}`,
             );
 
             if (terminalStates.has(body.status)) {
@@ -356,6 +352,6 @@ describeOrSkip("OrbStack E2E: repl run 'echo hello'", () => {
       expect(spawnOutput.instanceId).toBeGreaterThan(0);
       expect(spawnOutput.providerId).toMatch(/^repl-/);
     },
-    TEST_TIMEOUT_MS
+    TEST_TIMEOUT_MS,
   );
 });

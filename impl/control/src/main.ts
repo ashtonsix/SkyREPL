@@ -3,7 +3,7 @@
 import { createServer } from "./api/routes";
 import { registerAgentRoutes, createRealAgentBridge } from "./api/agent";
 import { registerWebSocketRoutes, registerSSEWorkflowStream } from "./api/sse-protocol";
-import { initDatabase, runMigrations, findStaleClaimed, findExpiredAvailable, getInstance, queryOne } from "./material/db";
+import { initDatabase, runMigrations, findStaleClaimed, findExpiredAvailable, getInstance, queryOne, queryMany, listExpiredManifests, findOrphanedBlobs, deleteBlobBatch, deleteObjectBatch } from "./material/db";
 import { createWorkflowEngine, recoverWorkflows, requestEngineShutdown, awaitEngineQuiescence } from "./workflow/engine";
 import { registerLaunchRun } from "./intent/launch-run";
 import { setAgentBridge } from "./workflow/nodes/start-run";
@@ -15,6 +15,8 @@ import { getProvider } from "./provider/registry";
 import { readFileSync, existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
+import { detectStaleHeartbeats } from "./resource/instance";
+import { holdExpiryTask } from "./resource/allocation";
 
 // =============================================================================
 // Module-level State
@@ -122,7 +124,7 @@ export function startHttpServer(port: number): void {
 // =============================================================================
 
 export function startBackgroundTasks(): void {
-  // heartbeatTimeoutCheck: the only one that matters for Slice 1 (still a stub)
+  // Heartbeat timeout: detect stale instances, fail their allocations
   const hbHandle = setInterval(() => {
     heartbeatTimeoutCheck().catch((err) =>
       console.error("[control] heartbeatTimeoutCheck error:", err)
@@ -145,26 +147,81 @@ export function startBackgroundTasks(): void {
   }, 60 * 60 * 1000);
   intervalHandles.push(idempotencyHandle);
 
-  // Remaining background tasks: not implemented for Slice 1
-  console.log("[control] Background task holdExpiryCheck: not implemented for Slice 1");
-  console.log("[control] Background task manifestCleanupCheck: not implemented for Slice 1");
-  console.log("[control] Background task orphanScanTask: not implemented for Slice 1");
-  console.log("[control] Background task storageGarbageCollection: not implemented for Slice 1");
+  // Hold expiry check
+  const holdHandle = setInterval(() => {
+    holdExpiryCheck().catch((err) =>
+      console.error("[control] holdExpiryCheck error:", err)
+    );
+  }, TIMING.HOLD_EXPIRY_CHECK_INTERVAL_MS);
+  intervalHandles.push(holdHandle);
+
+  // Manifest cleanup check
+  const manifestHandle = setInterval(() => {
+    manifestCleanupCheck().catch((err) =>
+      console.error("[control] manifestCleanupCheck error:", err)
+    );
+  }, TIMING.MANIFEST_CLEANUP_INTERVAL_MS);
+  intervalHandles.push(manifestHandle);
+
+  // Storage garbage collection
+  const gcHandle = setInterval(() => {
+    storageGarbageCollection().catch((err) =>
+      console.error("[control] storageGarbageCollection error:", err)
+    );
+  }, TIMING.BLOB_GC_INTERVAL_MS);
+  intervalHandles.push(gcHandle);
 
   console.log("[control] Background tasks started");
 }
 
 export async function heartbeatTimeoutCheck(): Promise<void> {
-  // Stub for Slice 1: no-op
-  console.debug("[control] heartbeatTimeoutCheck: no-op for Slice 1");
+  const now = Date.now();
+
+  // 1. Detect all degraded instances (> 2 minutes) — single query, partition locally
+  const degradedInstances = detectStaleHeartbeats(TIMING.HEARTBEAT_DEGRADED_MS);
+
+  for (const instance of degradedInstances) {
+    const elapsed = now - instance.last_heartbeat;
+    const isStale = elapsed >= TIMING.STALE_DETECTION_MS;
+
+    if (isStale) {
+      // Find and fail all ACTIVE allocations for this instance
+      const activeAllocations = queryMany<{ id: number }>(
+        "SELECT id FROM allocations WHERE instance_id = ? AND status = 'ACTIVE'",
+        [instance.id]
+      );
+
+      let failed = 0;
+      for (const alloc of activeAllocations) {
+        const result = failAllocation(alloc.id, "ACTIVE");
+        if (result.success) failed++;
+      }
+
+      if (activeAllocations.length > 0) {
+        console.log(
+          `[heartbeat] Instance ${instance.id} stale (last heartbeat ${elapsed}ms ago), failed ${failed}/${activeAllocations.length} active allocation(s)`
+        );
+      }
+    } else {
+      console.debug(
+        `[heartbeat] Instance ${instance.id} degraded (last heartbeat ${elapsed}ms ago)`
+      );
+    }
+  }
 }
 
 export async function holdExpiryCheck(): Promise<void> {
-  // Stub: no-op for Slice 1
+  await holdExpiryTask();
 }
 
 export async function manifestCleanupCheck(): Promise<void> {
-  // Stub: no-op for Slice 1
+  const now = Date.now();
+  const expiredManifests = listExpiredManifests(now);
+
+  for (const manifest of expiredManifests) {
+    console.log(`[manifest-cleanup] Manifest ${manifest.id} expired (sealed, past retention)`);
+    // TODO(#LIFE-09): Submit cleanup-manifest workflow for each expired manifest
+  }
 }
 
 export async function reconciliationTask(): Promise<void> {
@@ -222,12 +279,33 @@ export async function warmPoolReconciliation(): Promise<void> {
   }
 }
 
-export async function orphanScanTask(): Promise<void> {
-  // Stub: no-op for Slice 1
-}
-
 export async function storageGarbageCollection(): Promise<void> {
-  // Stub: no-op for Slice 1
+  const now = Date.now();
+
+  // Sub-task A: Blob GC - delete orphaned blobs unreferenced for 24h+
+  const graceCutoff = now - TIMING.BLOB_GRACE_PERIOD_MS;
+  const orphanedBlobs = findOrphanedBlobs(graceCutoff);
+
+  const batchSize = 500;
+
+  if (orphanedBlobs.length > 0) {
+    // Batch delete: take first 500 blobs (per spec batch size)
+    const blobBatch = orphanedBlobs.slice(0, batchSize).map(b => b.id);
+    deleteBlobBatch(blobBatch);
+    console.log(`[gc] Deleted ${blobBatch.length} orphaned blob(s)`);
+  }
+
+  // Sub-task B: Object expiry - delete objects with expires_at in the past
+  const expiredObjects = queryMany<{ id: number }>(
+    "SELECT id FROM objects WHERE expires_at IS NOT NULL AND expires_at < ? LIMIT ?",
+    [now, batchSize]
+  );
+
+  if (expiredObjects.length > 0) {
+    const objectIds = expiredObjects.map(o => o.id);
+    deleteObjectBatch(objectIds);
+    console.log(`[gc] Expired ${objectIds.length} object(s)`);
+  }
 }
 
 // =============================================================================

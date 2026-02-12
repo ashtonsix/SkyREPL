@@ -45,12 +45,12 @@ DEFERRED
   ---
   Acknowledged limitation. Track as future HA consideration.
 
-## #BL-08: Manifest cleanup should go through resource layer         [PENDING]
+## #BL-08: Manifest cleanup should go through resource layer         [RESOLVED → #LIFE-05]
   ---
   Manifest cleanup currently reaches through to objects directly
   (getManifestObjectIds, deleteObjectBatch). Proper layering:
   manifests clean up resources, resources clean up their own objects.
-  Likely folds into #LIFE-05 (garbage collection) when triaged.
+  Resolved: storage GC now routes through resource layer.
 
 ## #BL-09: Workflow field name drift (error_json, manifest_id)       [RESOLVED → #FND-07]
   ---
@@ -65,12 +65,13 @@ DEFERRED
   and idempotency check. Currently absent from db.ts — callers must
   use raw SQL. Likely folds into #LIFE-12 (manifest resource layer).
 
-## #BL-11: Missing allocation atomic transition helpers in db layer    [PENDING]
+## #BL-11: Missing allocation atomic transition helpers in db layer    [RESOLVED → #LIFE-01]
   ---
   impl-pseudo defines updateAllocationStatus() (updated_at bump + re-read)
   and claimAllocation() (two-phase atomic transition concurrency pattern). Both absent
   from db.ts. Risk of ad-hoc race protection without centralised atomic transitions.
-  Likely folds into #LIFE-01 (allocation lifecycle).
+  Resolved: resource/allocation.ts provides validateAllocationTransition,
+  claimWarmPoolAllocation (with retry), and all state machine transitions.
 
 ## #BL-12: manifest_resources missing owner_type/owner_id columns    [PENDING]
   ---
@@ -80,12 +81,12 @@ DEFERRED
   (ownerType/ownerId) but they can't be populated from DB.
   Likely folds into #LIFE-12 (manifest resource layer).
 
-## #BL-13: manifest_resources missing cleanup_processed_at field     [PENDING]
+## #BL-13: manifest_resources missing cleanup_processed_at field     [RESOLVED → #LIFE-05]
   ---
   impl-pseudo B21 defines cleanup_processed_at to prevent double-processing
   of blob reference decrements during manifest cleanup. Absent from both
   SQL schema and TypeScript types. Could cause ref count underflow.
-  Likely folds into #LIFE-05 (garbage collection).
+  Resolved: cleanup_processed_at added to manifest_resources in DDL (#LIFE-06).
 
 ## #BL-14: Flaky E2E simulated test — shutdown race                    [RESOLVED → #FND-10]
   ---
@@ -94,14 +95,14 @@ DEFERRED
   Engine loop continues after closeDatabase() during shutdown. Passes in isolation.
   Triaged to #FND-10 (graceful engine shutdown before DB close).
 
-## #BL-15: Agent panic payload sends instance_id, control plane omits it [PENDING]
+## #BL-15: Agent panic payload sends instance_id, control plane omits it [RESOLVED → #AGENT-01]
   ---
   Agent heartbeat.py sends instance_id in HeartbeatPanicStart/Complete payloads
   (lines 266, 289) but control plane HeartbeatPanicStartRequest /
   HeartbeatPanicCompleteRequest types in api/agent.ts omit the field.
   Silently ignored by Elysia. Means control plane can't use instance_id for
   auth during panic — falls back to run_id lookup which fails if agent is idle.
-  Likely folds into #AGENT-01 (panic handler).
+  Resolved: dedicated POST /v1/instances/:id/panic route with instance-level auth.
 
 ## #BL-16: Idempotency requests should include request timestamp       [PENDING]
   ---

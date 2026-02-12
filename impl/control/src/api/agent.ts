@@ -21,6 +21,7 @@ import { stateEvents, STATE_EVENT } from "../workflow/state-events";
 import { sseManager } from "./sse-protocol";
 import type { AgentBridge } from "../workflow/nodes/start-run";
 import type { StartRunMessage } from "@skyrepl/shared";
+import { TIMING } from "@skyrepl/shared";
 import { extractToken, verifyInstanceToken } from "./middleware/auth";
 import { getControlPlaneId } from "../config";
 
@@ -44,6 +45,8 @@ export interface AgentHeartbeatRequest {
     allocation_id: number;
     has_ssh_sessions: boolean;
   }>;
+  pending_command_acks?: number[];
+  dropped_logs_count?: number;
 }
 
 export interface AgentLogsRequest {
@@ -165,6 +168,15 @@ export function registerAgentRoutes(app: Elysia<any>): void {
       Date.now(),
       hb.instance_id,
     ]);
+
+    // Process command acknowledgments from agent
+    const pendingAcks = hb.pending_command_acks;
+    if (pendingAcks && pendingAcks.length > 0) {
+      sseManager.processCommandAcks(String(hb.instance_id), pendingAcks);
+    }
+
+    // Retry unacknowledged commands (30s timeout, max 3 retries)
+    sseManager.retryUnackedCommands(String(hb.instance_id), TIMING.COMMAND_ACK_TIMEOUT_MS);
 
     // Send heartbeat_ack via SSE (if SSE connection exists)
     const hasPendingCommands = sseManager.hasPendingCommands(

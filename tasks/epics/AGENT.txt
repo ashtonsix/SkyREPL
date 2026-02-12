@@ -15,11 +15,11 @@ Pseudo subsumed:
 TASK INDEX
 ================================================================================
 
-  #AGENT-01  Panic diagnostics on shutdown                        [PENDING]
-  #AGENT-02  Command ack protocol                                 [PENDING]
+  #AGENT-01  Panic diagnostics on shutdown                        [DONE]
+  #AGENT-02  Command ack protocol                                 [DONE]
   #AGENT-03  SSE backpressure on slow consumers                   [PENDING]
   #AGENT-04  Degraded mode                                        [PENDING]
-  #AGENT-05  Workdir cleanup between warm pool reuse              [PENDING]
+  #AGENT-05  Workdir cleanup between warm pool reuse              [DONE]
   #AGENT-06  Spot interruption handling                           [PENDING]
   #AGENT-07  Artifact collection                                  [PENDING]
   #AGENT-08  Checkpoint support                                   [PENDING]
@@ -28,7 +28,7 @@ TASK INDEX
 TASK DETAIL
 ================================================================================
 
-## #AGENT-01: Panic diagnostics on shutdown                        [Sm] [PENDING]
+## #AGENT-01: Panic diagnostics on shutdown                        [Sm] [DONE]
   Carries: SD-12
   Depends: #FND-04
   Spec: Ch11 §11.14
@@ -37,11 +37,11 @@ TASK DETAIL
   /v1/panic on agent shutdown. Fires in panic state before self-termination.
 
   Deliverables:
-  - [ ] Collect diagnostic payload (uptime, last command, memory, disk)
-  - [ ] POST to /v1/panic endpoint
-  - [ ] Best-effort: catch all exceptions, do not block shutdown
+  - [x] Collect diagnostic payload (uptime, last command, memory, disk)
+  - [x] POST to /v1/panic endpoint
+  - [x] Best-effort: catch all exceptions, do not block shutdown
 
-## #AGENT-02: Command ack protocol                                 [Md] [PENDING]
+## #AGENT-02: Command ack protocol                                 [Md] [DONE]
   Spec: Ch11 §11.4.5
   Depends: #FND-01
   ---
@@ -49,9 +49,9 @@ TASK DETAIL
   receiving each SSE command. Control plane tracks unacked commands.
 
   Deliverables:
-  - [ ] Ack message type in agent SSE protocol
-  - [ ] Agent sends ack after command dispatch
-  - [ ] Control plane tracks pending acks with timeout
+  - [x] Ack message type in agent SSE protocol
+  - [x] Agent sends ack after command dispatch
+  - [x] Control plane tracks pending acks with timeout
 
 ## #AGENT-03: SSE backpressure on slow consumers                   [Sm] [PENDING]
   Carries: EX3
@@ -78,15 +78,15 @@ TASK DETAIL
   - [ ] Automatic recovery to healthy when control plane returns
   - [ ] Configurable degradation thresholds
 
-## #AGENT-05: Workdir cleanup between warm pool reuse              [Sm] [PENDING]
+## #AGENT-05: Workdir cleanup between warm pool reuse              [Sm] [DONE]
   Spec: Ch11 §11.10
   ---
   Clean /tmp/repl-workdir between runs when instance is reused from
   warm pool. Preserve agent state, clean run artifacts.
 
   Deliverables:
-  - [ ] Workdir cleanup on new run start
-  - [ ] Preserve agent-level state files
+  - [x] Workdir cleanup on new run start
+  - [x] Preserve agent-level state files
 
 ## #AGENT-06: Spot interruption handling                           [Lg] [PENDING]
   Spec: Ch11 §11.9

@@ -451,10 +451,18 @@ export async function executeNode(
       // No retry - fail the node
       failNode(node.id, JSON.stringify(nodeError));
 
-      // NOT YET IMPLEMENTED — deferred to future slice
-      // Note: compensation is deferred (compensateFailedNode not yet available)
-      // When compensation.ts is implemented, call compensateFailedNode here
-      // if executor.compensate is defined
+      // Compensate the failed node if handler exists
+      if (executor?.compensate) {
+        const { compensateFailedNode } = await import("./compensation");
+        const result = await compensateFailedNode(workflowId, node.node_id);
+        if (!result.success) {
+          console.warn("[workflow] Compensation failed for node", {
+            workflowId,
+            nodeId: node.node_id,
+            error: result.error?.message,
+          });
+        }
+      }
     }
   }
 }
@@ -751,10 +759,7 @@ export async function handleRetry(
       break;
 
     case "alternative":
-      // Compensate failed node, then apply retry-with-alternative pattern
-      // NOT YET IMPLEMENTED — deferred to future slice
-      // Note: compensateFailedNode deferred until compensation.ts is implemented
-      // For now, fail the node and attempt RWA pattern
+      // Compensate failed node before trying alternative
       failNode(
         node.id,
         JSON.stringify({
@@ -763,6 +768,10 @@ export async function handleRetry(
           retried_with: "alternative",
         })
       );
+      {
+        const { compensateFailedNode } = await import("./compensation");
+        await compensateFailedNode(workflowId, node.node_id);
+      }
       {
         const alternativeRegions = error.details?.alternative_regions as
           | string[]
@@ -847,6 +856,17 @@ async function handleWorkflowFailure(
   workflowId: number,
   nodes: WorkflowNode[]
 ): Promise<void> {
+  // Run reverse-order compensation on completed nodes
+  try {
+    const { compensateWorkflow } = await import("./compensation");
+    await compensateWorkflow(workflowId);
+  } catch (err) {
+    console.warn("[workflow] Compensation rollback failed", {
+      workflowId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   // Find the first failed node for error context
   const failedNode = nodes.find((n) => n.status === "failed");
   const errorJson = failedNode?.error_json ?? JSON.stringify({

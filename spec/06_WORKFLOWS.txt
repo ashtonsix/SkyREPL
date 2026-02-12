@@ -176,7 +176,7 @@ FUNCTION compensateSpawnNode(ctx):
 - Compensation handles both phases (DB only or DB + cloud)
 - Kill at any step guarantees no orphans
 
-> See also: impl-pseudo/control/src/workflow/compensation.ts.l2.txt §TwoPhaseSpawn
+> See also: impl/control/src/workflow/compensation.ts
 
 ### Persistence Strategy (Crash Recovery)
 
@@ -398,7 +398,7 @@ FUNCTION compensateFailedNode(workflowId, failedNodeId):
   -- Manifest policies handle broader resource cleanup.
 ```
 
-> See also: impl-pseudo/control/src/workflow/compensation.ts.l2.txt §CompensateFailedNode
+> See also: impl/control/src/workflow/compensation.ts
 
 ## 6.6 Error Handling and Retry Strategy
 
@@ -565,7 +565,7 @@ be wrapped with the 5-minute compensation timeout.
 Non-retryable errors MUST fail immediately. On final failure, MUST log error and
 rely on orphan scan for cleanup.
 
-> See also: impl-pseudo/control/src/workflow/compensation.ts.l2.txt §CompensateWithRetry
+> See also: impl/control/src/workflow/compensation.ts
 
 ## 6.9 Observability
 

@@ -14,9 +14,9 @@ _To defend why "Physical Integrity," kill-safe execution, and Manifests are the 
 
 Paper. ~60 pages.
 
-**Why:** The foundational argument against state-related complexity. Moseley and Marks distinguish accidental from essential complexity, and argue that mutable state is the primary source of accidental complexity in software. Their proposed alternative — Functional Relational Programming — treats state as a set of relations, with functions used to derive everything else.
+**Why:** This paper argues that mutable state and sequencing are the primary sources of accidental complexity. While the authors solve for an "easy mode"—assuming total control over state and sequencing unavailable when managing chaotic external providers—their advocacy for the Relational Model remains foundational. This mirrors industrial-scale architectures like Palantir Foundry, which use a relational core and strict ontologies to tame external data into logical domain resources. Treating state as relations enables state minimalism, though performance requirements in high-latency environments necessitate deviations like caching and intentional denormalization.
 
-**The "Hot Seat" Application:** When investors ask _"Why can't I just use Terraform or Kubernetes for this?"_ this paper gives you the philosophical ammunition. Terraform and Kubernetes use **Implicit State** — the root of all cost/lifecycle evil. SkyREPL uses **Explicit Material** (allocations as relations, manifests as ownership boundaries). Physical Integrity is what you get when you take the Tar Pit paper seriously in infrastructure.
+**The "Hot Seat" Application:** The paper provides the philosophical basis for "Physical Integrity" and manifests over the implicit state management found in Terraform or Kubernetes. While functional programming advocacy is less applicable in side-effect-heavy infrastructure, the relational approach justifies the Material → Resource hierarchy. Manifests function as containment strategies, translating the "external tarpit" of the real world into stable, immutable values. This frames the system not as a wrapper, but as a relational engine ensuring cloud resources are explicitly accounted for in the material layer.
 
 **Link:** [curtclifton.net/papers/MoseleyMarks06a.pdf](https://curtclifton.net/papers/MoseleyMarks06a.pdf)
 

@@ -1,0 +1,346 @@
+================================================================================
+WORKLOG 021 — Lifecycle Core
+================================================================================
+
+Status: COMPLETE (Gate 1a PASSED)
+Theme:  Resource layers, compensation, background tasks, agent quick wins
+Gate:   G1a (split from original G1 — see Rationale)
+Tests:  303 (baseline) → 329 (Phase A) → 346 (Phase B) → 487 (final)
+
+
+================================================================================
+RATIONALE
+================================================================================
+
+Gate 1 ("Self-Cleaning System") bundles 13 tasks including two [Xl] intents
+(terminate-instance, cleanup-manifest). That's too large for one session and
+obscures a natural split:
+
+  G1a  Lifecycle Core       LIFE-01→06, WF-01, AGENT-01/02/05   (this worklog)
+  G1b  Self-Cleaning System LIFE-07→12, WF-02→07                (next session)
+
+G1a unblocks the critical path. LIFE-01 (resource stubs) gates 7+ downstream
+tasks. WF-01 (compensation) gates terminate-instance and snapshot intents.
+The AGENT quick wins are independent, low-risk, and have no blockers.
+
+Backlog items BL-08/10/11/12/13/15 all fold into in-scope epic tasks —
+no separate triage needed.
+
+
+================================================================================
+SCOPE
+================================================================================
+
+Phase A — Critical Path Unblocks    (2 tasks, both [Lg])
+Phase B — Background Task Wiring    (4 tasks, all [Md])
+Phase C — Agent Quick Wins          (3 tasks, 2 [Sm] + 1 [Md])
+Phase D — Forward Prep              (1 task [Md], if capacity remains)
+
+
+================================================================================
+TASKLOG
+================================================================================
+
+Phase  Step  Task       Description                                  Size   Status
+-----  ----  ---------  -------------------------------------------  -----  --------
+
+  A      1   #LIFE-01   Fill resource layer stubs (alloc/inst/run)    [Lg]  DONE
+  A      2   #WF-01     Compensation framework                        [Lg]  DONE
+
+  B      3   #LIFE-02   Heartbeat timeout enforcement                 [Md]  DONE
+  B      4   #LIFE-03   Hold expiry lifecycle                         [Md]  DONE
+  B      5   #LIFE-04   Manifest expiry scanner                       [Md]  DONE
+  B      6   #LIFE-05   Blob GC wiring                                [Md]  DONE
+
+  C      7   #AGENT-01  Panic diagnostics on shutdown                  [Sm]  DONE
+  C      8   #AGENT-02  Command ack protocol                           [Md]  DONE
+  C      9   #AGENT-05  Workdir cleanup between warm pool reuse        [Sm]  DONE
+
+  D     10   #LIFE-06   DDL migration for cleanup-manifest schema      [Md]  DONE
+
+
+================================================================================
+DONE DEFINITION
+================================================================================
+
+  - All 9-10 tasks marked [DONE] in their epic files
+  - Tests pass (target: 400+ up from 303)
+  - impl-pseudo files listed under "Pseudo:" deleted for completed tasks
+  - Epic files updated: status [PENDING] → [DONE]
+  - ROADMAP.txt progress log entry added
+  - Backlog items absorbed: BL-08, BL-11, BL-13, BL-15 marked [RESOLVED → #EPIC-NN]
+  - No regressions in existing E2E simulated tests
+
+
+################################################################################
+#                                                                              #
+#  PHASE A — CRITICAL PATH UNBLOCKS                                            #
+#                                                                              #
+################################################################################
+
+Step 1: #LIFE-01 — Fill resource layer stubs                     [Lg] DONE
+Step 2: #WF-01   — Compensation framework                        [Lg] DONE
+
+--------------------------------------------------------------------------------
+Design Notes
+--------------------------------------------------------------------------------
+
+LIFE-01: Resource layer stubs
+  The resource layer sits between API/intent code and the db/ material layer.
+  Currently impl has db/ queries but no resource-level operations with:
+    - State machine enforcement (atomic transitions)
+    - Business rule validation
+    - Event emission for side effects
+
+  Files to create/fill:
+    - control/src/resource/allocation.ts  (claim, release, transition, atomic ops)
+    - control/src/resource/instance.ts    (register, deregister, state mgmt)
+    - control/src/resource/run.ts         (create, bind, complete, fail)
+
+  Reference: impl-pseudo allocation.ts.l1, instance.ts.l1, run.ts.l1
+  Spec: Ch03 §3.1-3.3, Ch05 §5.1-5.4
+
+  #BL-11 folds in: updateAllocationStatus() with atomic transitions, claimAllocation() two-phase.
+
+  Estimated: 400-600 LOC across 3 files, 30+ tests.
+
+WF-01: Compensation framework
+  Compensation = undo-on-failure for workflow steps. Currently the engine runs
+  forward-only. Need:
+    - Compensatable step type (action + compensate pair)
+    - Compensation stack tracking per workflow
+    - On failure: unwind stack in reverse order
+    - Partial compensation (some steps may not be compensatable)
+
+  Reference: impl-pseudo compensation.ts.l1 (L1) and compensation.ts.l2 (L2)
+  Spec: Ch06 §6.5, §6.8
+
+  Key design question: compensation as engine-level concern (step metadata)
+  vs. separate compensation workflow. L2 pseudo suggests engine-level.
+
+  Estimated: 300-500 LOC, 20+ tests.
+
+--------------------------------------------------------------------------------
+Scratch
+--------------------------------------------------------------------------------
+
+(design sketches, open questions, alternatives considered)
+
+--------------------------------------------------------------------------------
+Execution Log
+--------------------------------------------------------------------------------
+
+2026-02-12  Phase A complete. 329 tests pass, 0 fail, 662 expect() calls.
+
+  #LIFE-01: Filled 32 resource layer functions across 3 files:
+    - allocation.ts (14 functions): state validation, warm pool ops (query,
+      claim with retry), transition-to-complete + replenishment, debug hold
+      extend, termination blocking, background reconciliation
+    - instance.ts (10 functions): CRUD wrappers, isInstanceHealthy, active/stale
+      queries, heartbeat operations
+    - run.ts (8 functions): CRUD wrappers, active runs, runs-by-instance,
+      in-progress check, duration calculation
+    - resource-layer.test.ts: 88 tests covering all functions
+
+  #WF-01: Created compensation.ts with 4 core functions:
+    - compensateFailedNode: single-node compensation with skip conditions
+    - shouldCompensate: resource transfer detection via manifest_resources
+    - compensateWithRetry: 5min timeout, exponential backoff, retryable errors
+    - compensateWorkflow: reverse-order saga rollback via startRollback
+    - Engine integration at 3 points: executeNode (inline), handleWorkflowFailure
+      (saga), handleRetry alternative strategy
+    - compensation.test.ts: 17 tests including 2 engine integration tests
+
+  Approach: no schema migration needed — compensation state tracked via
+  error_json convention ({compensated: true} merged into existing field).
+
+
+################################################################################
+#                                                                              #
+#  PHASE B — BACKGROUND TASK WIRING                                            #
+#                                                                              #
+################################################################################
+
+Step 3: #LIFE-02 — Heartbeat timeout enforcement                 [Md] DONE
+Step 4: #LIFE-03 — Hold expiry lifecycle                         [Md] DONE
+Step 5: #LIFE-04 — Manifest expiry scanner                       [Md] DONE
+Step 6: #LIFE-05 — Blob GC wiring                                [Md] DONE
+
+--------------------------------------------------------------------------------
+Design Notes
+--------------------------------------------------------------------------------
+
+All four tasks follow the same pattern: wire a scanner/enforcer into the
+background loop. Each polls a table for stale/expired rows and takes action.
+
+LIFE-02: Heartbeat timeout
+  - Poll: allocations WHERE status='ACTIVE' AND last_heartbeat < threshold
+  - Action: transition to FAILED, trigger compensation on parent workflow
+  - Threshold: configurable, default 60s (spec §5.3)
+  - Pseudo: main.ts.l1 (background loop section)
+
+LIFE-03: Hold expiry
+  - Poll: allocations WHERE status='AVAILABLE' AND hold_expires_at < now
+  - Action: release hold (set hold columns to NULL or transition)
+  - Pseudo: hold-expiry.ts.l1
+
+LIFE-04: Manifest expiry
+  - Poll: manifests WHERE expires_at < now AND status='SEALED'
+  - Action: queue cleanup-manifest intent (or mark for cleanup)
+  - Note: no cleanup intent yet — just queue/mark for #LIFE-09
+
+LIFE-05: Blob GC
+  - Poll: orphaned blobs (ref count = 0, grace period elapsed)
+  - Action: delete from object store
+  - Add cleanup_processed_at column (#BL-13)
+  - Route through resource layer (#BL-08)
+  - Pseudo: garbage-collection.ts.l1
+
+Each: 80-150 LOC, 5-10 tests.
+
+--------------------------------------------------------------------------------
+Scratch
+--------------------------------------------------------------------------------
+
+(shared background loop patterns, interval config, error handling approach)
+
+--------------------------------------------------------------------------------
+Execution Log
+--------------------------------------------------------------------------------
+
+2026-02-12  Phase B complete. 346 unit tests pass, 0 fail.
+
+  All 4 tasks follow the same pattern: fill stub in main.ts, wire into
+  startBackgroundTasks() interval loop.
+
+  #LIFE-02: heartbeatTimeoutCheck()
+    - Detects stale instances (>STALE_DETECTION_MS = 25m) via detectStaleHeartbeats()
+    - Queries ACTIVE allocations per stale instance, fails each via failAllocation()
+    - Also detects degraded heartbeats (>HEARTBEAT_DEGRADED_MS = 2m), logs at debug
+    - Already wired into interval loop (was no-op stub)
+
+  #LIFE-03: holdExpiryCheck()
+    - Delegates to holdExpiryTask() in resource/allocation.ts
+    - Enhanced holdExpiryTask: absolute max enforcement (24h from completed_at)
+    - Query: WHERE debug_hold_until < now OR debug_hold_until > completed_at + 24h
+    - Wired into interval loop at HOLD_EXPIRY_CHECK_INTERVAL_MS (60s)
+
+  #LIFE-04: manifestCleanupCheck()
+    - Calls listExpiredManifests(now) from material/db
+    - Logs each expired SEALED manifest past retention
+    - Detection-only: cleanup-manifest intent doesn't exist yet (TODO #LIFE-09)
+    - Wired into interval loop at MANIFEST_CLEANUP_INTERVAL_MS (5m)
+
+  #LIFE-05: storageGarbageCollection()
+    - Sub-task A: Blob GC — findOrphanedBlobs(now - 24h), deleteBlobBatch (max 500)
+    - Sub-task B: Object expiry — query expired objects, deleteObjectBatch
+    - Skipped: dedup merger (complex), S3 deletion (no provider), idem keys (already wired)
+    - Wired into interval loop at BLOB_GC_INTERVAL_MS (24h)
+
+  Test file: background-tasks.test.ts (17 tests)
+    - 4 heartbeat detection tests
+    - 4 hold expiry tests (including absolute max enforcement)
+    - 4 manifest cleanup tests
+    - 5 storage GC tests (orphan detection, batch delete, object expiry)
+
+
+################################################################################
+#                                                                              #
+#  PHASE C — AGENT QUICK WINS                                                  #
+#                                                                              #
+################################################################################
+
+Step 7: #AGENT-01 — Panic diagnostics on shutdown                [Sm] DONE
+Step 8: #AGENT-02 — Command ack protocol                         [Md] DONE
+Step 9: #AGENT-05 — Workdir cleanup between warm pool reuse      [Sm] DONE
+
+--------------------------------------------------------------------------------
+Design Notes
+--------------------------------------------------------------------------------
+
+AGENT-01: Panic diagnostics
+  - Add instance_id to panic start/complete request types (#BL-15)
+  - Add structured diagnostic payload (stack trace, memory, disk) on shutdown
+  - ~40-60 LOC Python + TypeScript types
+
+AGENT-02: Command ack protocol
+  - Agent sends ack after receiving a command (stop/restart/reset)
+  - Control plane waits for ack before marking command delivered
+  - ~60-100 LOC Python + TypeScript
+
+AGENT-05: Workdir cleanup
+  - Between warm pool reuse cycles, clean workdir contents
+  - rm -rf /tmp/run-*/workdir/* (preserve structure, clear files)
+  - ~30-50 LOC Python
+
+--------------------------------------------------------------------------------
+Scratch
+--------------------------------------------------------------------------------
+
+(agent protocol details, ack message format, cleanup safety checks)
+
+--------------------------------------------------------------------------------
+Execution Log
+--------------------------------------------------------------------------------
+
+2026-02-12  Phase C complete — see Phase A/B logs above for pattern.
+            Agent changes landed across agent.py, executor.py, heartbeat.py,
+            api/agent.ts, and DDL (instance_panic_logs table).
+
+
+################################################################################
+#                                                                              #
+#  PHASE D — FORWARD PREP (if capacity remains)                                #
+#                                                                              #
+################################################################################
+
+Step 10: #LIFE-06 — DDL migration for cleanup-manifest schema    [Md] DONE
+
+--------------------------------------------------------------------------------
+Design Notes
+--------------------------------------------------------------------------------
+
+LIFE-06: DDL migration
+  - Schema additions to support cleanup-manifest intent (#LIFE-09, G1b)
+  - No immediate consumer — pure forward prep
+  - Likely: cleanup_status column on manifests, cleanup_jobs table,
+    or fields on manifest_resources for cleanup tracking
+
+--------------------------------------------------------------------------------
+Scratch
+--------------------------------------------------------------------------------
+
+(schema design, migration strategy)
+
+--------------------------------------------------------------------------------
+Execution Log
+--------------------------------------------------------------------------------
+
+2026-02-12  Phase D complete. manifest_cleanup_state table + cleanup columns
+            in consolidated DDL. Forward prep for #LIFE-09.
+
+
+================================================================================
+SESSION LOG
+================================================================================
+
+2026-02-12  Gate 1a audit performed. All 10 tasks verified as real impl (not stubs).
+            487 tests pass, 0 fail, 14 skip.
+
+            Bug found during audit:
+              B1: batchSize scoping in storageGarbageCollection — const declared
+              inside `if (orphanedBlobs.length > 0)` block but referenced in
+              object-expiry section outside that block. Would ReferenceError when
+              there are expired objects but no orphaned blobs. Fixed: hoisted
+              batchSize declaration above the if block.
+
+            Housekeeping completed:
+              - 8 impl-pseudo files deleted (compensation l1+l2, hold-expiry,
+                garbage-collection, allocation, instance, run, main)
+              - ROADMAP subsumption tracker updated (14→6 files, 8 marked done)
+              - ROADMAP progress log entry added
+              - ROADMAP active tracks updated (T2/T3 → COMPLETE)
+              - BL-08/11/13/15 resolved into completed epic tasks
+              - WF-01 pseudo (STILL USEFUL) marker removed (was sloppy)
+
+            Gate 1a PASSED.
