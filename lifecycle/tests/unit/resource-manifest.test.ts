@@ -239,7 +239,7 @@ describe("manifest: claimResourceAtomic", () => {
     expect(targetResources.length).toBe(1);
     expect(targetResources[0].resource_type).toBe("instance");
     expect(targetResources[0].resource_id).toBe(String(instance.id));
-    expect(targetResources[0].owner_type).toBe("claimed");
+    expect(targetResources[0].owner_type).toBe("workflow");
     expect(targetResources[0].owner_id).toBe(targetManifest.id);
 
     // Verify resource is removed from source manifest
@@ -530,7 +530,7 @@ describe("manifest: parentClaimSubworkflowResource", () => {
     // Verify resource moved to parent
     const parentResources = getManifestResources(parentManifest.id);
     expect(parentResources.length).toBe(1);
-    expect(parentResources[0].owner_type).toBe("claimed");
+    expect(parentResources[0].owner_type).toBe("workflow");
   });
 
   test("fails if child manifest not sealed", () => {

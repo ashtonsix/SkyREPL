@@ -222,7 +222,7 @@ deleted (cleanup workflow completes). EXPIRED is derived, never stored.
 | resource_id      | TEXT    | Resource identifier                           |
 | cleanup_priority | INTEGER | null = use manifest default                   |
 | added_at         | INTEGER | Unix timestamp ms                             |
-| owner_type       | TEXT    | 'manifest', 'workflow', or 'policy'           |
+| owner_type       | TEXT    | 'manifest', 'released', 'workflow', or 'policy' |
 | owner_id         | INTEGER | workflow_id or null                           |
 
 PRIMARY KEY: (manifest_id, resource_type, resource_id). When claimed by another

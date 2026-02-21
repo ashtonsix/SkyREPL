@@ -62,7 +62,7 @@ export function sealManifestWithPolicy(
 /**
  * Atomically transfer a resource from a SEALED manifest to a DRAFT manifest.
  * Removes the resource from its current manifest and adds it to the new one
- * with owner_type='claimed'. Both operations happen in a single transaction.
+ * with owner_type='workflow'. Both operations happen in a single transaction.
  */
 export function claimResourceAtomic(
   newManifestId: number,
@@ -91,7 +91,7 @@ export function claimResourceAtomic(
 
     execute(
       `INSERT INTO manifest_resources (manifest_id, resource_type, resource_id, cleanup_priority, added_at, owner_type, owner_id)
-       VALUES (?, ?, ?, ?, ?, 'claimed', ?)`,
+       VALUES (?, ?, ?, ?, ?, 'workflow', ?)`,
       [
         newManifestId,
         resourceType,
@@ -182,7 +182,7 @@ export function claimWarmInstance(
 
 /**
  * Parent claims a resource from a child subworkflow's SEALED manifest.
- * Finds unclaimed resources (owner_type='manifest') in the child's manifest
+ * Finds released resources (owner_type='released') in the child's manifest
  * and transfers them to the parent's manifest.
  */
 export function parentClaimSubworkflowResource(
@@ -203,7 +203,6 @@ export function parentClaimSubworkflowResource(
       return { success: false };
 
     // Find a released resource of the requested type in the child manifest.
-    // After sealing, resources have owner_type='released' (Step 9 fix).
     const resource = queryOne<ManifestResource>(
       `SELECT * FROM manifest_resources
        WHERE manifest_id = ? AND resource_type = ? AND owner_type = 'released'
@@ -232,7 +231,7 @@ export function parentClaimSubworkflowResource(
  * Check whether a manifest has expired based on its expires_at timestamp.
  * Only SEALED manifests with a non-null expires_at can be expired.
  * Per §4.1: manifest is NOT expired if it still has unclaimed resources
- * (owner_type='manifest'). Resources with owner_type='workflow' or 'claimed'
+ * (owner_type='manifest'). Resources with owner_type='workflow'
  * have been transferred and don't block expiry.
  */
 export function isManifestExpired(manifestId: number): boolean {

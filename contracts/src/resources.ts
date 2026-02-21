@@ -247,7 +247,7 @@ export interface ManifestResource {
   resourceId: string;
   cleanupPriority: number | null;
   addedAt: TimestampMs;
-  ownerType: 'manifest' | 'workflow' | 'policy'; // Who added this resource
+  ownerType: 'manifest' | 'released' | 'workflow' | 'policy';
   ownerId: number | null; // ID of owner (workflow_id, policy_id, etc)
 }
 

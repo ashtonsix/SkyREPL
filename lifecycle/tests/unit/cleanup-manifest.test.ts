@@ -144,7 +144,7 @@ function createDummyWorkflow(): Workflow {
 
 function createSealedManifestWithResources(options?: {
   expiresAt?: number;
-  /** If true, resources are added with owner_type='workflow' (claimed), not 'manifest' (unclaimed).
+  /** If true, resources are added with owner_type='workflow', not 'manifest' (unclaimed).
    *  This matters for listExpiredManifests which now excludes manifests with unclaimed resources. */
   claimedResources?: boolean;
 }) {
