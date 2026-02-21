@@ -1,0 +1,555 @@
+================================================================================
+ARCHITECTURE
+================================================================================
+
+A technical orientation to SkyREPL's architecture. Readable in one sitting.
+
+  1. Data Model
+  2. Lifecycle Orchestrator
+  3. Safety and Recovery
+  4. Communication and Agent
+  5. Orbital: Advisory Intelligence
+  6. Zones, Contracts, and Interface
+  7. Design Decisions
+
+Four zones, each a bundle of components with its own development cadence:
+
+  lifecycle/   Core. Orchestration. Control plane, agent, providers.
+  orbital/     Advisory system. Modular scoring, placement.
+  shell/       User-facing. CLI, proxy, auth, budget enforcement.
+  scaffold/    Build, test, deploy, scripts, legal.
+
+Lifecycle is the gravitational center — roughly 70% of the codebase.
+
+SkyREPL is designed around three commitments.
+
+Integrity under churn: every cloud resource is tracked from the moment the
+system decides to create it, through whatever happens next (spot termination,
+network partition, control plane crash, operator error), to confirmed
+destruction. The architecture assumes failure is normal and builds recovery
+into the state machines rather than bolting it on as error handling.
+
+An auditable ontology: every resource has an owner (manifest), every
+operation has a record (workflow DAG), every cost has an attribution
+(per-manifest, per-user, per-provider). The data model is designed so that
+"what happened, who asked for it, and what did it cost" is a query, not a
+reconstruction project.
+
+Provider fungibility: any cloud provider that implements the interface
+contract joins the system on equal terms. The system is also extensible
+within bounds — providers can expose optional features via capability flags,
+modify workflow DAG structure via scoped rewrite rules, and bring their
+provider-unique capabilities (GCP TPUs, Weights & Biases, Tailscale, etc).
+Deeper integrations like AWS Cost Explorer are possible where they improve
+attribution or UX. The constraint: contracts must still be fulfilled,
+and the core abstraction boundary is enforced by contract-based testing.
+
+What follows is the implementation of those commitments. The data model
+establishes the ownership structure. The lifecycle orchestrator shows how resources
+move through their state machines. Safety and recovery describe what happens
+when things go wrong. Communication and the agent cover the protocol between
+the control plane and remote instances. Orbital provides the advisory layer.
+Contracts and interface describe the zone boundaries.
+
+
+================================================================================
+Data Model
+================================================================================
+
+Three tiers organise persistent state: Material, Resource, Manifest.
+
+
+Material Layer
+--------------------------------------------------------------------------------
+
+The substrate. Three storage classes:
+
+RECORDS — SQL tables (bun:sqlite WAL). Allocations, workflows, manifests,
+usage data. High-frequency queries requiring joins, indexes, foreign key
+constraints. The authoritative ledger.
+
+OBJECTS — Blob storage with tag-based querying. A single objects table plus
+object_tags table replaces what would otherwise be 6+ tables for snapshots,
+artifacts, logs. Content-addressable via SHA-256. Small blob optimisation:
+blobs <=64KB inline in the database, >64KB in S3. Presigned URLs abstract
+over storage location.
+
+EXTERNAL — Provider state cached in-memory only. Spot prices, capacity info.
+TTL-based eviction (default 5 minutes). Never persisted. Stale provider data
+is worse than a fresh API call; in-memory-only eliminates cache invalidation
+complexity.
+
+Integer primary keys (faster joins, smaller indexes) with base-36 slug
+display for user-facing identifiers.
+
+
+Resource Layer
+--------------------------------------------------------------------------------
+
+Six resource types form the intent layer: Instance, Run, Allocation,
+Workflow, Snapshot, Artifact. Each has a defined state machine. Each belongs
+to exactly one manifest.
+
+ALLOCATION is the lifecycle primitive — the binding between a run and an
+instance. Five states:
+
+  AVAILABLE -> CLAIMED -> ACTIVE -> COMPLETE
+                                     \-> FAILED
+
+AVAILABLE allocations with run_id=NULL are the warm pool. No separate data
+structure; just a WHERE clause. When a run completes and the instance is
+healthy, a new AVAILABLE allocation is created (warm pool replenishment).
+Claims are atomic via optimistic concurrency control, preventing
+double-claims.
+
+WORKFLOW orchestrates multi-step operations that can't be reduced to a single
+atomic transaction. Every multi-step operation — launching runs, terminating
+instances, creating snapshots, cleaning up manifests — is a workflow.
+
+Four composition patterns, which double as rewrite rules — extension points
+that allow providers to make registration-time and runtime modifications to
+the DAG:
+
+  Insert-and-Reconverge    Parallel installation before a node.
+  Conditional-Branch       Warm pool hit vs. cold spawn.
+  Parallel-Fan-Out         Cleanup by resource type.
+  Retry-with-Alternative   Capacity failure in one region, retry another.
+
+The restricted palette balances flexibility with complexity: providers can
+extend workflow behaviour (e.g. inserting feature installation nodes, adding
+provider-specific cleanup steps), but the scope of allowed rewrites is
+bounded by the four patterns. No arbitrary graph mutations.
+
+Compensation is single-node only. When a node fails, its compensate()
+handler fires (e.g. terminate a spawned instance). Completed nodes are not
+rolled back — manifest cleanup handles teardown. Crash recovery resets
+idempotent interrupted nodes to pending, marks non-idempotent ones failed.
+All state persisted before actions: node marked running before execution,
+completed after success.
+
+
+Manifest Layer
+--------------------------------------------------------------------------------
+
+The ownership boundary. Every resource belongs to exactly one manifest.
+
+Two states: DRAFT -> SEALED.
+
+DRAFT — Mutable working set owned by a running workflow. Created at workflow
+submission, before any node executes, so resources have an owner from the
+moment they exist.
+
+SEALED — Immutable. Resources detached from workflow ownership. Other
+workflows can query and claim individual resources. Retention timer starts.
+When retention expires and all resources are accounted for, a cleanup
+workflow destroys remaining resources and deletes the manifest.
+
+If a workflow fails partway through, resources created so far are already
+tracked in the DRAFT manifest. This is the structural guarantee against
+orphaned resources — a consequence of creating the manifest before creating
+the resources.
+
+
+================================================================================
+Lifecycle Orchestrator
+================================================================================
+
+The data model describes what exists. The lifecycle orchestrator describes how it
+moves — allocations binding runs to instances, workflows orchestrating
+multi-step operations, intents defining what those workflows achieve, and
+the provider abstraction that makes it work across clouds.
+
+
+Allocations
+--------------------------------------------------------------------------------
+
+Allocations are the mechanism for run-to-instance binding. The warm pool is
+the mechanism for reuse.
+
+When a run request arrives: check the warm pool (AVAILABLE allocations
+matching the instance spec). If a match exists, claim atomically. If not,
+spawn a new instance. Either path, the allocation tracks the binding through
+its lifecycle — CLAIMED when reserved, ACTIVE during execution, COMPLETE or
+FAILED at the end.
+
+The warm pool isn't a separate system. It's a query against the allocation
+table: same code path, same state machine guarantees, same concurrency
+controls.
+
+
+Workflows
+--------------------------------------------------------------------------------
+
+Declarative DAGs stored in the database. Visible, inspectable graphs — query
+workflow_nodes for what happened, when, and what failed.
+
+The launch-run workflow shows how the pieces fit:
+
+  1. check-budget
+  2. resolve-instance -> conditional-branch:
+     - warm pool match -> claim-warm-allocation
+     - no match -> spawn-instance
+  3. wait-for-boot (with parallel feature installation)
+  4. create-allocation
+  5. sync-files
+  6. await-completion
+  7. finalize-run (with conditional snapshot)
+
+This DAG isn't static — providers modify it at registration time via rewrite
+rules (e.g. AWS inserts cost-explorer tagging nodes; OrbStack skips feature
+installation). The template defines the base graph; rewrite rules adapt it
+within bounded scope.
+
+OTel span attributes (provider, region, instance type, workflow topo-signature)
+enable cross-provider observability and failure analysis.
+
+
+Intents
+--------------------------------------------------------------------------------
+
+Intents are what workflows achieve. Four categories:
+
+  LAUNCH      Provision and run. Budget check, instance resolution (warm
+              pool or spawn), file sync, execution, artifact collection.
+
+  TERMINATE   Controlled teardown. Checkpoint if needed, artifact upload,
+              instance destruction.
+
+  SNAPSHOT    Capture state for reproducibility. Volume snapshot, metadata,
+              manifest update.
+
+  CLEANUP     Manifest-scoped teardown. Fan-out by resource type, provider-
+              level destruction, manifest deletion.
+
+Each intent maps to a workflow template. The template defines the base DAG;
+rewrite rules and provider-specific node implementations adapt it at runtime.
+Most nodes are generic and accept any implementation that fulfils the node
+contract — launch on AWS and launch on Lambda Labs share the same graph
+structure with different implementations at each node and different
+rewrite-inserted nodes along the way.
+
+
+Provider Abstraction
+--------------------------------------------------------------------------------
+
+Three implementation tiers organise complexity:
+
+TESTING (OrbStack) — ~700 lines. Foundation of contract-based testing.
+Implements the same intent contracts as cloud providers, plus chaos injection
+for fault simulation and drift. The control plane validates against OrbStack;
+any provider implementing the same contracts inherits that validation.
+
+ADDITIONAL (Lambda, RunPod, future: SLURM, GCP) — ~500 lines each. Core
+interface methods, basic lifecycle hooks, error taxonomy mapping. Optional
+methods gated by capabilities.
+
+REFERENCE (AWS) — ~3000 lines. Everything from Additional, plus enhanced
+types, materialisation/projection functions, custom workflows, full
+lifecycle hooks. AWS is the reference because it's the most complex — it
+implements all optional capabilities and serves as the template for full
+integration. Same interface contract as every other provider.
+
+Capability flags describe optional feature support. Static, declared at
+compile time. The control plane gates method calls on these flags. No runtime
+negotiation.
+
+Extension points beyond capability flags: workflow rewrite rules (bounded
+DAG modifications), feature installations on instances (Tailscale, W&B,
+etc.), and hooks on SSH ProxyCommand. A handful of providers also have
+dedicated intents or direct core integration where the contract surface
+hasn't matured yet — accepted short-term technical debt.
+
+Testing is primarily (~80%) contract-based, with marginal (~20%) tailoring
+per-provider. The control plane validates that it handles intent contracts
+correctly; any provider implementing those contracts gets the same behaviour.
+Property-based tests complement the contract suite: assertions over all
+possible ways to realise an intent through the allowed degree of runtime
+flexibility (rewrite rules, conditional branches, provider-specific leaf
+nodes).
+
+What enforces the abstraction boundary: capability flags are static and
+provider-declared. Contract and property-based tests validate the interface.
+All provider-specific behaviour routes through the abstraction — the small
+number of direct core integrations noted above are tracked and time-bounded.
+
+
+================================================================================
+Safety and Recovery
+================================================================================
+
+The architecture is designed for kill-safe execution: crash at any line,
+recover without human intervention. Failure teardown is three-tier — workflow
+compensation catches failures inline, manifest cleanup sweeps what compensation
+misses, orphan scanning reconciles resources that escape both.
+
+
+Two-Phase Spawn
+--------------------------------------------------------------------------------
+
+Manifest entries are always created before cloud API calls. If the process
+crashes between "decided to spawn" and "provider acknowledged," the intent
+record survives. On recovery: complete the spawn or clean up partial state.
+No phantom instances from half-finished provisioning.
+
+
+Naming Convention
+--------------------------------------------------------------------------------
+
+All cloud resources are named repl-<control_id>-<manifest_id>-<resource_id>.
+This encoding survives total control plane loss. control_id identifies which
+control plane installation created the resource. manifest_id and resource_id
+(base-36 slugs) correlate to internal records.
+
+With the database gone, you can still: group resources by installation,
+correlate resources to manifests, assess age for triage. The naming
+convention is the recovery mechanism of last resort.
+
+
+Failure Teardown
+--------------------------------------------------------------------------------
+
+  Tier 1 — Workflow: single failed node compensation. Inline, fast. The
+  happy path for failures.
+
+  Tier 2 — Manifest: when compensation isn't enough (or the control plane was
+  down during the failure), manifest cleanup sweeps all resources owned by the
+  manifest. Background, auto-healing.
+
+  Tier 3 — Orphan: the resource exists in a cloud provider but isn't currently
+  tracked in any manifest. The system discovers these through background
+  scanning, reconciles what it can against manifests, and seeks operator
+  guidance where automatic reconciliation isn't possible. The defence line of
+  last resort.
+
+Two-phase spawn prevents direct workflow→orphan escalation. The orphan scanner
+catches what slips through — lists all cloud resources with the "repl-" prefix,
+compares against tracked database records, reports the difference. Classifier
+sorts orphans by likely origin: current session, other sessions, or unknown.
+
+The scanner never auto-terminates. All termination requires explicit user
+confirmation. A false positive — destroying a running training job — is
+catastrophic next to a false negative — paying for an idle instance a few
+extra hours. The scanner reports; the user decides.
+
+Runs hourly plus on-demand. Spawn failures with orphan risk trigger
+immediate targeted scans for the expected resource name.
+
+
+Dead Man's Switch
+--------------------------------------------------------------------------------
+
+Instances self-terminate when no longer observed by the system of record.
+Heuristic triggers have no clean answer (GPU at 0%? SSH open but no commands?);
+observation is structural: if the control plane can't see the instance,
+the instance shouldn't exist. When contact is lost, the agent checkpoints,
+uploads logs and artifacts (using redundant endpoints), and then shuts down.
+
+
+Spot Interruption
+--------------------------------------------------------------------------------
+
+Agent polls AWS instance metadata (IMDSv2) every 5s. On interruption notice:
+set flag, send spot_interrupt_start, execute checkpoint script (90-second
+budget), upload artifacts, send spot_interrupt_complete, send run_complete
+with interrupted=true, terminate run.
+
+
+================================================================================
+Communication and Agent
+================================================================================
+
+Two-Layer API
+--------------------------------------------------------------------------------
+
+The lifecycle API has two layers:
+
+RESOURCE LAYER — CRUD-like operations on the six resource types. Queries are
+available to shell; create-update-destroy operations are primarily internal
+to lifecycle, called from within running workflows via non-HTTP local
+loopback. Shell has curated access to a subset of mutations, but most
+resource-layer writes happen as side effects of workflows, not as direct
+external calls.
+
+WORKFLOW LAYER — Multi-step actions (launch, terminate, snapshot, cleanup).
+Shell has full access. This is the primary external interface for anything
+that changes system state.
+
+Shell consumes both layers: resource queries and workflow operations. RESTful,
+authenticated, budget-checked. The shell proxy adds middleware — rate
+limiting, session management, budget preflight.
+
+The agent uses an altogether different scheme: a specialised SSE-based API
+for heartbeats, log streaming, status updates, and command acknowledgment.
+Not part of the two-layer surface above. Authenticated by instance token.
+
+No backdoors, no direct database access from outside the control plane
+process.
+
+
+Agent Protocol
+--------------------------------------------------------------------------------
+
+Stdlib-only Python process running on remote instances (Rust rewrite
+planned). Complexity lives in the control plane, not the agent. Three
+channels, all agent-initiated:
+
+HTTP-SSE (control -> agent) — Command delivery. Single long-lived
+connection. SSE over WebSockets: simpler protocol, automatic reconnect
+semantics baked into the spec, and degrades gracefully through HTTP proxies
+that would choke on a WebSocket upgrade. Commands: start_run, cancel_run,
+capture_artifacts, prepare_snapshot, trigger_tailscale, heartbeat_ack.
+
+HTTP POST (agent -> control) — Status reporting and log streaming. Two-level
+batching: 100ms local buffer, then network batch on interval or size
+threshold. Heartbeats at 10s interval. Fire-and-forget with retry.
+
+Presigned URLs — File transfer bypasses the control plane. Files >64KB go
+direct to S3; <=64KB route through a control plane endpoint to avoid the
+round-trip.
+
+All connections originate from the agent. Instances may sit behind NAT/VPCs;
+the agent reaches out. The control plane never needs instance IPs or inbound
+firewall rules. Outbound-only works everywhere.
+
+
+SSE Protocol
+--------------------------------------------------------------------------------
+
+SSE is the command channel from control plane to agent. One-directional by
+design: the control plane pushes commands, the agent acknowledges via HTTP
+POST. This separation keeps the protocol simple — SSE handles delivery, POST
+handles confirmation, and neither needs to do both.
+
+Command acknowledgment is explicit. Each SSE command carries a command_id. The
+agent includes pending command acknowledgments in its next heartbeat POST
+(pending_command_acks). The control plane
+tracks which commands have been acknowledged and can retry or escalate on
+timeout. This gives reliable delivery semantics over an unreliable channel
+without reimplementing TCP-over-SSE.
+
+
+Panic Diagnostics
+--------------------------------------------------------------------------------
+
+When an agent disappears, the instance is gone and logs may be lost. Best-
+effort diagnostics sent to /v1/instances/:id/panic (2s timeout, must not
+block shutdown) capture last state and system metrics. 70-90% success rate —
+supplements normal logging for exactly the cases where regular channels are
+unavailable.
+
+
+================================================================================
+Orbital: Advisory Intelligence
+================================================================================
+
+Lifecycle asks, orbital recommends, lifecycle executes.
+
+Orbital is a thin TypeScript orchestrator dispatching to self-contained
+scoring modules — standalone executables in any language (Python, C++, SQL)
+spawned per invocation. The TypeScript layer handles API surface, module
+invocation, data routing, result aggregation.
+
+If orbital is unavailable, lifecycle falls back to local scoring (provider
+priority order from config). Orbital improves decisions but never gates
+them. A control plane that can't launch instances because the advisory
+service is down is worse than one that launches with a naive strategy.
+
+Spawn-per-invocation: no FFI bridges, no sidecar managers, no health checks.
+Contract is stdin/stdout/exit code — language-agnostic by construction.
+
+
+================================================================================
+Zones, Contracts, and Interface
+================================================================================
+
+The four zones (Lifecycle, Shell, Orbital, Scaffold) communicate through
+shared types and a single API surface.
+
+
+Cross-Zone Types
+--------------------------------------------------------------------------------
+
+The contracts/ package (@skyrepl/contracts) sits at the repository root.
+Neutral territory.
+
+TypeBox schemas — shared type definitions consumed by lifecycle, shell, and
+orbital. Single source of truth for resource shapes, API types, configuration
+formats.
+
+Error hierarchy — structured error types with codes and categories. Every
+zone throws the same error shapes.
+
+Timing constants — timeout values, retry intervals, polling periods.
+Centralised so timeout constraint chains stay consistent across zones.
+
+Changes to contracts affect every consumer and deserve cross-zone review.
+
+
+Shell
+--------------------------------------------------------------------------------
+
+Three local components: CLI, daemon, and proxy.
+
+CLI for direct invocation. The proxy server sits in
+front of lifecycle's API, providing a middleware surface: rate limiting,
+session management, budget preflight checks. At layer zero this is a
+transparent pass-through.
+
+The local daemon (shell/daemon/) is a long-running process that
+subscribes to lifecycle's event stream, manages SSH config regeneration,
+and provides desktop notifications. The CLI notifies the daemon of state
+changes best-effort; the daemon also subscribes independently. Not to be
+confused with the remote agent.
+
+Auth responsibilities: API key validation, tenant/user management, RBAC,
+budget enforcement.
+
+
+Scaffold
+--------------------------------------------------------------------------------
+
+Build and test infrastructure, deployment scripts, demo projects, legal.
+
+Testing mix: automated (bun test — unit, integration, simulated E2E)
+and interactive (scaffold/demo/ with repl.toml profiles for exploration).
+
+
+================================================================================
+Design Decisions
+================================================================================
+
+These hold across the entire system. Each includes what it protects and
+what enforces it.
+
+PROVIDER ABSTRACTION. Any provider joins by implementing the interface
+contract. Capability flags are static and provider-declared. Contract tests
+validate the interface. All provider-specific behaviour routes through the
+abstraction.
+
+MANIFEST OWNERSHIP. Every resource belongs to exactly one manifest. The
+manifest is created before any resource it contains. Structural guarantee
+against orphans — a consequence of creation order, not a cleanup script.
+
+NAMING ENCODES RECOVERY. repl-<control_id>-<manifest_id>-<resource_id> on
+all provider-created resources, all providers, from day one. When the
+database is gone, the names are the only link between cloud resources and
+the control plane that created them.
+
+THE API IS THE ONLY INTERFACE. Shell, orbital, CLI, agent, SDK, web — all go
+through the API. No backdoors, no direct database access from outside the
+control plane process. This makes the four-zone split an architectural
+boundary, not a directory convention.
+
+BUDGET-AS-ACL. Usage data is granular enough for per-manifest, per-user,
+per-provider cost attribution from day one.
+
+TENANT ISOLATION. tenant_id on every record. Every query scoped by tenant.
+
+
+================================================================================
+References
+================================================================================
+
+  docs/providers/    Provider setup guides
+  scaffold/demo/     Interactive testing project
+  scaffold/legal/    License (BSL 1.1), terms of service, privacy policy

@@ -1,0 +1,266 @@
+================================================================================
+Safety
+================================================================================
+
+Reading order: data-model -> execution -> providers -> api -> agent -> safety -> timing
+Prerequisite: ARCHITECTURE.txt (repo root)
+
+## Kill-Safe Execution
+
+DB record before cloud API call. The instance row exists before calling
+provider.spawn(). The allocation row exists before files sync. If the control
+plane crashes mid-operation, recovery scans for records with status='spawning'
+or 'syncing' and resumes from stable checkpoints.
+
+Intents survive crashes. A workflow node marked 'running' before execution
+means crash recovery knows which nodes were interrupted. Idempotent nodes reset
+to pending and retry. Non-idempotent nodes (already mutated cloud state) mark
+failed and fire compensation.
+
+Recovery happens automatically on control plane startup. No human intervention
+required. recoverWorkflows() queries interrupted workflows, inspects node
+states, and resumes execution.
+
+## Naming Convention
+
+All cloud resources follow the pattern: `repl-<control_id>-<manifest_id>-<instance_id>`
+
+- **control_id**: Which control plane installation created this resource
+  (8-char base-36 from control plane startup)
+- **manifest_id**: Base-36 slug of manifest ID (e.g., "9ix" for manifest 12345)
+- **instance_id**: Base-36 slug of instance ID
+
+This encoding survives total database loss. With only cloud provider APIs, you
+can:
+- Group resources by control plane installation
+- Correlate instances to manifests via slug
+- Assess resource age for triage
+- Determine which resources belong together
+
+Tailscale resources use simpler convention: `repl-<control_id>-<instance_id>`
+(provider is implicit, manifest tracked in DB).
+
+Without this convention, database loss means orphaned resources have no
+identifying information beyond provider-assigned IDs. The naming scheme is the
+recovery path.
+
+## Orphan Detection
+
+Orphans are cloud resources that exist in providers but are not tracked in the
+database. They happen at the edges: partial spawn failures, race conditions
+between DB writes and cloud API calls, control plane crashes during resource
+creation, or total database loss.
+
+Two-phase spawn protocol prevents most orphans. The scanner catches what slips
+through.
+
+Detection uses scanner + classifier pipeline:
+
+1. **Scanner** lists all cloud resources with "repl-" name prefix
+2. Compare against tracked DB records
+3. Report the difference
+4. **Classifier** sorts by likely origin: current session, other sessions, or
+   unknown (unparseable names)
+
+**Safety principle: SkyREPL NEVER auto-terminates resources.** All termination
+requires explicit user confirmation via CLI.
+
+DB recovery may reveal orphans are actually tracked. Users may have created
+resources outside SkyREPL. Conservative detection reports but does not act.
+Humans decide disposition.
+
+### Scanning Intervals
+
+Scanner runs hourly in background plus on-demand via `repl orphans scan`.
+Additionally, spawn failures with orphan risk trigger immediate targeted scans
+for the expected resource name.
+
+The 1-hour interval balances cost monitoring with system load. On-demand scans
+available for immediate triage.
+
+## Agent Liveness
+
+Heartbeat protocol: agent sends heartbeat immediately on startup (before first
+sleep), then every 10s. Each heartbeat carries system metrics (CPU/memory/disk/GPU),
+workflow_state, active_allocations with per-allocation SSH state, Tailscale
+status, and pending command acks. Control plane responds with ack containing
+control_plane_id (agent validates consistency across acks).
+
+Degraded/panic progression:
+
+```
+t=0       Last ack received
+t=2m      DEGRADED state -- continue heartbeating, control plane may recover
+t=15m     PANIC -- checkpoint script (5m budget), upload artifacts, shutdown
+t=25m     Control plane force-terminates if agent failed to self-terminate
+```
+
+Dead man's switch: if the agent cannot reach the control plane and confirm it's
+still alive, the agent terminates itself. This prevents orphaned instances from
+running indefinitely when the control plane is gone.
+
+Control plane force-termination at 25m is the backstop. If the agent is stuck
+(unresponsive to SIGTERM, checkpoint script hung), the control plane terminates
+the instance via provider API.
+
+## Spot Interruption Handling
+
+Agent polls AWS instance metadata (IMDSv2) every 5s. On interruption notice:
+
+1. Set spot_interrupted flag
+2. Send spot_interrupt_start event
+3. Execute checkpoint script (90s budget)
+4. Upload artifacts via presigned URLs
+5. Send spot_interrupt_complete event
+6. Send run_complete with interrupted=true
+7. Terminate run gracefully
+
+Checkpoint script is user-provided. Budget is configurable (default 90s). The
+agent enforces timeout -- kills checkpoint script if it exceeds budget, uploads
+whatever artifacts exist, and terminates cleanly.
+
+AWS provides 2-minute warning. 90s checkpoint + 30s for upload gives cushion
+for cleanup.
+
+## Orphan CLI Guide
+
+**Listing orphans:**
+
+```bash
+repl orphans list                       # All orphans, grouped by session
+repl orphans list --provider aws        # Filter by provider
+repl orphans list --include-whitelisted # Include acknowledged orphans
+repl orphans list --json                # Machine-readable output
+```
+
+Output groups orphans into three sections:
+
+- **CURRENT SESSION (WARNING)**: Recent, may indicate active spawn failures
+- **OTHER SESSIONS (INFO)**: Historical, lower priority
+- **TAILSCALE**: Orphaned Tailscale machines
+
+Each entry shows: provider, provider_id, resource name, age, estimated hourly
+cost, and resource type.
+
+**Inspecting a specific orphan:**
+
+```bash
+repl orphans inspect <provider_id>
+```
+
+Shows full details: provider, resource type, name, creation time, status,
+instance type, region, estimated cost. Inferred information from name parsing
+(control ID, manifest slug, instance slug). Possible DB matches with confidence
+scores.
+
+**Scanning on demand:**
+
+```bash
+repl orphans scan                       # Scan all providers
+repl orphans scan --provider aws        # Scan specific provider
+repl orphans scan --verbose             # Show scan details
+```
+
+Forces an immediate scan. Background scans run hourly automatically.
+
+**Whitelisting (acknowledging investigated orphans):**
+
+```bash
+repl orphans whitelist <id> --reason "Test instance for debugging"
+repl orphans whitelist <id> --reason "Temp keep" --expires "2024-02-07"
+repl orphans whitelist <id> --reason "Backup" --notes "Contact ops@..."
+```
+
+Reason is required. Whitelisted orphans are excluded from future warnings.
+Optional expiry triggers automatic re-evaluation.
+
+```bash
+repl orphans unwhitelist <id>           # Remove from whitelist
+```
+
+**Recovery after database loss:**
+
+```bash
+repl orphans recovery-report
+```
+
+Lists all cloud resources with SkyREPL naming, groups by control ID and slugs,
+shows potential correlations, and offers an import option to re-track discovered
+resources.
+
+**Preflight warnings:**
+
+Before launching runs, SkyREPL checks for orphans and displays warnings. These
+are advisory only and do not block operations. Bypass with --yes or --no-preflight.
+
+## Orphan Categories
+
+**Current session**: Created after session start time. Severity: WARNING.
+
+**Other sessions**: Older than session threshold. Severity: INFO.
+
+**Unknown**: Unparseable names (old version or manual). Severity: CAUTION.
+
+Each orphan record includes:
+- providerId
+- resourceType (instance | volume | snapshot | tailscale_machine)
+- provider
+- inferredInfo (parsed name components or null)
+- createdAt
+- ageMs
+- likelyCurrentSession
+- estimatedHourlyCost
+
+Tailscale orphan records include:
+- machineId
+- machineName
+- tailscaleIp
+- inferred instanceIdSlug
+- lastSeen
+- age
+
+## Output Format Example
+
+```
+Orphaned Resources (3 found)
+
+CURRENT SESSION (WARNING):
+  [aws] i-0abc123def456  repl-v2a1b2c3-9ix-1h2i
+        Age: 15m | Est. Cost: $1.23/hr | Type: instance
+
+OTHER SESSIONS (INFO):
+  [aws] i-0xyz789abc012  repl-v2a1b2c3-none-2j3k
+        Age: 2d 4h | Est. Cost: $0.45/hr | Type: instance
+
+TAILSCALE:
+  [ts] repl-v2a1b2c3-5p6q
+       IP: 100.64.0.15 | Last Seen: 3h ago
+```
+
+## Whitelist Management
+
+Whitelist fields:
+
+- **provider**: Cloud provider name
+- **provider_id**: Provider's resource ID (unique with provider)
+- **resource_type**: instance | volume | snapshot | tailscale_machine
+- **reason**: Why this orphan is being kept (required)
+- **acknowledged_by**: Who made the decision
+- **acknowledged_at**: When the decision was made
+- **expires_at**: Optional re-evaluation date
+- **notes**: Additional context
+
+Allowed automatic actions:
+- Detect orphans
+- Report orphans
+- Notify users
+- Update tracking records
+- Expire whitelist entries
+
+Prohibited automatic actions:
+- Terminate instances
+- Delete volumes
+- Remove snapshots
+- Deregister Tailscale
+- Modify any cloud resources
+

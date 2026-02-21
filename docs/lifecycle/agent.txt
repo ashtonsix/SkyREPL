@@ -1,0 +1,142 @@
+================================================================================
+Agent
+================================================================================
+
+Reading order: data-model -> execution -> providers -> api -> agent -> safety -> timing
+Prerequisite: ARCHITECTURE.txt (repo root)
+
+## Concept
+
+The agent is a stdlib-only Python process running on remote instances.
+Complexity lives in the control plane, not the agent.
+
+Agent-initiated architecture: all connections originate from the agent.
+Instances may be behind NAT/VPCs, so the agent reaches out -- the control
+plane never needs instance IPs or inbound firewall rules. This also makes
+load balancing simple (no sticky sessions).
+
+Three communication channels, all agent-initiated:
+
+  HTTP-SSE stream (control -> agent): Command delivery. Single long-lived
+    connection. Agent reads byte-by-byte to avoid buffer deadlock. Commands:
+    start_run, cancel_run, capture_artifacts, prepare_snapshot,
+    trigger_tailscale, heartbeat_ack.
+
+  HTTP POST (agent -> control): Status reporting. Two-level log batching:
+    100ms local buffer, then network batch on interval or size threshold.
+    Control plane reorders via batch_sequence_id. Heartbeats at 10s interval.
+    Fire-and-forget with retry.
+
+  Presigned URLs: Artifact upload/download bypasses the control plane.
+    Files >64KB go direct to S3. Files <=64KB route through a control plane
+    endpoint to avoid the S3 round-trip.
+
+## Heartbeat Protocol
+
+Agent sends heartbeat immediately on startup (before first sleep), then every
+10s. Each heartbeat carries system metrics (CPU/memory/disk/GPU), workflow_state,
+active_allocations with per-allocation SSH state, Tailscale status, and pending
+command acks. Control plane responds with ack containing control_plane_id
+(agent validates consistency across acks).
+
+Heartbeat basics:
+- Interval: 10s (configurable via REPL_HEARTBEAT_INTERVAL)
+- Immediate send on startup before first sleep
+- Carries system metrics + workflow state + allocation states
+- Control plane acks with control_plane_id for validation
+
+See docs/lifecycle/safety.txt for liveness detection, degraded/panic
+progression, and dead man's switch behavior.
+
+## Reference
+
+### SSE Event Types (control -> agent)
+
+**start_run**: Begin run with file sync and execution. Carries run_id, command,
+workdir, files[] with presigned URLs, artifact patterns, init script config.
+
+**cancel_run**: Terminate running run by run_id.
+
+**capture_artifacts**: Upload artifacts mid-run or during emergency checkpoint.
+
+**prepare_snapshot**: Prepare instance for snapshot creation.
+
+**trigger_tailscale**: JIT Tailscale installation (static binary, no apt).
+
+**heartbeat_ack**: Acknowledge agent heartbeat. Carries control_plane_id for
+consistency validation.
+
+### Command Acknowledgment
+
+HTTP-SSE is lossy. Each command carries a command_id. Agent queues ack, includes
+pending_command_acks in next heartbeat. Control plane retries unacknowledged
+commands after 30s (max 3 retries). Agent tracks last 100 processed command IDs
+for deduplication.
+
+### Control Plane Background Tasks
+
+These are control-plane tasks triggered on heartbeat intervals, not agent tasks.
+They run in the control plane's background task loop.
+
+**health_check**: Verify API connectivity to each provider. Return latency
+measurement. Used for provider health monitoring and degraded-mode detection.
+
+**reconcile**: Compare DB records against provider API state. Detect orphans,
+terminated instances, drift (IP changes, status mismatches). See
+docs/lifecycle/safety.txt for orphan detection details.
+
+### Agent -> Control Message Types
+
+**log**: Stdout/stderr chunk or sync_complete. Carries run_id, allocation_id,
+batch_sequence_id, stream, data, phase.
+
+**artifact**: Artifact upload confirmation (path, s3_key, size_bytes).
+
+**init_complete**: Init script finished successfully.
+
+**run_complete**: Run finished. Carries exit_code, workflow_state, interrupted
+flag.
+
+**prepare_snapshot_ack**: Snapshot preparation result (success/error).
+
+**spot_interrupt_start**: Spot interruption detected, checkpoint starting.
+
+**spot_interrupt_complete**: Checkpoint done, artifacts uploaded.
+
+**heartbeat**: Liveness signal. Fields: tailscale_ip, active_allocations[],
+tailscale_status, workflow_state, pending_command_acks[], dropped_logs_count.
+
+### Agent Status Reporting Fields
+
+In heartbeat payloads:
+
+**tailscale_ip**: Tailscale IP or null
+
+**active_allocations**: Per-allocation SSH state for debug hold management
+
+**tailscale_status**: not_installed | installing | ready | failed
+
+**workflow_state**: Instance lifecycle state using `<workflow>:<phase>` format
+(e.g., launch-run:running). See docs/lifecycle/execution.txt for details.
+
+**pending_command_acks**: Command IDs awaiting acknowledgment
+
+**dropped_logs_count**: Log buffer overflow events
+
+### Log Message Format
+
+**run_id**: Which run produced the log
+
+**allocation_id**: Which allocation is executing
+
+**batch_sequence_id**: Monotonic counter for reordering
+
+**stream**: stdout | stderr | sync_complete
+
+**data**: Log content
+
+**phase**: sync | execution (distinguishes failure type)
+
+**sync_success**: Only for sync_complete messages
+
+See docs/lifecycle/safety.txt for liveness detection and failure handling.

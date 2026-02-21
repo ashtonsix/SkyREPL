@@ -1,0 +1,6 @@
+node_modules/
+dist/
+bun.lock
+*.tsbuildinfo
+__pycache__/
+data/

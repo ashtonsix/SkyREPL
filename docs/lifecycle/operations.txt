@@ -1,0 +1,22 @@
+================================================================================
+Operations
+================================================================================
+
+## Database Migrations
+
+Migration files live in control/src/migrations/ as numbered SQL files:
+
+  001_initial.sql
+  002_idempotency_keys.sql
+  003_workflow_tables.sql
+  ...
+
+Applied sequentially on control plane startup. Migration state tracked in
+schema_migrations table (number, applied_at, checksum).
+
+## Security Hardening
+
+- API key Rotation
+- Rate limiting
+- Secrets at rest
+- Audit logging

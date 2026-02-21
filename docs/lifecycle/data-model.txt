@@ -1,0 +1,402 @@
+================================================================================
+Data Model
+================================================================================
+
+Reading order: data-model -> execution -> providers -> api -> agent -> safety -> timing
+Prerequisite: ARCHITECTURE.txt (repo root)
+
+## Material Layer
+
+Three material types serve distinct purposes:
+
+- **RECORDS**: Dedicated SQL tables (instances, runs, allocations, workflows,
+  workflow_nodes). Used for high-frequency queries requiring joins, indexes, and
+  foreign key constraints.
+
+- **OBJECTS**: Flexible blob storage with tag-based querying. A single objects
+  table + object_tags table replaces what would otherwise be 6+ separate tables
+  for snapshots, artifacts, logs, etc.
+
+- **EXTERNAL**: Provider state (spot prices, capacity info) cached in-memory
+  only. TTL-based eviction, default 5 minutes. Never persisted to database.
+
+**Content-addressable storage.** Blobs use SHA-256 checksums for deduplication.
+On upload, the CLI computes checksums and calls checkBlobsExist() to identify
+which files already exist. Only missing files transfer. Mutable content (logs)
+skips dedup and always creates new blobs.
+
+**Blob optimization (SBO).** Storage is split by size:
+- Blobs <=64KB: stored inline in the blobs.payload column
+- Blobs >64KB: stored in S3, referenced by blobs.s3_key/s3_bucket
+- Blobs with reservation >64KB: go directly to S3, skipping inline
+
+Agent and CLI always use presigned URLs. The control plane generates URLs that
+abstract over storage location -- same HTTP operations work for both inline and
+S3 blobs.
+
+**ID scheme.** All tables use INTEGER AUTOINCREMENT primary keys (faster joins,
+smaller indexes, better SQLite performance). User-facing display uses base-36
+slugs: `id.toString(36)` (e.g., 12345 -> "9ix"). Parse back with
+`parseInt(slug, 36)`.
+
+### Object Types Reference
+
+| Type                 | Payload                         | Key Tags                                   |
+|----------------------|---------------------------------|--------------------------------------------|
+| snapshot             | null (provider stores)          | run_id, spec, init_checksum, name          |
+| artifact             | File contents (or S3 ref)       | run_id, allocation_id, path, keep          |
+| log                  | Log data (newline-delimited)    | run_id, stream, sequence                   |
+| run_file             | File contents (via blob)        | run_id, path                               |
+| tailscale_machine    | JSON (machine ID, auth, status) | instance_id                                |
+| feature_installation | JSON (status, version)          | instance_id, feature                       |
+
+Tags use key:value format (e.g., `run_id:42`, `stream:stdout`).
+
+**snapshot**: Tags `run_id:<id>`, `spec:<type>`, `init_checksum:<hash>`,
+`name:<name>`. Provider object ID stored in provider_object_id (snap-xxx,
+ami-xxx). Payload is null -- the provider stores the actual snapshot.
+
+**artifact**: Tags `run_id:<id>`, `allocation_id:<id>`, `path:<filepath>`,
+`keep:true`. Payload is file contents inline or via S3.
+
+**log**: Tags `run_id:<id>`, `stream:stdout|stderr`, `sequence:<n>`. Appended
+via blob payload concatenation. When blob exceeds threshold, a new object+blob
+is created with incremented sequence tag. Checksum becomes stale after append
+(checksum_bytes < size_bytes).
+
+**run_file**: Tags `run_id:<id>`, `path:<filepath>`. Benefits most from CAS
+dedup. Checksum stored in blob for dedup lookups.
+
+**tailscale_machine**: Tag `instance_id:<id>`. Payload is JSON with machine ID,
+auth key, status.
+
+**feature_installation**: Tags `instance_id:<id>`, `feature:tailscale|nvidia-driver`.
+Payload is JSON with status, version, installed_at.
+
+### SQL Query Examples
+
+```sql
+-- Find snapshot for a specific run
+SELECT o.* FROM objects o
+JOIN object_tags ot ON o.id = ot.object_id
+WHERE o.type = 'snapshot' AND ot.tag = 'run_id:' || $run_id;
+
+-- Find artifacts for a run with file paths
+SELECT o.id, b.size_bytes, ot_path.tag as path_tag
+FROM objects o
+JOIN blobs b ON o.blob_id = b.id
+JOIN object_tags ot_run ON o.id = ot_run.object_id
+JOIN object_tags ot_path ON o.id = ot_path.object_id
+WHERE o.type = 'artifact'
+  AND ot_run.tag = 'run_id:' || $run_id
+  AND ot_path.tag LIKE 'path:%';
+
+-- Content-addressable lookup (dedup check)
+SELECT * FROM blobs WHERE bucket = $bucket AND checksum = $checksum;
+
+-- Find expired objects for cleanup
+SELECT * FROM objects WHERE expires_at < $now;
+```
+
+### Background Blob GC
+
+DB cascade cannot reach S3. When objects are deleted, their S3 blobs remain
+until a background job explicitly cleans them. The job finds blobs with no
+referencing objects and a 24-hour grace period (accommodates in-flight uploads
+and clock skew), deletes S3 objects, then deletes blob records.
+
+
+
+## Manifests
+
+A manifest is the ownership boundary for resources created by workflows. Every
+resource (instance, run, allocation, object) belongs to exactly one manifest.
+No exceptions.
+
+**Lifecycle:** DRAFT -> SEALED. Two states only. EXPIRED is derived, never
+stored.
+
+- **DRAFT**: Mutable working set owned by a running workflow. The workflow can
+  add and remove resources via ctx.emitResource(). Created at workflow
+  submission, before any node executes, so resources always have an owner from
+  the moment they exist.
+
+- **SEALED**: Immutable. Resources are detached from workflow ownership
+  (current_manifest_id set to NULL on each resource). Other workflows can query
+  and claim individual resources. Retention timer starts (expires_at = now +
+  retention_ms).
+
+- **EXPIRED (derived)**: Computed when ALL four conditions hold: (1)
+  status=SEALED, (2) expires_at IS NOT NULL, (3) now >= expires_at, (4)
+  COUNT(manifest_resources WHERE owner_type='manifest') = 0. Manifests with
+  null expires_at (e.g., snapshots with indefinite retention) never expire.
+  Triggers cleanup workflow when all conditions are met.
+
+**Cleanup priorities.** When a manifest expires, resources are destroyed in
+priority order (higher priority = deleted sooner):
+
+| Resource Type | Priority | Rationale                         |
+|---------------|----------|-----------------------------------|
+| allocation    | 90       | Release instance slots first      |
+| run           | 80       | Free file storage                 |
+| artifact      | 70       | S3 storage                        |
+| object        | 60       | Generic objects                   |
+| instance      | 50       | Provider resources                |
+| snapshot      | 10       | Last -- may be reused by future runs |
+
+This is the base set. Providers may register additional cleanup targets at
+registration time (e.g., feature providers like Tailscale register at priority
+65, between artifacts and generic objects). See docs/lifecycle/providers.txt for provider
+registration details.
+
+### How Manifests Flow During `repl run`
+
+1. User runs `repl run`. A launch-run workflow is submitted.
+2. Manifest M1 created immediately (status: DRAFT) -- before any node executes.
+3. Workflow nodes emit resources: spawn-instance emits instance, create-allocation
+   emits allocation, run is emitted at workflow start.
+4. Each emission inserts a manifest_resources row linking the resource to M1.
+5. Run completes. Workflow seals M1 (status -> SEALED, resources detached).
+6. M1.expires_at = now + 30 minutes (launch-run retention policy).
+7. If another run claims the warm instance before expiry, the instance transfers
+   to the new manifest. M1 continues with its remaining resources.
+8. When retention expires and all resources are claimed or cleaned, the cleanup
+   workflow destroys remaining resources and deletes M1.
+
+### Inspecting Manifests
+
+```sql
+-- All resources in a manifest, by cleanup priority
+SELECT resource_type, resource_id FROM manifest_resources
+WHERE manifest_id = $id ORDER BY COALESCE(cleanup_priority, 50) DESC;
+
+-- Which manifest owns a resource
+SELECT m.* FROM manifests m JOIN manifest_resources mr ON m.id = mr.manifest_id
+WHERE mr.resource_type = 'instance' AND mr.resource_id = $instance_id;
+
+-- Check if expired (all resources claimed)
+SELECT COUNT(*) = 0 as is_expired FROM manifest_resources
+WHERE manifest_id = $id AND owner_type = 'manifest';
+```
+
+### Default Retention by Workflow Type
+
+These are workflow-type-specific overrides. The global default fallback is
+DEFAULT_MANIFEST_RETENTION_MS (24h), applied when no override matches.
+
+| Workflow Type      | Retention          | Notes                       |
+|--------------------|--------------------|-----------------------------|
+| launch-run         | 30 min             | Warm pool instances         |
+| create-snapshot    | null (indefinite)  | May stay SEALED for months  |
+| install-feature    | 60 min             | Feature installations       |
+| terminate-instance | 5 min              | Quick cleanup after teardown|
+| cleanup-manifest   | 0 (immediate)      | Already being cleaned up    |
+
+Different resource types have different natural retention: artifacts default to
+1 week unless marked to keep, instances stay until the warm pool is depleted,
+snapshots have intermediate retention (often indefinite). Retention is
+configurable per workflow type via sealManifestWithPolicy().
+
+### Manifest Fields Reference
+
+| Field                    | Type    | Notes                           |
+|--------------------------|---------|---------------------------------|
+| id                       | INTEGER | PRIMARY KEY AUTOINCREMENT       |
+| workflow_id              | INTEGER | FK -> workflows                 |
+| status                   | TEXT    | 'DRAFT' or 'SEALED'            |
+| default_cleanup_priority | INTEGER | 0-100, default 50               |
+| retention_ms             | INTEGER | null = indefinite               |
+| created_at, updated_at   | INTEGER | Unix timestamp ms               |
+| released_at              | INTEGER | Set when sealed                 |
+| expires_at               | INTEGER | When eligible for cleanup       |
+
+Status transitions: DRAFT -> SEALED (set released_at, compute expires_at) ->
+deleted (cleanup workflow completes). EXPIRED is derived, never stored.
+
+### manifest_resources Table
+
+| Field            | Type    | Notes                                        |
+|------------------|---------|----------------------------------------------|
+| manifest_id      | INTEGER | FK -> manifests (CASCADE DELETE)              |
+| resource_type    | TEXT    | 'instance', 'run', 'allocation', 'object'    |
+| resource_id      | TEXT    | Resource identifier                           |
+| cleanup_priority | INTEGER | null = use manifest default                   |
+| added_at         | INTEGER | Unix timestamp ms                             |
+| owner_type       | TEXT    | 'manifest', 'workflow', or 'policy'           |
+| owner_id         | INTEGER | workflow_id or null                           |
+
+PRIMARY KEY: (manifest_id, resource_type, resource_id). When claimed by another
+workflow, owner_type and owner_id update. Manifest is expired when no resources
+have owner_type='manifest'.
+
+
+
+## Multi-Tenancy
+
+Every record carries a tenant_id column. Every query is scoped by tenant_id --
+no cross-tenant data access is possible at the lifecycle layer. Manifest
+ownership provides the containment boundary: all resources belong to a manifest,
+and all manifests belong to a tenant.
+
+Lifecycle enforces tenant isolation (data partitioning, resource ownership).
+Shell enforces budget caps (per-user and per-team spending limits) and
+authentication. Full auth and tenant management lives in shell/ -- see
+docs/shell/auth.txt for the auth reference.
+
+
+## Type System
+
+Types are organized into categories by layer. Each category has a canonical
+file location, naming convention, and import direction. The goal: no circular
+dependencies, predictable imports, clear separation between database storage,
+domain logic, and API surface.
+
+### Type Categories
+
+**Materialized types** (types.ts): Rich domain objects with camelCase fields
+and relationships. These are the primary types used in business logic.
+Example: Instance, Run, Allocation.
+
+**Record types** (db.types.ts): Raw database rows with snake_case fields and
+primitive types. Paired with converter functions (recordToX / xToRecord) that
+bridge the two representations.
+
+**API types** (api/*.types.ts): HTTP request/response shapes. Three sub-files:
+api/resources.types.ts (CRUD), api/workflows.types.ts (workflow I/O),
+api/agent.types.ts (agent heartbeat/commands).
+
+**Workflow types** (workflows/engine.types.ts + workflows/workflow-*.types.ts):
+Engine internals (node definitions, DAG structure) and per-workflow input/output.
+
+**Provider types** (providers/provider.types.ts): SpawnOptions, provider-
+specific extensions, pattern configs, feature provider interfaces, heartbeat
+task types.
+
+### Placement Decision Tree
+
+    Is this type a database row?
+      YES --> db.types.ts
+      NO  --> Is it an API request/response?
+        YES --> api/{resource}.types.ts or api/workflows.types.ts
+        NO  --> Is it provider-specific?
+          YES --> providers/provider.types.ts
+          NO  --> Is it workflow engine internals?
+            YES --> workflows/engine.types.ts
+            NO  --> Is it specific to a single module (foo.ts)?
+              YES --> foo.types.ts
+              NO  --> types.ts (cross-cutting)
+
+### Import Direction
+
+    types.ts <-- db.types.ts
+    types.ts <-- api/*.types.ts
+    types.ts <-- workflows/*.types.ts
+    types.ts <-- providers/provider.types.ts
+
+Every file imports from types.ts (materialized); no file imports from a
+sibling category. Cross-references use `import type` to break any remaining
+edges at runtime.
+
+### Naming Conventions
+
+| Category          | Pattern                       | Example                   |
+|-------------------|-------------------------------|---------------------------|
+| Materialized      | {Resource}                    | Instance, Run             |
+| Database record   | {Resource}Record              | InstanceRecord            |
+| API request       | {Action}{Resource}Request     | CreateRunRequest          |
+| API response      | {Action}{Resource}Response    | ListInstancesResponse     |
+| Workflow input    | {Workflow}Input               | LaunchRunInput            |
+| Workflow output   | {Workflow}Output              | LaunchRunOutput           |
+| Status enum       | {Resource}Status              | AllocationStatus          |
+| Config type       | {Feature}Config               | HoldDurationConfig        |
+| Options type      | {Feature}Options              | MaterializationOptions    |
+
+### Anti-Patterns
+
+**Mixed concern types.** Do not put API shapes in db.types.ts.
+Fix: move to api/{resource}.types.ts.
+
+**any usage.** Hides type errors, breaks refactoring.
+Fix: use generics or unknown with type guards.
+
+**Inline complex types.** Anonymous types in function signatures are hard
+to reference and test.
+Fix: extract to named interfaces in the appropriate category file.
+
+**Circular imports.** Module A imports B which imports A.
+Fix: use `import type { X } from` for type-only references, or extract
+the shared type to types.ts.
+
+**Overly generic types.** A single Options type with 20 optional fields.
+Fix: discriminated unions with specific variants.
+
+**String enums for status.** Enum values are opaque at the type level.
+Fix: union types with const assertions (e.g., `type Status = 'ACTIVE' | 'COMPLETE'`).
+
+### How To: Add a New Resource Type
+
+1. Define materialized type in `types.ts`:
+   ```typescript
+   export interface Widget {
+     id: ID;
+     name: string;
+     status: WidgetStatus;
+   }
+   export type WidgetStatus = 'DRAFT' | 'ACTIVE' | 'ARCHIVED';
+   ```
+
+2. Define record type in `db.types.ts`:
+   ```typescript
+   export interface WidgetRecord {
+     id: ID;
+     name: string;
+     status: string;
+     created_at: number;
+   }
+   export function recordToWidget(r: WidgetRecord): Widget;
+   export function widgetToRecord(w: Widget): WidgetRecord;
+   ```
+
+3. Add API types in `api/resources.types.ts`:
+   ```typescript
+   export interface CreateWidgetRequest { name: string; }
+   export type GetWidgetResponse = ApiResponse<Widget>;
+   ```
+
+### How To: Add a New Workflow Type
+
+1. Create `workflows/workflow-{name}.types.ts`:
+   ```typescript
+   export interface ProvisionWidgetInput { widgetId: ID; spec: string; }
+   export interface ProvisionWidgetOutput { instanceId: ID; }
+   ```
+
+2. Add to WorkflowType union in `workflows/engine.types.ts`:
+   ```typescript
+   export type WorkflowType =
+     | 'launch-run'
+     | 'provision-widget'  // new
+     | string;
+   ```
+
+3. Define blueprint in `workflows/workflow-{name}.ts`.
+
+### How To: Add a Provider Type
+
+1. Add to `providers/provider.types.ts`:
+   ```typescript
+   export interface AWSInstanceExtension {
+     availabilityZone: string;
+     spotRequestId: string | null;
+   }
+   ```
+
+2. Use type intersection for provider-specific resources:
+   ```typescript
+   type AWSInstance = Instance & AWSInstanceExtension;
+   ```
+
+Provider-specific types never go in types.ts or db.types.ts. Core provider
+types (SpawnOptions, BootstrapConfig) live in provider.types.ts and are
+referenced by workflow types.
+

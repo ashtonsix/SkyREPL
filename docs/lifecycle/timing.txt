@@ -1,0 +1,273 @@
+================================================================================
+Timing Configuration
+================================================================================
+
+Reading order: data-model -> execution -> providers -> api -> agent -> safety -> timing
+Prerequisite: ARCHITECTURE.txt (repo root)
+
+## Concept
+
+All timing parameters are tunable via environment variables (REPL_* prefix).
+The control plane validates constraint chains at startup and fails fast on
+violations. Adjust based on deployment characteristics: network latency,
+provider mix, workload patterns.
+
+### Constraint Chains
+
+Timing parameters form ordering constraints. If A < B in a chain, setting
+A >= B is a startup error.
+
+**Heartbeat chain** (liveness detection):
+
+    HEARTBEAT_INTERVAL (10s) < HEARTBEAT_DEGRADED (2m)
+      < HEARTBEAT_ACK_TIMEOUT (15m) < STALE_DETECTION (25m)
+
+Agent sends heartbeats at INTERVAL. After DEGRADED silence, agent enters
+early-warning mode. After ACK_TIMEOUT with no server ack, agent initiates
+shutdown. After STALE_DETECTION, control plane force-marks the allocation
+FAILED. Both sides detect failure independently; termination is idempotent.
+
+**Cleanup chain** (orphan prevention):
+
+    reconciliation_interval < manifest_cleanup_interval
+
+Reconciliation runs multiple times before manifest cleanup fires, giving
+several chances to catch orphans via provider state sync. Manifest cleanup
+is the fallback, not the primary mechanism.
+
+**Hold duration chain** (cost control):
+
+    default_hold <= max_ssh_extension <= max_explicit_extension
+      <= absolute_max_hold
+
+Bounded extensions prevent runaway costs. SSH activity auto-extends within
+its cap; explicit `repl extend` goes further; absolute max is the hard stop.
+
+**Workflow chain**:
+
+    compensation_timeout <= node_timeout < workflow_timeout
+
+Individual nodes have budgets. Compensation (rollback) must complete within
+node timeout so failed workflows clean up promptly.
+
+**Spawn/orphan chain**:
+
+    orphan_min_age > spawn_timeout
+
+Do not classify in-progress spawns as orphans. Grace period must exceed the
+longest reasonable spawn time.
+
+### Deployment Profiles
+
+**Development (OrbStack):** Aggressive timings for fast feedback.
+
+    REPL_HEARTBEAT_INTERVAL=5s
+    REPL_STALE_DETECTION=15s
+    REPL_DEFAULT_HOLD=1m
+    REPL_RECONCILIATION_INTERVAL=10s
+
+**Production (single-user):** Suggested defaults work well. Consider
+tighter cost control: REPL_ABSOLUTE_MAX_HOLD=12h.
+
+**Production (multi-tenant):** More conservative, longer grace periods.
+
+    REPL_HEARTBEAT_ACK_TIMEOUT=45s
+    REPL_STALE_DETECTION=60s
+    REPL_ORPHAN_MIN_AGE=15m
+    REPL_MANIFEST_CLEANUP_INTERVAL=10m
+
+**High-latency networks:** Wider margins for network delays.
+
+    REPL_HEARTBEAT_INTERVAL=20s
+    REPL_HEARTBEAT_ACK_TIMEOUT=20m
+    REPL_STALE_DETECTION=30m
+    REPL_CLI_API_TIMEOUT=60s
+
+
+## Why These Constraints
+
+### Failure Mode Analysis
+
+**Heartbeat too short (< 5s):** Higher control plane load, more false
+positives during GC pauses or brief network blips. Only justified for
+high-churn ephemeral workloads.
+
+**Heartbeat too long (> 30s):** Slower dead-instance detection. Stale
+allocations consume resources longer. Acceptable for stable long-running
+jobs where quick failure detection is less critical.
+
+**Hold too short:** Users lose SSH access before they can debug failures.
+Frustrated researchers. Default 5m is enough to notice; SSH auto-extension
+handles longer sessions.
+
+**Hold too long / no absolute cap:** Runaway costs from forgotten
+instances. The absolute max (24h default) is the safety net.
+
+**Orphan min age too short:** False positives -- kills instances still
+being spawned. Must exceed spawn_timeout plus buffer.
+
+**Orphan min age too long:** Real orphans accrue cost longer before
+detection. 10m default balances against the 10m spawn timeout.
+
+**Reconciliation too infrequent:** Provider state drift goes undetected.
+Orphans accumulate. 60s default is a good balance of API load vs freshness.
+
+**Spawn timeout too short:** Capacity-constrained regions or large instance
+types take longer. AWS spot can take 10-15m in tight regions. Timeout too
+short causes unnecessary failures; too long delays error feedback.
+
+### Provider-Specific Timing
+
+**OrbStack (local dev):** Instant provisioning, no API rate limits. Use
+aggressive timings: spawn_timeout 30s, spawn_poll 1s, reconciliation 10s.
+
+**Lambda Labs / RunPod:** Generally faster than AWS. spawn_timeout 5m
+is usually sufficient.
+
+**AWS:** Uses base defaults. Consider spawn_timeout 15m for capacity-
+constrained regions or large GPU instance types. Respect EC2 API rate
+limits -- do not poll more aggressively than 5s.
+
+
+## Reference
+
+### Heartbeat & Liveness
+
+| Parameter          | Env Var                        | Default | Chain Position | Trade-off              |
+|--------------------|--------------------------------|---------|----------------|------------------------|
+| Heartbeat interval | REPL_HEARTBEAT_INTERVAL        | 10s     | chain start    | Fast detect vs load    |
+| Degraded threshold | REPL_HEARTBEAT_DEGRADED_MS     | 2m      | early warning  | Noise vs visibility    |
+| Ack timeout        | REPL_HEARTBEAT_ACK_TIMEOUT     | 15m     | agent shutdown | Grace vs cost          |
+| Stale detection    | REPL_STALE_DETECTION           | 25m     | force-term     | Tolerance vs orphans   |
+
+### Hold Duration
+
+| Parameter          | Env Var                        | Default | Chain Position | Trade-off              |
+|--------------------|--------------------------------|---------|----------------|------------------------|
+| Default hold       | REPL_DEFAULT_HOLD              | 5m      | chain start    | Debug time vs cost     |
+| SSH extension      | REPL_SSH_EXTENSION             | 5m      | per detection  | Convenience vs cost    |
+| Max SSH extension  | REPL_MAX_SSH_EXTENSION         | 2h      | cumulative cap | Flexibility vs cost    |
+| Explicit extension | REPL_EXPLICIT_EXTENSION        | 30m     | user-requested | Convenience vs cost    |
+| Max explicit       | REPL_MAX_EXPLICIT_EXTENSION    | 8h      | per-ext cap    | Flexibility vs cost    |
+| Absolute max       | REPL_ABSOLUTE_MAX_HOLD         | 24h     | hard limit     | Safety ceiling         |
+
+### Background Tasks
+
+| Parameter          | Env Var                            | Default | Trade-off              |
+|--------------------|------------------------------------|---------|------------------------|
+| Heartbeat check    | REPL_HEARTBEAT_CHECK_INTERVAL      | 60s     | Detect speed vs load   |
+| Hold expiry check  | REPL_HOLD_EXPIRY_CHECK_INTERVAL    | 60s     | Cleanup speed vs load  |
+| Reconciliation     | REPL_RECONCILIATION_INTERVAL       | 60s     | Freshness vs API load  |
+| Manifest cleanup   | REPL_MANIFEST_CLEANUP_INTERVAL     | 5m      | Must be > reconciliation |
+| Orphan scan        | REPL_ORPHAN_SCAN_INTERVAL          | 1h      | Detection vs API load  |
+| Blob GC            | REPL_BLOB_GC_INTERVAL              | 24h     | Disk vs DB load        |
+
+### Workflow Engine
+
+| Parameter              | Env Var                          | Default | Trade-off              |
+|------------------------|----------------------------------|---------|------------------------|
+| Node timeout           | REPL_NODE_TIMEOUT                | 5m      | Per-node budget        |
+| Workflow timeout       | REPL_WORKFLOW_TIMEOUT            | 60m     | Overall limit          |
+| Pending workflow timeout | REPL_PENDING_WORKFLOW_TIMEOUT  | 30m     | Stuck workflow cleanup |
+| Compensation timeout   | REPL_COMPENSATION_TIMEOUT        | 5m      | Rollback budget        |
+| Cancel verification    | REPL_CANCEL_VERIFICATION         | 90s     | 3x heartbeat           |
+
+### Provider Operations
+
+| Parameter               | Env Var                           | Default | Trade-off              |
+|-------------------------|-----------------------------------|---------|------------------------|
+| Spawn timeout           | REPL_SPAWN_TIMEOUT                | 10m     | Patience vs feedback   |
+| Spawn poll              | REPL_SPAWN_POLL_INTERVAL          | 5s      | Freshness vs API cost  |
+| Instance boot timeout   | REPL_INSTANCE_BOOT_TIMEOUT        | 10m     | Boot patience          |
+| Boot poll               | REPL_BOOT_POLL_INTERVAL           | 5s      | Boot status freshness  |
+| Pending spawn stale     | REPL_PENDING_SPAWN_STALE_THRESHOLD| 10m     | Stuck spawn detection  |
+| Terminate timeout       | REPL_TERMINATE_TIMEOUT            | 5m      | Grace vs cleanup speed |
+| Snapshot timeout        | REPL_SNAPSHOT_TIMEOUT             | 30m     | Large disk tolerance   |
+| Snapshot prepare timeout| REPL_SNAPSHOT_PREPARE_TIMEOUT     | 5m      | Pre-snapshot grace     |
+| Snapshot poll           | REPL_SNAPSHOT_POLL_INTERVAL       | 30s     | Freshness vs API cost  |
+| Drain timeout           | REPL_DRAIN_TIMEOUT                | 60s     | SSH disconnect grace   |
+
+### Agent
+
+| Parameter            | Env Var                          | Default | Trade-off              |
+|----------------------|----------------------------------|---------|------------------------|
+| Log local buffer     | REPL_LOG_LOCAL_BUFFER            | 100ms   | Flush frequency        |
+| Log network batch    | REPL_LOG_NETWORK_BATCH           | 5s      | Visibility vs bandwidth|
+| Spot check interval  | REPL_SPOT_CHECK_INTERVAL         | 5s      | React speed vs load    |
+| Checkpoint budget    | REPL_SPOT_CHECKPOINT_BUDGET      | 90s     | Save time vs cost      |
+| Panic checkpoint     | REPL_PANIC_CHECKPOINT_BUDGET     | 5m      | Emergency save time    |
+| Panic diagnostics    | REPL_PANIC_DIAGNOSTICS_TIMEOUT   | 2s      | Debug data collection  |
+| Command ack timeout  | REPL_COMMAND_ACK_TIMEOUT         | 30s     | Retry speed            |
+| Shutdown grace       | REPL_AGENT_SHUTDOWN_GRACE        | 5s      | Cleanup time           |
+| SSH activity slack   | REPL_SSH_ACTIVITY_SLACK          | 60s     | Activity detection lag |
+
+### Retry & Backoff
+
+| Parameter            | Env Var                    | Default |
+|----------------------|----------------------------|---------|
+| Retry base delay     | REPL_RETRY_BASE_DELAY      | 2s      |
+| Retry max delay      | REPL_RETRY_MAX_DELAY       | 60s     |
+| Max attempts         | REPL_RETRY_MAX_ATTEMPTS    | 5       |
+| SSE reconnect base   | REPL_SSE_RECONNECT_BASE    | 2s      |
+| SSE reconnect max    | REPL_SSE_RECONNECT_MAX     | 64s     |
+| SSE max retries      | REPL_SSE_MAX_RETRIES       | 10      |
+
+### Cache TTLs
+
+| Parameter          | Env Var                          | Default |
+|--------------------|----------------------------------|---------|
+| Spot prices        | REPL_CACHE_SPOT_PRICES_TTL       | 5m      |
+| Capacity           | REPL_CACHE_CAPACITY_TTL          | 1m      |
+| Instance state     | REPL_CACHE_INSTANCE_STATE_TTL    | 30s     |
+| Instance types     | REPL_CACHE_INSTANCE_TYPES_TTL    | 1h      |
+| Resource cache     | REPL_RESOURCE_CACHE_TTL          | 5m      |
+| Snapshot cache     | REPL_SNAPSHOT_CACHE_TTL          | 5m      |
+| Refresh min interval | REPL_CACHE_REFRESH_MIN_INTERVAL | 1m      |
+
+### CLI & File Transfer
+
+| Parameter            | Env Var                            | Default |
+|----------------------|------------------------------------|---------|
+| Default run timeout  | REPL_CLI_DEFAULT_TIMEOUT           | 1h      |
+| API timeout          | REPL_CLI_API_TIMEOUT               | 30s     |
+| Completion cache     | REPL_COMPLETION_CACHE_TTL          | 30s     |
+| Completion API       | REPL_COMPLETION_API_TIMEOUT        | 200ms   |
+| Presigned URL TTL    | REPL_PRESIGNED_URL_TTL             | 4h      |
+| Sync timeout         | REPL_SYNC_TIMEOUT                  | 10m     |
+| Artifact collection  | REPL_ARTIFACT_COLLECTION_TIMEOUT   | 30m     |
+
+### Cleanup & GC
+
+| Parameter            | Env Var                          | Default |
+|----------------------|----------------------------------|---------|
+| CLAIMED timeout      | REPL_CLAIMED_TIMEOUT             | 5m      |
+| Orphan min age       | REPL_ORPHAN_MIN_AGE              | 10m     |
+| Blob grace period    | REPL_BLOB_GRACE_PERIOD           | 24h     |
+| Session threshold    | REPL_RECENT_SESSION_THRESHOLD    | 1h      |
+| Manifest retention   | REPL_DEFAULT_MANIFEST_RETENTION  | 24h     |
+
+### Warm Pool
+
+| Parameter                   | Env Var                              | Default |
+|-----------------------------|--------------------------------------|---------|
+| Pool expiry                 | REPL_WARM_POOL_EXPIRY                | 1h      |
+| Reconcile interval          | REPL_WARM_POOL_RECONCILE_INTERVAL    | 60s     |
+| Claim retry delay           | REPL_WARM_CLAIM_RETRY_DELAY          | 50ms    |
+| Claim max retries           | REPL_WARM_CLAIM_MAX_RETRIES          | 3       |
+| Max allocations per instance| REPL_MAX_ALLOCATIONS_PER_INSTANCE    | 10      |
+
+### Observability
+
+Track these metrics to detect timing-related issues:
+
+- Heartbeat ack latency distribution (P50, P95, P99)
+- Stale heartbeat detection rate
+- Hold expiry count (normal vs forced)
+- Orphan detection rate per reconciliation cycle
+- Spawn timeout rate by provider
+- Compensation execution time
+- Retry rate by operation type
+
+Alerts: heartbeat P99 approaching ack_timeout, orphan rate exceeding
+baseline, spawn timeout rate exceeding 1%, compensation failures.
+

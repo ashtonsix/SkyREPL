@@ -1,0 +1,337 @@
+================================================================================
+CLI
+================================================================================
+
+## Philosophy
+
+The CLI is a thin display layer. It submits workflow requests to the control
+plane and renders progress -- it does not orchestrate, retry, or make
+decisions.
+
+**Submission + display, not execution.** The CLI constructs a workflow
+request from config + flags, POSTs it, then streams SSE events to the
+terminal. The control plane owns all retry logic, state management, provider
+calls, and warm pool decisions.
+
+**Move to server if adding:** retry logic beyond network transients, state
+caching beyond config, decision logic (warm pool selection, fallback
+strategy), provider-specific code.
+
+**Developer experience matters.** Good CLI design means researchers spend
+mental energy on their work, not on instance management. Preflight warnings
+surface problems before they cost money. Receipt summaries provide actionable
+next steps. SSH integration removes the indirection of IP addresses and keys.
+
+**No provider-specific code.** The CLI speaks to one API. Providers are
+the control plane's concern.
+
+
+## Guide
+
+### First 10 Commands
+
+    repl run                   Submit a run using default profile
+    repl run status <id>       Check run status
+    repl logs <id>             Stream run logs (Ctrl-C to detach; run continues)
+    ssh repl-<id>              SSH into allocation workdir
+    repl extend <id>           Extend debug hold (default +30m)
+    repl artifacts pull <id>   Download run artifacts
+    repl orphans list          Check for untracked cloud resources
+    repl setup                 Interactive first-time setup wizard
+    repl usage                 Current month cost summary
+    repl control status        Control plane health check
+
+### Configuration: repl.toml
+
+Profiles are self-contained -- each specifies provider, spec, and command.
+
+```toml
+[profile.default]
+provider = "aws"
+spec = "g6.xlarge"
+region = "us-east-1"
+command = "./run.sh"
+timeout = "30m"
+spot = true
+hold = "5m"
+
+[profile.gpu-training]
+provider = "aws"
+spec = "g6.12xlarge"
+spot = true
+command = "python train.py --epochs 100"
+timeout = "12h"
+init = "setup_training.sh"
+snapshot = true
+checkpoint_script = "./checkpoint.sh"
+checkpoint_timeout = "90s"
+
+[profile.local]
+provider = "orbstack"
+spec = "ubuntu"
+command = "./run.sh"
+timeout = "10m"
+
+[files]
+include = ["*.py", "*.sh", "requirements.txt", "data/*"]
+exclude = ["__pycache__", "*.pyc", ".git", "node_modules", "venv"]
+artifacts = ["results/*", "*.pt", "checkpoint*.pt", "logs/*.log"]
+```
+
+**Profile fields:**
+
+| Field              | Type     | Default             | Description                      |
+|--------------------|----------|---------------------|----------------------------------|
+| provider           | string   | required            | aws, lambda, runpod, orbstack    |
+| spec               | string   | required            | Instance type                    |
+| command            | string   | required            | Command to execute               |
+| region             | string   | provider default    | Cloud region                     |
+| timeout            | duration | "30m"               | Max run duration                 |
+| workdir            | string   | "/home/ubuntu/work" | Remote working directory         |
+| spot               | bool     | true                | Use spot instances               |
+| init               | string   | null                | Init script path                 |
+| hold               | duration | "5m"                | Hold allocation after run        |
+| snapshot           | bool     | false               | Snapshot on success              |
+| keep_on_complete   | bool     | false               | Keep instance after success      |
+| keep_on_failure    | bool     | false               | Keep instance after failure      |
+| checkpoint_script  | string   | null                | Spot termination checkpoint      |
+| checkpoint_timeout | duration | "60s"               | Max checkpoint time              |
+
+Duration suffixes: s (seconds), m (minutes), h (hours), d (days).
+
+**Files section:** include/exclude use glob syntax (*, ** for recursive).
+Patterns are relative to the repl.toml directory. artifacts patterns
+specify which files to collect after run completion.
+
+**Checkpoint scripts** execute when cloud providers send spot termination
+notices. Environment variables: SKYREPL_CHECKPOINT_REASON,
+SKYREPL_RUN_ID, SKYREPL_WORKDIR. Exit 0 = success; non-zero = warning
+logged; instance terminates either way. See docs/lifecycle/timing.txt
+for provider warning times (AWS 2m, Lambda 30s, RunPod 1m).
+
+### Output Modes
+
+**Pretty (default, TTY):** ANSI colors, progress bars with live updates,
+timestamps, tables, receipt summaries with actionable next steps.
+
+**JSON (--json):** One JSON object per command. Stable field names. No
+ANSI codes. Includes both integer id and slug fields.
+
+**Quiet (--quiet):** Only errors and final results. No progress or
+informational messages.
+
+Non-TTY (piped) output automatically strips ANSI codes and replaces
+progress bars with dot sequences.
+
+
+## Command Reference
+
+### repl run [profile]
+
+Submit a launch-run workflow.
+
+```bash
+repl run                           # Default profile
+repl run --profile dev             # Named profile
+repl run --command "python x.py"   # Override command
+repl run --timeout 2h --spot       # Override settings
+repl run --dry-run                 # Validate without launching
+repl run --no-stream               # Submit and exit
+```
+
+Flags: --command, --timeout, --workdir, --spot/--no-spot, --hold,
+--snapshot, --dry-run, --no-stream.
+
+Output: workflow progress via SSE (node status, file sync progress, run
+output), then receipt with run ID, instance, duration, exit code, cost,
+allocation ID, hold time, SSH command, artifact pull command.
+
+JSON output (--json or --no-stream) returns workflow_id, run_id, status,
+stream_url.
+
+### repl run status <id>
+
+Get run status. Distinct from `repl status` (control plane health).
+
+```bash
+repl run status run-xyz789
+repl run status run-xyz        # Prefix autocomplete on tab ("did you mean?" if entered)
+```
+
+Output: run ID, status, workflow state, instance info, allocation,
+timestamps, duration.
+
+### repl logs <id>
+
+Stream logs from a run via WebSocket.
+
+```bash
+repl logs run-xyz789             # Stream (follows)
+repl logs run-xyz789 --tail      # Last 100 lines, then follow
+repl logs run-xyz789 --head      # First 100 lines, exit
+```
+
+Ctrl-C disconnects from logs; the run continues.
+
+### repl ssh <allocation-id>
+
+See docs/shell/ssh.txt for SSH integration details.
+
+### repl extend <id> --duration
+
+Extend allocation debug hold.
+
+```bash
+repl extend alloc-def456              # Default +30m
+repl extend alloc-def456 --duration 2h
+repl extend alloc-def                 # Prefix resolution
+```
+
+No allocation specified: targets the most recent ACTIVE or held COMPLETE
+allocation. Duration capped at maxExplicitExtensionMs (default) or
+absoluteMaxDebugHoldMs (with explicit duration).
+
+### repl artifacts pull <id>
+
+```bash
+repl artifacts list                       # All artifacts
+repl artifacts list --run run-xyz789      # Specific run
+repl artifacts pull run-xyz789            # Download all
+repl artifacts pull run-xyz789 --dest ./results
+repl artifacts pull run-xyz789 --pattern "*.pt"
+```
+
+### repl orphans list|inspect|scan|whitelist
+
+```bash
+repl orphans list                        # All orphans
+repl orphans list --provider aws         # Filter by provider
+repl orphans inspect i-0abc123def456     # Detailed info
+repl orphans scan                        # Force immediate scan
+repl orphans scan --provider aws
+repl orphans whitelist <id> --reason "Test instance"
+```
+
+See docs/lifecycle/safety.txt for full orphan CLI guide.
+
+### repl setup / repl setup-provider
+
+```bash
+repl setup                     # Interactive first-time wizard
+repl setup-provider aws        # Configure specific provider
+repl verify-setup              # Verify all provider connectivity
+```
+
+Setup wizard: provider credentials, control plane mode (local/cloud),
+SSH config generation, verification. Saves config to ~/.repl/.
+
+### repl usage
+
+```bash
+repl usage                     # Current month
+repl usage last-month          # Previous month
+repl usage --provider aws      # Filter by provider
+repl usage --export usage.csv  # Export to CSV
+```
+
+Shows total cost/hours by provider, cost by instance type, run count,
+success rate, spot vs on-demand utilization.
+
+### repl control start|stop|status
+
+```bash
+repl control start             # Start control plane
+repl control start --funnel    # With Funnel tunnel
+repl control stop              # Stop control plane
+repl control status            # Health check
+```
+
+Status output: API version, database connectivity, S3 status, Tailscale
+status, per-provider connectivity.
+
+### repl auth create-key|revoke-key|list-keys
+
+```bash
+repl auth login                # Interactive login
+repl auth login --token TOKEN  # Use existing token
+repl auth logout               # Clear authentication
+repl auth status               # Check auth status
+```
+
+Token stored in ~/.repl/auth.json (mode 0600). Local control plane
+auto-generates token tied to machine ID. See docs/shell/auth.txt.
+
+### repl team create|invite|remove|list
+
+Team management commands for multi-tenant deployments. See docs/shell/auth.txt
+for roles (admin/member) and budget enforcement.
+
+### Global Flags
+
+    --json             Machine-readable JSON output
+    --quiet            Suppress non-essential output
+    --yes              Skip confirmation prompts
+    --no-preflight     Skip preflight warnings
+    --no-color         Disable ANSI colors
+    --config PATH      Path to repl.toml (default: search upward)
+    --profile NAME     Profile to use (default: "default")
+
+### ID Slug Format
+
+IDs are integers displayed as base-36 slugs for brevity:
+run-9ix (ID 12345), inst-1h2i (ID 67890), alloc-xyz.
+
+CLI accepts slug format. Tab completion resolves prefixes. JSON output
+includes both `id` (integer) and `slug` fields.
+
+### Exit Codes and Error Formatting
+
+Non-zero for errors. Error output includes clear message, actionable
+suggestions, and debug info (request ID, relevant resource IDs).
+
+Error categories map to API categories: validation, auth, not_found,
+conflict, rate_limit, internal.
+
+CLI does not retry failed API calls (server handles retries via workflows).
+Network transient errors (connection refused, DNS) may be retried at the
+HTTP client level with backoff.
+
+### Shell Completion
+
+```bash
+repl completion bash >> ~/.bashrc
+repl completion zsh >> ~/.zshrc
+repl completion fish > ~/.config/fish/completions/repl.fish
+```
+
+Static: commands, flags, profile names, duration values. Dynamic (via API):
+run/instance/allocation/snapshot IDs, provider names. Cached 30s, API
+timeout 200ms, falls back to static if API unreachable.
+
+
+## Preflight Warnings
+
+Before `repl run` and other resource-allocating commands, CLI queries
+`GET /v1/preflight?operation=launch-run` and displays applicable warnings.
+All warnings are non-blocking: proceed with confirmation, or bypass with
+--yes or --no-preflight.
+
+**Orphan warnings:** Count and estimated hourly cost of orphaned resources,
+grouped by current session vs other sessions.
+
+**Budget warnings:** Current spend, monthly limit, remaining budget,
+estimated run cost. Surfaces before you launch something you cannot afford.
+
+**Credential expiry:** Provider, expiration date, days remaining. Suggests
+`repl setup-provider` to refresh.
+
+**Stale allocations:** Currently held allocations with hold time remaining
+and estimated idle cost per hour.
+
+**Low disk space:** Instances with low free disk percentage and absolute
+free space. Suggests cleanup or termination.
+
+**Shared instance notice (SSH only):** When connecting to an instance with
+other active allocations, shows allocation count and warns that resources
+are shared. Informational only (non-blocking) to avoid disrupting debug
+workflows.

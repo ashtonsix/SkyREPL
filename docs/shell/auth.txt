@@ -1,0 +1,129 @@
+================================================================================
+Authentication and Authorization
+================================================================================
+
+## Concept
+
+Auth flow:
+
+  1. Extract Bearer token from Authorization header ("Bearer <raw-key>").
+  2. SHA-256 hash the raw key (hex digest).
+  3. Look up hash in api_keys WHERE revoked_at IS NULL AND (expires_at IS NULL
+     OR expires_at > now()).
+  4. 401 if no row found (invalid key, revoked, or expired).
+  5. Attach AuthContext {tenantId, userId (api_keys.id), role} to the request
+     via a WeakMap keyed on the Request object.
+  6. All subsequent handlers read AuthContext via getAuthContext(request) and
+     scope queries to tenantId. Role is checked via checkPermission(ctx, action)
+     against a static role→action map.
+  7. Public paths bypass auth: /v1/health, /v1/agent/*, panic/blob-by-checksum
+     endpoints, and WebSocket upgrade requests.
+
+Three roles:
+
+  admin  -- Full access. Create/revoke API keys, invite/remove team members,
+            set team budget, view all manifests/usage, manage orphan whitelist.
+  member -- Own resources. Create/manage own manifests, view own usage, SSH to
+            own allocations, pull own artifacts. Shared read within tenant.
+  viewer -- View-only.
+
+Budget-as-ACL: budget caps constrain what operations a user can perform. Shell
+enforces caps via preflight checks before forwarding requests. Lifecycle reports
+usage but does not enforce budget directly. If shell misses it, lifecycle
+rejects as a safety net.
+
+Tenant isolation: every lifecycle record carries tenant_id. Every query is
+scoped. One tenant = one team. Maximum 5 seats per team (hard cap at launch).
+Self-managed deployments are single-tenant by default but the multi-tenant
+machinery is present.
+
+## Guide
+
+Creating API keys:
+
+  repl auth create-key --role member --name "ci-bot"
+
+  The raw key is displayed once on creation. Store it securely -- it cannot be
+  retrieved later. The database stores only the SHA-256 hash.
+
+Managing keys:
+
+  repl auth list-keys              # show all keys for your team
+  repl auth revoke-key <key-id>    # immediately invalidate a key
+  repl auth rotate-key <key-id>    # revoke old, issue new (atomic)
+
+  Keys have a 90-day default expiry. Expiry warnings appear 14 days before.
+
+Setting budget caps:
+
+  repl budget set --user <user-id> --limit 500    # per-user cap (USD)
+  repl budget set --team --limit 2000             # per-team cap (USD, admin)
+  repl budget status                              # show current usage vs caps
+
+  Budget is denominated in provider-reported cost (USD). Users can self-impose
+  limits. Admins can impose team-wide limits.
+
+Team management:
+
+  repl team invite <email>         # send invite (admin only)
+  repl team remove <user-id>       # remove member (admin only)
+  repl team list                   # show team members and roles
+
+## Reference
+
+Role permission matrix:
+
+  Operation                  admin    member      viewer
+  ------------------------------------------------------
+  Create/manage own runs     yes      yes         no
+  View own usage/manifests   yes      yes         yes
+  SSH to own allocations     yes      yes         no
+  Pull own artifacts         yes      yes         yes
+  View all team manifests    yes      read-only   read-only
+  View all team usage        yes      no          no
+  Create/revoke API keys     yes      no          no
+  Invite/remove members      yes      no          no
+  Set team budget            yes      no          no
+  Manage orphan whitelist    yes      no          no
+
+Budget enforcement flow:
+
+  Budget enforcement is not yet implemented. Shell will enforce per-user and
+  per-team budget caps at the proxy layer.
+
+API key format:
+
+  Format:  srk-<base62-32>
+           Prefix "srk-" followed by 32 base62 characters (A-Za-z0-9).
+           Generated from 32 cryptographically random bytes, each byte mod 62.
+
+  Storage: Raw key written to ~/.repl/api-key (mode 0600) on first control
+           plane startup. Only the SHA-256 hex digest is stored in the DB
+           (api_keys.key_hash). The raw key cannot be recovered from the DB.
+
+  Lookup:  Authorization: Bearer <raw-key>
+           SHA-256 hash → SELECT WHERE key_hash = ? AND revoked_at IS NULL
+           AND (expires_at IS NULL OR expires_at > now()).
+           last_used_at is updated on each successful auth (fire-and-forget).
+
+  Scoping: Each key carries tenant_id and role. All resource queries are
+           filtered by tenant_id. Role is enforced via checkPermission().
+
+Rate limiting:
+
+  Implemented. Sliding window: 120 requests per 60-second window, per auth
+  token. Returns 429 with Retry-After when exceeded. Per-process in-memory
+  (not distributed). Implemented in lifecycle/control/src/api/middleware/
+  rate-limit.ts.
+
+Secrets management:
+
+  Raw key: ~/.repl/api-key, mode 0600. Written once on first startup; never
+           overwritten. If the file exists, the existing key is re-used.
+  DB:      Only SHA-256 hex digest stored (api_keys.key_hash). No plaintext
+           in the database.
+  Rotation: No key rotation CLI yet. Manual workaround: revoke the
+            old key via `repl auth revoke-key`, then create a new key via
+            `repl auth create-key`.
+  Expiry:  90-day default expiry. expires_at is populated by seedApiKey
+           (Date.now() + 90 days). Expiry warnings appear 14 days before.

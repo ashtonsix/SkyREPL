@@ -1,0 +1,252 @@
+================================================================================
+Execution
+================================================================================
+
+Reading order: data-model -> execution -> providers -> api -> agent -> safety -> timing
+Prerequisite: ARCHITECTURE.txt (repo root)
+
+## Allocations
+
+An allocation is a run-to-instance binding -- the lifecycle primitive for run
+execution. It tracks the full arc from warm pool availability, through active
+execution, to completion.
+
+### State Machine
+
+```
+AVAILABLE -> CLAIMED -> ACTIVE -> COMPLETE
+                                   \-> FAILED
+```
+
+**AVAILABLE**: Empty run slot. run_id is NULL. This IS the warm pool (query
+result, not separate data structure).
+
+**CLAIMED**: Run assigned, files downloading. Short-lived. Agent emits
+sync_complete when files are ready.
+
+**ACTIVE**: Command running, logs streaming. Transitions to COMPLETE on run
+completion, FAILED on lifecycle error.
+
+**COMPLETE**: Terminal. Workdir retained (enables post-run debugging). Instance
+slot available for new allocations (warm pool replenishment). debug_hold_until
+may block termination and enable SSH.
+
+**FAILED**: Terminal. Lifecycle error (sync failure, agent crash, spot
+interruption). NOT run failure (exit_code != 0 is normal COMPLETE). Typically
+triggers instance termination.
+
+### Warm Pool
+
+The warm pool is `SELECT * FROM allocations WHERE status = 'AVAILABLE'`. No
+separate table. When an allocation completes and the instance is healthy, a new
+AVAILABLE allocation is created on the same instance (replenishment).
+
+### Debug Holds
+
+debug_hold_until is an explicit timestamp blocking instance termination and
+enabling SSH on COMPLETE allocations. Extended automatically (agent heartbeat
+reports active SSH sessions) or manually (`repl extend` CLI command).
+
+### SSH Properties
+
+Each allocation gets its own SSH entry with instance_id, user (default
+'ubuntu'), and workdir (per-instance counter: /home/ubuntu/work_1, work_2).
+`ssh <allocation_id>` connects to the right instance/user/workdir.
+
+### How Allocations Flow During `repl run`
+
+1. resolve-instance checks warm pool. If match: AVAILABLE -> CLAIMED (atomic
+   UPDATE prevents double-claim). If not: spawn instance, create AVAILABLE, claim.
+2. Agent downloads files, reports sync_complete. CLAIMED -> ACTIVE.
+3. Run executes, completes. ACTIVE -> COMPLETE. debug_hold_until set (5 min
+   success, 15 min failure).
+4. If instance healthy, new AVAILABLE allocation created (warm pool replenishment).
+
+### Extending a Hold
+
+```bash
+repl extend                          # Extend most recent allocation by 30 min
+repl extend <allocation-id>          # Extend specific allocation by 30 min
+repl extend <allocation-id> 2h       # Extend by user-specified duration
+```
+
+Extensions are capped. Without explicit duration: maxExplicitExtensionMs (8h).
+With explicit duration: absoluteMaxDebugHoldMs (24h).
+
+### Warm Pool Reuse
+
+queryWarmPool() finds AVAILABLE allocations matching spec/init_checksum. Scored:
+100 = exact checksum match (skip init), 50 = vanilla (needs init), 0 = excluded.
+claimWarmPoolAllocation() uses atomic UPDATE with optimistic concurrency, up to
+3 retries with linear backoff. Falls back to spawn on exhaustion.
+
+### Allocation Fields Reference
+
+| Field            | Type    | Notes                                          |
+|------------------|---------|------------------------------------------------|
+| id               | INTEGER | PRIMARY KEY AUTOINCREMENT                      |
+| manifest_id      | INTEGER | FK -> manifests                                |
+| instance_id      | INTEGER | FK -> instances (NOT NULL)                     |
+| run_id           | INTEGER | FK -> runs (NULL when AVAILABLE)               |
+| status           | TEXT    | AVAILABLE, CLAIMED, ACTIVE, COMPLETE, FAILED   |
+| debug_hold_until | INTEGER | Unix timestamp ms (NULL if no hold)             |
+| user             | TEXT    | Default 'ubuntu'                               |
+| workdir          | TEXT    | e.g., /home/ubuntu/work_1                      |
+| created_at       | INTEGER | Unix timestamp ms                              |
+| updated_at       | INTEGER | Unix timestamp ms                              |
+| completed_at     | INTEGER | Set on COMPLETE or FAILED                      |
+
+### Hold Duration Tiers
+
+| Config                 | Value     | Purpose                       |
+|------------------------|-----------|-------------------------------|
+| defaultDebugHoldMs     | 5 min     | After normal completion       |
+| failureDebugHoldMs     | 15 min    | After failure                 |
+| sshExtensionMs         | 5 min     | Per SSH activity detection    |
+| maxSshExtensionMs      | 2 hours   | Cumulative SSH cap            |
+| explicitExtensionMs    | 30 min    | Per `repl extend`             |
+| maxExplicitExtensionMs | 8 hours   | Cumulative explicit cap       |
+| absoluteMaxDebugHoldMs | 24 hours  | Hard limit                    |
+
+### State Transition Table
+
+```
+From       -> To         Trigger
+AVAILABLE  -> CLAIMED    Warm pool allocation claimed by workflow
+AVAILABLE  -> FAILED     Instance unhealthy (heartbeat timeout, spot interruption)
+CLAIMED    -> ACTIVE     Agent reports sync_complete
+CLAIMED    -> FAILED     Sync failure or timeout
+CLAIMED    -> AVAILABLE  Compensation rollback
+ACTIVE     -> COMPLETE   Run finishes (success or failure exit code)
+ACTIVE     -> FAILED     Lifecycle error (heartbeat timeout, agent crash, spot interrupt)
+COMPLETE   -> (terminal) Allows new allocations + instance termination
+FAILED     -> (terminal) Typically triggers instance termination
+```
+
+Race condition (ACTIVE->COMPLETE vs ACTIVE->FAILED): both use
+`UPDATE ... WHERE status='ACTIVE'`. First write wins. If timeout wins the race
+but run_complete evidence exists in workflow_events, the workflow treats it as
+success.
+
+
+
+## Workflows
+
+Workflows are declarative DAGs for orchestrating multi-step operations that
+cannot be reduced to single atomic transactions. Every multi-step operation in
+SkyREPL -- launching runs, terminating instances, creating snapshots, cleaning
+up manifests -- is a workflow.
+
+### The Four Patterns
+
+The workflow engine provides exactly four composition patterns. Fewer patterns
+means fewer moving parts and clearer workflow structure.
+
+**Insert-and-Reconverge (IAR)**: Insert a parallel node that must complete
+before a downstream node. Example: install Tailscale and GPU drivers in parallel
+before creating an allocation. Max 1 insertion depth.
+
+**Conditional-Branch (CB)**: Choose between two mutually exclusive paths.
+Supports standard conditions (warm pool available?) and try-fallback
+(triggerOnError=true: try S3 direct, fall back to Tailscale sync). Exactly two
+branches, deterministic condition.
+
+**Parallel-Fan-Out (PFO)**: Spawn multiple independent parallel work items that
+converge at a join node. Max 16 branches. Example: clean up resources by type
+during manifest cleanup.
+
+**Retry-with-Alternative (RWA)**: On failure, retry with different parameters.
+The failed node is compensated, then the alternative executes. Max 3 attempts,
+same output contract. Example: spot capacity unavailable in us-east-1, retry
+us-west-2.
+
+### Compensation
+
+Single-node only. When a node fails, its compensate() handler fires (e.g.,
+terminate a spawned instance). Completed nodes are NOT rolled back -- manifest
+cleanup handles teardown later. Each handler has a 5-minute timeout; on failure,
+the orphan scan catches remaining resources.
+
+### Crash Recovery
+
+All state persisted before actions: node marked 'running' before execution,
+'completed' after success, pattern applications before DAG modification. On
+startup, recoverWorkflows() resets idempotent interrupted nodes to pending and
+marks non-idempotent ones failed.
+
+### Topology Signatures
+
+OTel span attributes (provider, region, instance type) enable observability
+grouping in Grafana/Loki for cross-provider comparison and failure analysis.
+
+### How a Launch-Run Workflow Executes
+
+1. **check-budget**: Validate constraints. Fail immediately if exceeded.
+2. **resolve-instance**: Check warm pool for spec/init_checksum match.
+3. **CB**: Warm match -> claim-warm-allocation (with triggerOnError fallback to
+   spawn). Cold -> spawn-instance (two-phase: DB record before cloud API).
+4. **wait-for-boot**: Poll until ready. IAR inserts feature installs in parallel.
+5. **create-allocation**: Bind run to instance.
+6. **sync-files**: Presigned URLs, start_run to agent, await sync_complete.
+7. **await-completion**: Block until run_complete.
+8. **finalize-run**: COMPLETE transition. CB: conditional snapshot if requested.
+
+### How Compensation Fires on Failure
+
+If spawn-instance fails after creating a cloud resource: engine calls
+compensateSpawnNode(), which terminates the provider instance (ignores
+NOT_FOUND) and marks it as terminate:complete in DB. Workflow may retry with
+RWA pattern or fail entirely. On workflow failure, manifest stays DRAFT and
+cleanup tracks all emitted resources.
+
+### Observability: Topology Signatures
+
+Each workflow creates an OTel trace with span attributes for provider, region,
+instance type, warm-vs-cold path, and per-node timing. In Grafana: filter by
+type+status for failure clusters, group by topology for cross-provider
+comparison, drill into traces for node-level inspection.
+
+### Workflow States
+
+pending -> running -> completed | failed | cancelled | rolling_back -> failed
+
+### Node States
+
+pending -> running -> completed | failed | skipped
+
+### Derived State Format
+
+Instance workflow_state uses the format `<workflow>:<phase>` (e.g.,
+'launch-run:provisioning', 'spawn:pending'). This derived state ties instance
+status to the active workflow, preventing independent drift between the two.
+It also enables efficient query filtering by workflow type or phase (e.g.,
+`WHERE workflow_state LIKE 'launch-run:%'`).
+
+### Intent Blueprints
+
+| Intent              | Key Nodes                                             | Patterns Used        |
+|---------------------|-------------------------------------------------------|----------------------|
+| launch-run          | check-budget, resolve-instance, spawn/claim, sync, finalize | CB x3, IAR      |
+| terminate-instance  | validate, drain-allocations, drain-ssh, cleanup-features, terminate | PFO     |
+| create-snapshot     | validate, prepare-instance, create-provider-snapshot, register | none          |
+| cleanup-manifest    | load-resources, sort-by-priority, cleanup-loop, delete | PFO                 |
+
+### Pattern Reference
+
+| Pattern                | Abbrev | Limit        | Constraint                 |
+|------------------------|--------|--------------|----------------------------|
+| Insert-and-Reconverge  | IAR    | 1 insertion  | Target node must be pending|
+| Conditional-Branch     | CB     | 2 branches   | Deterministic condition    |
+| Parallel-Fan-Out       | PFO    | 16 branches  | Independent branches       |
+| Retry-with-Alternative | RWA    | 3 attempts   | Same output contract       |
+
+### Engine Operations
+
+- `submit(request)`: Submit workflow, returns workflow ID
+- `cancel(workflowId, reason)`: Fire-and-forget cancel via HTTP-SSE
+- `retry(workflowId)`: Create NEW workflow with same inputs (never mutate failed)
+- `recoverWorkflows()`: On startup, resume interrupted workflows
+
+MAX_SUBWORKFLOW_DEPTH = 3. Subworkflows create their own manifests and seal on
+completion. Parents claim resources by querying SEALED manifests.
+

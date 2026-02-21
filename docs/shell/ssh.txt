@@ -1,0 +1,248 @@
+================================================================================
+SSH Integration
+================================================================================
+
+## Concept
+
+SSH connections are per-allocation, not per-instance. Each allocation gets
+its own SSH host entry, workdir, and user context. Multiple allocations can
+coexist on the same instance — old runs remain accessible for debugging
+while new runs execute in separate workdirs.
+
+### Workdir Isolation
+
+Each allocation gets an isolated working directory:
+
+    /home/<user>/work_1    (allocation A)
+    /home/<user>/work_2    (allocation B)
+    /home/<user>/work_3    (allocation C)
+
+The per-instance counter increments with each new allocation. Old workdirs
+persist until instance termination, so `ssh repl-<old-alloc>` still lands
+you in the right directory for post-run debugging.
+
+### Tailscale JIT Installation
+
+Tailscale provides private networking between your machine and remote
+instances. SkyREPL installs Tailscale just-in-time on first SSH connection,
+avoiding overhead for batch/non-interactive workloads that never need SSH.
+
+The ProxyCommand in the SSH config intercepts the connection attempt and
+triggers installation if needed. The user sees a brief progress message
+on first connect; subsequent connections are instant.
+
+When Tailscale is unavailable (network restrictions, auth failure), SSH
+falls back to the instance's public IP.
+
+### ProxyCommand Routing
+
+SSH config entries use a ProxyCommand that:
+1. Extracts the allocation ID from the host alias
+2. Queries the API for the instance IP
+3. Ensures Tailscale is connected (triggers auth if needed)
+4. Establishes a tunnel via nc
+
+Unknown or stale slugs fall through to a catch-all `Host repl-*` entry
+that queries the API and provides suggestions ("did you mean?", prefix
+disambiguation, or stale config warnings).
+
+
+## Guide
+
+### SSH Into a Running Allocation
+
+After `repl run` completes (or while it is running), the receipt shows:
+
+    ssh repl-def456
+
+This works because `repl run` writes SSH config entries for each active
+allocation. The host alias is the allocation slug prefixed with `repl-`.
+
+For COMPLETE allocations, SSH access requires debug_hold_until > NOW.
+The hold is set automatically if keep_on_complete or keep_on_failure is
+configured. Extend with `repl extend`.
+
+### SSH Config Generation
+
+`repl run` writes per-allocation entries to `~/.repl/ssh_config`. Add
+this line to your `~/.ssh/config` (one-time setup):
+
+    Include ~/.repl/ssh_config
+
+Each entry looks like:
+
+    Host repl-def456
+      HostName 100.64.1.23
+      User ubuntu
+      Port 22
+      StrictHostKeyChecking no
+      UserKnownHostsFile /dev/null
+      LogLevel ERROR
+      IdentityFile ~/.ssh/repl-aws.pem
+      ProxyCommand ~/.repl/bin/ssh_proxy_command.sh %n
+
+Config regenerates automatically when:
+- Allocation enters ACTIVE state (new SSH target)
+- Allocation enters COMPLETE with debug_hold_until set
+- Allocation debug_hold_until expires (SSH target removed)
+- Instance IP changes (Tailscale ready, public IP assigned)
+- New allocation created on existing instance
+
+When an instance has multiple allocations (e.g., COMPLETE with debug hold +
+new ACTIVE), the config includes separate entries -- same IP, different
+allocation IDs, different workdirs (via RemoteCommand).
+
+### First-Time Experience: Tailscale Install
+
+On the first SSH connection to an instance without Tailscale:
+
+    $ ssh repl-def456
+    Installing Tailscale on instance... (typically 15-30s)
+    ████████████████████░░░░  80% installing
+    Tailscale ready. Connecting...
+
+Subsequent connections to the same instance connect instantly. Other
+instances on the same provider also install JIT on first SSH.
+
+### Fallback: Public IP
+
+If Tailscale installation fails or is unavailable:
+- ProxyCommand falls back to the instance's public IP
+- Connection proceeds over the public internet
+- Warning printed to stderr: "Tailscale unavailable, using public IP"
+- No functional difference for SSH; private networking benefits lost
+
+
+## Reference
+
+### SSH Config Template
+
+```
+# SkyREPL SSH Config
+# Generated: <timestamp>
+# Do not edit manually - regenerated on each run
+
+# Per-allocation entries (first-match-wins)
+Host repl-<slug>
+  HostName <tailscale_ip | public_ip>
+  User <allocation.user>
+  Port 22
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+  LogLevel ERROR
+  IdentityFile <provider_ssh_key_path>
+  RemoteCommand cd <allocation.workdir> && exec $SHELL -l
+  RequestTTY yes
+  ProxyCommand ~/.repl/bin/ssh_proxy_command.sh %n
+
+# Catch-all fallback (must be last)
+Host repl-*
+  ProxyCommand ~/.repl/bin/ssh_fallback.sh %n
+```
+
+Fields populated from allocation and instance records:
+- HostName: Tailscale IP preferred, public IP fallback
+- User: allocation's user field (provider-specific default, e.g., ubuntu)
+- IdentityFile: provider-specific SSH key from ~/.repl/ config
+- RemoteCommand: cd to allocation workdir, start login shell
+
+### JIT Installation Flow
+
+```
+States: not_installed --> installing --> ready | failed
+
+Trigger: ProxyCommand queries API, finds tailscale_status = not_installed
+
+Flow:
+  1. ProxyCommand calls API: POST /v1/instances/<id>/features/tailscale
+  2. Control plane sends install command to agent via heartbeat
+  3. Agent downloads and installs Tailscale (~15-30s typical)
+  4. Agent reports status via heartbeat: installing -> ready | failed
+  5. ProxyCommand polls GET /v1/instances/<id>/features/tailscale
+  6. On ready: connect via Tailscale IP
+  7. On failed: fall back to public IP
+
+Tracked as feature_installation object with tags:
+  instance_id:<id>, feature:tailscale
+Payload: { status, machine_id, auth_key, installed_at }
+```
+
+### Timing
+
+| Parameter             | Value  | Notes                              |
+|-----------------------|--------|------------------------------------|
+| Install poll interval | 2s     | ProxyCommand polls feature status  |
+| Install timeout       | 120s   | Max wait before public IP fallback |
+| Typical install time  | 15-30s | Network-dependent                  |
+| SSH extension amount  | 5m     | Per heartbeat with active SSH      |
+| Max SSH extension     | 2h     | Cumulative cap                     |
+| Absolute max hold     | 24h    | Hard limit from completion         |
+
+### ProxyCommand Pseudocode
+
+```
+ssh_proxy_command(hostname):
+  alloc_slug = strip_prefix(hostname, "repl-")
+  alloc = api.get_allocation(alloc_slug)
+  instance = api.get_instance(alloc.instance_id)
+
+  if instance.tailscale_status == "not_installed":
+    api.install_feature(instance.id, "tailscale")
+    poll until tailscale_status in ["ready", "failed"]
+      timeout after 120s
+
+  if instance.tailscale_ip:
+    exec nc <tailscale_ip> 22
+  else if instance.public_ip:
+    warn "Tailscale unavailable, using public IP"
+    exec nc <public_ip> 22
+  else:
+    error "No IP available for instance"
+```
+
+```
+ssh_fallback(hostname):
+  slug = strip_prefix(hostname, "repl-")
+  result = api.resolve_allocation(slug)
+
+  case result:
+    NOT_FOUND:
+      print "Allocation not found"
+      print "Recent allocations:" + api.list_recent()
+      exit 1
+    AMBIGUOUS:
+      print "Ambiguous prefix, matches:"
+      print result.matches
+      exit 1
+    STALE:
+      warn "Config entry stale. Run 'repl ssh-sync' to update."
+      ensure_tailscale(result.ip)
+      exec nc <result.ip> 22
+    match:
+      ensure_tailscale(result.ip)
+      exec nc <result.ip> 22
+```
+
+### SSH Activity Detection
+
+The agent detects active SSH sessions per allocation each heartbeat cycle:
+
+    who | grep -c "<user>"
+
+Allocation IDs with session count > 0 are included in the heartbeat's
+active_allocations list. The control plane extends debug_hold_until for
+each reported allocation: new_hold = max(current, NOW) + SSH_EXTENSION_MS,
+capped at max_ssh_extension and absolute_max_hold.
+
+This means SSH sessions automatically keep allocations alive without
+explicit user action, up to the cumulative cap.
+
+### Normative Requirements
+
+SSH access rules:
+- SSH allowed when status = ACTIVE
+- SSH allowed when status = COMPLETE AND debug_hold_until > NOW
+- SSH denied otherwise
+- Per-allocation config entries (not per-instance)
+- Config stored as object record keyed by allocation ID
+- Regeneration triggered by allocation state changes

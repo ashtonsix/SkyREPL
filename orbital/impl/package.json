@@ -1,0 +1,10 @@
+{
+  "name": "@skyrepl/orbital",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "src/main.ts",
+  "dependencies": {
+    "elysia": "^1.2",
+    "@sinclair/typebox": "^0.34"
+  }
+}

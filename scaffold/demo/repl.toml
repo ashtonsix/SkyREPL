@@ -1,0 +1,70 @@
+# SkyREPL demo project — for interactive exploration and friction testing.
+#
+# Usage:
+#   repl run                    # runs [default] profile
+#   repl run -c "echo override" # inline command, still uses default profile settings
+
+[default]
+command = "python3 -c \"import platform; print(f'Hello from {platform.node()} ({platform.machine()})')\""
+provider = "orbstack"
+spec = "ubuntu"
+workdir = "/workspace"
+max_duration = "1h"
+hold_duration = "5m"
+
+[default.env]
+DEMO = "true"
+PYTHONUNBUFFERED = "1"
+
+[quick]
+command = "echo 'quick test' && date"
+provider = "orbstack"
+spec = "ubuntu"
+workdir = "/workspace"
+max_duration = "10m"
+hold_duration = "1m"
+
+[init-demo]
+command = "python3 app.py"
+provider = "orbstack"
+spec = "ubuntu"
+workdir = "/workspace"
+max_duration = "1h"
+hold_duration = "10m"
+
+# OrbStack: short timeout test — verifies clean timeout + teardown
+[orbstack-timeout]
+command = "sleep 120"
+provider = "orbstack"
+spec = "ubuntu"
+workdir = "/workspace"
+max_duration = "30s"
+hold_duration = "0s"
+
+# ─── AWS profiles ───────────────────────────────────────────────────────────
+#
+# Prerequisites:
+#   1. AWS credentials available (env vars or ~/.aws/credentials)
+#   2. SKYREPL_CONTROL_PLANE_URL set to a public URL (not localhost)
+#      — AWS VMs must reach the control plane over the internet
+#   3. `repl control start` running
+#
+# See docs/providers/aws-setup.md for full setup guide.
+
+[aws-quick]
+command = "uname -a && curl -s http://169.254.169.254/latest/meta-data/instance-type"
+provider = "aws"
+spec = "ubuntu:noble:arm64"
+instance_type = "t4g.nano"
+workdir = "/workspace"
+max_duration = "10m"
+hold_duration = "1m"
+
+[aws-amd64]
+command = "uname -a && python3 -c \"import platform; print(platform.machine())\""
+provider = "aws"
+spec = "ubuntu:noble:amd64"
+instance_type = "t3.nano"
+workdir = "/workspace"
+max_duration = "10m"
+hold_duration = "1m"

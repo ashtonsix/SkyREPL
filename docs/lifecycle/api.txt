@@ -1,0 +1,160 @@
+================================================================================
+API Architecture
+================================================================================
+
+Reading order: data-model -> execution -> providers -> api -> agent -> safety -> timing
+Prerequisite: ARCHITECTURE.txt (repo root)
+
+## Concept
+
+Two-layer architecture:
+
+  Layer 2 (Workflow): Primary CLI interface. Submit workflows that abstract
+    orchestration complexity behind simple submission. Endpoints: launch-run,
+    terminate-instance, create-snapshot, extend-hold, cancel. Most users
+    interact exclusively through this layer.
+
+  Layer 1 (Resource): CRUD on resources (runs, instances, allocations,
+    workflows, manifests, objects). For debugging, monitoring dashboards, and
+    power users who need direct manipulation. Workflows are read-only at this
+    layer -- creation goes through Layer 2.
+
+Communication patterns:
+
+  CLI <-> Control (HTTP + WebSocket):
+    HTTP POST for workflow submission (launch-run, terminate, snapshot)
+    HTTP GET for resource queries (list runs, get instance details)
+    WebSocket for real-time log streaming and workflow progress
+
+  Agent <-> Control (SSE + HTTP):
+    HTTP-SSE for commands (unidirectional: control -> agent)
+    HTTP POST for status/logs (fire-and-forget with retry)
+    All connections agent-initiated (NAT/firewall friendly)
+
+  File transfer (presigned URLs):
+    Files >64KB go direct to S3 (control plane never sees payload)
+    Files <=64KB route through control plane endpoint
+
+## Reference
+
+Communication architecture:
+
+                       +---------------------------+
+                       |       CLI CLIENT          |
+                       +-------------+-------------+
+                                     |
+                  +------------------+------------------+
+                  |                  |                  |
+             HTTP POST          HTTP GET           WebSocket
+            (workflows)        (queries)       (logs, progress)
+                  |                  |                  |
+                  v                  v                  v
+       +-----------------------------------------------------+
+       |                     CONTROL PLANE                     |
+       +-----------------------------------------------------+
+                  |                  |                  |
+          HTTP-SSE stream       HTTP POST          Presigned
+            (commands)      (logs, heartbeat)        URLs
+                  |                  |                  |
+                  v                  ^                  |
+       +-----------------------------------------------------+
+       |                         AGENT                         |
+       |                  (on remote instance)                 |
+       +-----------------------------------------------------+
+                                     |
+                               HTTP PUT/GET
+                            (presigned URLs)
+                                     v
+                       +---------------------------+
+                       |        S3 STORAGE         |
+                       +---------------------------+
+
+V2 file sync flow (9 steps):
+
+  1. CLI hashes local files -> checksums[]
+  2. CLI: POST /v1/blobs/check with checksums
+  3. Control returns {missing: [...], urls: {checksum: url}}
+  4. CLI uploads missing blobs to S3 (parallel)
+  5. CLI: POST /v1/workflows/launch-run with {files: [{path, checksum}...]}
+  6. Control sends single start_run message to agent with file URLs
+  7. Agent downloads files (parallel), emits sync_complete log
+  8. Control receives sync_complete, transitions allocation CLAIMED -> ACTIVE
+  9. Agent executes command, reports run_complete
+
+Error codes (canonical list -- 25 codes across 8 categories, per spec Ch13):
+
+  Validation (400):
+    INVALID_INPUT              Bad request params (covers spec, region, provider, field values)
+    MISSING_REQUIRED_FIELD     Required field not provided
+    INVALID_FORMAT             Malformed request body (covers invalid JSON)
+
+  Auth (401/403):
+    UNAUTHORIZED               API key invalid or expired (401)
+    FORBIDDEN                  API key lacks required scope (403)
+
+  Not Found (404):
+    RESOURCE_NOT_FOUND         Generic resource not found
+    INSTANCE_NOT_FOUND         Instance ID doesn't exist
+    RUN_NOT_FOUND              Run ID doesn't exist
+    ALLOCATION_NOT_FOUND       Allocation ID doesn't exist
+    WORKFLOW_NOT_FOUND         Workflow ID doesn't exist
+    MANIFEST_NOT_FOUND         Manifest ID doesn't exist
+    OBJECT_NOT_FOUND           Object ID doesn't exist
+
+  Conflict (409):
+    IDEMPOTENCY_CONFLICT       Same idempotency key, different params
+    RESOURCE_ALREADY_EXISTS    Resource already exists
+    OWNERSHIP_CONFLICT         Resource owned by another manifest
+    INVALID_STATE_TRANSITION   State transition not allowed (covers run-in-progress, instance-has-allocations)
+
+  Rate Limit (429):
+    RATE_LIMITED                Too many API requests
+    BUDGET_EXCEEDED            Monthly budget limit reached
+
+  Provider (502):
+    PROVIDER_INTERNAL          Provider API failure
+    CAPACITY_ERROR             No capacity at provider
+    SPOT_INTERRUPTED           Spot instance reclaimed
+
+  Internal (500):
+    INTERNAL_ERROR             Unexpected server error (covers S3 errors)
+    DATABASE_ERROR             Database operation failed
+
+  Timeout (504):
+    REQUEST_TIMEOUT            Request exceeded deadline
+    OPERATION_TIMEOUT          Long-running operation timed out
+
+Client handling per category:
+
+  Validation:   Do NOT retry. Fix request parameters.
+  Auth:         Check API key validity and scopes. Do NOT retry.
+  Not Found:    Verify resource ID. May retry once after brief delay.
+  Conflict:     IDEMPOTENCY_CONFLICT: do NOT retry (param mismatch).
+                Other conflicts: safe to retry immediately.
+  Rate Limit:   Respect retry_after_ms. Exponential backoff.
+  Provider:     CAPACITY_ERROR: consider alternative regions/specs.
+                PROVIDER_INTERNAL: retry with exponential backoff.
+  Internal:     Retry with exponential backoff. Safe to reuse idempotency key.
+                Log request_id for support escalation.
+  Timeout:      Retry with exponential backoff.
+
+Idempotency key protocol:
+
+  Header: Idempotency-Key (max 256 chars, UUIDv4 or semantic string)
+  Same key + same params = cached response (original 2xx)
+  Same key + different params = 409 IDEMPOTENCY_CONFLICT
+  Same key + original failed (5xx) = retry allowed, new attempt
+  Retention: 2xx = 24h, 4xx = 1h, 5xx = immediate expiry
+  Supported on all POST mutation endpoints (workflows, resources)
+  Not needed on DELETE (naturally idempotent) or GET (read-only)
+
+Deprecated endpoints:
+
+  POST /v1/agent/artifacts     Replaced by presigned URLs
+  POST /v1/agent/status        Replaced by log messages (sync_complete,
+                               run_complete)
+  GET  /v1/agent/files/:path   Replaced by presigned URLs in start_run
+
+See also:
+  docs/lifecycle/agent.txt (agent-side protocol details)
+  docs/lifecycle/data-model.txt (blob storage and presigned URL mechanics)

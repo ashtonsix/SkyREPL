@@ -1,0 +1,12 @@
+{
+  "files": [],
+  "references": [
+    { "path": "contracts" },
+    { "path": "lifecycle/control" },
+    { "path": "lifecycle/tests" },
+    { "path": "shell/cli" },
+    { "path": "shell/proxy" },
+    { "path": "shell/tests" },
+    { "path": "orbital/impl" }
+  ]
+}

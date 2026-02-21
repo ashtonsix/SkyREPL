@@ -1,0 +1,154 @@
+================================================================================
+Getting Started
+================================================================================
+
+  SkyREPL runs commands on cloud VMs with lifecycle guarantees: provision,
+  execute, stream logs, terminate. No manual cleanup.
+
+
+================================================================================
+Prerequisites
+================================================================================
+
+  Bun 1.1+     https://bun.sh
+  Python 3.11+ on PATH as python3 (agent runtime)
+
+  macOS:  OrbStack  https://orbstack.dev
+  Linux:  Docker    https://docs.docker.com/engine/install/
+  Cloud:  AWS CLI configured; tunnel tool (Tailscale, cloudflared, or ngrok)
+
+
+================================================================================
+Installation
+================================================================================
+
+    git clone https://github.com/skyrepl/skyrepl && cd skyrepl && bun install
+
+  Add to PATH (~/.zshrc or ~/.bashrc):
+
+    export PATH="$PATH:/path/to/skyrepl/shell/cli/bin"
+
+    source ~/.zshrc && repl help
+
+
+================================================================================
+First Run: OrbStack (local)
+================================================================================
+
+    repl control start           # start control plane (persists across terminals)
+    repl run -c "echo hello"     # provision VM, run command, stream output, terminate
+    repl control stop            # stop when done
+
+  Default provider is orbstack, default spec is ubuntu.
+
+
+================================================================================
+Cloud Setup: AWS
+================================================================================
+
+  Cloud VMs must reach your control plane over the internet.
+
+    repl control start
+    repl setup                   # interactive: tunnel URL, SSH config, API key
+
+  Sets up: (1) public control plane URL saved to ~/.repl/control.env;
+  (2) `Include ~/.repl/ssh_config` in ~/.ssh/config; (3) API key at
+  ~/.repl/api-key. Tailscale shortcut: `repl setup tailscale`.
+
+  AWS credentials must be available in env or ~/.aws/credentials:
+
+    export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_DEFAULT_REGION=us-east-1
+
+
+================================================================================
+First Run: AWS
+================================================================================
+
+    # arm64 (cheaper)
+    repl run -c "echo hello" --provider aws --spec ubuntu:noble:arm64 --instance-type t4g.nano
+
+    # amd64
+    repl run -c "echo hello" --provider aws --spec ubuntu:noble:amd64 --instance-type t3.nano
+
+
+================================================================================
+SSH Access
+================================================================================
+
+  While a run is in its hold period (command done, instance still up):
+
+    repl ssh-config
+    repl allocation list             # find your allocation ID
+    ssh repl-<allocation-id>
+
+  Hold defaults to 5m; use --hold 0s to skip.
+
+
+================================================================================
+Useful Commands
+================================================================================
+
+  repl run list                  list recent runs and states
+  repl run attach <run-id>       attach to a running run's log stream
+  repl run cancel <workflow-id>  cancel a workflow
+  repl instance list             list instances
+  repl allocation list           list allocations (run-to-instance bindings)
+  repl run --dry-run             preview resolved config without launching
+  repl control start|stop|restart|status
+
+  Ctrl-C during `repl run` detaches without cancelling. Use `repl run attach`
+  or `repl run cancel` afterward.
+
+
+================================================================================
+Using Profiles (repl.toml)
+================================================================================
+
+  Place repl.toml in your project directory. CLI flags override profile values.
+
+    [default]
+    command = "python3 train.py"
+    provider = "orbstack"
+    spec = "ubuntu"
+    workdir = "/workspace"
+    max_duration = "1h"
+    hold_duration = "5m"
+
+    [default.env]
+    PYTHONUNBUFFERED = "1"
+
+    [gpu]
+    provider = "aws"
+    spec = "ubuntu:noble:amd64"
+    instance_type = "g4dn.xlarge"
+    max_duration = "4h"
+
+    repl run                     uses [default]
+    repl run -p gpu              uses [gpu]
+    repl run -p gpu -c "ls"      [gpu] settings, inline command
+    repl run -p gpu --dry-run    preview resolved config, no launch
+
+  See scaffold/demo/repl.toml for a working example with AWS profiles.
+
+
+================================================================================
+Troubleshooting
+================================================================================
+
+  "Control plane not reachable"       Run `repl control start`.
+
+  OrbStack: "missing IP address"      Exit session. Run from macOS host:
+                                        bash scaffold/scripts/orbstack-reset-networking.sh
+                                      Then resume.
+
+  AWS: VM cannot reach control plane  Run `repl setup` to set a public URL.
+
+  AWS: stuck at "Waiting for boot"    Check credentials and regional capacity.
+                                      Try --region us-west-2.
+
+  SSH: "No such host"                 Run `repl ssh-config`. Confirm ~/.ssh/config has:
+                                        Include ~/.repl/ssh_config
+
+  Docker (Linux): VM doesn't start    Check Docker daemon is running:
+                                        systemctl status docker
+                                      If using OrbStack Docker mode, use `orbctl` not `docker`.

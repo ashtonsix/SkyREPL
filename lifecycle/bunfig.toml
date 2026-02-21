@@ -1,0 +1,6 @@
+[install]
+peer = false
+
+[test]
+preload = ["./tests/preload-quiet.ts"]
+# OrbStack tests skipped by default. Opt in: ORBSTACK_TESTS=1 bun test

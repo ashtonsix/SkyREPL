@@ -1,0 +1,98 @@
+================================================================================
+Providers
+================================================================================
+
+Reading order: data-model -> execution -> providers -> api -> agent -> safety -> timing
+Prerequisite: ARCHITECTURE.txt (repo root)
+
+## Concept
+
+Three tiers organize implementation complexity:
+
+  Testing (OrbStack): Foundation of contract-based testing. Implements the same
+    intent contracts as cloud providers, plus chaos injection (fault injection,
+    resource constraints, drift simulation). The control plane validates against
+    OrbStack; any provider implementing the same contracts inherits that
+    validation. Lightweight -- just the core contract surface plus test helpers.
+
+  Additional (Lambda, RunPod, future: SLURM, GCP, CoreWeave): Core interface
+    methods, basic lifecycle hooks, error taxonomy mapping. Optional methods
+    gated by capabilities. Not forced into complex cloud platform integration.
+    Compact implementations focused on the essential provider surface. Lambda
+    Labs and RunPod implementations exist as independent prototypes and are
+    being brought into the main codebase.
+
+  Reference (AWS): Everything from Additional, plus enhanced types
+    (AWSInstance, AWSSnapshot), materialization/projection functions, custom
+    workflows (warm volumes, spot fleet, multi-AZ probing), full lifecycle
+    hooks, provider-specific workflow contracts. Substantially larger than
+    Additional-tier providers.
+
+Capability flags (11 flags) describe what optional features a provider supports.
+Most providers implement a sparse subset of the flags. The control plane uses
+flags to gate optional method calls at compile time, not runtime negotiation.
+
+Type enhancement: providers MAY define enhanced types extending generic
+resource types (e.g., AWSInstance extends ProviderInstance with
+availabilityZone, subnetId, volumes). Materialize on entry to provider
+context, project back to generic on exit. Control plane never sees
+provider-specific fields.
+
+## Guide
+
+Implementing a new provider:
+
+  1. Implement Provider<TInstance, TSnapshot> core methods:
+     - spawn(options): Return {id, status} at minimum
+     - terminate(providerId): Idempotent; MUST NOT throw if already terminated
+     - list(filter?): For reconciliation and drift detection
+     - get(providerId): Return instance or null
+     - generateBootstrap(cfg): Return {content, format, checksum}
+
+  2. Declare capabilities (set flags to true for supported features):
+     snapshots, spot, gpu, multiRegion, persistentVolumes,
+     warmVolumes, hibernation, costExplorer, tailscaleNative,
+     idempotentSpawn, customNetworking
+
+  3. Implement optional methods gated by capabilities:
+     - createSnapshot/getSnapshotStatus/deleteSnapshot (snapshots)
+     - requestSpotInstance/cancelSpotRequest/getSpotPrices (spot)
+
+  4. Implement lifecycle hooks: onStartup, onShutdown, onHeartbeat
+     Handle heartbeat task types: health_check, reconcile
+
+  5. Map provider errors to the error taxonomy (ProviderError with code,
+     category, retryable, provider)
+
+  6. Register via ProviderRegistration: {provider, hooks, workflows?, contracts?}
+
+Running compliance tests:
+
+  Contract compliance tests run parametrically against all registered
+  providers. Tests verify: spawn returns required fields, terminate is
+  idempotent, list filters correctly, generateBootstrap returns valid script
+  with SHA-256 checksum. Capability-gated tests skip gracefully for providers
+  without the feature.
+
+## Reference
+
+Core methods:
+
+  spawn(options)            Create instance. Return {id, status}.
+  terminate(providerId)     Destroy instance. Idempotent.
+  list(filter?)             List instances. Used for reconciliation.
+  get(providerId)           Get single instance or null.
+  generateBootstrap(cfg)    Return {content, format, checksum}.
+
+Error taxonomy:
+
+  CAPACITY_ERROR        capacity     retryable    No capacity at provider
+  AUTH_ERROR             auth         not retry    Invalid/expired credentials
+  RATE_LIMIT_ERROR      rate_limit   retryable    API throttling
+  SPOT_INTERRUPTED      capacity     retryable    Spot instance reclaimed
+  QUOTA_EXCEEDED        capacity     not retry    Account quota reached
+  INVALID_SPEC          validation   not retry    Spec not valid for provider
+  NOT_FOUND             not_found    not retry    Resource does not exist
+
+See also:
+  docs/lifecycle/execution.txt (workflow design rationale)
