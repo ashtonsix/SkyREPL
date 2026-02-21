@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 DIRS_TO_SCAN = ["lifecycle", "shell", "orbital", "scaffold", "contracts"]
-EXCLUDE_SUBDIRS = {"scaffold/tasks/archive"}
+EXCLUDE_SUBDIRS = {"scaffold/archive"}
 
 
 def find_repo_root():
