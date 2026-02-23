@@ -952,29 +952,6 @@ export function createAwsHooks(provider: AWSProvider): ProviderLifecycleHooks {
             }
             break;
           }
-          case "reconcile":
-            // Requires DB access — not yet wired
-            receipts.push({
-              type: "reconcile",
-              status: "skipped",
-              reason: "DB access not yet available in provider layer",
-            });
-            break;
-          case "cache_refresh":
-            // AMI cache has 24h TTL, no active refresh needed
-            receipts.push({
-              type: "cache_refresh",
-              status: "completed",
-              result: { note: "AMI cache uses fetchWithDiskCache TTL" },
-            });
-            break;
-          case "pool_maintenance":
-            receipts.push({
-              type: "pool_maintenance",
-              status: "skipped",
-              reason: "Warm pool not yet implemented",
-            });
-            break;
           default:
             receipts.push({
               type: task.type,

@@ -118,19 +118,6 @@ export const PROVIDER_CAPABILITIES: Record<ProviderName, ProviderCapabilities> =
     idempotentSpawn: false,
     customNetworking: true,
   },
-  gcp: {
-    snapshots: true,
-    spot: true,
-    gpu: true,
-    multiRegion: true,
-    persistentVolumes: true,
-    warmVolumes: false,
-    hibernation: false,
-    costExplorer: true,
-    tailscaleNative: false,
-    idempotentSpawn: true,
-    customNetworking: true,
-  },
 };
 
 // =============================================================================

@@ -562,27 +562,6 @@ export function createDigitalOceanHooks(provider: DigitalOceanProvider): Provide
             }
             break;
           }
-          case "reconcile":
-            receipts.push({
-              type: "reconcile",
-              status: "skipped",
-              reason: "DB access not yet available in provider layer",
-            });
-            break;
-          case "cache_refresh":
-            receipts.push({
-              type: "cache_refresh",
-              status: "completed",
-              result: { note: "No disk cache for DO — REST API only" },
-            });
-            break;
-          case "pool_maintenance":
-            receipts.push({
-              type: "pool_maintenance",
-              status: "skipped",
-              reason: "Warm pool not supported on DigitalOcean",
-            });
-            break;
           default:
             receipts.push({
               type: task.type,

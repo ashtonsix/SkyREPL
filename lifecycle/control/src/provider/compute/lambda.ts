@@ -592,37 +592,6 @@ export function createLambdaHooks(provider: LambdaLabsProvider): ProviderLifecyc
             }
             break;
           }
-          case "reconcile":
-            receipts.push({
-              type: "reconcile",
-              status: "skipped",
-              reason: "DB access not yet available in provider layer",
-            });
-            break;
-          case "cache_refresh":
-            // Refresh the pricing cache
-            try {
-              await provider.listAvailableSpecs();
-              receipts.push({
-                type: "cache_refresh",
-                status: "completed",
-                result: { note: "Lambda pricing cache refreshed" },
-              });
-            } catch (err) {
-              receipts.push({
-                type: "cache_refresh",
-                status: "failed",
-                result: { error: err instanceof Error ? err.message : String(err) },
-              });
-            }
-            break;
-          case "pool_maintenance":
-            receipts.push({
-              type: "pool_maintenance",
-              status: "skipped",
-              reason: "Warm pool not supported on Lambda Labs",
-            });
-            break;
           default:
             receipts.push({
               type: task.type,

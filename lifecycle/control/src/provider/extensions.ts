@@ -23,7 +23,7 @@ export interface HeartbeatExpectations {
 }
 
 export interface HeartbeatTask {
-  type: 'reconcile' | 'health_check' | 'cache_refresh' | 'pool_maintenance';
+  type: string;
   priority: 'high' | 'normal' | 'low';
   lastRun?: number;
   params?: Record<string, unknown>;

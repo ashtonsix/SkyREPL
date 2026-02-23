@@ -50,6 +50,7 @@ interface MockState {
   instanceTypes: Record<string, MockInstanceType>;
   lastLaunchBody?: any;
   launchError?: { status: number; body: any };
+  terminateError?: { status: number; body: any };
 }
 
 function createState(): MockState {
@@ -91,6 +92,17 @@ function createState(): MockState {
         regions_with_capacity_available: [
           { name: "us-east-1", description: "Virginia, USA" },
         ],
+      },
+      // Type with zero capacity — used for capacity pre-check tests
+      gpu_1x_a10: {
+        instance_type: {
+          name: "gpu_1x_a10",
+          description: "1x A10 (24 GB)",
+          gpu_description: "A10 24GB",
+          price_cents_per_hour: 60,
+          specs: { vcpus: 16, memory_gib: 128, storage_gib: 256, gpus: 1 },
+        },
+        regions_with_capacity_available: [], // No capacity anywhere
       },
     },
   };
@@ -188,6 +200,15 @@ function handleLaunch(state: MockState, body: any): Response {
 }
 
 function handleTerminate(state: MockState, body: any): Response {
+  if (state.terminateError) {
+    const { status, body: errBody } = state.terminateError;
+    state.terminateError = undefined;
+    return new Response(JSON.stringify(errBody), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
   const terminated = [];
   for (const id of body.instance_ids ?? []) {
     const inst = state.instances.get(id);
@@ -305,6 +326,14 @@ describe("PROV-054D: mapLambdaError", () => {
     expect(err.code).toBe("CAPACITY_ERROR");
     expect(err.retryable).toBe(true);
   });
+
+  test("quota exceeded: 400 with global/quota-exceeded code", () => {
+    const err = mapLambdaError(400, {
+      error: { code: "global/quota-exceeded", message: "Quota exceeded" },
+    });
+    expect(err.code).toBe("QUOTA_EXCEEDED");
+    expect(err.retryable).toBe(false);
+  });
 });
 
 // =============================================================================
@@ -339,7 +368,7 @@ describe("PROV-054D: lambdaRequest", () => {
 // =============================================================================
 
 describe("PROV-054D: spawn", () => {
-  test("spawn creates instance with correct POST body", async () => {
+  test("spawn creates instance with correct POST body including user_data", async () => {
     const state = createState();
     const provider = createProvider(state);
 
@@ -358,6 +387,10 @@ describe("PROV-054D: spawn", () => {
     expect(state.lastLaunchBody!.region_name).toBe("us-west-1");
     expect(state.lastLaunchBody!.instance_type_name).toBe("gpu_1x_a100");
     expect(state.lastLaunchBody!.ssh_key_names).toContain("my-key");
+
+    // Bootstrap content passed as user_data
+    expect(state.lastLaunchBody!.user_data).toContain("#!/bin/bash");
+    expect(state.lastLaunchBody!.user_data).toContain("test-reg-token");
   });
 
   test("spawn uses hostname from formatResourceName convention", async () => {
@@ -373,9 +406,9 @@ describe("PROV-054D: spawn", () => {
       instanceType: "gpu_1x_a100",
     });
 
-    // formatResourceName("abc123", 7, 42) = "repl-abc123-7-16" (42 in base36 = "16")
-    const hostname: string = state.lastLaunchBody!.hostname ?? state.lastLaunchBody!.name;
-    expect(hostname).toMatch(/repl-abc123/);
+    // Both hostname and name should be set from formatResourceName
+    expect(state.lastLaunchBody!.hostname).toMatch(/^repl-abc123-7-/);
+    expect(state.lastLaunchBody!.name).toBe(state.lastLaunchBody!.hostname);
   });
 
   test("spawn with spot=true throws UNSUPPORTED_OPERATION", async () => {
@@ -393,33 +426,45 @@ describe("PROV-054D: spawn", () => {
     ).rejects.toMatchObject({ code: "UNSUPPORTED_OPERATION" });
   });
 
-  test("spawn with no capacity throws CAPACITY_ERROR", async () => {
+  test("spawn without instanceType throws INVALID_SPEC", async () => {
     const state = createState();
     const provider = createProvider(state);
-
-    state.launchError = {
-      status: 400,
-      body: {
-        error: {
-          code: "instance-operations/launch/insufficient-capacity",
-          message: "No capacity available for gpu_1x_a100 in us-west-1",
-        },
-      },
-    };
 
     await expect(
       provider.spawn({
         spec: "gpu:a100:1",
         bootstrap: testBootstrap,
         ...testIdentity,
-        instanceType: "gpu_1x_a100",
+        // no instanceType
       }),
-    ).rejects.toMatchObject({ code: "CAPACITY_ERROR" });
+    ).rejects.toMatchObject({ code: "INVALID_SPEC" });
   });
 
-  test("spawn falls back to alternative region when default has no capacity", async () => {
+  test("spawn pre-checks capacity: zero-capacity type throws CAPACITY_ERROR before launch", async () => {
     const state = createState();
-    // gpu_8x_a100 has capacity in us-east-1, not us-west-1
+    const provider = createProvider(state);
+
+    // gpu_1x_a10 has zero regions_with_capacity_available in mock state.
+    // The provider should throw CAPACITY_ERROR from findAvailableRegion()
+    // BEFORE ever calling /instance-operations/launch.
+    await expect(
+      provider.spawn({
+        spec: "gpu:a10:1",
+        bootstrap: testBootstrap,
+        ...testIdentity,
+        instanceType: "gpu_1x_a10",
+      }),
+    ).rejects.toMatchObject({ code: "CAPACITY_ERROR" });
+
+    // Prove launch was never called
+    expect(state.lastLaunchBody).toBeUndefined();
+  });
+
+  test("spawn falls back to first available region when default and preferred lack capacity", async () => {
+    const state = createState();
+    // gpu_8x_a100 has capacity only in us-east-1
+    // Provider default is us-west-1 (no capacity for 8x)
+    // No explicit preferred region → should fall back to us-east-1
     const provider = createProvider(state, { defaultRegion: "us-west-1" });
 
     const result = await provider.spawn({
@@ -427,10 +472,30 @@ describe("PROV-054D: spawn", () => {
       bootstrap: testBootstrap,
       ...testIdentity,
       instanceType: "gpu_8x_a100",
-      region: "us-east-1",
+      // No region specified — neither default nor preferred match
     });
 
     expect(result.id).toBeDefined();
+    expect(state.lastLaunchBody!.region_name).toBe("us-east-1");
+  });
+
+  test("spawn prefers explicit region over default when both have capacity", async () => {
+    const state = createState();
+    // Give gpu_1x_a100 capacity in both regions
+    state.instanceTypes.gpu_1x_a100.regions_with_capacity_available = [
+      { name: "us-west-1", description: "California" },
+      { name: "us-east-1", description: "Virginia" },
+    ];
+    const provider = createProvider(state, { defaultRegion: "us-west-1" });
+
+    await provider.spawn({
+      spec: "gpu:a100:1",
+      bootstrap: testBootstrap,
+      ...testIdentity,
+      instanceType: "gpu_1x_a100",
+      region: "us-east-1",
+    });
+
     expect(state.lastLaunchBody!.region_name).toBe("us-east-1");
   });
 });
@@ -440,7 +505,7 @@ describe("PROV-054D: spawn", () => {
 // =============================================================================
 
 describe("PROV-054D: terminate", () => {
-  test("terminate sends correct POST body", async () => {
+  test("terminate removes instance from provider state", async () => {
     const state = createState();
     const provider = createProvider(state);
 
@@ -470,6 +535,28 @@ describe("PROV-054D: terminate", () => {
     // Second terminate: instance is gone, should be swallowed silently
     await expect(provider.terminate(inst.id)).resolves.toBeUndefined();
   });
+
+  test("terminate propagates non-NOT_FOUND errors", async () => {
+    const state = createState();
+    const provider = createProvider(state);
+
+    const inst = await provider.spawn({
+      spec: "gpu:a100:1",
+      bootstrap: testBootstrap,
+      ...testIdentity,
+      instanceType: "gpu_1x_a100",
+    });
+
+    // Inject a 500 error on next terminate call
+    state.terminateError = {
+      status: 500,
+      body: { error: { code: "internal", message: "Server error" } },
+    };
+
+    await expect(provider.terminate(inst.id)).rejects.toMatchObject({
+      code: "PROVIDER_INTERNAL",
+    });
+  });
 });
 
 // =============================================================================
@@ -477,30 +564,7 @@ describe("PROV-054D: terminate", () => {
 // =============================================================================
 
 describe("PROV-054D: list and get", () => {
-  test("list returns all instances", async () => {
-    const state = createState();
-    const provider = createProvider(state);
-
-    await provider.spawn({
-      spec: "gpu:a100:1",
-      bootstrap: testBootstrap,
-      ...testIdentity,
-      instanceId: 1,
-      instanceType: "gpu_1x_a100",
-    });
-    await provider.spawn({
-      spec: "gpu:a100:1",
-      bootstrap: testBootstrap,
-      ...testIdentity,
-      instanceId: 2,
-      instanceType: "gpu_1x_a100",
-    });
-
-    const all = await provider.list();
-    expect(all.length).toBe(2);
-  });
-
-  test("list with spec filter", async () => {
+  test("list with spec filter returns only matching instances", async () => {
     const state = createState();
     const provider = createProvider(state);
 
@@ -518,6 +582,9 @@ describe("PROV-054D: list and get", () => {
       instanceId: 2,
       instanceType: "gpu_1x_h100_pcie",
     });
+
+    const all = await provider.list();
+    expect(all.length).toBe(2);
 
     // Lambda's projectInstance sets spec = instanceTypeName, not the SkyREPL spec string
     const a100Only = await provider.list({ spec: "gpu_1x_a100" });
@@ -544,7 +611,35 @@ describe("PROV-054D: list and get", () => {
     expect(running.length).toBe(0);
   });
 
-  test("list excludes terminated by default", async () => {
+  test("list with region filter", async () => {
+    const state = createState();
+    const provider = createProvider(state);
+
+    await provider.spawn({
+      spec: "gpu:a100:1",
+      bootstrap: testBootstrap,
+      ...testIdentity,
+      instanceType: "gpu_1x_a100",
+    });
+
+    // Instance was spawned in us-west-1 (default region, has capacity for a100)
+    expect((await provider.list({ region: "us-west-1" })).length).toBe(1);
+    expect((await provider.list({ region: "eu-west-1" })).length).toBe(0);
+  });
+
+  test("list with limit", async () => {
+    const state = createState();
+    const provider = createProvider(state);
+
+    await provider.spawn({ spec: "gpu:a100:1", bootstrap: testBootstrap, ...testIdentity, instanceId: 1, instanceType: "gpu_1x_a100" });
+    await provider.spawn({ spec: "gpu:a100:1", bootstrap: testBootstrap, ...testIdentity, instanceId: 2, instanceType: "gpu_1x_a100" });
+    await provider.spawn({ spec: "gpu:a100:1", bootstrap: testBootstrap, ...testIdentity, instanceId: 3, instanceType: "gpu_1x_a100" });
+
+    const limited = await provider.list({ limit: 2 });
+    expect(limited.length).toBe(2);
+  });
+
+  test("list excludes terminated by default, includes with flag", async () => {
     const state = createState();
     const provider = createProvider(state);
 
@@ -558,24 +653,8 @@ describe("PROV-054D: list and get", () => {
     // Mark as terminated in mock state
     state.instances.get(inst.id)!.status = "terminated";
 
-    const results = await provider.list();
-    expect(results.length).toBe(0);
-  });
-
-  test("get returns instance by ID", async () => {
-    const state = createState();
-    const provider = createProvider(state);
-
-    const inst = await provider.spawn({
-      spec: "gpu:a100:1",
-      bootstrap: testBootstrap,
-      ...testIdentity,
-      instanceType: "gpu_1x_a100",
-    });
-
-    const found = await provider.get(inst.id);
-    expect(found).not.toBeNull();
-    expect(found!.id).toBe(inst.id);
+    expect((await provider.list()).length).toBe(0);
+    expect((await provider.list({ includeTerminated: true })).length).toBe(1);
   });
 
   test("get returns null for non-existent instance", async () => {
@@ -603,6 +682,7 @@ describe("PROV-054D: list and get", () => {
     expect(found!.gpuDescription).toBe("A100 80GB SXM4");
     expect(found!.vcpus).toBe(30);
     expect(found!.memoryGib).toBe(200);
+    expect(found!.storageGib).toBe(512);
     expect(found!.priceCentsPerHour).toBe(110);
   });
 });
@@ -633,17 +713,19 @@ describe("PROV-054D: generateBootstrap", () => {
     expect(result.content).toContain("test-reg-token");
   });
 
-  test("checksum changes with different configs", () => {
+  test("checksum is deterministic and changes with different configs", () => {
     const state = createState();
     const provider = createProvider(state);
 
-    const r1 = provider.generateBootstrap(testBootstrap);
+    const r1a = provider.generateBootstrap(testBootstrap);
+    const r1b = provider.generateBootstrap(testBootstrap);
+    expect(r1a.checksum).toBe(r1b.checksum); // same input → same output
+
     const r2 = provider.generateBootstrap({
       ...testBootstrap,
       initScript: "echo hello",
     });
-
-    expect(r1.checksum).not.toBe(r2.checksum);
+    expect(r1a.checksum).not.toBe(r2.checksum); // different input → different output
   });
 });
 
@@ -656,27 +738,31 @@ describe("PROV-054D: pricing", () => {
     const state = createState();
     const provider = createProvider(state);
 
-    const specs = await provider.listAvailableSpecs!();
+    const specs = await provider.listAvailableSpecs();
 
-    expect(Array.isArray(specs)).toBe(true);
-    // gpu_1x_a100 and gpu_8x_a100 have capacity, gpu_1x_h100_pcie does not
-    expect(specs.length).toBeGreaterThanOrEqual(2);
+    expect(specs.length).toBe(4); // all 4 types in mock, including zero-capacity
 
-    const a100Spec = specs.find((s: any) => s.name === "gpu_1x_a100");
+    const a100Spec = specs.find((s) => s.name === "gpu_1x_a100");
     expect(a100Spec).toBeDefined();
     expect(a100Spec!.hourlyRate).toBe(1.1); // 110 cents / 100 = $1.10
     expect(a100Spec!.availableRegions).toContain("us-west-1");
+
+    // Zero-capacity type still has pricing info
+    const a10Spec = specs.find((s) => s.name === "gpu_1x_a10");
+    expect(a10Spec).toBeDefined();
+    expect(a10Spec!.hourlyRate).toBe(0.6);
+    expect(a10Spec!.availableRegions).toEqual([]);
   });
 
-  test("getHourlyRate returns rate from cache", async () => {
+  test("getHourlyRate returns rate for valid spec and 0 for unknown", async () => {
     const state = createState();
     const provider = createProvider(state);
 
-    // Prime cache by listing first
-    await provider.listAvailableSpecs!();
+    const rate = await provider.getHourlyRate("gpu_1x_a100");
+    expect(rate).toBe(1.1);
 
-    const rate = await provider.getHourlyRate!("gpu_1x_a100");
-    expect(rate).toBe(1.1); // 110 cents / 100 = $1.10
+    const unknown = await provider.getHourlyRate("gpu_nonexistent");
+    expect(unknown).toBe(0);
   });
 });
 
@@ -685,38 +771,33 @@ describe("PROV-054D: pricing", () => {
 // =============================================================================
 
 describe("PROV-054D: lifecycle hooks", () => {
-  test("onStartup verifies API access", async () => {
+  test("onStartup verifies API access without throwing", async () => {
     const state = createState();
     const provider = createProvider(state);
-
     const hooks = createLambdaHooks(provider);
-    // Should not throw — mock handles /ssh-keys
+
     await expect(hooks.onStartup!()).resolves.toBeUndefined();
   });
 
-  test("onHeartbeat static responses: table-driven", async () => {
+  test("onHeartbeat: health_check completed, unknown type skipped", async () => {
     const state = createState();
     const provider = createProvider(state);
     const hooks = createLambdaHooks(provider);
 
-    const cases: [string, string, string?][] = [
-      ["health_check", "completed"],
-      ["reconcile", "skipped", "DB access"],
-      ["cache_refresh", "completed"],
-      ["unknown_task_type", "skipped", "Unknown task type"],
-    ];
+    const result = await hooks.onHeartbeat!({
+      tasks: [
+        { type: "health_check", priority: "normal" },
+        { type: "unknown_task_type", priority: "low" },
+      ],
+      deadline: Date.now() + 10_000,
+    });
 
-    for (const [type, expectedStatus, expectedReason] of cases) {
-      const result = await hooks.onHeartbeat!({
-        tasks: [{ type: type as any, priority: "normal" }],
-        deadline: Date.now() + 10_000,
-      });
-      expect(result.receipts[0]!.type).toBe(type);
-      expect(result.receipts[0]!.status).toBe(expectedStatus);
-      if (expectedReason) {
-        expect(result.receipts[0]!.reason).toContain(expectedReason);
-      }
-    }
+    expect(result.receipts).toHaveLength(2);
+    expect(result.receipts[0]!.type).toBe("health_check");
+    expect(result.receipts[0]!.status).toBe("completed");
+    expect(result.receipts[1]!.type).toBe("unknown_task_type");
+    expect(result.receipts[1]!.status).toBe("skipped");
+    expect(result.receipts[1]!.reason).toContain("Unknown task type");
   });
 });
 

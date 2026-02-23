@@ -191,7 +191,7 @@ describe("instances", () => {
 
     expect(listInstances().length).toBe(2);
     expect(listInstances({ provider: "orbstack" }).length).toBe(1);
-    expect(listInstances({ provider: "gcp" }).length).toBe(0);
+    expect(listInstances({ provider: "lambda" }).length).toBe(0);
   });
 
   test("blocks deletion with active allocations", () => {

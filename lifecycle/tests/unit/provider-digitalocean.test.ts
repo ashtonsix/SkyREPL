@@ -1045,27 +1045,18 @@ describe("PROV-054C: lifecycle hooks", () => {
     expect((result.receipts[0]!.result as any).latencyMs).toBeGreaterThanOrEqual(0);
   });
 
-  test("onHeartbeat static task responses: reconcile skipped, cache_refresh completed, unknown skipped", async () => {
+  test("onHeartbeat unknown task type returns skipped receipt", async () => {
     const state = createState();
     const provider = createProvider(state);
     const hooks = createDigitalOceanHooks(provider);
 
-    const cases: [string, string, string?][] = [
-      ["reconcile", "skipped", "DB access"],
-      ["cache_refresh", "completed"],
-      ["some_unknown_task", "skipped", "Unknown task type"],
-    ];
-    for (const [type, expectedStatus, expectedReason] of cases) {
-      const result = await hooks.onHeartbeat!({
-        tasks: [{ type: type as any, priority: "normal" }],
-        deadline: Date.now() + 10_000,
-      });
-      expect(result.receipts[0]!.type).toBe(type);
-      expect(result.receipts[0]!.status).toBe(expectedStatus);
-      if (expectedReason) {
-        expect(result.receipts[0]!.reason).toContain(expectedReason);
-      }
-    }
+    const result = await hooks.onHeartbeat!({
+      tasks: [{ type: "some_unknown_task" as any, priority: "normal" }],
+      deadline: Date.now() + 10_000,
+    });
+    expect(result.receipts[0]!.type).toBe("some_unknown_task");
+    expect(result.receipts[0]!.status).toBe("skipped");
+    expect(result.receipts[0]!.reason).toContain("Unknown task type");
   });
 });
 

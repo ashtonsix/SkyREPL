@@ -15,6 +15,7 @@ import type {
   ProviderCapabilities,
   ProviderInstanceStatus,
 } from "../types";
+import { PROVIDER_CAPABILITIES } from "../types";
 import { getProviderTiming } from "@skyrepl/contracts";
 import { ConcreteProviderError } from "../errors";
 import { parseSpec } from "../types";
@@ -296,19 +297,19 @@ export class OrbStackProvider implements Provider<OrbStackInstance> {
     return discoverIpVia(this.execFn, name);
   }
 
-  readonly capabilities: ProviderCapabilities = {
-    snapshots: true,
-    spot: false,
-    gpu: false,
-    multiRegion: false,
-    persistentVolumes: false,
-    warmVolumes: false,
-    hibernation: false,
-    costExplorer: false,
-    tailscaleNative: true,
-    idempotentSpawn: true,
-    customNetworking: false,
-  };
+  /** Verify orbctl is available. Used by lifecycle hooks. */
+  async verifyOrbctl(): Promise<string> {
+    const result = await this.orbctl(["version"], { timeout: 10_000 });
+    if (result.exitCode !== 0) {
+      throw new ConcreteProviderError("orbstack", "PROVIDER_INTERNAL",
+        `orbctl version check failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
+        { retryable: false }
+      );
+    }
+    return result.stdout.trim();
+  }
+
+  readonly capabilities: ProviderCapabilities = PROVIDER_CAPABILITIES.orbstack;
 
   async spawn(options: SpawnOptions): Promise<OrbStackInstance> {
     const { distro, version, arch } = parseSpec(options.spec);
@@ -483,13 +484,30 @@ export class OrbStackProvider implements Provider<OrbStackInstance> {
     const replItems = items.filter((item) => isReplVM(item.name));
 
     // Map to OrbStackInstance
-    const instances: OrbStackInstance[] = replItems.map((item) =>
+    let instances: OrbStackInstance[] = replItems.map((item) =>
       toOrbStackInstance(item, null)
     );
 
-    // Apply status filter if provided
+    // Apply filters — same client-side pattern as DO and Lambda providers
     if (filter?.status && filter.status.length > 0) {
-      return instances.filter((inst) => filter.status!.includes(inst.status));
+      instances = instances.filter((inst) => filter.status!.includes(inst.status));
+    }
+
+    if (filter?.spec) {
+      instances = instances.filter((inst) => inst.spec === filter.spec);
+    }
+
+    // OrbStack is single-region, but respect the filter contract
+    if (filter?.region) {
+      instances = instances.filter((inst) => inst.region === filter.region);
+    }
+
+    if (!filter?.includeTerminated) {
+      instances = instances.filter((inst) => inst.status !== "terminated");
+    }
+
+    if (filter?.limit) {
+      instances = instances.slice(0, filter.limit);
     }
 
     return instances;
@@ -721,81 +739,53 @@ export class OrbStackProvider implements Provider<OrbStackInstance> {
 /**
  * Create lifecycle hooks for the OrbStack provider.
  *
- * @param execFn - Optional exec override for testing. Defaults to the
- *   module-level realExec (Bun.spawn-based) implementation.
+ * @param provider - The OrbStackProvider instance to use for health checks.
  */
-export function createOrbStackHooks(execFn?: ExecFunction): ProviderLifecycleHooks {
-  const run = execFn ?? realExec;
-
+export function createOrbStackHooks(provider: OrbStackProvider): ProviderLifecycleHooks {
   return {
     async onStartup() {
-      let result: { stdout: string; stderr: string; exitCode: number };
       try {
-        result = await run(["orbctl", "version"]);
+        const version = await provider.verifyOrbctl();
+        console.log(`[orbstack] orbctl available: ${version}`);
       } catch (err) {
-        throw new ConcreteProviderError("orbstack", "PROVIDER_INTERNAL",
+        throw err instanceof ConcreteProviderError ? err : new ConcreteProviderError(
+          "orbstack", "PROVIDER_INTERNAL",
           `orbctl not found — install OrbStack to use the OrbStack provider: ${err instanceof Error ? err.message : String(err)}`,
           { retryable: false }
         );
       }
-
-      if (result.exitCode !== 0) {
-        throw new ConcreteProviderError("orbstack", "PROVIDER_INTERNAL",
-          `orbctl version check failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
-          { retryable: false }
-        );
-      }
-
-      const version = result.stdout.trim();
-      console.log(`[orbstack] orbctl available: ${version}`);
     },
 
     async onHeartbeat(expectations: HeartbeatExpectations) {
       const receipts: TaskReceipt[] = [];
 
       for (const task of expectations.tasks) {
-        if (task.type === "health_check") {
-          try {
-            const result = await run(["orbctl", "list", "--format", "json"]);
-            if (result.exitCode !== 0) {
+        switch (task.type) {
+          case "health_check": {
+            const start = Date.now();
+            try {
+              const instances = await provider.list();
+              const replCount = instances.length;
+              receipts.push({
+                type: "health_check",
+                status: "completed",
+                result: { replVmCount: replCount, latencyMs: Date.now() - start },
+              });
+            } catch (err) {
               receipts.push({
                 type: "health_check",
                 status: "failed",
-                result: {
-                  error: `orbctl list failed (exit ${result.exitCode}): ${result.stderr.trim()}`,
-                },
+                result: { error: err instanceof Error ? err.message : String(err) },
               });
-              continue;
             }
-
-            const raw = result.stdout.trim();
-            let items: Array<{ name: string }> = [];
-            if (raw && raw !== "[]") {
-              items = JSON.parse(raw);
-            }
-
-            const replCount = items.filter((item) =>
-              item.name?.startsWith("repl-")
-            ).length;
-
-            receipts.push({
-              type: "health_check",
-              status: "completed",
-              result: { replVmCount: replCount },
-            });
-          } catch (err) {
-            receipts.push({
-              type: "health_check",
-              status: "failed",
-              result: { error: err instanceof Error ? err.message : String(err) },
-            });
+            break;
           }
-        } else {
-          receipts.push({
-            type: task.type,
-            status: "skipped",
-            reason: `Task type '${task.type}' not handled by OrbStack provider`,
-          });
+          default:
+            receipts.push({
+              type: task.type,
+              status: "skipped",
+              reason: `Task type '${task.type}' not handled by OrbStack provider`,
+            });
         }
       }
 

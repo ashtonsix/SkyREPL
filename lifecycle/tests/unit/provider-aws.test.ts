@@ -1240,24 +1240,6 @@ describe("PROV-02: lifecycle hooks", () => {
     expect((result.receipts[0]!.result as any).latencyMs).toBeGreaterThanOrEqual(0);
   });
 
-  test("onHeartbeat reconcile returns skipped receipt", async () => {
-    const state = createState();
-    const provider = new AWSProvider({
-      region: "us-east-1",
-      _ec2ClientFactory: () => createMockEC2(state) as any,
-    });
-
-    const hooks = createAwsHooks(provider);
-    const result = await hooks.onHeartbeat!({
-      tasks: [{ type: "reconcile", priority: "normal" }],
-      deadline: Date.now() + 10_000,
-    });
-
-    expect(result.receipts[0]!.type).toBe("reconcile");
-    expect(result.receipts[0]!.status).toBe("skipped");
-    expect(result.receipts[0]!.reason).toContain("DB access");
-  });
-
   test("onHeartbeat unknown task type returns skipped receipt with reason", async () => {
     const state = createState();
     const provider = new AWSProvider({

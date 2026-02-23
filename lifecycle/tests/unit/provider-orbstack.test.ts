@@ -443,7 +443,7 @@ describe("lifecycle hooks", () => {
       exitCode: 0,
     });
 
-    const hooks = createOrbStackHooks(mockExec);
+    const hooks = createOrbStackHooks(new OrbStackProvider({ _execFactory: mockExec }));
     await expect(hooks.onStartup!()).resolves.toBeUndefined();
   });
 
@@ -452,7 +452,7 @@ describe("lifecycle hooks", () => {
       throw new Error("orbctl: not found");
     };
 
-    const hooks = createOrbStackHooks(mockExec);
+    const hooks = createOrbStackHooks(new OrbStackProvider({ _execFactory: mockExec }));
     await expect(hooks.onStartup!()).rejects.toThrow("orbctl not found");
   });
 
@@ -469,7 +469,7 @@ describe("lifecycle hooks", () => {
       exitCode: 0,
     });
 
-    const hooks = createOrbStackHooks(mockExec);
+    const hooks = createOrbStackHooks(new OrbStackProvider({ _execFactory: mockExec }));
     const result = await hooks.onHeartbeat!({
       tasks: [{ type: "health_check", priority: "normal" }],
       deadline: Date.now() + 5000,
@@ -488,14 +488,14 @@ describe("lifecycle hooks", () => {
       exitCode: 0,
     });
 
-    const hooks = createOrbStackHooks(mockExec);
+    const hooks = createOrbStackHooks(new OrbStackProvider({ _execFactory: mockExec }));
     const result = await hooks.onHeartbeat!({
-      tasks: [{ type: "cache_refresh", priority: "low" }],
+      tasks: [{ type: "some_unknown_task", priority: "low" }],
       deadline: Date.now() + 5000,
     });
 
     expect(result.receipts).toHaveLength(1);
-    expect(result.receipts[0]!.type).toBe("cache_refresh");
+    expect(result.receipts[0]!.type).toBe("some_unknown_task");
     expect(result.receipts[0]!.status).toBe("skipped");
   });
 });
