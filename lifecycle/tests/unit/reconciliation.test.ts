@@ -13,6 +13,8 @@ import {
 } from "../../control/src/material/db";
 import { runReconciliation } from "../../control/src/background/reconciliation";
 import { TIMING } from "@skyrepl/contracts";
+import { registerProvider } from "../../control/src/provider/registry";
+import type { Provider, ProviderCapabilities, SpawnOptions, BootstrapConfig, BootstrapScript, ListFilter } from "../../control/src/provider/types";
 
 // =============================================================================
 // Top-level test setup
@@ -271,6 +273,33 @@ describe("Reconciliation - Provider State Sync", () => {
 
     // Should not be counted since it's already FAILED
     expect(result.providerStateSync).toBe(0);
+    expect(getAllocation(alloc.id)?.status).toBe("FAILED");
+  });
+
+  test("E1: discovers externally-terminated instance via materializer", async () => {
+    // Instance appears alive in DB but provider says it's gone.
+    // reconcileProviderStateSync materializes the instance, which triggers
+    // mark_terminated. Then the allocation cleanup catches it.
+    const instance = createTestInstance(Date.now(), "launch-run:provisioning");
+    const alloc = createTestAllocation(instance.id, "ACTIVE");
+
+    // Register a provider that says this instance doesn't exist
+    await registerProvider({
+      provider: {
+        name: "test" as any,
+        capabilities: { snapshots: false, spot: false, gpu: false, multiRegion: false, persistentVolumes: false, warmVolumes: false, hibernation: false, costExplorer: false, tailscaleNative: false, idempotentSpawn: true, customNetworking: false } as ProviderCapabilities,
+        async spawn() { return { id: "mock", status: "running", spec: "test-spec", ip: "10.0.0.1", createdAt: Date.now(), isSpot: false }; },
+        async terminate() {},
+        async list() { return []; },
+        async get() { return null; }, // instance gone from provider
+        generateBootstrap() { return { content: "#!/bin/bash", format: "shell" as const, checksum: "mock" }; },
+      } as Provider,
+    });
+
+    const result = await runReconciliation();
+
+    // mark_terminated should have fired, then allocation cleanup catches it
+    expect(result.providerStateSync).toBe(1);
     expect(getAllocation(alloc.id)?.status).toBe("FAILED");
   });
 });

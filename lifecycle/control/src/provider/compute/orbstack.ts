@@ -71,6 +71,8 @@ export interface OrbStackProviderConfig {
    * use this function instead of Bun.spawn.
    */
   _execFactory?: ExecFunction;
+  /** For tests only: override the spawn poll timeout (default 60_000ms). */
+  _spawnPollTimeoutMs?: number;
 }
 
 // =============================================================================
@@ -273,10 +275,12 @@ export class OrbStackProvider implements Provider<OrbStackInstance> {
 
   private readonly execFn: ExecFunction;
   private readonly isMocked: boolean;
+  private readonly spawnPollTimeoutMs: number;
 
   constructor(config?: OrbStackProviderConfig) {
     this.execFn = config?._execFactory ?? realExec;
     this.isMocked = !!config?._execFactory;
+    this.spawnPollTimeoutMs = config?._spawnPollTimeoutMs ?? 60_000;
   }
 
   /** Run orbctl via the instance exec function. */
@@ -336,7 +340,7 @@ export class OrbStackProvider implements Provider<OrbStackInstance> {
       "SPAWN_POLL_INTERVAL_MS",
       "orbstack"
     );
-    const pollTimeout = 60_000;
+    const pollTimeout = this.spawnPollTimeoutMs;
     const pollStart = Date.now();
 
     while (Date.now() - pollStart < pollTimeout) {

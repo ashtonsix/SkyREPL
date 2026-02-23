@@ -1,6 +1,6 @@
 // tests/unit/provider-orbstack.test.ts - OrbStack Provider Unit Tests
 
-import { describe, test, expect, beforeAll, mock, setSystemTime } from "bun:test";
+import { describe, test, expect, beforeAll, mock } from "bun:test";
 import { createHash } from "crypto";
 import {
   OrbStackProvider,
@@ -539,19 +539,15 @@ describe("OrbStack Provider - spawn failure injection", () => {
   });
 
   test("spawn throws TIMEOUT_ERROR when VM never reaches running state", async () => {
-    // Use setSystemTime to advance Date.now() past the 60_000ms poll timeout
-    // so the timeout branch inside the poll loop is triggered immediately.
-    const realNow = Date.now();
-
-    // Mock exec: create succeeds, info always returns "starting"
+    // Mock exec: create succeeds, info always returns "starting" with a small
+    // delay so the poll timeout (1ms) is exceeded by the time we check.
     const mockExec = async (command: string[], _opts?: { timeout?: number }) => {
       const joined = command.join(" ");
       if (joined.includes("orbctl create")) {
         return { stdout: "", stderr: "", exitCode: 0 };
       }
       if (joined.includes("orbctl info") && joined.includes("--format json")) {
-        // Advance time by 61 seconds on each info poll so the timeout triggers
-        setSystemTime(new Date(Date.now() + 61_000));
+        await Bun.sleep(2); // Ensure poll timeout (1ms) is exceeded
         return {
           stdout: JSON.stringify({
             record: { id: "repl-ctrl01-3-5", name: "repl-ctrl01-3-5", state: "starting" },
@@ -563,17 +559,12 @@ describe("OrbStack Provider - spawn failure injection", () => {
       return { stdout: "", stderr: "", exitCode: 0 };
     };
 
-    const provider = new OrbStackProvider({ _execFactory: mockExec });
+    // Use _spawnPollTimeoutMs: 1 so the timeout triggers after one poll.
+    // Avoids setSystemTime which freezes Date.now() process-wide and
+    // deadlocks any concurrent test using polling loops.
+    const provider = new OrbStackProvider({ _execFactory: mockExec, _spawnPollTimeoutMs: 1 });
 
-    let err: any;
-    try {
-      await provider.spawn(spawnOpts);
-    } catch (e) {
-      err = e;
-    } finally {
-      // Restore real time regardless of outcome
-      setSystemTime(new Date(realNow));
-    }
+    const err = await provider.spawn(spawnOpts).catch((e) => e);
 
     expect(err).toBeInstanceOf(ConcreteProviderError);
     expect(err.code).toBe("TIMEOUT_ERROR");

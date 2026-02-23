@@ -5,9 +5,11 @@
 
 import { getControlId, parseResourceName } from "../material/control-id";
 import { getDatabase } from "../material/db/helpers";
-import { queryMany, isWhitelisted, recordOrphanScan } from "../material/db";
+import { queryMany, updateInstance, isWhitelisted, recordOrphanScan, type Instance } from "../material/db";
 import { getProvider, getAllProviders } from "../provider/registry";
 import type { ProviderName } from "../provider/types";
+import { cacheSet } from "../resource/cache";
+import { stampMaterialized, getTtlForTier } from "../resource/materializer";
 
 // =============================================================================
 // Types
@@ -41,6 +43,7 @@ export interface ScanResult {
 interface TrackedInstance {
   id: number;
   provider_id: string;
+  ip: string | null;
 }
 
 /**
@@ -48,7 +51,7 @@ interface TrackedInstance {
  */
 function getActiveTrackedInstances(provider: string): TrackedInstance[] {
   return queryMany<TrackedInstance>(
-    `SELECT id, provider_id FROM instances
+    `SELECT id, provider_id, ip FROM instances
      WHERE provider = ? AND workflow_state NOT LIKE 'terminate:%'`,
     [provider]
   );
@@ -83,7 +86,39 @@ export async function scanProvider(providerName: string): Promise<ScanResult> {
     .filter(t => t.provider_id !== "" && !cloudIdSet.has(t.provider_id))
     .map(t => t.provider_id);
 
-  // 5. Find orphan candidates (in cloud but not tracked in DB)
+  // 5. Write-back: update tracked instances with cloud-discovered state.
+  //    The scanner already pays for provider.list() — writing back discovered
+  //    state (IP changes) completes the materialization contract.
+  const trackedById = new Map(tracked.map(t => [t.provider_id, t]));
+  let writeBackCount = 0;
+  for (const cloudInst of cloudInstances) {
+    const dbInst = trackedById.get(cloudInst.id);
+    if (!dbInst) continue;
+
+    const updates: Record<string, unknown> = {};
+    if (cloudInst.ip && cloudInst.ip !== dbInst.ip) {
+      updates.ip = cloudInst.ip;
+    }
+
+    if (Object.keys(updates).length > 0) {
+      updateInstance(dbInst.id, updates);
+      writeBackCount++;
+    }
+
+    // Populate materializer cache with this fresh observation (batch-tier TTL)
+    const freshRecord = queryMany<Instance>(
+      "SELECT * FROM instances WHERE id = ?", [dbInst.id]
+    )[0];
+    if (freshRecord) {
+      cacheSet(`instance:${dbInst.id}`, stampMaterialized(freshRecord), getTtlForTier('batch', providerName));
+    }
+  }
+
+  if (writeBackCount > 0) {
+    console.log(`[orphan] Write-back: updated ${writeBackCount} tracked instance(s) for ${providerName}`);
+  }
+
+  // 6. Find orphan candidates (in cloud but not tracked in DB)
   const now = Date.now();
   const orphans: OrphanRecord[] = [];
 
@@ -121,7 +156,7 @@ export async function scanProvider(providerName: string): Promise<ScanResult> {
     });
   }
 
-  // 6. Record the scan
+  // 7. Record the scan
   recordOrphanScan({
     provider: providerName,
     scanned_at: scannedAt,

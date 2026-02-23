@@ -2,8 +2,13 @@
 
 import { Elysia, t } from "elysia";
 import { Type } from "@sinclair/typebox";
-import { getRunRecord } from "../../resource/run";
-import { getInstanceRecord } from "../../resource/instance";
+import { getRunRecord, materializeRun } from "../../resource/run";
+import { getInstanceRecord, materializeInstance } from "../../resource/instance";
+import { materializeAllocation } from "../../resource/allocation";
+import { materializeManifest } from "../../resource/manifest";
+import { materializeWorkflow } from "../../resource/workflow";
+import { stampMaterialized } from "../../resource/materializer";
+import { materializeInstanceBatch } from "../../resource/instance";
 import {
   queryOne,
   queryMany,
@@ -79,13 +84,14 @@ export function registerResourceRoutes(app: Elysia<any>): void {
   app.get("/v1/runs", ({ query, request }: { query: Record<string, unknown>; request: Request }) => {
     const auth = getAuthContext(request);
     const filters = buildRunFilters(query, auth?.tenantId);
-    return paginatedList<Run>("runs", filters, query);
+    const result = paginatedList<Run>("runs", filters, query);
+    return { ...result, data: result.data.map(stampMaterialized) };
   });
 
   app.get("/v1/runs/:id", ({ params, set, request }) => {
     const auth = getAuthContext(request);
     const id = params.id;
-    const run = getRunRecord(id);
+    const run = materializeRun(id);
     if (!run || (auth && run.tenant_id !== auth.tenantId)) {
       return new Response(
         JSON.stringify({ error: { code: "RUN_NOT_FOUND", message: `Run ${id} not found`, category: "not_found" } }),
@@ -97,16 +103,23 @@ export function registerResourceRoutes(app: Elysia<any>): void {
 
   // ─── Instances ───────────────────────────────────────────────────────
 
-  app.get("/v1/instances", ({ query, request }: { query: Record<string, unknown>; request: Request }) => {
+  app.get("/v1/instances", async ({ query, request }: { query: Record<string, unknown>; request: Request }) => {
     const auth = getAuthContext(request);
     const filters = buildInstanceFilters(query, auth?.tenantId);
-    return paginatedList<Instance>("instances", filters, query);
+    const result = paginatedList<Instance>("instances", filters, query);
+    const ids = result.data.map(r => r.id);
+    if (ids.length === 0) return { ...result, data: [] };
+    const materialized = await materializeInstanceBatch(ids, { tier: "display" });
+    // Preserve pagination order (materializeInstanceBatch may reorder)
+    const byId = new Map(materialized.map(m => [m.id, m]));
+    const ordered = ids.map(id => byId.get(id)).filter(Boolean);
+    return { ...result, data: ordered };
   });
 
-  app.get("/v1/instances/:id", ({ params, set, request }) => {
+  app.get("/v1/instances/:id", async ({ params, set, request }) => {
     const auth = getAuthContext(request);
     const id = params.id;
-    const instance = getInstanceRecord(id);
+    const instance = await materializeInstance(id);
     if (!instance || (auth && instance.tenant_id !== auth.tenantId)) {
       return new Response(
         JSON.stringify({ error: { code: "INSTANCE_NOT_FOUND", message: `Instance ${id} not found`, category: "not_found" } }),
@@ -249,7 +262,7 @@ export function registerResourceRoutes(app: Elysia<any>): void {
       sql, [...filters.values, ...cursorValues]
     );
     const hasMore = rows.length > limit;
-    const data = hasMore ? rows.slice(0, limit) : rows;
+    const data = (hasMore ? rows.slice(0, limit) : rows).map(stampMaterialized);
     const lastRow = data[data.length - 1];
     return {
       data,
@@ -266,7 +279,7 @@ export function registerResourceRoutes(app: Elysia<any>): void {
   app.get("/v1/allocations/:id", ({ params, set, request }) => {
     const auth = getAuthContext(request);
     const id = Number(params.id);
-    const allocation = getAllocation(id);
+    const allocation = materializeAllocation(id);
     if (!allocation || (auth && allocation.tenant_id !== auth.tenantId)) {
       set.status = 404;
       return { error: { code: "ALLOCATION_NOT_FOUND", message: `Allocation ${id} not found`, category: "not_found" } };
@@ -307,13 +320,14 @@ export function registerResourceRoutes(app: Elysia<any>): void {
   app.get("/v1/manifests", ({ query, request }: { query: Record<string, unknown>; request: Request }) => {
     const auth = getAuthContext(request);
     const filters = buildManifestFilters(query, auth?.tenantId);
-    return paginatedList<Manifest>("manifests", filters, query);
+    const result = paginatedList<Manifest>("manifests", filters, query);
+    return { ...result, data: result.data.map(stampMaterialized) };
   });
 
   app.get("/v1/manifests/:id", ({ params, set, request }) => {
     const auth = getAuthContext(request);
     const id = Number(params.id);
-    const manifest = getManifest(id);
+    const manifest = materializeManifest(id);
     if (!manifest || (auth && manifest.tenant_id !== auth.tenantId)) {
       set.status = 404;
       return { error: { code: "MANIFEST_NOT_FOUND", message: `Manifest ${id} not found`, category: "not_found" } };
@@ -351,7 +365,8 @@ export function registerResourceRoutes(app: Elysia<any>): void {
   app.get("/v1/workflows", ({ query, request }: { query: Record<string, unknown>; request: Request }) => {
     const auth = getAuthContext(request);
     const filters = buildWorkflowFilters(query, auth?.tenantId);
-    return paginatedList<Workflow>("workflows", filters, query);
+    const result = paginatedList<Workflow>("workflows", filters, query);
+    return { ...result, data: result.data.map(stampMaterialized) };
   });
 
   app.get("/v1/workflows/:id", ({ params, query, set, request }) => {
@@ -365,7 +380,7 @@ export function registerResourceRoutes(app: Elysia<any>): void {
       );
     }
 
-    const result: Record<string, unknown> = { data: { ...workflow } };
+    const result: Record<string, unknown> = { data: { ...materializeWorkflow(id)! } };
     const include = typeof query.include === "string" ? query.include.split(",") : [];
 
     if (include.includes("nodes")) {

@@ -1,7 +1,7 @@
 // resource/allocation.ts - Allocation State Machine, Warm Pool, Debug Holds
 
 import type { Allocation } from "../material/db";
-import type { AllocationStatus } from "@skyrepl/contracts";
+import type { AllocationStatus, Materialized, MaterializeOptions } from "@skyrepl/contracts";
 
 import {
   getAllocation,
@@ -23,8 +23,27 @@ import {
   failAllocation,
 } from "../workflow/state-transitions";
 import { TIMING } from "@skyrepl/contracts";
+import { stampMaterialized } from "./materializer";
+import { materializeInstance, isTerminalState } from "./instance";
 
 export { ALLOCATION_TRANSITIONS };
+
+// =============================================================================
+// Materializer (DB-authoritative — trivially thin)
+// =============================================================================
+
+export function materializeAllocation(id: number, _opts?: MaterializeOptions): Materialized<Allocation> | null {
+  const record = getAllocation(id);
+  if (!record) return null;
+  return stampMaterialized(record);
+}
+
+export function materializeAllocationBatch(ids: number[], _opts?: MaterializeOptions): Materialized<Allocation>[] {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => "?").join(", ");
+  const records = queryMany<Allocation>(`SELECT * FROM allocations WHERE id IN (${placeholders})`, ids);
+  return records.map(stampMaterialized);
+}
 
 // =============================================================================
 // Types
@@ -185,6 +204,17 @@ export async function claimWarmPoolAllocation(
 
     if (!warm) {
       return { success: false, error: "No warm allocation available" };
+    }
+
+    // Decision-tier materialization: verify the instance is actually alive
+    // before claiming. Uses 30s TTL cache — cheap after the first call.
+    // If provider says instance is gone, enrichFromProvider marks it
+    // terminate:complete (§3.3 mark_terminated). Belt + suspenders: check both.
+    const materialized = await materializeInstance(warm.instance_id, { tier: 'decision' });
+    if (!materialized || isTerminalState(materialized.workflow_state)) {
+      // Instance gone or dead — skip this candidate, retry
+      if (attempt < retries) continue;
+      return { success: false, error: "Warm pool candidate instance not available" };
     }
 
     // Attempt to claim it

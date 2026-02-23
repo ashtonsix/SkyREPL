@@ -161,6 +161,13 @@ export {
   WorkflowStatusResponseSchema,
 } from './api/workflows';
 
+// Materialization
+export type {
+  FreshnessTier,
+  MaterializeOptions,
+  Materialized,
+} from './materialization';
+
 // Config - Timing
 export {
   TIMING,

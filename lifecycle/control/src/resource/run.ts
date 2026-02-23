@@ -1,6 +1,7 @@
-// resource/run.ts - Run Resource Operations
+// resource/run.ts - Run Resource Operations + Materializer
 
 import type { Run } from "../material/db";
+import type { Materialized, MaterializeOptions } from "@skyrepl/contracts";
 import {
   getRun,
   createRun,
@@ -8,6 +9,7 @@ import {
   listRuns,
   queryMany,
 } from "../material/db";
+import { stampMaterialized } from "./materializer";
 
 // =============================================================================
 // Run Lifecycle
@@ -61,6 +63,23 @@ export function listRunRecords(filter?: {
   return listRuns(
     filter?.workflow_state ? { workflow_state: filter.workflow_state } : undefined
   );
+}
+
+// =============================================================================
+// Materializer (DB-authoritative — trivially thin)
+// =============================================================================
+
+export function materializeRun(id: number, _opts?: MaterializeOptions): Materialized<Run> | null {
+  const record = getRun(id);
+  if (!record) return null;
+  return stampMaterialized(record);
+}
+
+export function materializeRunBatch(ids: number[], _opts?: MaterializeOptions): Materialized<Run>[] {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => "?").join(", ");
+  const records = queryMany<Run>(`SELECT * FROM runs WHERE id IN (${placeholders})`, ids);
+  return records.map(stampMaterialized);
 }
 
 // =============================================================================

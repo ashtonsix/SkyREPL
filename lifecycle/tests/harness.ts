@@ -27,6 +27,7 @@ import {
 import {
   clearAllProviders,
 } from "../control/src/provider/registry";
+import { cacheClear, cacheResetStats } from "../control/src/resource/cache";
 import { expect } from "bun:test";
 
 export interface SetupTestOptions {
@@ -53,10 +54,12 @@ export function setupTest(opts: SetupTestOptions = {}): () => Promise<void> {
     resetEngineShutdown();
   }
 
-  // 3. Clear all registries
+  // 3. Clear all registries and caches
   clearBlueprints();
   clearNodeExecutors();
   clearAllProviders();
+  cacheClear();
+  cacheResetStats();
 
   // 4. Fresh in-memory database
   initDatabase(":memory:");

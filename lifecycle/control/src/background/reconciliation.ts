@@ -18,6 +18,7 @@ import {
 import { getProvider } from "../provider/registry";
 import type { ProviderName } from "../provider/types";
 import { TIMING } from "@skyrepl/contracts";
+import { materializeInstance } from "../resource/instance";
 
 // =============================================================================
 // Result Type
@@ -217,7 +218,7 @@ export async function runReconciliation(): Promise<ReconciliationResult> {
   result.warmPoolHealth = reconcileWarmPoolHealth();
   result.orphanedClaims = reconcileOrphanedClaims();
   result.stalledTransitions = reconcileStalledTransitions();
-  result.providerStateSync = reconcileProviderStateSync();
+  result.providerStateSync = await reconcileProviderStateSync();
   result.allocationAging = reconcileAllocationAging();
   result.stalePendingSpawns = await reconcileStalePendingSpawns();
 
@@ -331,11 +332,37 @@ function reconcileStalledTransitions(): number {
 // =============================================================================
 
 /**
- * Find non-terminal allocations on instances that have been terminated.
- * Checks the instance workflow_state in the DB (no provider API call needed).
- * Transition: any non-terminal -> FAILED.
+ * Discover externally-terminated instances via the materializer, then
+ * clean up their allocations.
+ *
+ * Phase 1: Materialize all active (non-terminal) instances. For each,
+ *   materializeInstance calls provider.get(). If the provider says the
+ *   instance is gone, mark_terminated fires (§3.3 M28) — the instance's
+ *   workflow_state is set to terminate:complete in the DB.
+ *
+ * Phase 2: Find non-terminal allocations on terminated instances and
+ *   fail them (existing DB-side check, now catches both previously-known
+ *   and freshly-discovered terminated instances).
  */
-function reconcileProviderStateSync(): number {
+async function reconcileProviderStateSync(): Promise<number> {
+  // Phase 1: Materialize active instances to discover drift.
+  // Individual materializeInstance uses provider.get() (definitive signal),
+  // not provider.list() (ambiguous absence). Errors are caught inside
+  // materializeInstance — provider unreachable falls back to DB state.
+  const active = queryMany<Instance>(
+    `SELECT * FROM instances
+     WHERE workflow_state NOT LIKE 'terminate:%'
+       AND workflow_state NOT LIKE '%:error'
+       AND workflow_state NOT LIKE '%:compensated'
+       AND provider_id IS NOT NULL`,
+    []
+  );
+
+  for (const inst of active) {
+    await materializeInstance(inst.id, { tier: "batch" });
+  }
+
+  // Phase 2: Clean up allocations on terminated instances.
   const terminated = queryMany<Allocation>(
     `SELECT a.* FROM allocations a
      JOIN instances i ON a.instance_id = i.id

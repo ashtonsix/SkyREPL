@@ -19,6 +19,8 @@ import {
   completeAllocation,
 } from "../../control/src/workflow/state-transitions";
 import { TIMING } from "@skyrepl/contracts";
+import { registerProvider } from "../../control/src/provider/registry";
+import type { Provider, ProviderCapabilities, SpawnOptions, BootstrapConfig, BootstrapScript, ListFilter } from "../../control/src/provider/types";
 
 // Resource layer modules under test
 import {
@@ -344,6 +346,19 @@ describe("allocation: claimWarmPoolAllocation", () => {
     const instance = createTestInstance({ spec: "gpu-small" });
     await createAvailableAllocation(instance.id);
     const run = createTestRun();
+
+    // Register mock provider so materializeInstance confirms instance is alive
+    await registerProvider({
+      provider: {
+        name: "orbstack" as any,
+        capabilities: { snapshots: false, spot: false, gpu: false, multiRegion: false, persistentVolumes: false, warmVolumes: false, hibernation: false, costExplorer: false, tailscaleNative: false, idempotentSpawn: true, customNetworking: false } as ProviderCapabilities,
+        async spawn(_opts: SpawnOptions) { return { id: "mock", status: "running", spec: "gpu-small", ip: "10.0.0.1", createdAt: Date.now(), isSpot: false }; },
+        async terminate() {},
+        async list() { return []; },
+        async get(id: string) { return { id, status: "running", spec: "gpu-small", ip: "10.0.0.1", createdAt: Date.now(), isSpot: false }; },
+        generateBootstrap() { return { content: "#!/bin/bash", format: "shell" as const, checksum: "mock" }; },
+      } as Provider,
+    });
 
     const result = await claimWarmPoolAllocation(
       { spec: "gpu-small", tenantId: 1 },

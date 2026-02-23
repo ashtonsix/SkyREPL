@@ -3,6 +3,7 @@
 // claiming, and manifest lifecycle helpers.
 
 import { TIMING } from "@skyrepl/contracts";
+import type { Materialized, MaterializeOptions } from "@skyrepl/contracts";
 import {
   getManifest,
   addResourceToManifest,
@@ -15,7 +16,25 @@ import {
   type Workflow,
 } from "../material/db";
 import { sealManifest } from "../workflow/state-transitions";
+import { stampMaterialized } from "./materializer";
 import type { TransitionResult } from "../workflow/state-transitions";
+
+// =============================================================================
+// Materializer (DB-authoritative — trivially thin)
+// =============================================================================
+
+export function materializeManifest(id: number, _opts?: MaterializeOptions): Materialized<Manifest> | null {
+  const record = getManifest(id);
+  if (!record) return null;
+  return stampMaterialized(record);
+}
+
+export function materializeManifestBatch(ids: number[], _opts?: MaterializeOptions): Materialized<Manifest>[] {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => "?").join(", ");
+  const records = queryMany<Manifest>(`SELECT * FROM manifests WHERE id IN (${placeholders})`, ids);
+  return records.map(stampMaterialized);
+}
 
 // =============================================================================
 // Retention Policies
