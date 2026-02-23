@@ -35,12 +35,15 @@ export function getTtlForTier(tier: FreshnessTier, provider?: string): number {
 }
 
 /**
- * Resolve MaterializeOptions into an effective TTL.
+ * Resolve MaterializeOptions into an effective TTL and refresh strategy.
+ *
+ * forceRefresh bypasses the cache READ but keeps the tier's TTL for cache
+ * WRITE — the fresh result populates the cache so subsequent reads benefit.
+ * This is distinct from tier='loop' (TTL 0, no cache at all).
  */
-export function resolveOptions(opts?: MaterializeOptions, provider?: string): { ttlMs: number; tier: FreshnessTier } {
-  if (opts?.forceRefresh) return { ttlMs: 0, tier: 'loop' };
+export function resolveOptions(opts?: MaterializeOptions, provider?: string): { ttlMs: number; tier: FreshnessTier; forceRefresh: boolean } {
   const tier = opts?.tier ?? 'display';
-  return { ttlMs: getTtlForTier(tier, provider), tier };
+  return { ttlMs: getTtlForTier(tier, provider), tier, forceRefresh: opts?.forceRefresh ?? false };
 }
 
 // =============================================================================
@@ -58,17 +61,23 @@ export function stampMaterialized<T>(record: T): Materialized<T> {
 /**
  * Get-or-materialize pattern with cache integration.
  *
- * 1. If ttlMs > 0, check cache. Return on hit.
+ * 1. If ttlMs > 0 and !forceRefresh, check cache. Return on hit.
  * 2. Call fetcher() to produce fresh value.
- * 3. Cache the result (if ttlMs > 0).
+ * 3. Cache the result (if ttlMs > 0) — even on forceRefresh, so
+ *    subsequent reads at the same tier benefit from the fresh data.
  * 4. Return.
+ *
+ * forceRefresh skips the cache read but still writes. This is the mechanism
+ * for "bypass TTL before acting on a resource" — the caller gets definitive
+ * provider state, and the cache is updated for everyone else.
  */
 export async function cachedMaterialize<T>(
   cacheKey: string,
   ttlMs: number,
   fetcher: () => Promise<T>,
+  forceRefresh?: boolean,
 ): Promise<T> {
-  if (ttlMs > 0) {
+  if (ttlMs > 0 && !forceRefresh) {
     const cached = cacheGet<T>(cacheKey);
     if (cached !== null) return cached;
   }

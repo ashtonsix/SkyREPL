@@ -16,7 +16,7 @@ export type DurationMs = number;
 /** SHA256 hash as hex string */
 export type Checksum = string;
 
-export type ProviderName = 'aws' | 'lambda' | 'runpod' | 'orbstack';
+export type ProviderName = 'aws' | 'digitalocean' | 'gcp' | 'lambda' | 'runpod' | 'orbstack';
 
 /** Feature provider name */
 export type FeatureProviderName = 'tailscale' | (string & {});

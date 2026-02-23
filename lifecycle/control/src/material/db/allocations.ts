@@ -99,6 +99,7 @@ export function findWarmAllocation(
         AND i.spec = ?
         AND i.tenant_id = ?
         AND (i.workflow_state LIKE '%:complete' OR i.workflow_state = 'launch-run:provisioning')
+        AND i.workflow_state != 'terminate:complete'
         AND i.last_heartbeat > ?
         AND (i.init_checksum = ? OR i.init_checksum IS NULL)
     `;
@@ -128,6 +129,7 @@ export function findWarmAllocation(
         AND i.spec = ?
         AND i.tenant_id = ?
         AND (i.workflow_state LIKE '%:complete' OR i.workflow_state = 'launch-run:provisioning')
+        AND i.workflow_state != 'terminate:complete'
         AND i.last_heartbeat > ?
     `;
     params.push(heartbeatCutoff);

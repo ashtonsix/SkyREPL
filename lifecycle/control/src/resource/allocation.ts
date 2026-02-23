@@ -141,6 +141,7 @@ export async function queryWarmPool(
     JOIN instances i ON a.instance_id = i.id
     WHERE a.status = 'AVAILABLE' AND a.run_id IS NULL
       AND (i.workflow_state LIKE '%:complete' OR i.workflow_state = 'launch-run:provisioning')
+      AND i.workflow_state != 'terminate:complete'
       AND i.last_heartbeat > ?
   `;
 

@@ -2,7 +2,8 @@
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
 import { queryOne, findWarmAllocation, type WorkflowNode } from "../../material/db";
-import { skipNode } from "../state-transitions";
+import { skipNode, failAllocation } from "../state-transitions";
+import { materializeInstance, isTerminalState } from "../../resource/instance";
 import type { ResolveInstanceOutput, LaunchRunWorkflowInput } from "../../intent/launch-run.schema";
 
 // =============================================================================
@@ -39,33 +40,52 @@ export const resolveInstanceExecutor: NodeExecutor<ResolveInstanceInput, Resolve
     );
 
     if (warmAllocation) {
-      // Warm path: skip cold-path nodes (spawn + wait-for-boot)
-      const spawnNode = queryOne<WorkflowNode>(
-        "SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
-        [ctx.workflowId, "spawn-instance"]
-      );
-      if (spawnNode && spawnNode.status === "pending") {
-        skipNode(spawnNode.id);
-      }
-
-      const bootNode = queryOne<WorkflowNode>(
-        "SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
-        [ctx.workflowId, "wait-for-boot"]
-      );
-      if (bootNode && bootNode.status === "pending") {
-        skipNode(bootNode.id);
-      }
-
-      ctx.log("info", "Resolved instance: warm path", {
-        allocationId: warmAllocation.id,
-        instanceId: warmAllocation.instance_id,
+      // FRESH_STATE: Verify instance is still alive before committing to
+      // warm path. Uses forceRefresh to bypass TTL cache — must have
+      // definitive provider state before skipping spawn. This catches
+      // out-of-band terminations (provider console, spot eviction, admin
+      // cleanup) that stale cache wouldn't detect.
+      const instance = await materializeInstance(warmAllocation.instance_id, {
+        tier: 'decision',
+        forceRefresh: true,
       });
 
-      return {
-        warmAvailable: true,
-        allocationId: warmAllocation.id,
-        instanceId: warmAllocation.instance_id,
-      };
+      if (!instance || isTerminalState(instance.workflow_state)) {
+        // Instance is dead — clean up stale allocation and fall through to cold path
+        failAllocation(warmAllocation.id, "AVAILABLE");
+        ctx.log("warn", "Warm pool instance terminated out-of-band, falling through to cold path", {
+          allocationId: warmAllocation.id,
+          instanceId: warmAllocation.instance_id,
+        });
+      } else {
+        // Warm path: skip cold-path nodes (spawn + wait-for-boot)
+        const spawnNode = queryOne<WorkflowNode>(
+          "SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
+          [ctx.workflowId, "spawn-instance"]
+        );
+        if (spawnNode && spawnNode.status === "pending") {
+          skipNode(spawnNode.id);
+        }
+
+        const bootNode = queryOne<WorkflowNode>(
+          "SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
+          [ctx.workflowId, "wait-for-boot"]
+        );
+        if (bootNode && bootNode.status === "pending") {
+          skipNode(bootNode.id);
+        }
+
+        ctx.log("info", "Resolved instance: warm path", {
+          allocationId: warmAllocation.id,
+          instanceId: warmAllocation.instance_id,
+        });
+
+        return {
+          warmAvailable: true,
+          allocationId: warmAllocation.id,
+          instanceId: warmAllocation.instance_id,
+        };
+      }
     }
 
     // Cold path: skip the claim-warm-allocation node

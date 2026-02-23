@@ -35,13 +35,13 @@ export async function materializeInstance(id: number, opts?: MaterializeOptions)
     return stampMaterialized(record);
   }
 
-  const { ttlMs } = resolveOptions(opts, record.provider);
+  const { ttlMs, forceRefresh } = resolveOptions(opts, record.provider);
   const cacheKey = `instance:${id}`;
 
   return cachedMaterialize<Materialized<Instance>>(cacheKey, ttlMs, async () => {
     const enriched = await enrichFromProvider(record);
     return stampMaterialized(enriched);
-  });
+  }, forceRefresh);
 }
 
 /**
@@ -153,6 +153,18 @@ function applyProviderState(record: Instance, providerState: ProviderInstance | 
     // Provider says instance doesn't exist — if we think it's running, that's drift.
     // Don't auto-terminate here; the orphan scanner handles that.
     return record;
+  }
+
+  // Provider reports instance as dead or dying. "terminated" covers DO "archive"
+  // and EC2 "terminated"; "terminating" covers EC2 "shutting-down" (brief window
+  // before full termination). Both are definitive signals — mark_terminated applies.
+  if (providerState.status === "terminated" || providerState.status === "terminating") {
+    console.warn(
+      `[materialize] Instance ${record.id} (${record.provider_id}) reported terminated by provider ${record.provider} — marking terminated`
+    );
+    updateInstance(record.id, { workflow_state: "terminate:complete" });
+    cacheInvalidate(`instance:${record.id}`);
+    return { ...record, workflow_state: "terminate:complete" };
   }
 
   const updates: Partial<Instance> = {};

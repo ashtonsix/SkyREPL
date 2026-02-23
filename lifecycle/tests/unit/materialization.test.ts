@@ -186,6 +186,39 @@ describe("warm pool: materialization barrier in claimWarmPoolAllocation", () => 
     expect(dbRecord!.workflow_state).toBe("terminate:complete");
   });
 
+  test("claim rejected when provider says instance is terminating (EC2 shutting-down)", async () => {
+    // AWS-specific gap: EC2 "shutting-down" maps to "terminating" which is a
+    // brief intermediate state before "terminated". Must also trigger mark_terminated.
+    const instance = createTestInstance({ provider_id: "dying-vm-1" });
+    createTestAllocation(instance.id);
+    const run = createTestRun();
+
+    await registerProvider({
+      provider: createMinimalMockProvider({
+        get: async (id) => ({
+          id,
+          status: "terminating" as any,  // EC2 "shutting-down" → "terminating"
+          spec: "gpu-small",
+          ip: "10.0.0.1",
+          createdAt: Date.now(),
+          isSpot: false,
+        }),
+      }),
+    });
+
+    const result = await claimWarmPoolAllocation(
+      { spec: "gpu-small", tenantId: 1 },
+      run.id,
+    );
+
+    // Claim must be rejected — instance is dying
+    expect(result.success).toBe(false);
+
+    // Instance should be marked terminated in DB
+    const dbRecord = getInstance(instance.id);
+    expect(dbRecord!.workflow_state).toBe("terminate:complete");
+  });
+
   test("claim succeeds when provider confirms instance is alive", async () => {
     const instance = createTestInstance({ provider_id: "alive-vm-1" });
     createTestAllocation(instance.id);
@@ -481,6 +514,34 @@ describe("cachedMaterialize", () => {
     await cachedMaterialize("pattern:2", 0, fetcher);
 
     expect(fetchCount).toBe(3);
+  });
+
+  test("forceRefresh bypasses cache read but still writes", async () => {
+    let fetchCount = 0;
+    const fetcher = async () => {
+      fetchCount++;
+      return { value: fetchCount };
+    };
+
+    // Prime the cache with a normal call
+    const first = await cachedMaterialize("pattern:3", 10_000, fetcher);
+    expect(first.value).toBe(1);
+    expect(fetchCount).toBe(1);
+
+    // Normal read: hits cache, no fetch
+    const second = await cachedMaterialize("pattern:3", 10_000, fetcher);
+    expect(second.value).toBe(1);
+    expect(fetchCount).toBe(1);
+
+    // forceRefresh: bypasses cache, fetches fresh, writes to cache
+    const third = await cachedMaterialize("pattern:3", 10_000, fetcher, true);
+    expect(third.value).toBe(2);
+    expect(fetchCount).toBe(2);
+
+    // Normal read after forceRefresh: hits updated cache
+    const fourth = await cachedMaterialize("pattern:3", 10_000, fetcher);
+    expect(fourth.value).toBe(2); // sees the force-refreshed value
+    expect(fetchCount).toBe(2);   // NOT incremented
   });
 });
 

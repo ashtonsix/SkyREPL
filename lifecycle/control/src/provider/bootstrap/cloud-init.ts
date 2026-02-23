@@ -88,7 +88,7 @@ function collectSnippets(config: BootstrapConfig): {
 } {
   const snippets: CloudInitSnippet[] = [
     disableAptDaily(),
-    writeAgentConfig(config.controlPlaneUrl, config.registrationToken),
+    writeAgentConfig(config.controlPlaneUrl, config.registrationToken, config.environment),
     downloadAgent(config.controlPlaneUrl),
     ...(config.features ?? []).map((f) =>
       installFeature(f.name, f.config as Record<string, string> | undefined)

@@ -104,7 +104,7 @@ const mockOrbstack: Provider = {
   spawn: async () => { throw new Error("not implemented"); },
   terminate: async () => {},
   list: async () => [],
-  get: async () => null,
+  get: async (id: string) => ({ id, status: "running" as const, spec: "gpu-small", ip: "10.0.0.1", createdAt: Date.now(), isSpot: false }),
   generateBootstrap: () => ({ content: "", format: "shell" as const, checksum: "" }),
   createSnapshot: async () => ({ requestId: "", status: { status: "available" as const, providerSnapshotId: "" } }),
   getSnapshotStatus: async () => ({ status: "available" as const, providerSnapshotId: "" }),
@@ -402,6 +402,122 @@ describe("resolve-instance: warm vs cold path", () => {
       "SELECT status FROM workflow_nodes WHERE workflow_id = ? AND node_id = 'claim-warm-allocation'"
     ).get(workflowId) as any;
     expect(claimNode.status).toBe("pending");
+  });
+
+  test("warm→cold fallthrough: dead warm instance falls through to cold path (#2.06)", async () => {
+    const { workflowId, manifestId } = setupWorkflowWithNodes();
+
+    // Create a warm instance + allocation (warm pool has a candidate)
+    const instance = createTestInstance({ spec: "gpu-small" });
+    const alloc = createAvailableAllocation(instance.id);
+
+    // Override provider.get to return null — simulates out-of-band termination
+    clearProviderCache();
+    const deadProvider: Provider = {
+      ...mockOrbstack,
+      get: async () => null,  // Provider says: instance doesn't exist
+    };
+    await registerProvider({ provider: deadProvider });
+
+    const { resolveInstanceExecutor } = await import(
+      "../../control/src/workflow/nodes/resolve-instance"
+    );
+
+    const logMessages: string[] = [];
+    const ctx = {
+      workflowId,
+      nodeId: "resolve-instance",
+      manifestId,
+      tenantId: 1,
+      workflowInput: { runId: 1, command: "echo hi", spec: "gpu-small", provider: "orbstack" },
+      getNodeOutput: () => null,
+      log: (_level: string, msg: string) => { logMessages.push(msg); },
+      input: {},
+      emitResource: () => {},
+      claimResource: async () => false,
+      applyPattern: () => {},
+      checkCancellation: () => {},
+      sleep: async () => {},
+      spawnSubworkflow: async () => ({ workflowId: 0, wait: async () => ({ status: "completed" as const }) }),
+    };
+
+    const output = await resolveInstanceExecutor.execute(ctx as any);
+
+    // Must fall through to cold path
+    expect(output.warmAvailable).toBe(false);
+    expect(output.allocationId).toBeUndefined();
+
+    // Stale allocation should be failed
+    const db = getDatabase();
+    const failedAlloc = db.query(
+      "SELECT status FROM allocations WHERE id = ?"
+    ).get(alloc.id) as any;
+    expect(failedAlloc.status).toBe("FAILED");
+
+    // claim-warm-allocation should be skipped (cold path)
+    const claimNode = db.query(
+      "SELECT status FROM workflow_nodes WHERE workflow_id = ? AND node_id = 'claim-warm-allocation'"
+    ).get(workflowId) as any;
+    expect(claimNode.status).toBe("skipped");
+
+    // spawn/boot should remain pending (cold path needs them)
+    const spawnNode = db.query(
+      "SELECT status FROM workflow_nodes WHERE workflow_id = ? AND node_id = 'spawn-instance'"
+    ).get(workflowId) as any;
+    expect(spawnNode.status).toBe("pending");
+
+    // Log should mention the fallthrough
+    expect(logMessages.some(m => m.includes("falling through to cold"))).toBe(true);
+  });
+
+  test("warm→cold fallthrough: terminating warm instance falls through to cold path (EC2 shutting-down)", async () => {
+    const { workflowId, manifestId } = setupWorkflowWithNodes();
+
+    // Create a warm instance + allocation
+    const instance = createTestInstance({ spec: "gpu-small" });
+    const alloc = createAvailableAllocation(instance.id);
+
+    // Provider returns "terminating" — EC2 shutting-down intermediate state
+    clearProviderCache();
+    const dyingProvider: Provider = {
+      ...mockOrbstack,
+      get: async (id: string) => ({
+        id, status: "terminating" as any, spec: "gpu-small",
+        ip: "10.0.0.1", createdAt: Date.now(), isSpot: false,
+      }),
+    };
+    await registerProvider({ provider: dyingProvider });
+
+    const { resolveInstanceExecutor } = await import(
+      "../../control/src/workflow/nodes/resolve-instance"
+    );
+
+    const ctx = {
+      workflowId,
+      nodeId: "resolve-instance",
+      manifestId,
+      tenantId: 1,
+      workflowInput: { runId: 1, command: "echo hi", spec: "gpu-small", provider: "orbstack" },
+      getNodeOutput: () => null,
+      log: () => {},
+      input: {},
+      emitResource: () => {},
+      claimResource: async () => false,
+      applyPattern: () => {},
+      checkCancellation: () => {},
+      sleep: async () => {},
+      spawnSubworkflow: async () => ({ workflowId: 0, wait: async () => ({ status: "completed" as const }) }),
+    };
+
+    const output = await resolveInstanceExecutor.execute(ctx as any);
+
+    // Must fall through to cold path — "terminating" is effectively dead
+    expect(output.warmAvailable).toBe(false);
+
+    // Instance should be marked terminated in DB
+    const db = getDatabase();
+    const dbInstance = db.query("SELECT workflow_state FROM instances WHERE id = ?").get(instance.id) as any;
+    expect(dbInstance.workflow_state).toBe("terminate:complete");
   });
 
   test("cold path: resolve-instance returns warmAvailable=false and skips claim node", async () => {

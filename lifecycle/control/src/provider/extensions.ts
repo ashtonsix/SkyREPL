@@ -109,9 +109,21 @@ const ORBSTACK_TTL_CONFIG: TTLConfig = {
   },
 };
 
+const DIGITALOCEAN_TTL_CONFIG: TTLConfig = {
+  default: 120_000,  // 2 minutes (REST API, moderate latency)
+  maxTtl: 600_000,   // 10 minutes
+
+  byPrefix: {
+    'instance:': 30_000,           // 30 seconds
+    'capacity:': 60_000,           // 1 minute
+    'snapshot:': 300_000,          // 5 minutes
+  },
+};
+
 const PROVIDER_TTL_CONFIGS: Record<string, TTLConfig> = {
   aws: AWS_TTL_CONFIG,
   orbstack: ORBSTACK_TTL_CONFIG,
+  digitalocean: DIGITALOCEAN_TTL_CONFIG,
 };
 
 export function getTTL(provider: ProviderName, key: string): number | null {

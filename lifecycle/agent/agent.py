@@ -72,21 +72,30 @@ _load_env_file(os.path.expanduser("~/.repl/agent.env"))
 # Configuration (from environment)
 # =============================================================================
 
-CONTROL_PLANE_URL = os.getenv("SKYREPL_CONTROL_PLANE_URL", "http://localhost:3000")
+CONTROL_PLANE_URL = os.getenv("SKYREPL_CONTROL_PLANE_URL", "")
 INSTANCE_ID = os.getenv("SKYREPL_INSTANCE_ID")  # Required
 WORKDIR = os.getenv("SKYREPL_WORKDIR", "/workspace")
 SHUTDOWN_GRACE_PERIOD_S = int(os.getenv("SKYREPL_SHUTDOWN_GRACE_PERIOD_S", "5"))
 
 # Registration token for auth (read from env or config file)
 REGISTRATION_TOKEN = os.getenv("SKYREPL_REGISTRATION_TOKEN", "")
-if not REGISTRATION_TOKEN:
-    # Fallback: read from config.json
+
+# Fallback: read missing config from /etc/skyrepl/config.json (written by cloud-init)
+if not CONTROL_PLANE_URL or not INSTANCE_ID or not REGISTRATION_TOKEN:
     try:
         with open("/etc/skyrepl/config.json") as f:
-            config = json.load(f)
-            REGISTRATION_TOKEN = config.get("registrationToken", "")
+            _config = json.load(f)
+            if not CONTROL_PLANE_URL:
+                CONTROL_PLANE_URL = _config.get("controlPlaneUrl", "")
+            if not INSTANCE_ID:
+                INSTANCE_ID = _config.get("SKYREPL_INSTANCE_ID", "")
+            if not REGISTRATION_TOKEN:
+                REGISTRATION_TOKEN = _config.get("registrationToken", "")
     except (FileNotFoundError, json.JSONDecodeError):
         pass
+
+if not CONTROL_PLANE_URL:
+    CONTROL_PLANE_URL = "http://localhost:3000"
 
 # =============================================================================
 # Global State

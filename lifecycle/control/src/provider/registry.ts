@@ -10,6 +10,7 @@ import type { ProviderLifecycleHooks } from "./extensions";
 
 export const providerRegistry = {
   aws: () => import("./compute/aws"),
+  digitalocean: () => import("./compute/digitalocean"),
   // lambda: () => import("./compute/lambda"), // Slice 2+
   // runpod: () => import("./compute/runpod"), // Slice 2+
   orbstack: () => import("./compute/orbstack"),

@@ -105,6 +105,32 @@ export const PROVIDER_CAPABILITIES: Record<ProviderName, ProviderCapabilities> =
     idempotentSpawn: true,
     customNetworking: false,
   },
+  digitalocean: {
+    snapshots: true,
+    spot: false,
+    gpu: true,
+    multiRegion: true,
+    persistentVolumes: true,
+    warmVolumes: false,
+    hibernation: false,
+    costExplorer: false,
+    tailscaleNative: false,
+    idempotentSpawn: false,
+    customNetworking: true,
+  },
+  gcp: {
+    snapshots: true,
+    spot: true,
+    gpu: true,
+    multiRegion: true,
+    persistentVolumes: true,
+    warmVolumes: false,
+    hibernation: false,
+    costExplorer: true,
+    tailscaleNative: false,
+    idempotentSpawn: true,
+    customNetworking: true,
+  },
 };
 
 // =============================================================================
@@ -274,6 +300,21 @@ export interface OrbStackInstance extends ProviderInstance {
   diskGb: number;
   hostMountPath?: string;
   useRosetta?: boolean;
+}
+
+export interface DigitalOceanInstance extends ProviderInstance {
+  dropletId: number;
+  sizeSlug: string;
+  imageSlug?: string;
+  vpcUuid?: string;
+  tags: string[];
+}
+
+export interface DigitalOceanSnapshot extends ProviderSnapshot {
+  snapshotId: number;
+  resourceType: "droplet";
+  regions: string[];
+  minDiskSize: number;
 }
 
 // =============================================================================
