@@ -317,6 +317,17 @@ export interface DigitalOceanSnapshot extends ProviderSnapshot {
   minDiskSize: number;
 }
 
+export interface LambdaInstance extends ProviderInstance {
+  instanceTypeName: string;          // e.g. "gpu_1x_a100"
+  gpuCount?: number;                 // from instance_type.specs.gpus
+  gpuDescription?: string;           // from instance_type.gpu_description
+  vcpus?: number;                    // from instance_type.specs.vcpus
+  memoryGib?: number;                // from instance_type.specs.memory_gib
+  storageGib?: number;               // from instance_type.specs.storage_gib
+  priceCentsPerHour?: number;        // from instance_type.price_cents_per_hour
+  hostname?: string;                 // from instance hostname field
+}
+
 // =============================================================================
 // Feature Provider Interface
 // =============================================================================
