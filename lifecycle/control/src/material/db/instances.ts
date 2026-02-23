@@ -20,10 +20,9 @@ export interface Instance {
   spot_request_id: string | null;
   init_checksum: string | null;
   registration_token_hash: string | null;
+  provider_metadata: string | null;
   created_at: number;
   last_heartbeat: number;
-  tailscale_ip: string | null;
-  tailscale_status: "not_installed" | "installing" | "ready" | "failed" | null;
 }
 
 export function getInstance(id: number): Instance | null {
@@ -41,15 +40,15 @@ export function getInstanceByProviderId(
 }
 
 export function createInstance(
-  data: Omit<Instance, "id" | "created_at" | "tenant_id" | "tailscale_ip" | "tailscale_status">,
+  data: Omit<Instance, "id" | "created_at" | "tenant_id">,
   tenantId: number = 1
 ): Instance {
   const now = Date.now();
   const db = getDatabase();
 
   const stmt = db.prepare(`
-    INSERT INTO instances (tenant_id, provider, provider_id, spec, region, ip, workflow_state, workflow_error, current_manifest_id, spawn_idempotency_key, is_spot, spot_request_id, init_checksum, registration_token_hash, created_at, last_heartbeat)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO instances (tenant_id, provider, provider_id, spec, region, ip, workflow_state, workflow_error, current_manifest_id, spawn_idempotency_key, is_spot, spot_request_id, init_checksum, registration_token_hash, provider_metadata, created_at, last_heartbeat)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const result = stmt.run(
@@ -67,6 +66,7 @@ export function createInstance(
     data.spot_request_id,
     data.init_checksum,
     data.registration_token_hash,
+    data.provider_metadata,
     now,
     data.last_heartbeat
   );

@@ -16,7 +16,7 @@ import { failAllocation } from "../workflow/state-transitions";
 // =============================================================================
 
 export function createInstanceRecord(
-  data: Omit<Instance, "id" | "created_at" | "tenant_id" | "tailscale_ip" | "tailscale_status">,
+  data: Omit<Instance, "id" | "created_at" | "tenant_id">,
   tenantId: number = 1
 ): Instance {
   return createInstance(data, tenantId);

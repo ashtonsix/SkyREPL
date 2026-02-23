@@ -26,7 +26,8 @@ import {
   addObjectTag,
   deleteObject,
 } from "../../material/db";
-import { getInstance, updateInstance } from "../../material/db";
+import { getInstance } from "../../material/db";
+import { getTailscaleState } from "../../api/agent";
 import { commandBus } from "../../events/command-bus";
 
 // =============================================================================
@@ -126,22 +127,26 @@ export class TailscaleFeatureProvider implements FeatureProvider<TailscaleConfig
       type: "trigger_tailscale",
     });
 
-    // Step 3: Poll instance record for tailscale_status='ready'.
+    // Step 3: Poll objects table for tailscale_status='ready'.
     const deadline = Date.now() + ATTACH_TIMEOUT_MS;
     let tailscaleIp: string | null = null;
 
     while (Date.now() < deadline) {
+      // Verify instance still exists
       const current = getInstance(id);
       if (!current) {
         throw new Error(`attach: instance ${instanceId} disappeared during poll`);
       }
 
-      if (current.tailscale_status === "ready" && current.tailscale_ip) {
-        tailscaleIp = current.tailscale_ip;
+      // Read tailscale state from objects table (written by heartbeat handler)
+      const tsState = getTailscaleState(instanceId);
+
+      if (tsState?.tailscale_status === "ready" && tsState.tailscale_ip) {
+        tailscaleIp = tsState.tailscale_ip;
         break;
       }
 
-      if (current.tailscale_status === "failed") {
+      if (tsState?.tailscale_status === "failed") {
         throw new Error(
           `attach: Tailscale installation failed on instance ${instanceId}`
         );
@@ -216,16 +221,6 @@ export class TailscaleFeatureProvider implements FeatureProvider<TailscaleConfig
 
     // Remove DB record.
     deleteObject(objectId);
-
-    // Clear tailscale columns on the instance row.
-    const id = Number(instanceId);
-    const instance = getInstance(id);
-    if (instance) {
-      updateInstance(id, {
-        tailscale_ip: null,
-        tailscale_status: "not_installed",
-      });
-    }
   }
 
   // ---------------------------------------------------------------------------
@@ -260,11 +255,11 @@ export class TailscaleFeatureProvider implements FeatureProvider<TailscaleConfig
         resolvedHostname = device.hostname ?? resolvedHostname;
       }
     } else {
-      // No device_id recorded: check the instance columns for a live status.
-      const instance = getInstance(Number(instanceId));
-      if (instance?.tailscale_status === "ready" && instance.tailscale_ip) {
+      // No device_id recorded: check the objects-backed tailscale state.
+      const tsState = getTailscaleState(instanceId);
+      if (tsState?.tailscale_status === "ready" && tsState.tailscale_ip) {
         online = true;
-        resolvedIp = instance.tailscale_ip;
+        resolvedIp = tsState.tailscale_ip;
       }
     }
 

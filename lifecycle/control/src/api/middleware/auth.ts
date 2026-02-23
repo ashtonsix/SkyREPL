@@ -50,7 +50,8 @@ export function extractToken(request: Request, query?: Record<string, string>): 
 
 export interface AuthContext {
   tenantId: number;
-  userId: number;  // api_keys.id
+  userId: number;  // users.id (resolved via api_keys.user_id)
+  keyId: number;   // api_keys.id (for key-specific operations)
   role: "admin" | "member" | "viewer";
 }
 
@@ -62,19 +63,20 @@ export function validateApiKey(rawKey: string): AuthContext | null {
   const hash = createHash("sha256").update(rawKey).digest("hex");
   const db = getDatabase();
   const row = db.prepare(
-    `SELECT id, tenant_id, role FROM api_keys
-     WHERE key_hash = ? AND revoked_at IS NULL
-     AND (expires_at IS NULL OR expires_at > ?)`
-  ).get(hash, Date.now()) as { id: number; tenant_id: number; role: string } | undefined;
+    `SELECT ak.id as key_id, ak.user_id, ak.tenant_id, ak.role FROM api_keys ak
+     WHERE ak.key_hash = ? AND ak.revoked_at IS NULL
+     AND (ak.expires_at IS NULL OR ak.expires_at > ?)`
+  ).get(hash, Date.now()) as { key_id: number; user_id: number | null; tenant_id: number; role: string } | undefined;
 
   if (!row) return null;
 
   // Update last_used_at (fire-and-forget, don't block the request)
-  db.prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?").run(Date.now(), row.id);
+  db.prepare("UPDATE api_keys SET last_used_at = ? WHERE id = ?").run(Date.now(), row.key_id);
 
   return {
     tenantId: row.tenant_id,
-    userId: row.id,
+    userId: row.user_id ?? row.key_id, // Fall back to key_id for keys without a linked user
+    keyId: row.key_id,
     role: row.role as AuthContext["role"],
   };
 }

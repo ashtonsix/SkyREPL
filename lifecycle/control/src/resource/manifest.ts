@@ -90,15 +90,14 @@ export function claimResourceAtomic(
     execute(`DELETE FROM manifest_resources WHERE id = ?`, [existing.id]);
 
     execute(
-      `INSERT INTO manifest_resources (manifest_id, resource_type, resource_id, cleanup_priority, added_at, owner_type, owner_id)
-       VALUES (?, ?, ?, ?, ?, 'workflow', ?)`,
+      `INSERT INTO manifest_resources (manifest_id, resource_type, resource_id, cleanup_priority, added_at, owner_type)
+       VALUES (?, ?, ?, ?, ?, 'workflow')`,
       [
         newManifestId,
         resourceType,
         resourceId,
         existing.cleanup_priority,
         now,
-        newManifestId,
       ]
     );
 

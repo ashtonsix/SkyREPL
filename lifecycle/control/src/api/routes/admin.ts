@@ -14,7 +14,6 @@ import {
   removeUser,
   listTenantUsers,
   countTenantUsers,
-  getUserByApiKeyId,
   getUser,
   type Tenant,
   type User,
@@ -79,7 +78,7 @@ const PatchUserSchema = Type.Object({
  * For single-machine mode, this runs inline. In managed mode,
  * this check moves to the shell proxy layer.
  */
-export function checkBudget(tenantId: number, apiKeyId: number): string | null {
+export function checkBudget(tenantId: number, userId: number): string | null {
   const tenant = getTenant(tenantId);
   if (!tenant) return null; // No tenant = no budget enforcement
 
@@ -95,15 +94,15 @@ export function checkBudget(tenantId: number, apiKeyId: number): string | null {
     }
   }
 
-  // Check per-user budget via api_key_id → users.api_key_id
-  const user = getUserByApiKeyId(apiKeyId);
+  // Check per-user budget (claimed_by FK → users.id)
+  const user = getUser(userId);
   if (user?.budget_usd !== null && user?.budget_usd !== undefined) {
     const userUsage = queryOne<{ total_cost: number | null }>(
       `SELECT SUM(ur.estimated_cost_usd) as total_cost
        FROM usage_records ur
        JOIN allocations a ON ur.allocation_id = a.id
        WHERE ur.tenant_id = ? AND a.claimed_by = ?`,
-      [tenantId, apiKeyId],
+      [tenantId, userId],
     );
     const userCost = userUsage?.total_cost ?? 0;
     if (userCost >= user.budget_usd) {
@@ -392,19 +391,17 @@ export function registerAdminRoutes(app: Elysia<any>): void {
       [tenantId],
     );
 
-    // Per-user usage via api_key_id → allocations.claimed_by
+    // Per-user usage (claimed_by FK → users.id)
     const userUsage: Record<number, number> = {};
     for (const user of users) {
-      if (user.api_key_id) {
-        const usage = queryOne<{ total_cost: number | null }>(
-          `SELECT SUM(ur.estimated_cost_usd) as total_cost
-           FROM usage_records ur
-           JOIN allocations a ON ur.allocation_id = a.id
-           WHERE ur.tenant_id = ? AND a.claimed_by = ?`,
-          [tenantId, user.api_key_id],
-        );
-        userUsage[user.id] = usage?.total_cost ?? 0;
-      }
+      const usage = queryOne<{ total_cost: number | null }>(
+        `SELECT SUM(ur.estimated_cost_usd) as total_cost
+         FROM usage_records ur
+         JOIN allocations a ON ur.allocation_id = a.id
+         WHERE ur.tenant_id = ? AND a.claimed_by = ?`,
+        [tenantId, user.id],
+      );
+      userUsage[user.id] = usage?.total_cost ?? 0;
     }
 
     return {

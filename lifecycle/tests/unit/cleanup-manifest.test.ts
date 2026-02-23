@@ -181,7 +181,7 @@ function createSealedManifestWithResources(options?: {
 
   // Add resources to manifest
   const ownerOpts = options?.claimedResources
-    ? { ownerType: "workflow" as const, ownerId: workflow.id }
+    ? { ownerType: "workflow" as const }
     : {};
   addResourceToManifest(manifest.id, "allocation", String(alloc.id), { cleanupPriority: 90, ...ownerOpts });
   addResourceToManifest(manifest.id, "run", String(run.id), { cleanupPriority: 80, ...ownerOpts });

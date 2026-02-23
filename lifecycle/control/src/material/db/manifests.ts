@@ -25,7 +25,6 @@ export interface ManifestResource {
   cleanup_priority: number | null;
   added_at: number;
   owner_type: string;
-  owner_id: number | null;
   cleanup_processed_at: number | null;
 }
 
@@ -41,7 +40,6 @@ interface AddResourceOptions {
   cleanupPriority?: number;
   allowRecovery?: boolean;
   ownerType?: string;
-  ownerId?: number;
 }
 
 export function getManifest(id: number): Manifest | null {
@@ -93,9 +91,9 @@ export function addResourceToManifest(
   }
 
   execute(
-    `INSERT INTO manifest_resources (manifest_id, resource_type, resource_id, cleanup_priority, added_at, owner_type, owner_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [manifestId, resourceType, resourceId, options?.cleanupPriority ?? null, now, options?.ownerType ?? 'manifest', options?.ownerId ?? null]
+    `INSERT INTO manifest_resources (manifest_id, resource_type, resource_id, cleanup_priority, added_at, owner_type)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [manifestId, resourceType, resourceId, options?.cleanupPriority ?? null, now, options?.ownerType ?? 'manifest']
   );
 }
 

@@ -15,6 +15,7 @@ import {
   queryOne,
   type Instance,
 } from "../../control/src/material/db";
+import { getTailscaleState } from "../../control/src/api/agent";
 import { createServer } from "../../control/src/api/routes";
 import { registerAgentRoutes } from "../../control/src/api/agent";
 
@@ -270,11 +271,11 @@ describe("getTailscaleClient", () => {
 });
 
 // =============================================================================
-// 3. Heartbeat stores tailscale_ip and tailscale_status
+// 3. Heartbeat stores tailscale state in objects table
 // =============================================================================
 
 describe("Heartbeat stores Tailscale fields", () => {
-  test("heartbeat with tailscale fields updates instance record", async () => {
+  test("heartbeat with tailscale fields writes to objects table", async () => {
     const instance = makeInstance();
     const app = makeApp();
 
@@ -294,9 +295,9 @@ describe("Heartbeat stores Tailscale fields", () => {
     const body = await resp.json();
     expect(body.ack).toBe(true);
 
-    const updated = getInstance(instance.id);
-    expect(updated?.tailscale_ip).toBe("100.64.0.42");
-    expect(updated?.tailscale_status).toBe("ready");
+    const tsState = getTailscaleState(String(instance.id));
+    expect(tsState?.tailscale_ip).toBe("100.64.0.42");
+    expect(tsState?.tailscale_status).toBe("ready");
   });
 
   test("heartbeat without tailscale fields preserves existing values", async () => {
@@ -327,9 +328,9 @@ describe("Heartbeat stores Tailscale fields", () => {
       }),
     });
 
-    const updated = getInstance(instance.id);
-    expect(updated?.tailscale_ip).toBe("100.64.0.1");
-    expect(updated?.tailscale_status).toBe("ready");
+    const tsState = getTailscaleState(String(instance.id));
+    expect(tsState?.tailscale_ip).toBe("100.64.0.1");
+    expect(tsState?.tailscale_status).toBe("ready");
   });
 
   test("heartbeat with tailscale_status='installing' stores correctly", async () => {
@@ -348,9 +349,9 @@ describe("Heartbeat stores Tailscale fields", () => {
       }),
     });
 
-    const updated = getInstance(instance.id);
-    expect(updated?.tailscale_ip).toBeNull();
-    expect(updated?.tailscale_status).toBe("installing");
+    const tsState = getTailscaleState(String(instance.id));
+    expect(tsState?.tailscale_ip).toBeNull();
+    expect(tsState?.tailscale_status).toBe("installing");
   });
 });
 
@@ -422,15 +423,14 @@ describe("tailscale-ensure endpoint logic", () => {
       }),
     });
 
-    // Verify instance is ready in DB
-    const updated = getInstance(instance.id);
-    expect(updated?.tailscale_status).toBe("ready");
-    expect(updated?.tailscale_ip).toBe("100.64.0.5");
+    // Verify tailscale state is ready in objects table
+    const tsState = getTailscaleState(String(instance.id));
+    expect(tsState?.tailscale_status).toBe("ready");
+    expect(tsState?.tailscale_ip).toBe("100.64.0.5");
 
-    // The ensure endpoint handler checks instance.tailscale_status.
-    // Since we can't bypass API key auth easily, test the DB state
+    // The ensure endpoint handler reads from getTailscaleState().
+    // Since we can't bypass API key auth easily, test the objects table state
     // that the handler reads — if status is 'ready', the handler returns immediately.
-    // This validates items 1 and 4 of the spec (heartbeat stores, status queryable).
   });
 
   test("returns 503 when TAILSCALE_API_KEY is not configured", async () => {
@@ -513,13 +513,13 @@ describe("tailscale-ensure endpoint logic", () => {
       }),
     });
 
-    const updated = getInstance(instance.id);
-    expect(updated?.tailscale_status).toBe("installing");
+    const tsState = getTailscaleState(String(instance.id));
+    expect(tsState?.tailscale_status).toBe("installing");
 
     // The route logic for 'installing' status returns { status: 'installing' }
     // without creating a new auth key. This is enforced by the conditional
     // in the route handler: if (currentStatus === 'installing') return immediately.
-    // We verify DB state matches what the handler would read.
-    expect(updated?.tailscale_status).toBe("installing");
+    // We verify objects table state matches what the handler would read.
+    expect(tsState?.tailscale_status).toBe("installing");
   });
 });

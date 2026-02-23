@@ -17,10 +17,10 @@ import {
 } from "../../control/src/provider/feature/tailscale-api";
 import {
   createInstance,
-  updateInstance,
   queryMany,
   type Instance,
 } from "../../control/src/material/db";
+import { upsertTailscaleState } from "../../control/src/api/agent";
 import { sseManager } from "../../control/src/api/sse-protocol";
 
 // =============================================================================
@@ -43,10 +43,13 @@ function makeInstance(overrides: Partial<Omit<Instance, "id" | "created_at">> = 
     init_checksum: null,
     registration_token_hash: null,
     last_heartbeat: Date.now(),
-    tailscale_ip: null,
-    tailscale_status: null,
     ...overrides,
   });
+}
+
+/** Simulate the agent reporting tailscale state via heartbeat (writes to objects table). */
+function setTailscaleState(instanceId: number, ip: string | null, status: string | null): void {
+  upsertTailscaleState(String(instanceId), ip, status);
 }
 
 function makeDevice(overrides: Partial<TailscaleDevice> = {}): TailscaleDevice {
@@ -134,22 +137,16 @@ describe("TailscaleFeatureProvider.attach()", () => {
     });
     const provider = new TailscaleFeatureProvider(client);
 
-    // Create an instance that starts as 'not installed' then becomes ready.
-    const instance = makeInstance({
-      tailscale_ip: null,
-      tailscale_status: null,
-    });
+    // Create an instance that starts without tailscale, then becomes ready.
+    const instance = makeInstance();
 
     // Simulate the agent reporting ready after attach triggers it.
-    // We update the instance row in the same tick to make the poll succeed
+    // We write to the objects table in the same tick to make the poll succeed
     // without actually waiting 2 s per cycle.
     const attachPromise = provider.attach(String(instance.id), {});
 
-    // Immediately update the instance to simulate the heartbeat response.
-    updateInstance(instance.id, {
-      tailscale_ip: "100.64.0.5",
-      tailscale_status: "ready",
-    });
+    // Simulate the heartbeat response writing tailscale state to objects.
+    setTailscaleState(instance.id, "100.64.0.5", "ready");
 
     const state = await attachPromise;
 
@@ -180,11 +177,8 @@ describe("TailscaleFeatureProvider.attach()", () => {
 
     // First attach — stores the record.
     const attachPromise = provider.attach(String(instance.id), {});
-    // createInstance doesn't persist tailscale columns; update after to simulate agent readiness.
-    updateInstance(instance.id, {
-      tailscale_ip: "100.64.0.7",
-      tailscale_status: "ready",
-    });
+    // Simulate agent reporting readiness via objects table.
+    setTailscaleState(instance.id, "100.64.0.7", "ready");
     const firstState = await attachPromise;
     expect(firstState.ip).toBe("100.64.0.7");
 
@@ -216,10 +210,7 @@ describe("TailscaleFeatureProvider.attach()", () => {
       authKey: "user-supplied-key",
     });
 
-    updateInstance(instance.id, {
-      tailscale_ip: "100.64.0.9",
-      tailscale_status: "ready",
-    });
+    setTailscaleState(instance.id, "100.64.0.9", "ready");
 
     await attachPromise;
     expect(createAuthKeyCalled).toBe(false);
@@ -233,10 +224,7 @@ describe("TailscaleFeatureProvider.attach()", () => {
     const attachPromise = provider.attach(String(instance.id), {});
 
     // Simulate installation failure.
-    updateInstance(instance.id, {
-      tailscale_ip: null,
-      tailscale_status: "failed",
-    });
+    setTailscaleState(instance.id, null, "failed");
 
     await expect(attachPromise).rejects.toThrow(/Tailscale installation failed/);
   });
@@ -252,10 +240,7 @@ describe("TailscaleFeatureProvider.attach()", () => {
     const instance = makeInstance();
     const attachPromise = provider.attach(String(instance.id), {});
 
-    updateInstance(instance.id, {
-      tailscale_ip: "100.64.0.11",
-      tailscale_status: "ready",
-    });
+    setTailscaleState(instance.id, "100.64.0.11", "ready");
 
     const state = await attachPromise;
 
@@ -300,10 +285,7 @@ describe("TailscaleFeatureProvider.detach()", () => {
 
     const instance = makeInstance();
     const attachPromise = provider.attach(String(instance.id), {});
-    updateInstance(instance.id, {
-      tailscale_ip: "100.64.0.20",
-      tailscale_status: "ready",
-    });
+    setTailscaleState(instance.id, "100.64.0.20", "ready");
     await attachPromise;
 
     // Verify record exists before detach.
@@ -355,10 +337,7 @@ describe("TailscaleFeatureProvider.detach()", () => {
 
     const instance = makeInstance();
     const attachPromise = provider.attach(String(instance.id), {});
-    updateInstance(instance.id, {
-      tailscale_ip: "100.64.0.21",
-      tailscale_status: "ready",
-    });
+    setTailscaleState(instance.id, "100.64.0.21", "ready");
     await attachPromise;
 
     // Should not throw — 404 on deleteDevice is treated as already-removed.
@@ -369,7 +348,7 @@ describe("TailscaleFeatureProvider.detach()", () => {
     expect(rows).toHaveLength(0);
   });
 
-  test("clears tailscale columns on the instance row after detach", async () => {
+  test("cleans up device record in objects table after detach", async () => {
     const device = makeDevice({ addresses: ["100.64.0.22"] });
     const client = makeMockApiClient({
       async listDevices() { return [device]; },
@@ -379,18 +358,18 @@ describe("TailscaleFeatureProvider.detach()", () => {
 
     const instance = makeInstance();
     const attachPromise = provider.attach(String(instance.id), {});
-    updateInstance(instance.id, {
-      tailscale_ip: "100.64.0.22",
-      tailscale_status: "ready",
-    });
+    setTailscaleState(instance.id, "100.64.0.22", "ready");
     await attachPromise;
+
+    // Device record exists before detach.
+    const before = queryMany("SELECT id FROM objects WHERE type = 'tailscale_device'");
+    expect(before).toHaveLength(1);
 
     await provider.detach(String(instance.id));
 
-    const { getInstance } = await import("../../control/src/material/db");
-    const updated = getInstance(instance.id);
-    expect(updated?.tailscale_status).toBe("not_installed");
-    expect(updated?.tailscale_ip).toBeNull();
+    // Device record is gone after detach.
+    const after = queryMany("SELECT id FROM objects WHERE type = 'tailscale_device'");
+    expect(after).toHaveLength(0);
   });
 });
 
@@ -409,10 +388,7 @@ describe("TailscaleFeatureProvider.reconcile()", () => {
 
     const instance = makeInstance();
     const attachPromise = provider.attach(String(instance.id), {});
-    updateInstance(instance.id, {
-      tailscale_ip: "100.64.0.30",
-      tailscale_status: "ready",
-    });
+    setTailscaleState(instance.id, "100.64.0.30", "ready");
     await attachPromise;
 
     const result = await provider.reconcile({
@@ -487,10 +463,7 @@ describe("TailscaleFeatureProvider.reconcile()", () => {
     const attachProvider = new TailscaleFeatureProvider(attachClient);
     const instance = makeInstance();
     const attachPromise = attachProvider.attach(String(instance.id), {});
-    updateInstance(instance.id, {
-      tailscale_ip: "100.64.0.40",
-      tailscale_status: "ready",
-    });
+    setTailscaleState(instance.id, "100.64.0.40", "ready");
     await attachPromise;
 
     // Confirm record exists.
@@ -555,10 +528,7 @@ describe("TailscaleFeatureProvider.status()", () => {
 
     const instance = makeInstance();
     const attachPromise = provider.attach(String(instance.id), {});
-    updateInstance(instance.id, {
-      tailscale_ip: "100.64.0.50",
-      tailscale_status: "ready",
-    });
+    setTailscaleState(instance.id, "100.64.0.50", "ready");
     await attachPromise;
 
     // Now the device is offline in the tailnet.

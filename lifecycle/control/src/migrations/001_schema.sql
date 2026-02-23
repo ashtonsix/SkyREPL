@@ -3,6 +3,7 @@
 -- =============================================================================
 -- Complete schema for SkyREPL control plane database.
 -- tenant_id on every table, provenance columns on workflows/manifests/allocations.
+-- CHECK constraints on all status/boolean columns.
 
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -39,20 +40,43 @@ CREATE TABLE users (
     display_name TEXT NOT NULL DEFAULT '',
     role TEXT NOT NULL DEFAULT 'member',
     budget_usd REAL,
-    api_key_id INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     FOREIGN KEY (tenant_id) REFERENCES tenants(id),
-    FOREIGN KEY (api_key_id) REFERENCES api_keys(id),
     UNIQUE(tenant_id, email)
 );
 
 CREATE INDEX idx_users_tenant ON users(tenant_id);
-CREATE INDEX idx_users_api_key ON users(api_key_id) WHERE api_key_id IS NOT NULL;
 
 -- Default tenant for self-managed / single-tenant mode
 INSERT INTO tenants (id, name, seat_cap, budget_usd, created_at, updated_at)
     VALUES (1, 'default', 5, NULL, strftime('%s','now') * 1000, strftime('%s','now') * 1000);
+
+-- =============================================================================
+-- API Keys (reverse FK: api_keys.user_id → users.id)
+-- =============================================================================
+
+CREATE TABLE api_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id INTEGER NOT NULL DEFAULT 1,
+    user_id INTEGER,
+    key_hash TEXT NOT NULL,
+    name TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'admin',
+    permissions TEXT NOT NULL DEFAULT 'all',
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER,
+    expires_at INTEGER,
+    revoked_at INTEGER,
+    UNIQUE(key_hash),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE INDEX idx_api_keys_hash ON api_keys(key_hash) WHERE revoked_at IS NULL;
+CREATE INDEX idx_api_keys_tenant ON api_keys(tenant_id)
+    WHERE revoked_at IS NULL;
+CREATE INDEX idx_api_keys_user ON api_keys(user_id)
+    WHERE user_id IS NOT NULL AND revoked_at IS NULL;
 
 -- =============================================================================
 -- Core Resources
@@ -70,12 +94,11 @@ CREATE TABLE instances (
     workflow_error TEXT,
     current_manifest_id INTEGER,
     spawn_idempotency_key TEXT,
-    is_spot INTEGER NOT NULL DEFAULT 0,
+    is_spot INTEGER NOT NULL DEFAULT 0 CHECK(is_spot IN (0, 1)),
     spot_request_id TEXT,
     init_checksum TEXT,
     registration_token_hash TEXT,
-    tailscale_ip TEXT,
-    tailscale_status TEXT,
+    provider_metadata TEXT,
     created_at INTEGER NOT NULL,
     last_heartbeat INTEGER NOT NULL,
     FOREIGN KEY (current_manifest_id) REFERENCES manifests(id)
@@ -107,8 +130,8 @@ CREATE TABLE runs (
     current_manifest_id INTEGER,
     exit_code INTEGER,
     init_checksum TEXT,
-    create_snapshot INTEGER NOT NULL DEFAULT 0,
-    spot_interrupted INTEGER NOT NULL DEFAULT 0,
+    create_snapshot INTEGER NOT NULL DEFAULT 0 CHECK(create_snapshot IN (0, 1)),
+    spot_interrupted INTEGER NOT NULL DEFAULT 0 CHECK(spot_interrupted IN (0, 1)),
     created_at INTEGER NOT NULL,
     started_at INTEGER,
     finished_at INTEGER,
@@ -126,7 +149,7 @@ CREATE TABLE allocations (
     tenant_id INTEGER NOT NULL DEFAULT 1,
     run_id INTEGER,
     instance_id INTEGER NOT NULL,
-    status TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('AVAILABLE', 'CLAIMED', 'ACTIVE', 'COMPLETE', 'FAILED')),
     current_manifest_id INTEGER,
     claimed_by INTEGER,
     user TEXT NOT NULL DEFAULT 'ubuntu',
@@ -138,7 +161,7 @@ CREATE TABLE allocations (
     FOREIGN KEY (run_id) REFERENCES runs(id),
     FOREIGN KEY (instance_id) REFERENCES instances(id),
     FOREIGN KEY (current_manifest_id) REFERENCES manifests(id),
-    FOREIGN KEY (claimed_by) REFERENCES api_keys(id)
+    FOREIGN KEY (claimed_by) REFERENCES users(id)
 );
 
 CREATE INDEX idx_allocations_tenant ON allocations(tenant_id, status);
@@ -161,7 +184,7 @@ CREATE TABLE workflows (
     type TEXT NOT NULL,
     parent_workflow_id INTEGER,
     depth INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'paused', 'completed', 'failed', 'cancelled', 'rolling_back')),
     current_node TEXT,
     input_json TEXT NOT NULL,
     output_json TEXT,
@@ -172,13 +195,16 @@ CREATE TABLE workflows (
     idempotency_key TEXT,
     timeout_ms INTEGER,
     timeout_at INTEGER,
+    priority INTEGER NOT NULL DEFAULT 0,
+    retry_of_workflow_id INTEGER,
     created_at INTEGER NOT NULL,
     started_at INTEGER,
     finished_at INTEGER,
     updated_at INTEGER NOT NULL,
     FOREIGN KEY (parent_workflow_id) REFERENCES workflows(id),
     FOREIGN KEY (manifest_id) REFERENCES manifests(id),
-    FOREIGN KEY (created_by) REFERENCES api_keys(id)
+    FOREIGN KEY (created_by) REFERENCES users(id),
+    FOREIGN KEY (retry_of_workflow_id) REFERENCES workflows(id)
 );
 
 CREATE INDEX idx_workflows_tenant ON workflows(tenant_id, status);
@@ -195,7 +221,7 @@ CREATE TABLE workflow_nodes (
     workflow_id INTEGER NOT NULL,
     node_id TEXT NOT NULL,
     node_type TEXT NOT NULL,
-    status TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'completed', 'failed', 'skipped')),
     input_json TEXT NOT NULL,
     output_json TEXT,
     error_json TEXT,
@@ -279,16 +305,18 @@ CREATE TABLE manifests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id INTEGER NOT NULL DEFAULT 1,
     workflow_id INTEGER NOT NULL,
-    status TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('DRAFT', 'SEALED')),
     created_by INTEGER,
     default_cleanup_priority INTEGER NOT NULL DEFAULT 50,
     retention_ms INTEGER,
+    parent_manifest_id INTEGER,
     created_at INTEGER NOT NULL,
     released_at INTEGER,
     expires_at INTEGER,
     updated_at INTEGER NOT NULL,
     FOREIGN KEY (workflow_id) REFERENCES workflows(id),
-    FOREIGN KEY (created_by) REFERENCES api_keys(id)
+    FOREIGN KEY (created_by) REFERENCES users(id),
+    FOREIGN KEY (parent_manifest_id) REFERENCES manifests(id)
 );
 
 CREATE INDEX idx_manifests_tenant ON manifests(tenant_id, status);
@@ -304,8 +332,7 @@ CREATE TABLE manifest_resources (
     resource_id TEXT NOT NULL,
     cleanup_priority INTEGER,
     added_at INTEGER NOT NULL,
-    owner_type TEXT DEFAULT 'manifest',
-    owner_id INTEGER,
+    owner_type TEXT DEFAULT 'manifest' CHECK(owner_type IN ('manifest', 'released', 'workflow', 'policy')),
     cleanup_processed_at INTEGER,
     FOREIGN KEY (manifest_id) REFERENCES manifests(id) ON DELETE CASCADE,
     UNIQUE (manifest_id, resource_type, resource_id)
@@ -313,7 +340,7 @@ CREATE TABLE manifest_resources (
 
 CREATE INDEX idx_manifest_resources_lookup ON manifest_resources(resource_type, resource_id);
 CREATE INDEX idx_manifest_resources_priority ON manifest_resources(manifest_id, cleanup_priority);
-CREATE INDEX idx_manifest_resources_owner ON manifest_resources(owner_type, owner_id);
+CREATE INDEX idx_manifest_resources_owner ON manifest_resources(manifest_id, owner_type);
 
 -- =============================================================================
 -- Usage Tracking
@@ -328,7 +355,7 @@ CREATE TABLE usage_records (
     provider TEXT NOT NULL,
     spec TEXT NOT NULL,
     region TEXT,
-    is_spot INTEGER NOT NULL DEFAULT 0,
+    is_spot INTEGER NOT NULL DEFAULT 0 CHECK(is_spot IN (0, 1)),
     started_at INTEGER NOT NULL,
     finished_at INTEGER,
     duration_ms INTEGER,
@@ -386,49 +413,19 @@ CREATE TABLE orphan_whitelist (
     provider TEXT NOT NULL,
     provider_id TEXT NOT NULL,
     resource_type TEXT NOT NULL,
-    resource_name TEXT,
     reason TEXT NOT NULL,
     acknowledged_by TEXT NOT NULL,
     acknowledged_at INTEGER NOT NULL,
     expires_at INTEGER,
-    notes TEXT,
     UNIQUE(provider, provider_id)
 );
 
 CREATE INDEX idx_whitelist_expires ON orphan_whitelist(expires_at);
 CREATE INDEX idx_whitelist_provider ON orphan_whitelist(provider, resource_type);
 
-CREATE TABLE api_keys (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tenant_id INTEGER NOT NULL DEFAULT 1,
-    key_hash TEXT NOT NULL,
-    name TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'admin',
-    permissions TEXT NOT NULL DEFAULT 'all',
-    created_at INTEGER NOT NULL,
-    last_used_at INTEGER,
-    expires_at INTEGER,
-    revoked_at INTEGER,
-    UNIQUE(key_hash)
-);
-
-CREATE INDEX idx_api_keys_hash ON api_keys(key_hash) WHERE revoked_at IS NULL;
-CREATE INDEX idx_api_keys_tenant ON api_keys(tenant_id)
-    WHERE revoked_at IS NULL;
-
-CREATE TABLE rate_limit_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    key TEXT NOT NULL,
-    endpoint TEXT NOT NULL,
-    timestamp INTEGER NOT NULL,
-    window_ms INTEGER NOT NULL
-);
-
-CREATE INDEX idx_rate_limit_key ON rate_limit_log(key, endpoint, timestamp);
-CREATE INDEX idx_rate_limit_cleanup ON rate_limit_log(timestamp);
-
 CREATE TABLE orphan_scans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id INTEGER NOT NULL DEFAULT 1,
     provider TEXT NOT NULL,
     scanned_at INTEGER NOT NULL,
     orphans_found INTEGER NOT NULL,
@@ -440,9 +437,39 @@ CREATE INDEX idx_orphan_scans_provider ON orphan_scans(provider, scanned_at DESC
 
 CREATE TABLE manifest_cleanup_state (
     manifest_id INTEGER PRIMARY KEY,
+    tenant_id INTEGER NOT NULL DEFAULT 1,
     last_completed_priority INTEGER NOT NULL DEFAULT 0,
     last_completed_resource_id INTEGER NOT NULL DEFAULT 0,
     started_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     FOREIGN KEY (manifest_id) REFERENCES manifests(id)
 );
+
+-- =============================================================================
+-- Cost Events (C0 DDL — no writers yet)
+-- =============================================================================
+
+CREATE TABLE cost_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL CHECK(event_type IN (
+        'instance_start', 'instance_stop',
+        'allocation_start', 'allocation_end',
+        'run_start', 'run_end',
+        'storage_snapshot', 'storage_artifact',
+        'network_egress',
+        'adjustment'
+    )),
+    tenant_id TEXT NOT NULL,
+    instance_id TEXT,
+    manifest_id TEXT,
+    run_id TEXT,
+    payload TEXT NOT NULL,
+    dedupe_key TEXT UNIQUE,
+    event_version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX idx_cost_events_tenant ON cost_events(tenant_id, created_at);
+CREATE INDEX idx_cost_events_type ON cost_events(event_type, created_at);
+CREATE INDEX idx_cost_events_instance ON cost_events(instance_id)
+    WHERE instance_id IS NOT NULL;

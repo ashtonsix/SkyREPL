@@ -206,8 +206,6 @@ export const TIMING = {
     'REPL_CACHE_INSTANCE_TYPES_TTL',
     3_600_000,
   ), // 1h
-  RESOURCE_CACHE_TTL: getEnvDuration('REPL_RESOURCE_CACHE_TTL', 300_000), // 5m
-  SNAPSHOT_CACHE_TTL: getEnvDuration('REPL_SNAPSHOT_CACHE_TTL', 300_000), // 5m
 } as const;
 
 export type TimingConfig = typeof TIMING;

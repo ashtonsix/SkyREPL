@@ -27,7 +27,6 @@ export interface User {
   display_name: string;
   role: string;
   budget_usd: number | null;
-  api_key_id: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -119,10 +118,13 @@ export function getUserByEmail(tenantId: number, email: string): User | null {
 }
 
 export function getUserByApiKeyId(apiKeyId: number): User | null {
-  return queryOne<User>(
-    "SELECT * FROM users WHERE api_key_id = ?",
+  // Reverse lookup: api_keys.user_id → users.id
+  const row = queryOne<{ user_id: number | null }>(
+    "SELECT user_id FROM api_keys WHERE id = ?",
     [apiKeyId],
   );
+  if (!row?.user_id) return null;
+  return getUser(row.user_id);
 }
 
 export function createUser(opts: {
@@ -131,7 +133,6 @@ export function createUser(opts: {
   displayName?: string;
   role?: string;
   budgetUsd?: number | null;
-  apiKeyId?: number | null;
 }): User {
   // Verify tenant exists
   const tenant = getTenant(opts.tenantId);
@@ -162,15 +163,14 @@ export function createUser(opts: {
   const now = Date.now();
   const db = getDatabase();
   const result = db.prepare(
-    `INSERT INTO users (tenant_id, email, display_name, role, budget_usd, api_key_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO users (tenant_id, email, display_name, role, budget_usd, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
   ).run(
     opts.tenantId,
     opts.email,
     opts.displayName ?? "",
     opts.role ?? "member",
     opts.budgetUsd ?? null,
-    opts.apiKeyId ?? null,
     now,
     now,
   );
@@ -182,7 +182,6 @@ export function updateUser(id: number, updates: {
   displayName?: string;
   role?: string;
   budgetUsd?: number | null;
-  apiKeyId?: number | null;
 }): User {
   const user = getUser(id);
   if (!user) {
@@ -204,10 +203,6 @@ export function updateUser(id: number, updates: {
     sets.push("budget_usd = ?");
     values.push(updates.budgetUsd);
   }
-  if (updates.apiKeyId !== undefined) {
-    sets.push("api_key_id = ?");
-    values.push(updates.apiKeyId);
-  }
 
   values.push(id);
   execute(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`, values);
@@ -220,13 +215,11 @@ export function removeUser(id: number): void {
     throw new SkyREPLError("RESOURCE_NOT_FOUND", `User ${id} not found`, "not_found");
   }
 
-  // Revoke associated API key
-  if (user.api_key_id) {
-    execute(
-      "UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
-      [Date.now(), user.api_key_id],
-    );
-  }
+  // Revoke all API keys linked to this user (reverse FK: api_keys.user_id)
+  execute(
+    "UPDATE api_keys SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+    [Date.now(), id],
+  );
 
   execute("DELETE FROM users WHERE id = ?", [id]);
 }

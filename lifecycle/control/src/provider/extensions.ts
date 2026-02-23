@@ -13,20 +13,6 @@ interface CacheEntry<T> {
 
 const cache = new Map<string, CacheEntry<unknown>>();
 
-export async function getWithCache<T>(
-  key: string,
-  ttlMs: number,
-  fetcher: () => Promise<T>
-): Promise<T> {
-  const cached = cache.get(key);
-  if (cached && Date.now() < cached.expiresAt) {
-    return cached.value as T;
-  }
-  const value = await fetcher();
-  cache.set(key, { value, expiresAt: Date.now() + ttlMs });
-  return value;
-}
-
 // =============================================================================
 // Lifecycle Hooks
 // =============================================================================

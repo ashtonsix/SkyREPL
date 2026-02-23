@@ -11,7 +11,7 @@ import { findStaleClaimed } from "../../material/db/allocations";
 import {
   queryOne,
   getTenant,
-  getUserByApiKeyId,
+  getUser,
 } from "../../material/db";
 import { TIMING } from "@skyrepl/contracts";
 
@@ -63,7 +63,7 @@ export function registerPreflightRoutes(app: Elysia<any>): void {
       return { error: { code: "UNAUTHORIZED", message: "Missing API key", category: "auth" } };
     }
 
-    const { tenantId, userId } = auth;
+    const { tenantId, userId, keyId } = auth;
 
     const warnings: PreflightWarning[] = [];
     const errors: PreflightError[] = [];
@@ -137,7 +137,7 @@ export function registerPreflightRoutes(app: Elysia<any>): void {
       }
 
       // Per-user budget
-      const user = getUserByApiKeyId(userId);
+      const user = getUser(userId);
       if (user?.budget_usd !== null && user?.budget_usd !== undefined) {
         const userUsage = queryOne<{ total_cost: number | null }>(
           `SELECT SUM(ur.estimated_cost_usd) as total_cost
@@ -168,7 +168,7 @@ export function registerPreflightRoutes(app: Elysia<any>): void {
     try {
       const keyRow = queryOne<{ expires_at: number | null }>(
         "SELECT expires_at FROM api_keys WHERE id = ? AND revoked_at IS NULL",
-        [userId]
+        [keyId]
       );
       if (keyRow?.expires_at !== null && keyRow?.expires_at !== undefined) {
         const expiresAt = keyRow.expires_at;

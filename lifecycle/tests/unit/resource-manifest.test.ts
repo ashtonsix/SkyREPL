@@ -240,7 +240,6 @@ describe("manifest: claimResourceAtomic", () => {
     expect(targetResources[0].resource_type).toBe("instance");
     expect(targetResources[0].resource_id).toBe(String(instance.id));
     expect(targetResources[0].owner_type).toBe("workflow");
-    expect(targetResources[0].owner_id).toBe(targetManifest.id);
 
     // Verify resource is removed from source manifest
     const sourceResources = getManifestResources(sourceManifest.id);
@@ -666,7 +665,6 @@ describe("manifest: isManifestExpired", () => {
     // Add resource with owner_type='workflow' (claimed by a workflow)
     addResourceToManifest(manifest.id, "instance", String(instance.id), {
       ownerType: "workflow",
-      ownerId: workflow.id,
     });
 
     // Seal with an already-past expiry
@@ -755,7 +753,6 @@ describe("manifest: listExpiredManifests", () => {
     // Add resource claimed by a workflow
     addResourceToManifest(manifest.id, "instance", String(instance.id), {
       ownerType: "workflow",
-      ownerId: workflow.id,
     });
 
     // Seal with past expiry

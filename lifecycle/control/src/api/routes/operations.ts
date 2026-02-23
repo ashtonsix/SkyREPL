@@ -9,6 +9,7 @@ import {
   getAllocation,
   execute,
 } from "../../material/db";
+import { getTailscaleState } from "../agent";
 import { launchRun } from "../../intent/launch-run";
 import type { LaunchRunInput } from "../../intent/launch-run";
 import { terminateInstance } from "../../intent/terminate-instance";
@@ -459,11 +460,12 @@ export function registerOperationRoutes(app: Elysia<any>): void {
       };
     }
 
-    const currentStatus = instance.tailscale_status ?? "not_installed";
+    const tsState = getTailscaleState(String(instanceId));
+    const currentStatus = tsState?.tailscale_status ?? "not_installed";
 
     // Already ready — return immediately
     if (currentStatus === "ready") {
-      return { status: "ready", ip: instance.tailscale_ip };
+      return { status: "ready", ip: tsState?.tailscale_ip ?? null };
     }
 
     // Install in flight — let caller poll
@@ -535,10 +537,11 @@ export function registerOperationRoutes(app: Elysia<any>): void {
       };
     }
 
+    const tsState = getTailscaleState(String(instanceId));
     return {
       instance_id: instanceId,
-      tailscale_status: instance.tailscale_status ?? "not_installed",
-      tailscale_ip: instance.tailscale_ip ?? null,
+      tailscale_status: tsState?.tailscale_status ?? "not_installed",
+      tailscale_ip: tsState?.tailscale_ip ?? null,
     };
   }, { params: IdParams });
 

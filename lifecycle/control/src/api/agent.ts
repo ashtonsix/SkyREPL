@@ -12,6 +12,7 @@ import {
   createBlob,
   createObject,
   addObjectTag,
+  findObjectByTag,
   addResourceToManifest,
   type Allocation,
   type Run,
@@ -178,22 +179,19 @@ export function registerAgentRoutes(app: Elysia<any>): void {
       };
     }
 
-    // Update instance heartbeat timestamp and Tailscale fields
+    // Update instance heartbeat timestamp
+    execute("UPDATE instances SET last_heartbeat = ? WHERE id = ?", [
+      Date.now(),
+      hb.instance_id,
+    ]);
+
+    // Write tailscale state to objects table (migrated from instances columns)
     if (hb.tailscale_ip !== undefined || hb.tailscale_status !== undefined) {
-      execute(
-        "UPDATE instances SET last_heartbeat = ?, tailscale_ip = ?, tailscale_status = ? WHERE id = ?",
-        [
-          Date.now(),
-          hb.tailscale_ip ?? null,
-          hb.tailscale_status ?? null,
-          hb.instance_id,
-        ]
+      upsertTailscaleState(
+        String(hb.instance_id),
+        hb.tailscale_ip ?? null,
+        hb.tailscale_status ?? null
       );
-    } else {
-      execute("UPDATE instances SET last_heartbeat = ? WHERE id = ?", [
-        Date.now(),
-        hb.instance_id,
-      ]);
     }
 
     // Process command acknowledgments from agent
@@ -759,6 +757,104 @@ export function mapStatusToWorkflowState(status: string): string {
     timeout: "launch-run:timeout",
   };
   return mapping[status] ?? `launch-run:${status}`;
+}
+
+// =============================================================================
+// Tailscale State (objects table)
+// =============================================================================
+
+/**
+ * Upsert tailscale state for an instance into the objects table.
+ * Creates a tailscale_state object on first call, updates metadata_json on subsequent calls.
+ */
+export function upsertTailscaleState(
+  instanceId: string,
+  tailscaleIp: string | null,
+  tailscaleStatus: string | null
+): void {
+  const now = Date.now();
+  const metadata = JSON.stringify({
+    instance_id: instanceId,
+    tailscale_ip: tailscaleIp,
+    tailscale_status: tailscaleStatus,
+    updated_at: now,
+  });
+
+  // Check for existing tailscale_state object for this instance
+  const existing = queryOne<{ id: number }>(
+    `SELECT o.id FROM objects o
+     JOIN object_tags t ON o.id = t.object_id
+     WHERE o.type = 'tailscale_state' AND t.tag = ?
+     LIMIT 1`,
+    [`instance_id:${instanceId}`]
+  );
+
+  if (existing) {
+    execute(
+      "UPDATE objects SET metadata_json = ?, updated_at = ? WHERE id = ?",
+      [metadata, now, existing.id]
+    );
+  } else {
+    // Create minimal blob + object
+    const payload = Buffer.from(metadata, "utf-8");
+    const blob = createBlob({
+      bucket: "tailscale-state",
+      checksum: `tailscale-state-${instanceId}`,
+      checksum_bytes: payload.length,
+      s3_key: null,
+      s3_bucket: null,
+      payload,
+      size_bytes: payload.length,
+      last_referenced_at: now,
+    });
+
+    const obj = createObject({
+      type: "tailscale_state" as any,
+      blob_id: blob.id,
+      provider: "tailscale",
+      provider_object_id: null,
+      metadata_json: metadata,
+      expires_at: null,
+      current_manifest_id: null,
+      accessed_at: now,
+      updated_at: now,
+    });
+
+    addObjectTag(obj.id, "instance_id", instanceId);
+    addObjectTag(obj.id, "feature", "tailscale_state");
+  }
+}
+
+/**
+ * Read tailscale state for an instance from the objects table.
+ * Used by operations routes and tailscale-provider.
+ */
+export function getTailscaleState(instanceId: string): {
+  tailscale_ip: string | null;
+  tailscale_status: string | null;
+} | null {
+  const row = queryOne<{ metadata_json: string | null }>(
+    `SELECT o.metadata_json FROM objects o
+     JOIN object_tags t ON o.id = t.object_id
+     WHERE o.type = 'tailscale_state' AND t.tag = ?
+     LIMIT 1`,
+    [`instance_id:${instanceId}`]
+  );
+
+  if (!row?.metadata_json) return null;
+
+  try {
+    const data = JSON.parse(row.metadata_json) as {
+      tailscale_ip?: string | null;
+      tailscale_status?: string | null;
+    };
+    return {
+      tailscale_ip: data.tailscale_ip ?? null,
+      tailscale_status: data.tailscale_status ?? null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 // =============================================================================
