@@ -6,13 +6,18 @@ import { createHash } from "node:crypto";
 import {
   queryOne,
   queryMany,
-  execute,
   createBlob,
   getBlob,
   getDatabase,
+  getRun,
+  getAllocationByRunId,
+  getInstanceByTokenHash,
+  updateBlobLastReferenced,
+  updateBlobStorageKey,
+  updateBlobSize,
   type Run,
   type Allocation,
-} from "../../material/db";
+} from "../../material/db"; // raw-db: boutique queries (partial-column instance selects, checksum IN queries), see WL-057
 import { getControlId } from "../../material/control-id";
 import { storeInline, getSqlStorageSizeCache, SQL_STORAGE_ADVISORY_BYTES, SQL_STORAGE_STRONG_BYTES } from "../../material/storage";
 import { downloadLogs } from "../../background/log-streaming";
@@ -80,13 +85,10 @@ function resolveAgentAuth(
 ): { tenantId: number; instanceId: number } | null {
   if (!runId) return null;
 
-  const run = queryOne<Run>("SELECT * FROM runs WHERE id = ?", [runId]);
+  const run = getRun(runId);
   if (!run) return null;
 
-  const allocation = queryOne<Allocation>(
-    "SELECT * FROM allocations WHERE run_id = ?",
-    [runId]
-  );
+  const allocation = getAllocationByRunId(runId);
   if (!allocation) return null;
 
   // Verify instance token
@@ -122,13 +124,10 @@ function resolveAgentAuthFromToken(
   if (!token) return null;
 
   const tokenHash = createHash("sha256").update(token).digest("hex");
-  const instanceRow = queryOne<{ id: number; tenant_id: number }>(
-    "SELECT id, tenant_id FROM instances WHERE registration_token_hash = ?",
-    [tokenHash]
-  );
-  if (!instanceRow) return null;
+  const instance = getInstanceByTokenHash(tokenHash);
+  if (!instance) return null;
 
-  return { tenantId: instanceRow.tenant_id, instanceId: instanceRow.id };
+  return { tenantId: instance.tenant_id, instanceId: instance.id };
 }
 
 export function registerBlobRoutes(app: Elysia<any>): void {
@@ -153,7 +152,7 @@ export function registerBlobRoutes(app: Elysia<any>): void {
   app.get("/v1/runs/:id/artifacts", ({ params, set, request }) => {
     const runId = params.id;
     const auth = getAuthContext(request);
-    const run = queryOne<Run>("SELECT * FROM runs WHERE id = ?", [runId]);
+    const run = getRun(runId);
     // (the existing !run check is fine -- Run type includes tenant_id)
     if (!run || (auth && run.tenant_id !== auth.tenantId)) {
       set.status = 404;
@@ -260,7 +259,7 @@ export function registerBlobRoutes(app: Elysia<any>): void {
     const runId = params.id;
 
     // Look up run (no API key required — auth bypass in server.ts)
-    const run = queryOne<Run>("SELECT * FROM runs WHERE id = ?", [runId]);
+    const run = getRun(runId);
     if (!run) {
       set.status = 404;
       return { error: { code: "RUN_NOT_FOUND", message: `Run ${runId} not found`, category: "not_found" } };
@@ -383,16 +382,13 @@ export function registerBlobRoutes(app: Elysia<any>): void {
     // Find the instance that owns this token by matching its SHA256 hash.
     // This is the same hash algorithm used by verifyInstanceToken() in auth.ts.
     const tokenHash = createHash("sha256").update(token).digest("hex");
-    const instanceRow = queryOne<{ id: number; tenant_id: number }>(
-      "SELECT id, tenant_id FROM instances WHERE registration_token_hash = ?",
-      [tokenHash]
-    );
-    if (!instanceRow) {
+    const instance = getInstanceByTokenHash(tokenHash);
+    if (!instance) {
       set.status = 401;
       return { error: { code: "UNAUTHORIZED", message: "Invalid authentication token", category: "auth" } };
     }
 
-    const tenantId = instanceRow.tenant_id;
+    const tenantId = instance.tenant_id;
     const blob = queryOne<{ id: number; payload: Buffer | null; s3_key: string | null; size_bytes: number }>(
       "SELECT id, payload, s3_key, size_bytes FROM blobs WHERE checksum = ? AND tenant_id = ?",
       [checksum, tenantId]
@@ -581,9 +577,9 @@ export function registerBlobRoutes(app: Elysia<any>): void {
 
     // Update blob record with s3_key if not already set, and size
     if (!blob.s3_key) {
-      execute("UPDATE blobs SET s3_key = ?, size_bytes = ? WHERE id = ?", [s3Key, data.length, blobId]);
+      updateBlobStorageKey(blobId, s3Key, data.length);
     } else {
-      execute("UPDATE blobs SET size_bytes = ? WHERE id = ?", [data.length, blobId]);
+      updateBlobSize(blobId, data.length);
     }
 
     return { ack: true, blob_id: blobId, size_bytes: data.length };
@@ -638,8 +634,7 @@ export function registerBlobRoutes(app: Elysia<any>): void {
     }
 
     // Mark as confirmed by updating last_referenced_at
-    const now = Date.now();
-    execute("UPDATE blobs SET last_referenced_at = ? WHERE id = ?", [now, req.blob_id]);
+    updateBlobLastReferenced(req.blob_id);
 
     return { confirmed: true, blob_id: req.blob_id };
   }, { body: ConfirmSchema });

@@ -7,9 +7,9 @@
 
 import crypto from "crypto";
 import type { NodeExecutor, NodeContext } from "../engine.types";
-import { createInstanceRecord, updateInstanceRecord, getInstanceRecord } from "../../resource/instance";
+import { createInstanceRecord, updateInstanceRecord, getInstanceRecordRaw } from "../../resource/instance";
 import { getProvider } from "../../provider/registry";
-import { queryOne } from "../../material/db";
+import { getInstanceByIdempotencyKey } from "../../material/db";
 import type { ProviderName } from "../../provider/types";
 import type { Instance } from "../../material/db";
 import type { SpawnInstanceOutput, LaunchRunWorkflowInput } from "../../intent/launch-run.schema";
@@ -55,10 +55,7 @@ const TERMINAL_SPAWN_STATES = new Set([
  * Returns the existing record, or null if none found.
  */
 export function findExistingSpawnRecord(idempotencyKey: string): Instance | null {
-  return queryOne<Instance>(
-    "SELECT * FROM instances WHERE spawn_idempotency_key = ?",
-    [idempotencyKey]
-  );
+  return getInstanceByIdempotencyKey(idempotencyKey);
 }
 
 /**
@@ -212,7 +209,7 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
     const output = ctx.output as SpawnInstanceOutput | undefined;
     if (!output?.instanceId) return;
 
-    const instance = getInstanceRecord(output.instanceId);
+    const instance = getInstanceRecordRaw(output.instanceId);
     if (!instance) return;
 
     // If provider_id was assigned, terminate the actual VM

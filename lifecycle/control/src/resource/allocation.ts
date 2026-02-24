@@ -1,4 +1,9 @@
 // resource/allocation.ts - Allocation State Machine, Warm Pool, Debug Holds
+//
+// MATERIALIZATION BOUNDARY — allocation resources
+// READS: use materializeAllocation() / materializeAllocationBatch() (DB-authoritative, stamps materialized_at)
+// WRITES: use createAllocation() and state-transition functions from workflow/state-transitions.ts
+// Allocations are DB-authoritative — no provider enrichment needed.
 
 import type { Allocation } from "../material/db";
 import type { AllocationStatus, Materialized, MaterializeOptions } from "@skyrepl/contracts";

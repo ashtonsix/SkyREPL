@@ -29,10 +29,42 @@ export interface BlobProviderCapabilities {
 // Lifecycle Hooks (mirrors compute ProviderLifecycleHooks pattern)
 // =============================================================================
 
+// Known storage task types:
+// - 'health_check': blob provider health verification (existing)
+// - 'blob_gc': garbage collect unreferenced blobs
+// - 'log_compaction': compact log chunks for completed runs
+
+export interface StorageHeartbeatExpectations {
+  tasks: StorageHeartbeatTask[];
+  deadline: number;
+}
+
+export interface StorageHeartbeatTask {
+  type: string;
+  priority: 'high' | 'normal' | 'low';
+  lastRun?: number;
+  params?: Record<string, unknown>;
+}
+
+export interface StorageHeartbeatReceipts {
+  receipts: StorageTaskReceipt[];
+  nextHeartbeat?: {
+    preferredInterval: number;
+  };
+}
+
+export interface StorageTaskReceipt {
+  type: string;
+  status: 'completed' | 'skipped' | 'deferred' | 'failed';
+  result?: unknown;
+  reason?: string;
+}
+
 export interface BlobProviderLifecycleHooks {
   onStartup?(): Promise<void>;
   onShutdown?(): Promise<void>;
   onHealthCheck?(): Promise<{ healthy: boolean; latencyMs: number }>;
+  onHeartbeat?(expectations: StorageHeartbeatExpectations): Promise<StorageHeartbeatReceipts>;
 }
 
 // =============================================================================

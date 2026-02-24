@@ -2,7 +2,7 @@
 // Checks that the target instance exists and acquires a termination lock.
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
-import { getInstance, updateInstance, queryMany } from "../../material/db";
+import { getInstance, updateInstance, queryMany } from "../../material/db"; // raw-db: debug-hold allocation query (Bucket B, status+hold filter), see WL-057
 import type {
   TerminateInstanceInput,
   ValidateInstanceOutput,

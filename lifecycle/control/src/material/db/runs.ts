@@ -1,3 +1,9 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// RAW DB LAYER — runs table
+// Business code should use materializeRun() from resource/run.ts,
+// not these functions directly. @see resource/run.ts
+// DB operations below — add new queries here, not at call sites.
+// ─────────────────────────────────────────────────────────────────────────────
 // db/runs.ts - Run CRUD
 
 import { type SQLQueryBindings } from "bun:sqlite";
@@ -22,6 +28,7 @@ export interface Run {
   finished_at: number | null;
 }
 
+/** @see resource/run.ts — use materializeRun() for business reads */
 export function getRun(id: number): Run | null {
   return queryOne<Run>("SELECT * FROM runs WHERE id = ?", [id]);
 }
@@ -68,6 +75,7 @@ export function updateRun(id: number, updates: Partial<Run>): Run {
   return getRun(id)!;
 }
 
+/** @see resource/run.ts — use materializeRun() for business reads */
 export function listRuns(filter?: {
   current_manifest_id?: number;
   workflow_state?: string;

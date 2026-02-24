@@ -4,7 +4,7 @@
 // Stores large blob payloads in a separate blob_payloads table (SQLite).
 // Default provider for self-managed / single-tenant deployments.
 
-import type { BlobProvider, BlobProviderCapabilities, UploadOpts, PresignedUrlOpts } from "./types";
+import type { BlobProvider, BlobProviderCapabilities, BlobProviderLifecycleHooks, StorageTaskReceipt, StorageHeartbeatExpectations, UploadOpts, PresignedUrlOpts } from "./types";
 import { BlobProviderError } from "./types";
 import { getDatabase } from "../../material/db";
 
@@ -96,6 +96,50 @@ export class SqlBlobProvider implements BlobProvider {
   // ---------------------------------------------------------------------------
   // Metrics
   // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
+  // Lifecycle Hooks Factory
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Create lifecycle hooks for this SqlBlobProvider instance.
+   * Includes onHealthCheck and onHeartbeat.
+   */
+  createHooks(): BlobProviderLifecycleHooks {
+    const provider = this;
+    return {
+      async onHealthCheck() {
+        return provider.healthCheck();
+      },
+      async onHeartbeat(expectations: StorageHeartbeatExpectations) {
+        const receipts: StorageTaskReceipt[] = [];
+        for (const task of expectations.tasks) {
+          switch (task.type) {
+            case 'health_check': {
+              try {
+                const result = await provider.healthCheck();
+                receipts.push({ type: 'health_check', status: result.healthy ? 'completed' : 'failed' });
+              } catch (err) {
+                receipts.push({ type: 'health_check', status: 'failed', reason: String(err) });
+              }
+              break;
+            }
+            case 'blob_gc':
+              // Acknowledge — actual GC logic runs in the control plane dispatch loop
+              receipts.push({ type: 'blob_gc', status: 'completed' });
+              break;
+            case 'log_compaction':
+              // Acknowledge — actual compaction logic runs in the control plane dispatch loop
+              receipts.push({ type: 'log_compaction', status: 'completed' });
+              break;
+            default:
+              receipts.push({ type: task.type, status: 'skipped', reason: `Unknown task type: ${task.type}` });
+          }
+        }
+        return { receipts };
+      },
+    };
+  }
 
   /** Get total size of stored blob payloads (for upgrade encouragement) */
   totalSizeBytes(): number {

@@ -4,7 +4,7 @@
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
 import { updateRunRecord } from "../../resource/run";
-import { getInstanceRecord } from "../../resource/instance";
+import { getInstanceRecordRaw } from "../../resource/instance";
 import {
   getAllocation,
   createAllocation,
@@ -103,7 +103,7 @@ export const finalizeExecutor: NodeExecutor<FinalizeInput, FinalizeOutput> = {
     if (!replenished) {
       // No replenishment — terminate instance
       try {
-        const instance = getInstanceRecord(input.instanceId);
+        const instance = getInstanceRecordRaw(input.instanceId);
         if (instance?.provider_id) {
           const provider = await getProvider(instance.provider as ProviderName);
           await provider.terminate(instance.provider_id);
@@ -165,7 +165,7 @@ function tryReplenishWarmPool(ctx: NodeContext, input: FinalizeInput): boolean {
       return false;
     }
 
-    const instance = getInstanceRecord(input.instanceId);
+    const instance = getInstanceRecordRaw(input.instanceId);
     if (!instance) {
       ctx.log("debug", "Skipping replenishment: instance not found");
       return false;

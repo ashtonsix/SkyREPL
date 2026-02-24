@@ -1,3 +1,9 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// RAW DB LAYER — blobs and objects tables
+// No materializer exists for blobs/objects yet. These are used directly
+// by the blob storage layer and object tracking layer.
+// DB operations below — add new queries here, not at call sites.
+// ─────────────────────────────────────────────────────────────────────────────
 // db/objects.ts - Blob, StorageObject, and Tag operations
 
 import { ConflictError } from "@skyrepl/contracts";
@@ -209,6 +215,21 @@ export function deleteObject(id: number): void {
 
 export function updateObjectTimestamp(objectId: number): void {
   execute("UPDATE objects SET updated_at = ? WHERE id = ?", [Date.now(), objectId]);
+}
+
+/** Update object metadata JSON. */
+export function updateObjectMetadata(id: number, metadataJson: string): void {
+  execute("UPDATE objects SET metadata_json = ?, updated_at = ? WHERE id = ?", [metadataJson, Date.now(), id]);
+}
+
+/** Update blob storage key and size after external upload. */
+export function updateBlobStorageKey(id: number, s3Key: string, sizeBytes: number): void {
+  execute("UPDATE blobs SET s3_key = ?, size_bytes = ? WHERE id = ?", [s3Key, sizeBytes, id]);
+}
+
+/** Update blob size after upload (when s3_key already set). */
+export function updateBlobSize(id: number, sizeBytes: number): void {
+  execute("UPDATE blobs SET size_bytes = ? WHERE id = ?", [sizeBytes, id]);
 }
 
 export function deleteObjectBatch(objectIds: number[]): void {

@@ -140,6 +140,9 @@ afterEach(() => cleanup());
 // B0 (P0): Warm Pool Claim with Materialization Barrier
 // =============================================================================
 
+// REGRESSION-CRITICAL: Warm pool freshness gate. If this test breaks, the
+// materialization barrier is compromised. See WL-049 §LOST CONCEPT for the
+// attractor basin that erodes this pattern.
 describe("warm pool: materialization barrier in claimWarmPoolAllocation", () => {
   test("claim fails when no warm allocation exists (no candidates)", async () => {
     // No allocations created — findWarmAllocation returns null immediately

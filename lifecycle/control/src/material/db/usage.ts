@@ -1,3 +1,8 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// RAW DB LAYER — usage_records table
+// No materializer exists for usage records yet.
+// DB operations below — add new queries here, not at call sites.
+// ─────────────────────────────────────────────────────────────────────────────
 // db/usage.ts - Usage record operations
 
 import { NotFoundError } from "@skyrepl/contracts";
@@ -84,4 +89,30 @@ export function getActiveUsageRecords(): UsageRecord[] {
   return queryMany<UsageRecord>(
     "SELECT * FROM usage_records WHERE finished_at IS NULL"
   );
+}
+
+/** Get open (unfinished) usage records for an instance. */
+export function getOpenUsageRecordsForInstance(instanceId: number): UsageRecord[] {
+  return queryMany<UsageRecord>(
+    "SELECT * FROM usage_records WHERE instance_id = ? AND finished_at IS NULL",
+    [instanceId]
+  );
+}
+
+/** Get total cost for a tenant (all-time sum of estimated_cost_usd). */
+export function getTotalCostByTenant(tenantId: number): number {
+  const result = queryOne<{ total: number | null }>(
+    "SELECT SUM(estimated_cost_usd) as total FROM usage_records WHERE tenant_id = ?",
+    [tenantId]
+  );
+  return result?.total ?? 0;
+}
+
+/** Get total cost for a specific user within a tenant (via allocations.claimed_by FK). */
+export function getUserCostByTenant(tenantId: number, userId: number): number {
+  const result = queryOne<{ total: number | null }>(
+    "SELECT SUM(ur.estimated_cost_usd) as total FROM usage_records ur JOIN allocations a ON ur.allocation_id = a.id WHERE ur.tenant_id = ? AND a.claimed_by = ?",
+    [tenantId, userId]
+  );
+  return result?.total ?? 0;
 }

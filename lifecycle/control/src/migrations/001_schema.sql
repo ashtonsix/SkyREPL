@@ -82,6 +82,7 @@ CREATE INDEX idx_api_keys_user ON api_keys(user_id)
 -- Core Resources
 -- =============================================================================
 
+-- instances: raw records. Business reads go through resource/instance.ts materializer.
 CREATE TABLE instances (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id INTEGER NOT NULL DEFAULT 1,
@@ -119,6 +120,7 @@ CREATE UNIQUE INDEX idx_instances_spawn_key ON instances(spawn_idempotency_key)
 CREATE INDEX idx_instances_token_hash ON instances(registration_token_hash)
     WHERE registration_token_hash IS NOT NULL;
 
+-- runs: raw records. Business reads go through resource/run.ts materializer.
 CREATE TABLE runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id INTEGER NOT NULL DEFAULT 1,
@@ -144,6 +146,7 @@ CREATE INDEX idx_runs_manifest ON runs(current_manifest_id);
 CREATE INDEX idx_runs_created ON runs(created_at DESC);
 CREATE INDEX idx_runs_duration ON runs(started_at, finished_at);
 
+-- allocations: raw records. Business reads go through resource/allocation.ts materializer.
 CREATE TABLE allocations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id INTEGER NOT NULL DEFAULT 1,
@@ -178,6 +181,7 @@ CREATE INDEX idx_allocations_available ON allocations(instance_id, status, workd
 -- Workflow Execution
 -- =============================================================================
 
+-- workflows: raw records. Business reads go through resource/workflow.ts materializer.
 CREATE TABLE workflows (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id INTEGER NOT NULL DEFAULT 1,
@@ -301,6 +305,7 @@ CREATE INDEX idx_object_tags_tag ON object_tags(tag);
 -- Manifest Management
 -- =============================================================================
 
+-- manifests: raw records. Business reads go through resource/manifest.ts materializer.
 CREATE TABLE manifests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     tenant_id INTEGER NOT NULL DEFAULT 1,

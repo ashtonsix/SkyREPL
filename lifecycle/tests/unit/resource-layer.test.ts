@@ -41,7 +41,7 @@ import {
 
 import {
   createInstanceRecord,
-  getInstanceRecord,
+  getInstanceRecordRaw,
   updateInstanceRecord,
   listInstanceRecords,
   isInstanceHealthy,
@@ -51,7 +51,7 @@ import {
 
 import {
   createRunRecord,
-  getRunRecord,
+  getRunRecordRaw,
   updateRunRecord,
   listRunRecords,
   isRunInProgress,
@@ -700,13 +700,13 @@ describe("instance: CRUD schema smoke", () => {
     expect(instance.id).toBeDefined();
 
     // Read
-    const fetched = getInstanceRecord(instance.id);
+    const fetched = getInstanceRecordRaw(instance.id);
     expect(fetched).not.toBeNull();
     expect(fetched!.id).toBe(instance.id);
     expect(fetched!.provider).toBe("orbstack");
 
     // Read miss
-    expect(getInstanceRecord(99999)).toBeNull();
+    expect(getInstanceRecordRaw(99999)).toBeNull();
 
     // Update
     const updated = updateInstanceRecord(instance.id, {
@@ -836,13 +836,13 @@ describe("run: CRUD schema smoke", () => {
     expect(run.id).toBeDefined();
 
     // Read
-    const fetched = getRunRecord(run.id);
+    const fetched = getRunRecordRaw(run.id);
     expect(fetched).not.toBeNull();
     expect(fetched!.id).toBe(run.id);
     expect(fetched!.command).toBe("echo hello");
 
     // Read miss
-    expect(getRunRecord(99999)).toBeNull();
+    expect(getRunRecordRaw(99999)).toBeNull();
 
     // Update
     const now = Date.now();

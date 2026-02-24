@@ -90,6 +90,15 @@ Six resource types form the intent layer: Instance, Run, Allocation,
 Workflow, Snapshot, Artifact. Each has a defined state machine. Each belongs
 to exactly one manifest.
 
+Materialisation is the process of converting raw DB records into business-
+ready resources. Each resource type has a materializer (resource/*.ts) that
+adds a materialized_at timestamp and, for provider-observed resources
+(instances), enriches from external state within a TTL-controlled cache.
+Business code reads resources through materializers, not raw DB queries.
+Writes go directly to material/db — only reads have the materialization
+boundary. This separation ensures freshness tracking, drift detection, and
+reconciliation happen automatically, not by convention.
+
 ALLOCATION is the lifecycle primitive — the binding between a run and an
 instance. Five states:
 

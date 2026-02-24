@@ -2,7 +2,7 @@
 // Sets instance to terminate:complete and closes open usage records.
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
-import { updateInstance, queryMany, execute } from "../../material/db";
+import { updateInstance, getOpenUsageRecordsForInstance, finishUsageRecord } from "../../material/db";
 import type {
   TerminateInstanceInput,
   ValidateInstanceOutput,
@@ -30,17 +30,10 @@ export const cleanupRecordsExecutor: NodeExecutor<unknown, CleanupRecordsOutput>
 
     // Close any open usage records for this instance
     const now = Date.now();
-    const openRecords = queryMany<{ id: number; started_at: number }>(
-      "SELECT id, started_at FROM usage_records WHERE instance_id = ? AND finished_at IS NULL",
-      [instanceId]
-    );
+    const openRecords = getOpenUsageRecordsForInstance(instanceId);
 
     for (const record of openRecords) {
-      const durationMs = now - record.started_at;
-      execute(
-        "UPDATE usage_records SET finished_at = ?, duration_ms = ? WHERE id = ?",
-        [now, durationMs, record.id]
-      );
+      finishUsageRecord(record.id, now);
     }
 
     ctx.log("info", "Instance records cleaned up", {

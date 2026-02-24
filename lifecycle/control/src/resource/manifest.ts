@@ -1,6 +1,11 @@
 // resource/manifest.ts - Manifest Resource Operations (Ownership Boundaries)
 // Resource claiming protocol: cross-manifest resource transfer, warm instance
 // claiming, and manifest lifecycle helpers.
+//
+// MATERIALIZATION BOUNDARY — manifest resources
+// READS: use materializeManifest() / materializeManifestBatch() (DB-authoritative, stamps materialized_at)
+// WRITES: use createManifest(), sealManifest() from workflow/state-transitions.ts
+// Manifests are DB-authoritative — no provider enrichment needed.
 
 import { TIMING } from "@skyrepl/contracts";
 import type { Materialized, MaterializeOptions } from "@skyrepl/contracts";

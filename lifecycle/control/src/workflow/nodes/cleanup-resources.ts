@@ -7,7 +7,7 @@ import {
   queryOne,
   updateInstance,
   updateRun,
-} from "../../material/db";
+} from "../../material/db"; // raw-db: boutique queries (partial-column existence checks, cleanup-specific deletes), see WL-057
 import { getProvider } from "../../provider/registry";
 import type { ProviderName } from "../../provider/types";
 import type { CleanupManifestInput } from "../../intent/cleanup-manifest";

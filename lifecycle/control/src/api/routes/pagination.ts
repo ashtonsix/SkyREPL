@@ -1,6 +1,6 @@
 // api/routes/pagination.ts — Pagination helpers and filter builders
 
-import { queryMany } from "../../material/db";
+import { queryMany } from "../../material/db"; // raw-db: generic paginated list (dynamic table, Bucket B), see WL-057
 import type { PaginationMeta, ListRequest } from "./server";
 
 // =============================================================================

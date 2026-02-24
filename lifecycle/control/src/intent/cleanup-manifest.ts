@@ -2,7 +2,7 @@
 // Handles garbage collection of expired manifests by deleting owned resources
 // in priority order, then deleting the manifest itself.
 
-import { getManifest, type Workflow, getWorkflow, queryOne, listExpiredManifests, updateWorkflow, deleteManifest } from "../material/db";
+import { getManifest, type Workflow, getWorkflow, queryOne, listExpiredManifests, updateWorkflow, deleteManifest } from "../material/db"; // raw-db: workflow-by-manifest dedup check (Bucket B), see WL-057
 import type { WorkflowBlueprint, NodeExecutor } from "../workflow/engine.types";
 import { submit, registerBlueprint, registerNodeExecutor } from "../workflow/engine";
 

@@ -2,11 +2,11 @@
 
 import { Elysia } from "elysia";
 import {
-  queryOne,
   queryMany,
+  getWorkflow,
   type Workflow,
   type WorkflowNode,
-} from "../material/db";
+} from "../material/db"; // raw-db: boutique queries (workflow_nodes ORDER BY started_at), see WL-057
 import type { ControlToAgentMessage } from "@skyrepl/contracts";
 import { getControlPlaneId } from "../config";
 import { workflowEvents } from "../workflow/events";
@@ -610,10 +610,7 @@ export function registerSSEWorkflowStream(app: Elysia<any>): void {
     const workflowId = params.id;
 
     // Validate workflow exists
-    const workflow = queryOne<Workflow>(
-      "SELECT * FROM workflows WHERE id = ?",
-      [workflowId]
-    );
+    const workflow = getWorkflow(Number(workflowId));
     if (!workflow) {
       return new Response(
         JSON.stringify({

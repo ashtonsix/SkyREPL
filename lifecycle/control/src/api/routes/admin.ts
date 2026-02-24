@@ -15,9 +15,11 @@ import {
   listTenantUsers,
   countTenantUsers,
   getUser,
+  getTotalCostByTenant,
+  getUserCostByTenant,
   type Tenant,
   type User,
-} from "../../material/db";
+} from "../../material/db"; // raw-db: api_keys CRUD (Bucket D), see WL-057
 import { getDatabase } from "../../material/db/init";
 import { randomBytes, createHash } from "node:crypto";
 import {
@@ -84,11 +86,7 @@ export function checkBudget(tenantId: number, userId: number): string | null {
 
   // Check team budget
   if (tenant.budget_usd !== null) {
-    const totalUsage = queryOne<{ total_cost: number | null }>(
-      "SELECT SUM(estimated_cost_usd) as total_cost FROM usage_records WHERE tenant_id = ?",
-      [tenantId],
-    );
-    const totalCost = totalUsage?.total_cost ?? 0;
+    const totalCost = getTotalCostByTenant(tenantId);
     if (totalCost >= tenant.budget_usd) {
       return `Team budget exceeded: $${totalCost.toFixed(2)} / $${tenant.budget_usd} limit`;
     }
@@ -97,14 +95,7 @@ export function checkBudget(tenantId: number, userId: number): string | null {
   // Check per-user budget (claimed_by FK → users.id)
   const user = getUser(userId);
   if (user?.budget_usd !== null && user?.budget_usd !== undefined) {
-    const userUsage = queryOne<{ total_cost: number | null }>(
-      `SELECT SUM(ur.estimated_cost_usd) as total_cost
-       FROM usage_records ur
-       JOIN allocations a ON ur.allocation_id = a.id
-       WHERE ur.tenant_id = ? AND a.claimed_by = ?`,
-      [tenantId, userId],
-    );
-    const userCost = userUsage?.total_cost ?? 0;
+    const userCost = getUserCostByTenant(tenantId, userId);
     if (userCost >= user.budget_usd) {
       return `User budget exceeded: $${userCost.toFixed(2)} / $${user.budget_usd} limit`;
     }
@@ -386,22 +377,12 @@ export function registerAdminRoutes(app: Elysia<any>): void {
     const users = listTenantUsers(tenantId);
 
     // Aggregate usage from usage_records
-    const totalUsage = queryOne<{ total_cost: number | null }>(
-      "SELECT SUM(estimated_cost_usd) as total_cost FROM usage_records WHERE tenant_id = ?",
-      [tenantId],
-    );
+    const totalCostUsd = getTotalCostByTenant(tenantId);
 
     // Per-user usage (claimed_by FK → users.id)
     const userUsage: Record<number, number> = {};
     for (const user of users) {
-      const usage = queryOne<{ total_cost: number | null }>(
-        `SELECT SUM(ur.estimated_cost_usd) as total_cost
-         FROM usage_records ur
-         JOIN allocations a ON ur.allocation_id = a.id
-         WHERE ur.tenant_id = ? AND a.claimed_by = ?`,
-        [tenantId, user.id],
-      );
-      userUsage[user.id] = usage?.total_cost ?? 0;
+      userUsage[user.id] = getUserCostByTenant(tenantId, user.id);
     }
 
     return {
@@ -409,7 +390,7 @@ export function registerAdminRoutes(app: Elysia<any>): void {
         tenant_id: tenantId,
         tenant_name: tenant?.name ?? "unknown",
         tenant_budget_usd: tenant?.budget_usd ?? null,
-        total_cost_usd: totalUsage?.total_cost ?? 0,
+        total_cost_usd: totalCostUsd,
         users: users.map(u => ({
           id: u.id,
           email: u.email,

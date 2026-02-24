@@ -26,7 +26,9 @@ import { periodicFlush, periodicLogCompaction } from "./background/log-streaming
 import { seedApiKey } from "./material/db/tenants";
 import { terminateOrphanedVMs, scanAll } from "./orphan/scanner";
 import { execute, queryOne } from "./material/db";
-import { clearBlobProviderCache } from "./provider/storage/registry";
+import { clearBlobProviderCache, invokeAllStorageHeartbeats } from "./provider/storage/registry";
+import { invokeAllHeartbeats, type HeartbeatExpectations } from "./provider/extensions";
+import type { StorageHeartbeatExpectations } from "./provider/storage/types";
 
 // =============================================================================
 // Module-level State
@@ -36,6 +38,13 @@ let engine: WorkflowEngine | null = null;
 const intervalHandles: ReturnType<typeof setInterval>[] = [];
 let httpServer: ReturnType<import("elysia").Elysia["listen"]> | null = null;
 let isShuttingDown = false;
+
+// Per-task last-run timestamps for heartbeat dispatch loops
+let lastHeartbeatTimeout = 0;
+let lastReconciliation = 0;
+let lastOrphanScan = 0;
+let lastStorageGc = 0;
+let lastLogCompaction = 0;
 
 // =============================================================================
 // Startup
@@ -229,14 +238,6 @@ export function startHttpServer(port: number): void {
 // =============================================================================
 
 export function startBackgroundTasks(): void {
-  // Heartbeat timeout: detect stale instances, fail their allocations
-  const hbHandle = setInterval(() => {
-    heartbeatTimeoutCheck().catch((err) =>
-      console.error("[control] heartbeatTimeoutCheck error:", err)
-    );
-  }, TIMING.HEARTBEAT_CHECK_INTERVAL_MS);
-  intervalHandles.push(hbHandle);
-
   // Warm pool reconciliation: timeout stale CLAIMED, expire old AVAILABLE
   const warmPoolHandle = setInterval(() => {
     warmPoolReconciliation().catch((err) =>
@@ -268,30 +269,6 @@ export function startBackgroundTasks(): void {
   }, TIMING.MANIFEST_CLEANUP_INTERVAL_MS);
   intervalHandles.push(manifestHandle);
 
-  // Storage garbage collection
-  const gcHandle = setInterval(() => {
-    storageGarbageCollection().catch((err) =>
-      console.error("[control] storageGarbageCollection error:", err)
-    );
-  }, TIMING.BLOB_GC_INTERVAL_MS);
-  intervalHandles.push(gcHandle);
-
-  // Allocation reconciliation (#LIFE-11): safety net for stuck allocations
-  const reconcileHandle = setInterval(() => {
-    reconciliationTask().catch((err) =>
-      console.error("[control] reconciliationTask error:", err)
-    );
-  }, TIMING.RECONCILIATION_INTERVAL_MS);
-  intervalHandles.push(reconcileHandle);
-
-  // Orphan scanner: periodic scan of all providers for untracked cloud resources
-  const orphanScanHandle = setInterval(() => {
-    scanAll().catch((err) =>
-      console.error("[control] orphan scanAll error:", err)
-    );
-  }, TIMING.ORPHAN_SCAN_INTERVAL_MS);
-  intervalHandles.push(orphanScanHandle);
-
   // Log chunk periodic flush (every 30s)
   const logFlushHandle = setInterval(() => {
     try { periodicFlush(); }
@@ -299,13 +276,23 @@ export function startBackgroundTasks(): void {
   }, 30_000);
   intervalHandles.push(logFlushHandle);
 
-  // Log compaction: gather completed run chunks into larger blobs (every hour)
-  const logCompactionHandle = setInterval(() => {
-    periodicLogCompaction().catch((err) =>
-      console.error("[control] periodicLogCompaction error:", err)
+  // Compute heartbeat: health check + stale detection + reconciliation + orphan scan
+  // Runs at the fastest cadence (HEARTBEAT_CHECK_INTERVAL_MS); slower tasks skip when not due.
+  const computeHbHandle = setInterval(() => {
+    computeHeartbeatDispatch().catch((err) =>
+      console.error("[control] computeHeartbeatDispatch error:", err)
     );
-  }, 3600_000);
-  intervalHandles.push(logCompactionHandle);
+  }, TIMING.HEARTBEAT_CHECK_INTERVAL_MS);
+  intervalHandles.push(computeHbHandle);
+
+  // Storage heartbeat: health check + blob GC + log compaction
+  // Runs at BLOB_GC_INTERVAL_MS cadence; log compaction skips when not due.
+  const storageHbHandle = setInterval(() => {
+    storageHeartbeatDispatch().catch((err) =>
+      console.error("[control] storageHeartbeatDispatch error:", err)
+    );
+  }, TIMING.BLOB_GC_INTERVAL_MS);
+  intervalHandles.push(storageHbHandle);
 
   console.log("[control] Background tasks started");
 }
@@ -317,6 +304,95 @@ export async function holdExpiryCheck(): Promise<void> {
 export async function reconciliationTask(): Promise<void> {
   const { runReconciliation } = await import("./background/reconciliation");
   await runReconciliation();
+}
+
+// =============================================================================
+// Compute Heartbeat Dispatch
+// =============================================================================
+
+export async function computeHeartbeatDispatch(): Promise<void> {
+  const now = Date.now();
+
+  // Always include health_check; add other tasks only when due
+  const tasks: HeartbeatExpectations["tasks"] = [
+    { type: "health_check", priority: "high" },
+  ];
+
+  if (now - lastHeartbeatTimeout >= TIMING.HEARTBEAT_CHECK_INTERVAL_MS) {
+    tasks.push({ type: "heartbeat_timeout_scan", priority: "high", lastRun: lastHeartbeatTimeout });
+  }
+  if (now - lastReconciliation >= TIMING.RECONCILIATION_INTERVAL_MS) {
+    tasks.push({ type: "reconcile_instances", priority: "normal", lastRun: lastReconciliation });
+  }
+  if (now - lastOrphanScan >= TIMING.ORPHAN_SCAN_INTERVAL_MS) {
+    tasks.push({ type: "orphan_scan", priority: "low", lastRun: lastOrphanScan });
+  }
+
+  const expectations: HeartbeatExpectations = {
+    tasks,
+    deadline: now + 30_000,
+  };
+
+  try {
+    await invokeAllHeartbeats(expectations);
+
+    // Run control-plane-side logic for due tasks
+    if (tasks.some(t => t.type === "heartbeat_timeout_scan")) {
+      await heartbeatTimeoutCheck();
+      lastHeartbeatTimeout = Date.now();
+    }
+    if (tasks.some(t => t.type === "reconcile_instances")) {
+      await reconciliationTask();
+      lastReconciliation = Date.now();
+    }
+    if (tasks.some(t => t.type === "orphan_scan")) {
+      await scanAll();
+      lastOrphanScan = Date.now();
+    }
+  } catch (err) {
+    console.error("[control] computeHeartbeatDispatch error:", err);
+  }
+}
+
+// =============================================================================
+// Storage Heartbeat Dispatch
+// =============================================================================
+
+export async function storageHeartbeatDispatch(): Promise<void> {
+  const now = Date.now();
+
+  // Always include health_check; add other tasks only when due
+  const tasks: StorageHeartbeatExpectations["tasks"] = [
+    { type: "health_check", priority: "high" },
+  ];
+
+  if (now - lastStorageGc >= TIMING.BLOB_GC_INTERVAL_MS) {
+    tasks.push({ type: "blob_gc", priority: "normal", lastRun: lastStorageGc });
+  }
+  if (now - lastLogCompaction >= 3600_000) {
+    tasks.push({ type: "log_compaction", priority: "low", lastRun: lastLogCompaction });
+  }
+
+  const expectations: StorageHeartbeatExpectations = {
+    tasks,
+    deadline: now + 60_000,
+  };
+
+  try {
+    await invokeAllStorageHeartbeats(expectations);
+
+    // Run control-plane-side storage tasks for due items
+    if (tasks.some(t => t.type === "blob_gc")) {
+      await storageGarbageCollection();
+      lastStorageGc = Date.now();
+    }
+    if (tasks.some(t => t.type === "log_compaction")) {
+      await periodicLogCompaction();
+      lastLogCompaction = Date.now();
+    }
+  } catch (err) {
+    console.error("[control] storageHeartbeatDispatch error:", err);
+  }
 }
 
 // =============================================================================

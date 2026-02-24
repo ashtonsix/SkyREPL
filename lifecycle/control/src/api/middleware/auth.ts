@@ -9,7 +9,7 @@
 import crypto from "crypto";
 import { createHash } from "node:crypto";
 import { getDatabase } from "../../material/db/init";
-import { getInstanceRecord } from "../../resource/instance";
+import { getInstanceRecordRaw } from "../../resource/instance";
 
 /**
  * Verify instance auth token from Authorization header or query param.
@@ -19,7 +19,7 @@ export function verifyInstanceToken(instanceId: number | string, token: string):
   const id = typeof instanceId === "string" ? parseInt(instanceId, 10) : instanceId;
   if (isNaN(id)) return false;
 
-  const instance = getInstanceRecord(id);
+  const instance = getInstanceRecordRaw(id);
   if (!instance) return false;
 
   // Backward compatibility: if no token hash is set, allow any request

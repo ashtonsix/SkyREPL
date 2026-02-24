@@ -9,7 +9,7 @@
 //   - reconcilePendingSpawn: compares one spawn:pending DB record against provider API
 //   - reconcileStalePendingSpawns: periodic sweep over all stale spawn:pending records
 
-import { queryMany, queryOne, updateInstance, type Allocation, type Instance } from "../material/db";
+import { queryMany, queryOne, updateInstance, findStaleClaimed, findExpiredAvailable, type Allocation, type Instance } from "../material/db"; // raw-db: boutique queries (spawn:pending sweep, JOINs for warm pool health/orphaned claims/stalled transitions/provider sync), see WL-057
 import {
   failAllocation,
   failAllocationAnyState,
@@ -241,10 +241,7 @@ export async function runReconciliation(): Promise<ReconciliationResult> {
  */
 function reconcileClaimedTimeout(): number {
   const cutoff = Date.now() - TIMING.CLAIMED_TIMEOUT_MS;
-  const stale = queryMany<Allocation>(
-    "SELECT * FROM allocations WHERE status = 'CLAIMED' AND updated_at < ?",
-    [cutoff]
-  );
+  const stale = findStaleClaimed(cutoff);
   let count = 0;
   for (const alloc of stale) {
     const r = failAllocation(alloc.id, "CLAIMED");
@@ -389,10 +386,7 @@ async function reconcileProviderStateSync(): Promise<number> {
  */
 function reconcileAllocationAging(): number {
   const cutoff = Date.now() - TIMING.WARM_POOL_EXPIRY_MS;
-  const expired = queryMany<Allocation>(
-    "SELECT * FROM allocations WHERE status = 'AVAILABLE' AND created_at < ?",
-    [cutoff]
-  );
+  const expired = findExpiredAvailable(cutoff);
   let count = 0;
   for (const alloc of expired) {
     const r = failAllocation(alloc.id, "AVAILABLE");

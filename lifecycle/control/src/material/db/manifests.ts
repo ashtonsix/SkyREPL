@@ -1,3 +1,9 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// RAW DB LAYER — manifests table
+// Business code should use materializeManifest() from resource/manifest.ts,
+// not these functions directly. @see resource/manifest.ts
+// DB operations below — add new queries here, not at call sites.
+// ─────────────────────────────────────────────────────────────────────────────
 // db/manifests.ts - Manifest and ManifestResource operations
 
 import { ConflictError } from "@skyrepl/contracts";
@@ -42,6 +48,7 @@ interface AddResourceOptions {
   ownerType?: string;
 }
 
+/** @see resource/manifest.ts — use materializeManifest() for business reads */
 export function getManifest(id: number): Manifest | null {
   return queryOne<Manifest>("SELECT * FROM manifests WHERE id = ?", [id]);
 }

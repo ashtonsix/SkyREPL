@@ -8,7 +8,7 @@ import {
   formatResourceName,
   isReplResource,
 } from "../material/control-id";
-import { queryMany } from "../material/db";
+import { queryMany } from "../material/db"; // raw-db: naming audit instance query (Bucket B), see WL-057
 import { getProvider } from "../provider/registry";
 import type { ProviderName } from "../provider/types";
 

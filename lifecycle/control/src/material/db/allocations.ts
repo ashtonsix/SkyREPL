@@ -1,3 +1,9 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// RAW DB LAYER — allocations table
+// Business code should use materializeAllocation() from resource/allocation.ts,
+// not these functions directly. @see resource/allocation.ts
+// DB operations below — add new queries here, not at call sites.
+// ─────────────────────────────────────────────────────────────────────────────
 // db/allocations.ts - Allocation CRUD + warm pool operations
 
 import {
@@ -23,8 +29,28 @@ export interface Allocation {
   completed_at: number | null;
 }
 
+/** @see resource/allocation.ts — use materializeAllocation() for business reads */
 export function getAllocation(id: number): Allocation | null {
   return queryOne<Allocation>("SELECT * FROM allocations WHERE id = ?", [id]);
+}
+
+/** Get allocation by run_id. Returns the allocation bound to a specific run. */
+export function getAllocationByRunId(runId: number): Allocation | null {
+  return queryOne<Allocation>("SELECT * FROM allocations WHERE run_id = ?", [runId]);
+}
+
+/** Generic PATCH for allocations (mirrors updateInstance pattern). */
+export function updateAllocation(id: number, updates: Partial<Allocation>): Allocation {
+  const fields = Object.entries(updates).filter(([_, v]) => v !== undefined);
+  if (fields.length === 0) {
+    const existing = getAllocation(id);
+    if (!existing) throw new Error(`Allocation ${id} not found`);
+    return existing;
+  }
+  const setClauses = fields.map(([k]) => `${k} = ?`).join(", ");
+  const values = fields.map(([_, v]) => v);
+  execute(`UPDATE allocations SET ${setClauses}, updated_at = ? WHERE id = ?`, [...values, Date.now(), id]);
+  return getAllocation(id)!;
 }
 
 export function createAllocation(

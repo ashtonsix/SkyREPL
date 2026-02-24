@@ -1,4 +1,9 @@
 // resource/instance.ts - Instance Resource Operations
+//
+// MATERIALIZATION BOUNDARY — instance resources
+// READS: use materializeInstance() / materializeInstanceBatch() (provider-enriched, cached, drift-detecting)
+// WRITES: use createInstanceRecord(), updateInstanceRecord() (direct DB, no materialization needed)
+// Raw DB reads (getInstanceRecordRaw) bypass materialization — use only when you need the DB record, not the resource.
 
 import type { Instance } from "../material/db";
 import type { Materialized, MaterializeOptions } from "@skyrepl/contracts";
@@ -195,7 +200,7 @@ export function createInstanceRecord(
   return createInstance(data, tenantId);
 }
 
-export function getInstanceRecord(id: number): Instance | null {
+export function getInstanceRecordRaw(id: number): Instance | null {
   return getInstance(id);
 }
 

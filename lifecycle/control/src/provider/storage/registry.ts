@@ -2,7 +2,7 @@
 // Dynamic registration with per-tenant resolution and caching.
 // Mirrors the compute provider registry pattern (registerProvider/unregisterProvider).
 
-import type { BlobProvider, BlobProviderLifecycleHooks } from "./types";
+import type { BlobProvider, BlobProviderLifecycleHooks, StorageHeartbeatExpectations, StorageHeartbeatReceipts } from "./types";
 import { SqlBlobProvider } from "./sql-blob";
 import { S3BlobProvider, type S3BlobProviderConfig } from "./s3";
 import { queryOne } from "../../material/db";
@@ -74,6 +74,34 @@ export async function unregisterBlobProvider(name: string): Promise<void> {
       providerCache.delete(key);
     }
   }
+}
+
+/**
+ * Invoke heartbeat hooks on all registered blob providers.
+ * Returns a map of provider name to StorageHeartbeatReceipts.
+ */
+export async function invokeAllStorageHeartbeats(
+  expectations: StorageHeartbeatExpectations
+): Promise<Map<string, StorageHeartbeatReceipts>> {
+  const results = new Map<string, StorageHeartbeatReceipts>();
+
+  for (const [name, reg] of blobProviderRegistrations) {
+    if (reg.hooks?.onHeartbeat) {
+      try {
+        const receipts = await reg.hooks.onHeartbeat(expectations);
+        results.set(name, receipts);
+      } catch {
+        results.set(name, { receipts: [{ type: 'health_check', status: 'failed', reason: 'onHeartbeat threw' }] });
+      }
+    }
+  }
+
+  // Also check the default provider if no explicit registration
+  if (defaultProvider && !blobProviderRegistrations.has(defaultProvider.name)) {
+    // Default provider (SqlBlobProvider) has no lifecycle hooks — skip heartbeat
+  }
+
+  return results;
 }
 
 /**

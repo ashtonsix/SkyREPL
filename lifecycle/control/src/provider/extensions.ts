@@ -23,6 +23,11 @@ export interface HeartbeatExpectations {
 }
 
 export interface HeartbeatTask {
+  // Known task types:
+  // - 'health_check': provider health verification (existing)
+  // - 'heartbeat_timeout_scan': detect stale instances, provider can annotate expected latency
+  // - 'reconcile_instances': provider returns live instance state for comparison
+  // - 'orphan_scan': provider returns list of all running resources for orphan detection
   type: string;
   priority: 'high' | 'normal' | 'low';
   lastRun?: number;
@@ -206,4 +211,22 @@ export async function invokeAllHooks(
       ([provider, _]) => invokeHook(provider, hook, ...args)
     )
   );
+}
+
+export async function invokeAllHeartbeats(
+  expectations: HeartbeatExpectations
+): Promise<Map<ProviderName, HeartbeatReceipts>> {
+  const results = new Map<ProviderName, HeartbeatReceipts>();
+  await Promise.allSettled(
+    Array.from(providerHooks.entries()).map(async ([provider, hooks]) => {
+      if (!hooks.onHeartbeat) return;
+      try {
+        const receipts = await hooks.onHeartbeat(expectations);
+        results.set(provider, receipts);
+      } catch (error) {
+        console.error(`[heartbeat] ${provider} error:`, error);
+      }
+    })
+  );
+  return results;
 }

@@ -2,7 +2,7 @@
 // Polls the provider until instance reaches running state, then updates DB.
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
-import { updateInstanceRecord, getInstanceRecord } from "../../resource/instance";
+import { updateInstanceRecord, getInstanceRecordRaw } from "../../resource/instance";
 import { getProvider } from "../../provider/registry";
 import type { ProviderName } from "../../provider/types";
 import { TIMING } from "@skyrepl/contracts";
@@ -102,7 +102,7 @@ export const waitForBootExecutor: NodeExecutor<WaitForBootInput, WaitForBootOutp
     }
 
     // Update instance state if record still exists
-    const instance = getInstanceRecord(input.instance_id);
+    const instance = getInstanceRecordRaw(input.instance_id);
     if (instance) {
       updateInstanceRecord(input.instance_id, {
         workflow_state: "boot:compensated",

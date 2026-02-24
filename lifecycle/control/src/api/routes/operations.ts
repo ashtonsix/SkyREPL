@@ -2,7 +2,7 @@
 
 import { Elysia, t } from "elysia";
 import { Type } from "@sinclair/typebox";
-import { getInstanceRecord } from "../../resource/instance";
+import { getInstanceRecordRaw } from "../../resource/instance";
 import {
   getWorkflow,
   getWorkflowNodes,
@@ -340,7 +340,7 @@ export function registerOperationRoutes(app: Elysia<any>): void {
 
     // Verify instance belongs to the caller's tenant
     if (auth) {
-      const instance = getInstanceRecord(instanceId);
+      const instance = getInstanceRecordRaw(instanceId);
       if (!instance || instance.tenant_id !== auth.tenantId) {
         set.status = 404;
         return { error: { code: "INSTANCE_NOT_FOUND", message: `Instance ${instanceId} not found`, category: "not_found" } };
@@ -448,7 +448,7 @@ export function registerOperationRoutes(app: Elysia<any>): void {
     const auth = getAuthContext(request);
     const instanceId = Number(params.id);
 
-    const instance = getInstanceRecord(instanceId);
+    const instance = getInstanceRecordRaw(instanceId);
     if (!instance || (auth && instance.tenant_id !== auth.tenantId)) {
       set.status = 404;
       return {
@@ -525,7 +525,7 @@ export function registerOperationRoutes(app: Elysia<any>): void {
     const auth = getAuthContext(request);
     const instanceId = Number(params.id);
 
-    const instance = getInstanceRecord(instanceId);
+    const instance = getInstanceRecordRaw(instanceId);
     if (!instance || (auth && instance.tenant_id !== auth.tenantId)) {
       set.status = 404;
       return {

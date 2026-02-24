@@ -25,6 +25,8 @@ export {
   type Instance,
   getInstance,
   getInstanceByProviderId,
+  getInstanceByTokenHash,
+  getInstanceByIdempotencyKey,
   createInstance,
   updateInstance,
   listInstances,
@@ -35,6 +37,8 @@ export {
 export {
   type Allocation,
   getAllocation,
+  getAllocationByRunId,
+  updateAllocation,
   createAllocation,
   deleteAllocation,
   findWarmAllocation,
@@ -62,6 +66,7 @@ export {
   createWorkflow,
   updateWorkflow,
   getWorkflowNodes,
+  getWorkflowNode,
   createWorkflowNode,
   updateWorkflowNode,
   findReadyNodes,
@@ -90,6 +95,8 @@ export {
   createBlob,
   findBlobByChecksum,
   updateBlobLastReferenced,
+  updateBlobStorageKey,
+  updateBlobSize,
   findOrphanedBlobs,
   deleteBlobBatch,
   deleteBlob,
@@ -99,6 +106,7 @@ export {
   findObjectByTag,
   deleteObject,
   updateObjectTimestamp,
+  updateObjectMetadata,
   deleteObjectBatch,
   checkBlobsExist,
 } from "./objects";
@@ -124,6 +132,9 @@ export {
   finishUsageRecord,
   getMonthlyCostByProvider,
   getActiveUsageRecords,
+  getOpenUsageRecordsForInstance,
+  getTotalCostByTenant,
+  getUserCostByTenant,
 } from "./usage";
 
 // Tenants and Users

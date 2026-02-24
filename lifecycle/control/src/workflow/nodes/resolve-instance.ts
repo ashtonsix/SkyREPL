@@ -1,7 +1,7 @@
 // workflow/nodes/resolve-instance.ts - Resolve Instance Node
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
-import { queryOne, findWarmAllocation, type WorkflowNode } from "../../material/db";
+import { getWorkflowNode, findWarmAllocation, type WorkflowNode } from "../../material/db";
 import { skipNode, failAllocation } from "../state-transitions";
 import { materializeInstance, isTerminalState } from "../../resource/instance";
 import type { ResolveInstanceOutput, LaunchRunWorkflowInput } from "../../intent/launch-run.schema";
@@ -59,18 +59,12 @@ export const resolveInstanceExecutor: NodeExecutor<ResolveInstanceInput, Resolve
         });
       } else {
         // Warm path: skip cold-path nodes (spawn + wait-for-boot)
-        const spawnNode = queryOne<WorkflowNode>(
-          "SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
-          [ctx.workflowId, "spawn-instance"]
-        );
+        const spawnNode = getWorkflowNode(ctx.workflowId, "spawn-instance");
         if (spawnNode && spawnNode.status === "pending") {
           skipNode(spawnNode.id);
         }
 
-        const bootNode = queryOne<WorkflowNode>(
-          "SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
-          [ctx.workflowId, "wait-for-boot"]
-        );
+        const bootNode = getWorkflowNode(ctx.workflowId, "wait-for-boot");
         if (bootNode && bootNode.status === "pending") {
           skipNode(bootNode.id);
         }
@@ -89,10 +83,7 @@ export const resolveInstanceExecutor: NodeExecutor<ResolveInstanceInput, Resolve
     }
 
     // Cold path: skip the claim-warm-allocation node
-    const claimNode = queryOne<WorkflowNode>(
-      "SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
-      [ctx.workflowId, "claim-warm-allocation"]
-    );
+    const claimNode = getWorkflowNode(ctx.workflowId, "claim-warm-allocation");
     if (claimNode && claimNode.status === "pending") {
       skipNode(claimNode.id);
     }

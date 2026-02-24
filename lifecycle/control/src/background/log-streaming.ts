@@ -4,7 +4,7 @@
 // Tier 2: Chunk storage (inline blobs <64KB, immutable once written)
 // Tier 3: Gather — concatenates completed run chunks into larger gathered blobs
 
-import { createBlob, queryOne, queryMany, getDatabase, deleteBlobBatch, getRun, getBlob } from "../material/db";
+import { createBlob, queryOne, queryMany, getDatabase, deleteBlobBatch, getRun, getBlob } from "../material/db"; // raw-db: log_chunks CRUD (Bucket D, owns table), see WL-057
 import { getControlId } from "../material/control-id";
 import { getInline } from "../material/storage";
 import { getBlobProvider } from "../provider/storage/registry";

@@ -1,3 +1,9 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// RAW DB LAYER — instances table
+// Business code should use materializeInstance() from resource/instance.ts,
+// not these functions directly. @see resource/instance.ts
+// DB operations below — add new queries here, not at call sites.
+// ─────────────────────────────────────────────────────────────────────────────
 // db/instances.ts - Instance CRUD
 
 import { type SQLQueryBindings } from "bun:sqlite";
@@ -25,8 +31,25 @@ export interface Instance {
   last_heartbeat: number;
 }
 
+/** @see resource/instance.ts — use materializeInstance() for business reads */
 export function getInstance(id: number): Instance | null {
   return queryOne<Instance>("SELECT * FROM instances WHERE id = ?", [id]);
+}
+
+/** Get instance by registration token hash. Used for agent authentication. */
+export function getInstanceByTokenHash(hash: string): Instance | null {
+  return queryOne<Instance>(
+    "SELECT * FROM instances WHERE registration_token_hash = ?",
+    [hash]
+  );
+}
+
+/** Get instance by spawn idempotency key. Used to detect duplicate spawns. */
+export function getInstanceByIdempotencyKey(key: string): Instance | null {
+  return queryOne<Instance>(
+    "SELECT * FROM instances WHERE spawn_idempotency_key = ?",
+    [key]
+  );
 }
 
 export function getInstanceByProviderId(
@@ -90,6 +113,7 @@ export function updateInstance(
   return getInstance(id)!;
 }
 
+/** @see resource/instance.ts — use materializeInstance() for business reads */
 export function listInstances(filter?: {
   provider?: string;
   workflow_state?: string;

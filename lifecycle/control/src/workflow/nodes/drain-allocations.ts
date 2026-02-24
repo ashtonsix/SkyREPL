@@ -2,7 +2,7 @@
 // Transitions all non-terminal allocations for the instance to terminal states.
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
-import { queryMany, type Allocation } from "../../material/db";
+import { queryMany, type Allocation } from "../../material/db"; // raw-db: non-terminal allocation query (Bucket B, status filter), see WL-057
 import {
   failAllocationAnyState,
 } from "../state-transitions";

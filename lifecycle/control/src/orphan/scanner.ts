@@ -5,7 +5,7 @@
 
 import { getControlId, parseResourceName } from "../material/control-id";
 import { getDatabase } from "../material/db/helpers";
-import { queryMany, updateInstance, isWhitelisted, recordOrphanScan, type Instance } from "../material/db";
+import { queryMany, updateInstance, getInstance, isWhitelisted, recordOrphanScan, type Instance } from "../material/db"; // raw-db: boutique queries (partial-column tracked instances, provider_id status filter), see WL-057
 import { getProvider, getAllProviders } from "../provider/registry";
 import type { ProviderName } from "../provider/types";
 import { cacheSet } from "../resource/cache";
@@ -106,9 +106,7 @@ export async function scanProvider(providerName: string): Promise<ScanResult> {
     }
 
     // Populate materializer cache with this fresh observation (batch-tier TTL)
-    const freshRecord = queryMany<Instance>(
-      "SELECT * FROM instances WHERE id = ?", [dbInst.id]
-    )[0];
+    const freshRecord = getInstance(dbInst.id);
     if (freshRecord) {
       cacheSet(`instance:${dbInst.id}`, stampMaterialized(freshRecord), getTtlForTier('batch', providerName));
     }

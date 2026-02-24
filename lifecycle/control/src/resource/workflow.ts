@@ -1,4 +1,9 @@
 // resource/workflow.ts - Workflow Materializer (DB-authoritative)
+//
+// MATERIALIZATION BOUNDARY — workflow resources
+// READS: use materializeWorkflow() / materializeWorkflowBatch() (DB-authoritative, stamps materialized_at)
+// WRITES: workflows are created and updated by the engine (workflow/engine/) directly
+// Workflows are DB-authoritative — no provider enrichment needed.
 
 import type { Workflow } from "../material/db";
 import type { Materialized, MaterializeOptions } from "@skyrepl/contracts";

@@ -1,4 +1,9 @@
 // resource/run.ts - Run Resource Operations + Materializer
+//
+// MATERIALIZATION BOUNDARY — run resources
+// READS: use materializeRun() / materializeRunBatch() (DB-authoritative, stamps materialized_at)
+// WRITES: use createRunRecord(), updateRunRecord() (direct DB, no materialization needed)
+// Raw DB reads (getRunRecordRaw) bypass materialization — use only when you need the DB record, not the resource.
 
 import type { Run } from "../material/db";
 import type { Materialized, MaterializeOptions } from "@skyrepl/contracts";
@@ -22,7 +27,7 @@ export function createRunRecord(
   return createRun(data, tenantId);
 }
 
-export function getRunRecord(id: number): Run | null {
+export function getRunRecordRaw(id: number): Run | null {
   return getRun(id);
 }
 

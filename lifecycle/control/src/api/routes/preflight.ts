@@ -12,7 +12,9 @@ import {
   queryOne,
   getTenant,
   getUser,
-} from "../../material/db";
+  getTotalCostByTenant,
+  getUserCostByTenant,
+} from "../../material/db"; // raw-db: api_keys expiry check (Bucket D), see WL-057
 import { TIMING } from "@skyrepl/contracts";
 
 // =============================================================================
@@ -112,11 +114,7 @@ export function registerPreflightRoutes(app: Elysia<any>): void {
       const tenant = getTenant(tenantId);
 
       if (tenant?.budget_usd !== null && tenant?.budget_usd !== undefined) {
-        const totalUsage = queryOne<{ total_cost: number | null }>(
-          "SELECT SUM(estimated_cost_usd) as total_cost FROM usage_records WHERE tenant_id = ?",
-          [tenantId]
-        );
-        const totalCost = totalUsage?.total_cost ?? 0;
+        const totalCost = getTotalCostByTenant(tenantId);
         const budget = tenant.budget_usd;
         const remaining = budget - totalCost;
 
@@ -139,14 +137,7 @@ export function registerPreflightRoutes(app: Elysia<any>): void {
       // Per-user budget
       const user = getUser(userId);
       if (user?.budget_usd !== null && user?.budget_usd !== undefined) {
-        const userUsage = queryOne<{ total_cost: number | null }>(
-          `SELECT SUM(ur.estimated_cost_usd) as total_cost
-           FROM usage_records ur
-           JOIN allocations a ON ur.allocation_id = a.id
-           WHERE ur.tenant_id = ? AND a.claimed_by = ?`,
-          [tenantId, userId]
-        );
-        const userCost = userUsage?.total_cost ?? 0;
+        const userCost = getUserCostByTenant(tenantId, userId);
         const userBudget = user.budget_usd;
 
         if (userCost >= userBudget) {

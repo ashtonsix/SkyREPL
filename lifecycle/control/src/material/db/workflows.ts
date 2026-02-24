@@ -1,3 +1,9 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// RAW DB LAYER — workflows table
+// Business code should use materializeWorkflow() from resource/workflow.ts,
+// not these functions directly. @see resource/workflow.ts
+// DB operations below — add new queries here, not at call sites.
+// ─────────────────────────────────────────────────────────────────────────────
 // db/workflows.ts - Workflow and WorkflowNode CRUD
 
 import { type SQLQueryBindings } from "bun:sqlite";
@@ -51,6 +57,7 @@ export interface WorkflowNode {
   updated_at: number;
 }
 
+/** @see resource/workflow.ts — use materializeWorkflow() for business reads */
 export function getWorkflow(id: number): Workflow | null {
   return queryOne<Workflow>("SELECT * FROM workflows WHERE id = ?", [id]);
 }
@@ -111,10 +118,19 @@ export function updateWorkflow(
   return getWorkflow(id)!;
 }
 
+/** @see resource/workflow.ts — use materializeWorkflow() for business reads */
 export function getWorkflowNodes(workflowId: number): WorkflowNode[] {
   return queryMany<WorkflowNode>(
     "SELECT * FROM workflow_nodes WHERE workflow_id = ?",
     [workflowId]
+  );
+}
+
+/** Get a specific workflow node by workflow ID and node ID. */
+export function getWorkflowNode(workflowId: number, nodeId: string): WorkflowNode | null {
+  return queryOne<WorkflowNode>(
+    "SELECT * FROM workflow_nodes WHERE workflow_id = ? AND node_id = ?",
+    [workflowId, nodeId]
   );
 }
 

@@ -4,7 +4,7 @@
 
 import { Elysia } from "elysia";
 import { updateRunRecord } from "../resource/run";
-import { getInstanceRecord } from "../resource/instance";
+import { getInstanceRecordRaw } from "../resource/instance";
 import {
   queryOne,
   queryMany,
@@ -14,10 +14,14 @@ import {
   addObjectTag,
   findObjectByTag,
   addResourceToManifest,
+  getAllocation,
+  getAllocationByRunId,
+  updateObjectMetadata,
+  getRun,
   type Allocation,
   type Run,
   type Manifest,
-} from "../material/db";
+} from "../material/db"; // raw-db: boutique queries (heartbeat update, active-allocs check, panic log insert), see WL-057
 import { appendLog, flushRunBuffers } from "../background/log-streaming";
 import { activateAllocation, failAllocation } from "../workflow/state-transitions";
 import { stateEvents, STATE_EVENT } from "../workflow/events";
@@ -135,7 +139,7 @@ function requireAuth(
   if (!token) {
     // No token provided: check if this instance requires auth
     // Instances without a token hash allow unauthenticated access (backward compat)
-    const instance = getInstanceRecord(Number(instanceId));
+    const instance = getInstanceRecordRaw(Number(instanceId));
     if (instance?.registration_token_hash) {
       return { error: { code: "UNAUTHORIZED", message: "Missing authentication token", category: "auth" } };
     }
@@ -167,7 +171,7 @@ export function registerAgentRoutes(app: Elysia<any>): void {
     }
 
     // Reject heartbeats from terminated instances (#8.09: DMS bypass prevention)
-    const instance = getInstanceRecord(Number(hb.instance_id));
+    const instance = getInstanceRecordRaw(Number(hb.instance_id));
     if (!instance || instance.workflow_state.startsWith("terminate:")) {
       set.status = 409;
       return {
@@ -210,10 +214,7 @@ export function registerAgentRoutes(app: Elysia<any>): void {
       for (const entry of hb.active_allocations) {
         if (!entry.has_ssh_sessions) continue;
 
-        const alloc = queryOne<Allocation>(
-          "SELECT * FROM allocations WHERE id = ?",
-          [entry.allocation_id]
-        );
+        const alloc = getAllocation(entry.allocation_id);
 
         // Only extend existing holds on COMPLETE allocations (§5.4 line 390)
         if (!alloc || alloc.status !== "COMPLETE" || alloc.debug_hold_until === null) {
@@ -256,15 +257,12 @@ export function registerAgentRoutes(app: Elysia<any>): void {
     const log = body as AgentLogsRequest;
 
     // Auth check - need to get instance_id from run_id
-    const run = queryOne<Run>("SELECT * FROM runs WHERE id = ?", [log.run_id]);
+    const run = getRun(log.run_id);
     if (!run) {
       set.status = 404;
       return { error: { code: "RUN_NOT_FOUND", message: "Run not found", category: "not_found" } };
     }
-    const allocation = queryOne<Allocation>(
-      "SELECT * FROM allocations WHERE run_id = ?",
-      [log.run_id]
-    );
+    const allocation = getAllocationByRunId(log.run_id);
     // If allocation exists, verify auth. If no allocation yet, skip auth (backward compat).
     if (allocation) {
       const authError = requireAuth({ instance_id: allocation.instance_id }, request);
@@ -372,15 +370,12 @@ export function registerAgentRoutes(app: Elysia<any>): void {
     };
 
     // Auth check via run -> allocation -> instance
-    const run = queryOne<Run>("SELECT * FROM runs WHERE id = ?", [req.run_id]);
+    const run = getRun(req.run_id);
     if (!run) {
       set.status = 404;
       return { error: { code: "RUN_NOT_FOUND", message: "Run not found", category: "not_found" } };
     }
-    const allocation = queryOne<Allocation>(
-      "SELECT * FROM allocations WHERE run_id = ?",
-      [req.run_id]
-    );
+    const allocation = getAllocationByRunId(req.run_id);
     if (allocation) {
       const authError = requireAuth({ instance_id: allocation.instance_id }, request);
       if (authError) {
@@ -471,10 +466,7 @@ export function registerAgentRoutes(app: Elysia<any>): void {
     const status = body as AgentStatusRequest;
 
     // Auth check - require allocation to exist (#12.04: no auth bypass for unknown runs)
-    const allocation = queryOne<Allocation>(
-      "SELECT * FROM allocations WHERE run_id = ?",
-      [status.run_id]
-    );
+    const allocation = getAllocationByRunId(status.run_id);
     if (!allocation) {
       set.status = 404;
       return {
@@ -614,10 +606,7 @@ export function registerAgentRoutes(app: Elysia<any>): void {
 
     // NOT YET IMPLEMENTED — deferred to future slice
     // Auth check - need to get instance_id from run_id
-    const allocation = queryOne<Allocation>(
-      "SELECT * FROM allocations WHERE run_id = ?",
-      [req.run_id]
-    );
+    const allocation = getAllocationByRunId(req.run_id);
     // If allocation exists, verify auth. If no allocation yet, skip auth (backward compat).
     if (allocation) {
       const authError = requireAuth({ instance_id: allocation.instance_id }, request);
@@ -637,10 +626,7 @@ export function registerAgentRoutes(app: Elysia<any>): void {
 
     // NOT YET IMPLEMENTED — deferred to future slice
     // Auth check - need to get instance_id from run_id
-    const allocation = queryOne<Allocation>(
-      "SELECT * FROM allocations WHERE run_id = ?",
-      [req.run_id]
-    );
+    const allocation = getAllocationByRunId(req.run_id);
     // If allocation exists, verify auth. If no allocation yet, skip auth (backward compat).
     if (allocation) {
       const authError = requireAuth({ instance_id: allocation.instance_id }, request);
@@ -697,7 +683,7 @@ export function registerAgentRoutes(app: Elysia<any>): void {
     const now = Date.now();
 
     // Fetch instance to get tenant_id for the panic log record
-    const instance = getInstanceRecord(Number(params.id));
+    const instance = getInstanceRecordRaw(Number(params.id));
     if (!instance) {
       set.status = 404;
       return { error: { code: "RESOURCE_NOT_FOUND", message: "Instance not found", category: "not_found" } };
@@ -805,10 +791,7 @@ export function upsertTailscaleState(
   );
 
   if (existing) {
-    execute(
-      "UPDATE objects SET metadata_json = ?, updated_at = ? WHERE id = ?",
-      [metadata, now, existing.id]
-    );
+    updateObjectMetadata(existing.id, metadata);
   } else {
     // Create minimal blob + object
     const payload = Buffer.from(metadata, "utf-8");

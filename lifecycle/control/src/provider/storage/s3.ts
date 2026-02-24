@@ -10,7 +10,7 @@ import {
   CreateBucketCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import type { BlobProvider, BlobProviderCapabilities, UploadOpts, PresignedUrlOpts } from "./types";
+import type { BlobProvider, BlobProviderCapabilities, BlobProviderLifecycleHooks, StorageTaskReceipt, StorageHeartbeatExpectations, UploadOpts, PresignedUrlOpts } from "./types";
 import { PRESIGNED_PUT_TTL_MS, PRESIGNED_GET_TTL_MS, BlobProviderError, mapS3Error, withBlobErrorMapping } from "./types";
 
 // =============================================================================
@@ -198,6 +198,53 @@ export class S3BlobProvider implements BlobProvider {
   // ---------------------------------------------------------------------------
   // Bucket Management
   // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
+  // Lifecycle Hooks Factory
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Create lifecycle hooks for this S3BlobProvider instance.
+   * Includes onStartup (bucket ensure), onHealthCheck, and onHeartbeat.
+   */
+  createHooks(): BlobProviderLifecycleHooks {
+    const provider = this;
+    return {
+      async onStartup() {
+        await provider.ensureBucket();
+      },
+      async onHealthCheck() {
+        return provider.healthCheck();
+      },
+      async onHeartbeat(expectations: StorageHeartbeatExpectations) {
+        const receipts: StorageTaskReceipt[] = [];
+        for (const task of expectations.tasks) {
+          switch (task.type) {
+            case 'health_check': {
+              try {
+                const result = await provider.healthCheck();
+                receipts.push({ type: 'health_check', status: result.healthy ? 'completed' : 'failed' });
+              } catch (err) {
+                receipts.push({ type: 'health_check', status: 'failed', reason: String(err) });
+              }
+              break;
+            }
+            case 'blob_gc':
+              // Acknowledge — actual GC logic runs in the control plane dispatch loop
+              receipts.push({ type: 'blob_gc', status: 'completed' });
+              break;
+            case 'log_compaction':
+              // Acknowledge — actual compaction logic runs in the control plane dispatch loop
+              receipts.push({ type: 'log_compaction', status: 'completed' });
+              break;
+            default:
+              receipts.push({ type: task.type, status: 'skipped', reason: `Unknown task type: ${task.type}` });
+          }
+        }
+        return { receipts };
+      },
+    };
+  }
 
   /** Ensure bucket exists. Called at registration via lifecycle hooks. */
   async ensureBucket(): Promise<void> {

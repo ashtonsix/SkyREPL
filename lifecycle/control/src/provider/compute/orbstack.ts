@@ -780,6 +780,39 @@ export function createOrbStackHooks(provider: OrbStackProvider): ProviderLifecyc
             }
             break;
           }
+          case "heartbeat_timeout_scan":
+            // Provider acknowledges — control plane handles the DB scan
+            receipts.push({ type: task.type, status: "completed" });
+            break;
+
+          case "reconcile_instances":
+            // Provider returns list of live instances for comparison
+            try {
+              const instances = await provider.list();
+              receipts.push({
+                type: task.type,
+                status: "completed",
+                result: { instances: instances.map(i => ({ id: i.id, status: i.status, ip: i.ip })) },
+              });
+            } catch (err) {
+              receipts.push({ type: task.type, status: "failed", reason: String(err) });
+            }
+            break;
+
+          case "orphan_scan":
+            // Provider returns full resource list for orphan detection
+            try {
+              const instances = await provider.list();
+              receipts.push({
+                type: task.type,
+                status: "completed",
+                result: { instances },
+              });
+            } catch (err) {
+              receipts.push({ type: task.type, status: "failed", reason: String(err) });
+            }
+            break;
+
           default:
             receipts.push({
               type: task.type,

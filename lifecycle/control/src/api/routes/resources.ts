@@ -2,17 +2,15 @@
 
 import { Elysia, t } from "elysia";
 import { Type } from "@sinclair/typebox";
-import { getRunRecord, materializeRun } from "../../resource/run";
-import { getInstanceRecord, materializeInstance } from "../../resource/instance";
+import { getRunRecordRaw, materializeRun } from "../../resource/run";
+import { getInstanceRecordRaw, materializeInstance } from "../../resource/instance";
 import { materializeAllocation } from "../../resource/allocation";
 import { materializeManifest } from "../../resource/manifest";
 import { materializeWorkflow } from "../../resource/workflow";
 import { stampMaterialized } from "../../resource/materializer";
 import { materializeInstanceBatch } from "../../resource/instance";
 import {
-  queryOne,
   queryMany,
-  execute,
   getWorkflow,
   getWorkflowNodes,
   updateInstance,
@@ -20,6 +18,7 @@ import {
   updateRun,
   deleteRun,
   getAllocation,
+  updateAllocation,
   getManifest,
   getManifestResources,
   getObject,
@@ -29,7 +28,7 @@ import {
   type Manifest,
   type StorageObject,
   type Run,
-} from "../../material/db";
+} from "../../material/db"; // raw-db: boutique queries (allocations JOIN instances, workflow manifest inline), see WL-057
 import {
   SkyREPLError,
   httpStatusForError,
@@ -138,7 +137,7 @@ export function registerResourceRoutes(app: Elysia<any>): void {
       return { error: { code: "FORBIDDEN", message: "Admin only", category: "auth" } };
     }
     const id = Number(params.id);
-    const instance = getInstanceRecord(id);
+    const instance = getInstanceRecordRaw(id);
     if (!instance || instance.tenant_id !== auth.tenantId) {
       set.status = 404;
       return { error: { code: "INSTANCE_NOT_FOUND", message: `Instance ${id} not found`, category: "not_found" } };
@@ -163,7 +162,7 @@ export function registerResourceRoutes(app: Elysia<any>): void {
       return { error: { code: "FORBIDDEN", message: "Admin only", category: "auth" } };
     }
     const id = Number(params.id);
-    const instance = getInstanceRecord(id);
+    const instance = getInstanceRecordRaw(id);
     if (!instance || instance.tenant_id !== auth.tenantId) {
       set.status = 404;
       return { error: { code: "INSTANCE_NOT_FOUND", message: `Instance ${id} not found`, category: "not_found" } };
@@ -191,7 +190,7 @@ export function registerResourceRoutes(app: Elysia<any>): void {
       return { error: { code: "FORBIDDEN", message: "Admin only", category: "auth" } };
     }
     const id = Number(params.id);
-    const run = getRunRecord(id);
+    const run = getRunRecordRaw(id);
     if (!run || run.tenant_id !== auth.tenantId) {
       set.status = 404;
       return { error: { code: "RUN_NOT_FOUND", message: `Run ${id} not found`, category: "not_found" } };
@@ -216,7 +215,7 @@ export function registerResourceRoutes(app: Elysia<any>): void {
       return { error: { code: "FORBIDDEN", message: "Admin only", category: "auth" } };
     }
     const id = Number(params.id);
-    const run = getRunRecord(id);
+    const run = getRunRecordRaw(id);
     if (!run || run.tenant_id !== auth.tenantId) {
       set.status = 404;
       return { error: { code: "RUN_NOT_FOUND", message: `Run ${id} not found`, category: "not_found" } };
@@ -308,10 +307,7 @@ export function registerResourceRoutes(app: Elysia<any>): void {
       set.status = 400;
       return { error: { code: "INVALID_INPUT", message: "No updatable fields provided", category: "validation" } };
     }
-    const setClauses = Object.keys(updates).map(f => `${f} = ?`).join(", ");
-    const values = [...Object.values(updates), Date.now(), id];
-    execute(`UPDATE allocations SET ${setClauses}, updated_at = ? WHERE id = ?`, values);
-    const updated = getAllocation(id)!;
+    const updated = updateAllocation(id, updates as any);
     return { data: updated };
   }, { params: IdParams, body: PatchAllocationSchema });
 
@@ -387,10 +383,7 @@ export function registerResourceRoutes(app: Elysia<any>): void {
       (result.data as Record<string, unknown>).nodes = getWorkflowNodes(id);
     }
     if (include.includes("manifest") && workflow.manifest_id) {
-      (result.data as Record<string, unknown>).manifest = queryOne(
-        "SELECT * FROM manifests WHERE id = ?",
-        [workflow.manifest_id]
-      );
+      (result.data as Record<string, unknown>).manifest = getManifest(workflow.manifest_id);
     }
 
     return result;
