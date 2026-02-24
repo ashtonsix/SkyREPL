@@ -373,10 +373,9 @@ describe("PROV-054D: spawn", () => {
     const provider = createProvider(state);
 
     const result = await provider.spawn({
-      spec: "gpu:a100:1",
+      spec: "gpu_1x_a100",
       bootstrap: testBootstrap,
       ...testIdentity,
-      instanceType: "gpu_1x_a100",
     });
 
     expect(result.id).toBeDefined();
@@ -398,12 +397,11 @@ describe("PROV-054D: spawn", () => {
     const provider = createProvider(state);
 
     await provider.spawn({
-      spec: "gpu:a100:1",
+      spec: "gpu_1x_a100",
       bootstrap: testBootstrap,
       controlId: "abc123",
       manifestId: 7,
       instanceId: 42,
-      instanceType: "gpu_1x_a100",
     });
 
     // Both hostname and name should be set from formatResourceName
@@ -417,25 +415,23 @@ describe("PROV-054D: spawn", () => {
 
     await expect(
       provider.spawn({
-        spec: "gpu:a100:1",
+        spec: "gpu_1x_a100",
         bootstrap: testBootstrap,
         ...testIdentity,
-        instanceType: "gpu_1x_a100",
         spot: true,
       }),
     ).rejects.toMatchObject({ code: "UNSUPPORTED_OPERATION" });
   });
 
-  test("spawn without instanceType throws INVALID_SPEC", async () => {
+  test("spawn without spec throws INVALID_SPEC", async () => {
     const state = createState();
     const provider = createProvider(state);
 
     await expect(
       provider.spawn({
-        spec: "gpu:a100:1",
+        spec: "",
         bootstrap: testBootstrap,
         ...testIdentity,
-        // no instanceType
       }),
     ).rejects.toMatchObject({ code: "INVALID_SPEC" });
   });
@@ -449,10 +445,9 @@ describe("PROV-054D: spawn", () => {
     // BEFORE ever calling /instance-operations/launch.
     await expect(
       provider.spawn({
-        spec: "gpu:a10:1",
+        spec: "gpu_1x_a10",
         bootstrap: testBootstrap,
         ...testIdentity,
-        instanceType: "gpu_1x_a10",
       }),
     ).rejects.toMatchObject({ code: "CAPACITY_ERROR" });
 
@@ -468,10 +463,9 @@ describe("PROV-054D: spawn", () => {
     const provider = createProvider(state, { defaultRegion: "us-west-1" });
 
     const result = await provider.spawn({
-      spec: "gpu:a100:8",
+      spec: "gpu_8x_a100",
       bootstrap: testBootstrap,
       ...testIdentity,
-      instanceType: "gpu_8x_a100",
       // No region specified — neither default nor preferred match
     });
 
@@ -489,10 +483,9 @@ describe("PROV-054D: spawn", () => {
     const provider = createProvider(state, { defaultRegion: "us-west-1" });
 
     await provider.spawn({
-      spec: "gpu:a100:1",
+      spec: "gpu_1x_a100",
       bootstrap: testBootstrap,
       ...testIdentity,
-      instanceType: "gpu_1x_a100",
       region: "us-east-1",
     });
 
@@ -510,10 +503,9 @@ describe("PROV-054D: terminate", () => {
     const provider = createProvider(state);
 
     const inst = await provider.spawn({
-      spec: "gpu:a100:1",
+      spec: "gpu_1x_a100",
       bootstrap: testBootstrap,
       ...testIdentity,
-      instanceType: "gpu_1x_a100",
     });
 
     await provider.terminate(inst.id);
@@ -525,10 +517,9 @@ describe("PROV-054D: terminate", () => {
     const provider = createProvider(state);
 
     const inst = await provider.spawn({
-      spec: "gpu:a100:1",
+      spec: "gpu_1x_a100",
       bootstrap: testBootstrap,
       ...testIdentity,
-      instanceType: "gpu_1x_a100",
     });
 
     await provider.terminate(inst.id);
@@ -541,10 +532,9 @@ describe("PROV-054D: terminate", () => {
     const provider = createProvider(state);
 
     const inst = await provider.spawn({
-      spec: "gpu:a100:1",
+      spec: "gpu_1x_a100",
       bootstrap: testBootstrap,
       ...testIdentity,
-      instanceType: "gpu_1x_a100",
     });
 
     // Inject a 500 error on next terminate call
@@ -569,18 +559,16 @@ describe("PROV-054D: list and get", () => {
     const provider = createProvider(state);
 
     await provider.spawn({
-      spec: "gpu:a100:1",
+      spec: "gpu_1x_a100",
       bootstrap: testBootstrap,
       ...testIdentity,
       instanceId: 1,
-      instanceType: "gpu_1x_a100",
     });
     await provider.spawn({
-      spec: "gpu:h100:1",
+      spec: "gpu_1x_h100_pcie",
       bootstrap: testBootstrap,
       ...testIdentity,
       instanceId: 2,
-      instanceType: "gpu_1x_h100_pcie",
     });
 
     const all = await provider.list();
@@ -597,10 +585,9 @@ describe("PROV-054D: list and get", () => {
     const provider = createProvider(state);
 
     await provider.spawn({
-      spec: "gpu:a100:1",
+      spec: "gpu_1x_a100",
       bootstrap: testBootstrap,
       ...testIdentity,
-      instanceType: "gpu_1x_a100",
     });
 
     // Instances start as "booting" → "starting"
@@ -616,10 +603,9 @@ describe("PROV-054D: list and get", () => {
     const provider = createProvider(state);
 
     await provider.spawn({
-      spec: "gpu:a100:1",
+      spec: "gpu_1x_a100",
       bootstrap: testBootstrap,
       ...testIdentity,
-      instanceType: "gpu_1x_a100",
     });
 
     // Instance was spawned in us-west-1 (default region, has capacity for a100)
@@ -631,9 +617,9 @@ describe("PROV-054D: list and get", () => {
     const state = createState();
     const provider = createProvider(state);
 
-    await provider.spawn({ spec: "gpu:a100:1", bootstrap: testBootstrap, ...testIdentity, instanceId: 1, instanceType: "gpu_1x_a100" });
-    await provider.spawn({ spec: "gpu:a100:1", bootstrap: testBootstrap, ...testIdentity, instanceId: 2, instanceType: "gpu_1x_a100" });
-    await provider.spawn({ spec: "gpu:a100:1", bootstrap: testBootstrap, ...testIdentity, instanceId: 3, instanceType: "gpu_1x_a100" });
+    await provider.spawn({ spec: "gpu_1x_a100", bootstrap: testBootstrap, ...testIdentity, instanceId: 1 });
+    await provider.spawn({ spec: "gpu_1x_a100", bootstrap: testBootstrap, ...testIdentity, instanceId: 2 });
+    await provider.spawn({ spec: "gpu_1x_a100", bootstrap: testBootstrap, ...testIdentity, instanceId: 3 });
 
     const limited = await provider.list({ limit: 2 });
     expect(limited.length).toBe(2);
@@ -644,10 +630,9 @@ describe("PROV-054D: list and get", () => {
     const provider = createProvider(state);
 
     const inst = await provider.spawn({
-      spec: "gpu:a100:1",
+      spec: "gpu_1x_a100",
       bootstrap: testBootstrap,
       ...testIdentity,
-      instanceType: "gpu_1x_a100",
     });
 
     // Mark as terminated in mock state
@@ -670,10 +655,9 @@ describe("PROV-054D: list and get", () => {
     const provider = createProvider(state);
 
     const inst = await provider.spawn({
-      spec: "gpu:a100:1",
+      spec: "gpu_1x_a100",
       bootstrap: testBootstrap,
       ...testIdentity,
-      instanceType: "gpu_1x_a100",
     });
 
     const found = await provider.get(inst.id) as LambdaInstance;
@@ -811,10 +795,9 @@ describe("PROV-054D: instance mapping", () => {
     const provider = createProvider(state);
 
     const inst = await provider.spawn({
-      spec: "gpu:a100:1",
+      spec: "gpu_1x_a100",
       bootstrap: testBootstrap,
       ...testIdentity,
-      instanceType: "gpu_1x_a100",
     });
 
     // Simulate active instance with IPs

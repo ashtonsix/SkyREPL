@@ -10,7 +10,6 @@ export interface Profile {
   provider?: string;
   region?: string;
   spec?: string;
-  instance_type?: string;
   workdir?: string;
   max_duration?: string;
   hold_duration?: string;

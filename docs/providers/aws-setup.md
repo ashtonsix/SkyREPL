@@ -104,12 +104,12 @@ repl run --provider aws --spec "ubuntu:noble:amd64" --command "echo hello world"
 repl run list
 ```
 
-The spec format is `distro:version:arch`. Supported values:
+The spec format is either an EC2 instance type (e.g. `t4g.nano`, `c8g.large`) or `distro:version:arch`. Supported values for the OS descriptor format:
 - Distro: `ubuntu`
 - Version: `noble` (24.04), `jammy` (22.04), `focal` (20.04)
 - Arch: `amd64`, `arm64`
 
-Instance types default to `t3.micro` (amd64) or `t4g.micro` (arm64). Pass `--instance-type` to override.
+When an instance type is used as the spec, the architecture is inferred from the instance family (Graviton families like `c8g`, `t4g` → arm64, others → amd64). When an OS descriptor is used, instance types default to `t3.micro` (amd64) or `t4g.micro` (arm64).
 
 ## Spot Instances
 

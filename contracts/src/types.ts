@@ -70,7 +70,6 @@ export function parseInputId(input: string): number {
 
 /** Normalized instance specification across providers */
 export interface InstanceSpec {
-  instanceType: string; // Provider-specific identifier (e.g., 'g5.xlarge', 'gpu_1x_a100')
   vcpus: number; // Virtual CPU cores
   memoryMb: number; // Memory in megabytes
   gpuCount?: number; // Number of GPUs

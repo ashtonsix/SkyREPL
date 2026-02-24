@@ -127,7 +127,6 @@ export const PROVIDER_CAPABILITIES: Record<ProviderName, ProviderCapabilities> =
 export interface SpawnOptions {
   spec: string;
   region?: string;
-  instanceType?: string;
   spot?: boolean;
   maxSpotPrice?: number;
   initChecksum?: string;

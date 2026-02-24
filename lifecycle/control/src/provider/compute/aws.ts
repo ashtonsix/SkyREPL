@@ -141,15 +141,27 @@ export function mapEC2Error(awsErrorCode: string, message: string): ConcreteProv
 /**
  * Default instance types per architecture.
  *
- * The spec string (e.g. "ubuntu:noble:arm64") encodes distro/version/arch but
- * not instance size. Instance type comes from SpawnOptions.instanceType
- * (set by the caller from repl.toml config), falling back to these defaults.
+ * Used when spec is an OS descriptor (e.g. "ubuntu:noble:arm64") rather than
+ * an EC2 instance type. When spec IS an instance type (e.g. "c8g.large"),
+ * it is used directly and arch is inferred from the instance family.
  */
 const DEFAULT_INSTANCE_TYPES: Record<string, string> = {
   arm64: "t4g.micro",
   amd64: "t3.micro",
   x86_64: "t3.micro",
 };
+
+/**
+ * Infer CPU architecture from an EC2 instance type string.
+ *
+ * Graviton (arm64) instances have families matching: letter(s) + digit(s) + 'g'
+ * Examples: t4g, c7g, c8g, m7gd, r8g, hpc7g, g5g
+ * Non-Graviton: p3, g4dn, c5, t3, m5 — all amd64/x86_64
+ */
+function inferArchFromInstanceType(instanceType: string): string {
+  const family = instanceType.split(".")[0];
+  return /^[a-z]\d+g/.test(family) ? "arm64" : "amd64";
+}
 
 /**
  * Ubuntu version codename → release number mapping for DescribeImages filter.
@@ -286,19 +298,46 @@ export class AWSProvider implements Provider<AWSInstance, AWSSnapshot> {
     return this.clients.get(r)!;
   }
 
+  /**
+   * Flush the cached EC2 clients so the next call creates fresh ones.
+   * Called on auth failure to pick up refreshed credentials.
+   */
+  flushClientCache(): void {
+    this.clients.clear();
+  }
+
   // ─── Private: resolveInstanceParams ───────────────────────────────────────
 
   /**
    * Resolve AMI and instance type for a given spec in a region.
    * Shared by both spawn() and requestSpotInstance().
+   *
+   * spec can be either:
+   *   - An EC2 instance type: "c8g.large", "p3.2xlarge" (contains '.', no ':')
+   *   - An OS spec: "ubuntu:noble:arm64" (contains ':')
+   *   - A bare distro name: "ubuntu" (no '.' or ':')
    */
   private async resolveInstanceParams(
     spec: string,
     region: string,
-    overrideInstanceType?: string,
     snapshotId?: string,
   ): Promise<{ imageId: string; instanceType: string }> {
-    const { version, arch } = parseSpec(spec);
+    let instanceType: string;
+    let version: string;
+    let arch: string;
+
+    if (spec.includes(".") && !spec.includes(":")) {
+      // spec IS the instance type (e.g., "c8g.large", "p3.2xlarge")
+      instanceType = spec;
+      arch = inferArchFromInstanceType(spec);
+      version = "noble";
+    } else {
+      // spec is an OS spec (e.g., "ubuntu:noble:arm64")
+      const parsed = parseSpec(spec);
+      version = parsed.version;
+      arch = parsed.arch;
+      instanceType = DEFAULT_INSTANCE_TYPES[arch] ?? "t3.micro";
+    }
 
     let imageId: string;
     if (snapshotId) {
@@ -315,10 +354,6 @@ export class AWSProvider implements Provider<AWSInstance, AWSSnapshot> {
       }
     }
 
-    const instanceType = overrideInstanceType
-      ?? DEFAULT_INSTANCE_TYPES[arch]
-      ?? "t3.micro";
-
     return { imageId, instanceType };
   }
 
@@ -328,7 +363,7 @@ export class AWSProvider implements Provider<AWSInstance, AWSSnapshot> {
     const region = options.region ?? this.defaultRegion;
     const client = this.getClient(region);
     const { imageId, instanceType } = await this.resolveInstanceParams(
-      options.spec, region, options.instanceType, options.snapshotId
+      options.spec, region, options.snapshotId
     );
 
     // Generate cloud-init user-data
@@ -619,7 +654,7 @@ export class AWSProvider implements Provider<AWSInstance, AWSSnapshot> {
     const region = options.region ?? this.defaultRegion;
     const client = this.getClient(region);
     const { imageId, instanceType } = await this.resolveInstanceParams(
-      options.spec, region, options.instanceType, options.snapshotId
+      options.spec, region, options.snapshotId
     );
 
     const bootstrap = this.generateBootstrap(options.bootstrap);
@@ -684,8 +719,13 @@ export class AWSProvider implements Provider<AWSInstance, AWSSnapshot> {
   // ─── Optional: getSpotPrices ──────────────────────────────────────────────
 
   async getSpotPrices(spec: string, regions?: string[]): Promise<SpotPriceInfo[]> {
-    const { arch } = parseSpec(spec);
-    const instanceType = DEFAULT_INSTANCE_TYPES[arch] ?? "t3.micro";
+    let instanceType: string;
+    if (spec.includes(".") && !spec.includes(":")) {
+      instanceType = spec;
+    } else {
+      const { arch } = parseSpec(spec);
+      instanceType = DEFAULT_INSTANCE_TYPES[arch] ?? "t3.micro";
+    }
     const targetRegions = regions?.length ? regions : [this.defaultRegion];
     const results: SpotPriceInfo[] = [];
 
@@ -944,6 +984,10 @@ export function createAwsHooks(provider: AWSProvider): ProviderLifecycleHooks {
                 result: { latencyMs: Date.now() - start },
               });
             } catch (err) {
+              // Session expired or auth failure — flush cached clients so the
+              // next API call picks up refreshed credentials from the ambient
+              // credential chain (env vars, ~/.aws/credentials, SSO cache).
+              provider.flushClientCache();
               receipts.push({
                 type: "health_check",
                 status: "failed",

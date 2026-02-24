@@ -614,7 +614,6 @@ export interface LaunchRunRequest {
   spec: string;
   provider: string;
   region?: string;
-  instance_type?: string;
   init_checksum?: string | null;
   use_tailscale?: boolean;
   max_duration_ms: number;

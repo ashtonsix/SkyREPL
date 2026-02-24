@@ -203,27 +203,20 @@ async function cleanupInstance(
     return "skipped"; // Already terminated
   }
 
-  // Step 12: Actually terminate the VM via provider API (best-effort)
+  // Actually terminate the VM via provider API.
+  // If terminate fails, re-throw so the cleanup workflow retries later
+  // rather than marking the instance as terminated while it's still running.
   if (existing.provider_id) {
-    try {
-      const provider = await getProvider(existing.provider as ProviderName);
-      await provider.terminate(existing.provider_id);
-      ctx.log("info", "Terminated instance via provider", {
-        instanceId: id,
-        provider: existing.provider,
-        providerId: existing.provider_id,
-      });
-    } catch (err) {
-      ctx.log("warn", "Failed to terminate instance via provider (best-effort)", {
-        instanceId: id,
-        provider: existing.provider,
-        providerId: existing.provider_id,
-        error: String(err),
-      });
-    }
+    const provider = await getProvider(existing.provider as ProviderName);
+    await provider.terminate(existing.provider_id);
+    ctx.log("info", "Terminated instance via provider", {
+      instanceId: id,
+      provider: existing.provider,
+      providerId: existing.provider_id,
+    });
   }
 
-  // Mark as terminated in DB
+  // Mark as terminated in DB — only reached if terminate succeeded
   updateInstance(id, { workflow_state: "terminate:complete" });
   ctx.log("info", "Marked instance as terminated for cleanup", {
     instanceId: id,

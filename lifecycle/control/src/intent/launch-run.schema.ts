@@ -18,7 +18,6 @@ export const LaunchRunWorkflowInputSchema = Type.Object({
   allowSpotFallback: Type.Optional(Type.Boolean()),
   provider: Type.Optional(Type.String()),
   region: Type.Optional(Type.String()),
-  instanceType: Type.Optional(Type.String()),
   workdir: Type.Optional(Type.String()),
   env: Type.Optional(Type.Record(Type.String(), Type.String())),
   maxDurationMs: Type.Optional(Type.Number()),

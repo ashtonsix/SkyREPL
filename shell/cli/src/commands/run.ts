@@ -26,7 +26,7 @@ function parseRunArgs(args: string[]): { flags: Record<string, string | true> } 
   const flags: Record<string, string | true> = {};
 
   // Flags that take a value
-  const valuedFlags = new Set(['-p', '--profile', '-c', '--command', '--timeout', '--hold', '--workdir', '--provider', '--spec', '--instance-type', '--region']);
+  const valuedFlags = new Set(['-p', '--profile', '-c', '--command', '--timeout', '--hold', '--workdir', '--provider', '--spec', '--region']);
   // Boolean flags
   const boolFlags = new Set(['--dry-run', '--no-preflight']);
 
@@ -97,7 +97,6 @@ export async function runCommand(args: string[]): Promise<void> {
     console.error('  --provider <name>       Override provider');
     console.error('  --region <region>       Override region');
     console.error('  --spec <spec>           Override instance spec');
-    console.error('  --instance-type <type>  Override provider instance type (e.g. t4g.nano)');
     console.error('  --workdir <path>        Override working directory');
     console.error('  --timeout <duration>    Override max duration (e.g. "1h", "30m")');
     console.error('  --hold <duration>       Override hold duration');
@@ -121,7 +120,6 @@ export async function runCommand(args: string[]): Promise<void> {
   const region = (flags['--region'] as string) ?? profile.region;
   const spec = (flags['--spec'] as string) ?? profile.spec ?? DEFAULTS.spec;
   const workdir = (flags['--workdir'] as string) ?? profile.workdir ?? DEFAULTS.workdir;
-  const instanceType = (flags['--instance-type'] as string) ?? profile.instance_type;
   const maxDurationMs = parseDuration((flags['--timeout'] as string) ?? profile.max_duration ?? DEFAULTS.max_duration);
   const holdDurationMs = parseDuration((flags['--hold'] as string) ?? profile.hold_duration ?? DEFAULTS.hold_duration);
 
@@ -133,7 +131,6 @@ export async function runCommand(args: string[]): Promise<void> {
       provider,
       ...(region ? { region } : {}),
       spec,
-      ...(instanceType ? { instance_type: instanceType } : {}),
       workdir,
       max_duration_ms: maxDurationMs,
       hold_duration_ms: holdDurationMs,
@@ -163,7 +160,6 @@ export async function runCommand(args: string[]): Promise<void> {
       spec,
       provider,
       ...(region ? { region } : {}),
-      ...(instanceType ? { instance_type: instanceType } : {}),
       workdir,
       max_duration_ms: maxDurationMs,
       hold_duration_ms: holdDurationMs,

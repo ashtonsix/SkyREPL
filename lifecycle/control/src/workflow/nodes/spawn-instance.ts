@@ -26,7 +26,6 @@ export interface SpawnInstanceInput {
   region?: string;
   spot?: boolean;
   initChecksum?: string;
-  instanceType?: string;
 }
 
 // Output type re-exported from schema
@@ -184,7 +183,6 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
       instanceId: instance.id,
       controlId: ctx.controlId,
       manifestId: ctx.manifestId,
-      instanceType: input.instanceType,
       region: input.region,
     });
 

@@ -65,7 +65,7 @@ describe.skipIf(!TEST_REAL_AWS)("AWS Provider - Integration Tests", () => {
 
   test("spawn → running → terminate lifecycle", async () => {
     const instance = await provider.spawn({
-      spec: "ubuntu:noble:arm64",
+      spec: "t4g.nano",
       region: "us-east-1",
       bootstrap: {
         agentUrl: "http://localhost:3000/v1/agent/download",
@@ -73,7 +73,6 @@ describe.skipIf(!TEST_REAL_AWS)("AWS Provider - Integration Tests", () => {
         registrationToken: "integration-test-token",
       },
       tags: {
-        instance_type: "t4g.nano",
         "skyrepl:control_id": "inttest",
       },
       instanceId: 1,

@@ -519,8 +519,7 @@ Scaffold
 
 Build and test infrastructure, deployment scripts, demo projects, legal.
 
-Testing mix: automated (bun test — unit, integration, simulated E2E)
-and interactive (scaffold/demo/ with repl.toml profiles for exploration).
+Testing mix: automated (bun test — unit, integration, simulated E2E).
 
 
 ================================================================================
@@ -560,5 +559,4 @@ References
 ================================================================================
 
   docs/providers/    Provider setup guides
-  scaffold/demo/     Interactive testing project
   scaffold/legal/    License (BSL 1.1), terms of service, privacy policy

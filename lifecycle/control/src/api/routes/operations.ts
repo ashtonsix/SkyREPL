@@ -108,7 +108,6 @@ export function registerOperationRoutes(app: Elysia<any>): void {
       workdir: body.workdir ?? "/workspace",
       provider: providerName,
       region: body.region || undefined,
-      instanceType: (body as any).instance_type ?? undefined,
       env: body.env ?? undefined,
       maxDurationMs: body.max_duration_ms,
       holdDurationMs: body.hold_duration_ms ?? 300_000,

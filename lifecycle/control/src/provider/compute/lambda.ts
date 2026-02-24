@@ -270,12 +270,12 @@ export class LambdaLabsProvider implements Provider<LambdaInstance> {
       );
     }
 
-    const instanceType = options.instanceType;
+    const instanceType = options.spec;
     if (!instanceType) {
       throw new ConcreteProviderError(
         "lambda",
         "INVALID_SPEC",
-        "Lambda Labs requires instanceType to be specified (e.g. 'gpu_1x_a100')",
+        "Lambda Labs requires spec to be specified (e.g. 'gpu_1x_a100')",
       );
     }
 

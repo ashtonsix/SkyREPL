@@ -560,16 +560,15 @@ describe("PROV-02: spawn", () => {
     expect(decoded).not.toContain("#!/bin/bash");
   });
 
-  test("spawn passes instanceType over arch default", async () => {
+  test("spawn with instance type as spec overrides arch default", async () => {
     const state = createState();
     const provider = createProvider(state);
 
     await provider.spawn({
-      spec: "ubuntu:noble:arm64",
+      spec: "c7g.large",
       bootstrap: testBootstrap,
       ...testIdentity,
       snapshotId: "ami-known-test",
-      instanceType: "c7g.large",
     });
 
     expect(state.lastRunInput!.InstanceType).toBe("c7g.large");

@@ -21,14 +21,14 @@ let regenCallCount = 0;
 let regenLastCalledAt: number | null = null;
 
 // Mock ApiClient constructor (needed so import('../cli/src/client') doesn't fail)
-mock.module('/home/ashtonsix/SkyREPL/shell/cli/src/client', () => ({
+mock.module('../cli/src/client', () => ({
   ApiClient: class MockApiClient {
     constructor() {}
   },
 }));
 
 // Mock regenerateSSHConfig to count calls
-mock.module('/home/ashtonsix/SkyREPL/shell/cli/src/ssh', () => ({
+mock.module('../cli/src/ssh', () => ({
   regenerateSSHConfig: async (_client: unknown) => {
     regenCallCount++;
     regenLastCalledAt = Date.now();

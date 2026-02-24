@@ -53,9 +53,6 @@ export interface LaunchRunInput {
   /** Specific region, or let system choose */
   region?: string;
 
-  /** Provider-specific instance type override (e.g., "t4g.nano") */
-  instanceType?: string;
-
   /** Override workdir (default: auto-assigned) */
   workdir?: string;
 

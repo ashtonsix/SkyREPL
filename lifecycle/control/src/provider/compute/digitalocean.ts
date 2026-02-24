@@ -162,7 +162,7 @@ export interface DigitalOceanProviderConfig {
 
 /**
  * Default droplet size slug. DO is x64-only — no ARM droplets.
- * instanceType from SpawnOptions overrides this.
+ * When spec IS a size slug (no ':'), it overrides this.
  */
 const DEFAULT_SIZE_SLUG = "s-1vcpu-1gb";
 
@@ -206,17 +206,24 @@ export class DigitalOceanProvider
 
   async spawn(options: SpawnOptions): Promise<DigitalOceanInstance> {
     const region = options.region ?? this.config.defaultRegion;
-    const { version, arch } = parseSpec(options.spec);
+
+    // Detect whether spec is a DO size slug or distro:version:arch
+    let size: string;
+    let version: string;
+    if (options.spec.includes(":")) {
+      const parsed = parseSpec(options.spec);
+      version = parsed.version;
+      size = this.config.defaultSizeSlug ?? DEFAULT_SIZE_SLUG;
+    } else {
+      // spec IS the size slug (e.g. "g-32vcpu-128gb")
+      size = options.spec;
+      version = "noble";
+    }
 
     // Resolve image: snapshot ID or Ubuntu slug
     const image: string | number = options.snapshotId
       ? (isNaN(Number(options.snapshotId)) ? options.snapshotId : Number(options.snapshotId))
       : (UBUNTU_IMAGE_SLUGS[version] ?? "ubuntu-24-04-x64");
-
-    // Resolve size (DO is x64-only — no arch-based size selection needed)
-    const size = options.instanceType
-      ?? this.config.defaultSizeSlug
-      ?? DEFAULT_SIZE_SLUG;
 
     // Generate cloud-init user-data
     const bootstrap = this.generateBootstrap(options.bootstrap);

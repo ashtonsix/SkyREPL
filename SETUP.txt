@@ -65,10 +65,10 @@ First Run: AWS
 ================================================================================
 
     # arm64 (cheaper)
-    repl run -c "echo hello" --provider aws --spec ubuntu:noble:arm64 --instance-type t4g.nano
+    repl run -c "echo hello" --provider aws --spec t4g.nano
 
     # amd64
-    repl run -c "echo hello" --provider aws --spec ubuntu:noble:amd64 --instance-type t3.nano
+    repl run -c "echo hello" --provider aws --spec t3.nano
 
 
 ================================================================================
@@ -119,8 +119,7 @@ Using Profiles (repl.toml)
 
     [gpu]
     provider = "aws"
-    spec = "ubuntu:noble:amd64"
-    instance_type = "g4dn.xlarge"
+    spec = "g4dn.xlarge"
     max_duration = "4h"
 
     repl run                     uses [default]
@@ -128,7 +127,8 @@ Using Profiles (repl.toml)
     repl run -p gpu -c "ls"      [gpu] settings, inline command
     repl run -p gpu --dry-run    preview resolved config, no launch
 
-  See scaffold/demo/repl.toml for a working example with AWS profiles.
+  The spec field accepts an EC2 instance type (e.g. "g4dn.xlarge") or
+  an OS descriptor ("ubuntu:noble:amd64").
 
 
 ================================================================================

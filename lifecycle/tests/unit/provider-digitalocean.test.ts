@@ -437,15 +437,14 @@ describe("PROV-054C: spawn", () => {
     expect(state.lastCreateBody!.name).toBe("repl-abc123-7-16"); // 42 in base36 = "16"
   });
 
-  test("spawn with instanceType overrides default size slug", async () => {
+  test("spawn with size slug as spec overrides default size slug", async () => {
     const state = createState();
     const provider = createProvider(state);
 
     await provider.spawn({
-      spec: "ubuntu:noble:arm64",
+      spec: "g-32vcpu-128gb",
       bootstrap: testBootstrap,
       ...testIdentity,
-      instanceType: "g-32vcpu-128gb",
     });
 
     expect(state.lastCreateBody!.size).toBe("g-32vcpu-128gb");
