@@ -1,5 +1,5 @@
 // tests/unit/log-streaming.test.ts - Log Streaming Enhancement Tests
-// Covers: S2.C2 (sequence numbering, gap detection), S2.D2 (reconnect replay),
+// Covers: S2.C2 (sequence numbering, gap detection),
 //         S2.D3 (updated_at tracking), S2.C3 (manifest ownership wiring)
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
@@ -22,10 +22,6 @@ import {
   type Blob,
   type ManifestResource,
 } from "../../control/src/material/db";
-import {
-  appendLogData,
-  getLogUpdates,
-} from "../../control/src/material/storage";
 import { SSEManager, type LogBroadcast } from "../../control/src/api/sse-protocol";
 
 // =============================================================================
@@ -198,82 +194,6 @@ describe("S2.D3: objects.updated_at tracking", () => {
     expect(updated!.updated_at).toBeGreaterThan(1000);
   });
 
-  test("appendLogData updates objects.updated_at when objectId provided", () => {
-    const run = createTestRun();
-    const { blob, obj } = createLogObject(run.id, "stdout");
-
-    const beforeAppend = obj.updated_at!;
-
-    // Small delay to ensure timestamp difference
-    const data = Buffer.from("hello world\n");
-    appendLogData(blob.id, data, obj.id);
-
-    const updated = getObject(obj.id);
-    expect(updated).toBeDefined();
-    expect(updated!.updated_at).toBeGreaterThanOrEqual(beforeAppend);
-  });
-});
-
-// =============================================================================
-// S2.D2: getLogUpdates uses objects.updated_at instead of blobs.last_referenced_at
-// =============================================================================
-
-describe("S2.D2: getLogUpdates with objects.updated_at", () => {
-
-  test("getLogUpdates returns logs updated after lastSeen timestamp", () => {
-    const run = createTestRun();
-    const { blob, obj } = createLogObject(run.id, "stdout");
-
-    // Wire object tags so getLogUpdates can find it
-    addObjectTag(obj.id, "run_id", String(run.id));
-    addObjectTag(obj.id, "stream", "stdout");
-
-    const beforeAppend = Date.now() - 1;
-    appendLogData(blob.id, Buffer.from("line 1\n"), obj.id);
-
-    const updates = getLogUpdates(run.id, "stdout", beforeAppend);
-    expect(updates.length).toBe(1);
-    expect(Buffer.from(updates[0].payload).toString("utf-8")).toBe("line 1\n");
-    expect(updates[0].updatedAt).toBeGreaterThan(beforeAppend);
-  });
-
-  test("getLogUpdates returns empty for logs not updated since lastSeen", () => {
-    const run = createTestRun();
-    const { blob, obj } = createLogObject(run.id, "stdout");
-
-    addObjectTag(obj.id, "run_id", String(run.id));
-    addObjectTag(obj.id, "stream", "stdout");
-
-    appendLogData(blob.id, Buffer.from("line 1\n"), obj.id);
-
-    // Use a future timestamp
-    const futureTime = Date.now() + 10000;
-    const updates = getLogUpdates(run.id, "stdout", futureTime);
-    expect(updates.length).toBe(0);
-  });
-
-  test("getLogUpdates filters by stream correctly", () => {
-    const run = createTestRun();
-    const stdout = createLogObject(run.id, "stdout");
-    const stderr = createLogObject(run.id, "stderr");
-
-    addObjectTag(stdout.obj.id, "run_id", String(run.id));
-    addObjectTag(stdout.obj.id, "stream", "stdout");
-    addObjectTag(stderr.obj.id, "run_id", String(run.id));
-    addObjectTag(stderr.obj.id, "stream", "stderr");
-
-    const before = Date.now() - 1;
-    appendLogData(stdout.blob.id, Buffer.from("stdout data\n"), stdout.obj.id);
-    appendLogData(stderr.blob.id, Buffer.from("stderr data\n"), stderr.obj.id);
-
-    const stdoutUpdates = getLogUpdates(run.id, "stdout", before);
-    expect(stdoutUpdates.length).toBe(1);
-    expect(Buffer.from(stdoutUpdates[0].payload).toString("utf-8")).toBe("stdout data\n");
-
-    const stderrUpdates = getLogUpdates(run.id, "stderr", before);
-    expect(stderrUpdates.length).toBe(1);
-    expect(Buffer.from(stderrUpdates[0].payload).toString("utf-8")).toBe("stderr data\n");
-  });
 });
 
 // =============================================================================
@@ -678,16 +598,6 @@ describe("Full log lifecycle integration", () => {
     );
     expect(resources.length).toBe(1);
     expect(resources[0].resource_id).toBe(String(obj.id));
-
-    // Append data and verify updated_at changes
-    appendLogData(blob.id, Buffer.from("test output\n"), obj.id);
-    const afterAppend = getObject(obj.id);
-    expect(afterAppend!.updated_at).toBeGreaterThanOrEqual(now);
-
-    // Verify getLogUpdates works with updated_at
-    const updates = getLogUpdates(run.id, "stdout", now - 1);
-    expect(updates.length).toBe(1);
-    expect(Buffer.from(updates[0].payload).toString("utf-8")).toBe("test output\n");
   });
 
   test("multiple streams for same run each get independent objects and tags", () => {

@@ -4,6 +4,8 @@
   "type": "module",
   "main": "src/main.ts",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.996.0",
+    "@aws-sdk/s3-request-presigner": "^3.996.0",
     "@sinclair/typebox": "^0.34",
     "@skyrepl/contracts": "workspace:*",
     "elysia": "^1.2"

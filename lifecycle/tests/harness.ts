@@ -27,6 +27,9 @@ import {
 import {
   clearAllProviders,
 } from "../control/src/provider/registry";
+import {
+  clearAllBlobProviders,
+} from "../control/src/provider/storage/registry";
 import { cacheClear, cacheResetStats } from "../control/src/resource/cache";
 import { expect } from "bun:test";
 
@@ -58,6 +61,7 @@ export function setupTest(opts: SetupTestOptions = {}): () => Promise<void> {
   clearBlueprints();
   clearNodeExecutors();
   clearAllProviders();
+  clearAllBlobProviders();
   cacheClear();
   cacheResetStats();
 

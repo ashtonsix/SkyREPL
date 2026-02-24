@@ -293,18 +293,33 @@ export class ApiClient {
    * GET /v1/artifacts/:id/download
    */
   async downloadArtifact(artifactId: string): Promise<{ data: Buffer; filename: string }> {
+    // Use redirect: "manual" so we can follow 302 without forwarding the Bearer token.
+    // Presigned URLs carry their own auth in the query string — forwarding our token
+    // would corrupt the S3 request signature.
     const response = await fetch(`${this.baseUrl}/v1/artifacts/${artifactId}/download`, {
       headers: this.headers(),
+      redirect: 'manual',
     });
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      const msg = (body as any)?.error?.message ?? `HTTP ${response.status}`;
+
+    let finalResponse: Response;
+    if (response.status === 302) {
+      const location = response.headers.get('Location');
+      if (!location) throw new Error('download artifact failed: 302 with no Location header');
+      // Follow redirect WITHOUT auth header
+      finalResponse = await fetch(location);
+    } else {
+      finalResponse = response;
+    }
+
+    if (!finalResponse.ok) {
+      const body = await finalResponse.json().catch(() => ({}));
+      const msg = (body as any)?.error?.message ?? `HTTP ${finalResponse.status}`;
       throw new Error(`download artifact failed: ${msg}`);
     }
-    const disposition = response.headers.get('Content-Disposition') ?? '';
+    const disposition = finalResponse.headers.get('Content-Disposition') ?? '';
     const match = disposition.match(/filename="?([^"]+)"?/);
     const filename = match?.[1] ?? `artifact-${artifactId}`;
-    const data = Buffer.from(await response.arrayBuffer());
+    const data = Buffer.from(await finalResponse.arrayBuffer());
     return { data, filename };
   }
 

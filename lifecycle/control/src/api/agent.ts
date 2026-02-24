@@ -18,7 +18,7 @@ import {
   type Run,
   type Manifest,
 } from "../material/db";
-import { createBlobWithDedup, appendLogData } from "../material/storage";
+import { appendLog, flushRunBuffers } from "../background/log-streaming";
 import { activateAllocation, failAllocation } from "../workflow/state-transitions";
 import { stateEvents, STATE_EVENT } from "../workflow/events";
 import { sseManager } from "./sse-protocol";
@@ -336,7 +336,10 @@ export function registerAgentRoutes(app: Elysia<any>): void {
       }
     }
 
-    appendLogData(blobId, Buffer.from(log.data, "utf-8"), objectId);
+    // Resolve tenant_id and manifest_id for chunk storage
+    const tenantId = run.tenant_id ?? 1;
+    const manifestId = run.current_manifest_id ?? null;
+    appendLog(log.run_id, log.stream, log.data, tenantId, manifestId);
 
     // Forward to CLI WebSocket subscribers
     sseManager.broadcastLog(String(log.run_id), {
@@ -365,10 +368,10 @@ export function registerAgentRoutes(app: Elysia<any>): void {
       path: string;
       checksum: string;
       size_bytes: number;
-      content_base64: string;
+      blob_id: number;
     };
 
-    // Auth check via run → allocation → instance
+    // Auth check via run -> allocation -> instance
     const run = queryOne<Run>("SELECT * FROM runs WHERE id = ?", [req.run_id]);
     if (!run) {
       set.status = 404;
@@ -390,11 +393,18 @@ export function registerAgentRoutes(app: Elysia<any>): void {
     const now = Date.now();
 
     try {
-      // Decode base64 content
-      const data = Buffer.from(req.content_base64, "base64");
+      if (req.blob_id === undefined) {
+        set.status = 400;
+        return { error: { code: "INVALID_INPUT", message: "blob_id is required", category: "validation" } };
+      }
 
-      // Create or deduplicate blob
-      const blobId = createBlobWithDedup("artifacts", req.checksum, data);
+      // Presigned URL flow: blob already uploaded, just wire the artifact object
+      const blob = queryOne<{ id: number }>("SELECT id FROM blobs WHERE id = ?", [req.blob_id]);
+      if (!blob) {
+        set.status = 404;
+        return { error: { code: "BLOB_NOT_FOUND", message: `Blob ${req.blob_id} not found`, category: "not_found" } };
+      }
+      const blobId = req.blob_id;
 
       // Create artifact object
       const obj = createObject({
@@ -496,6 +506,11 @@ export function registerAgentRoutes(app: Elysia<any>): void {
     }
 
     updateRunRecord(status.run_id, updates);
+
+    // Flush remaining log buffers on run completion
+    if (["completed", "failed", "timeout"].includes(status.status)) {
+      flushRunBuffers(status.run_id);
+    }
 
     // Emit run:finished event for EventEmitter-based waiters
     if (["completed", "failed", "timeout"].includes(status.status)) {

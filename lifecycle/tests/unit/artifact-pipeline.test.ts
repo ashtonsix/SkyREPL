@@ -22,8 +22,6 @@ import {
   type Manifest,
   type StorageObject,
 } from "../../control/src/material/db";
-import { createBlobWithDedup } from "../../control/src/material/storage";
-
 // =============================================================================
 // Test Helpers
 // =============================================================================
@@ -86,7 +84,17 @@ function storeArtifactObject(
 ): { objectId: number; blobId: number } {
   const data = Buffer.from(content, "utf-8");
   const checksum = require("crypto").createHash("sha256").update(data).digest("hex");
-  const blobId = createBlobWithDedup("artifacts", checksum, data);
+  const blob = createBlob({
+    bucket: "artifacts",
+    checksum,
+    checksum_bytes: data.length,
+    s3_key: null,
+    s3_bucket: null,
+    payload: data,
+    size_bytes: data.length,
+    last_referenced_at: Date.now(),
+  });
+  const blobId = blob.id;
   const now = Date.now();
 
   const obj = createObject({
@@ -131,30 +139,57 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("AGENT-07: Artifact storage", () => {
-  test("createBlobWithDedup stores artifact blob", () => {
+  test("createBlob stores artifact blob", () => {
     const data = Buffer.from("test artifact content");
     const checksum = require("crypto").createHash("sha256").update(data).digest("hex");
 
-    const blobId = createBlobWithDedup("artifacts", checksum, data);
-    expect(blobId).toBeGreaterThan(0);
+    const blob = createBlob({
+      bucket: "artifacts",
+      checksum,
+      checksum_bytes: data.length,
+      s3_key: null,
+      s3_bucket: null,
+      payload: data,
+      size_bytes: data.length,
+      last_referenced_at: Date.now(),
+    });
+    expect(blob.id).toBeGreaterThan(0);
 
     // Verify blob exists
-    const blob = queryOne<{ id: number; payload: Buffer; size_bytes: number }>(
+    const row = queryOne<{ id: number; payload: Buffer; size_bytes: number }>(
       "SELECT id, payload, size_bytes FROM blobs WHERE id = ?",
-      [blobId]
+      [blob.id]
     );
-    expect(blob).toBeTruthy();
-    expect(blob!.size_bytes).toBe(data.length);
+    expect(row).toBeTruthy();
+    expect(row!.size_bytes).toBe(data.length);
   });
 
-  test("createBlobWithDedup deduplicates same checksum", () => {
+  test("createBlob deduplicates same checksum in artifacts bucket", () => {
     const data = Buffer.from("same content");
     const checksum = require("crypto").createHash("sha256").update(data).digest("hex");
 
-    const blobId1 = createBlobWithDedup("artifacts", checksum, data);
-    const blobId2 = createBlobWithDedup("artifacts", checksum, data);
+    const blob1 = createBlob({
+      bucket: "artifacts",
+      checksum,
+      checksum_bytes: data.length,
+      s3_key: null,
+      s3_bucket: null,
+      payload: data,
+      size_bytes: data.length,
+      last_referenced_at: Date.now(),
+    });
+    const blob2 = createBlob({
+      bucket: "artifacts",
+      checksum,
+      checksum_bytes: data.length,
+      s3_key: null,
+      s3_bucket: null,
+      payload: data,
+      size_bytes: data.length,
+      last_referenced_at: Date.now(),
+    });
 
-    expect(blobId1).toBe(blobId2);
+    expect(blob1.id).toBe(blob2.id);
   });
 
   test("artifact object is created with correct metadata", () => {

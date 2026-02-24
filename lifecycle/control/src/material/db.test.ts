@@ -120,9 +120,10 @@ afterEach(() => cleanup());
 
 describe("schema & migrations", () => {
   test("runs migrations idempotently", () => {
-    expect(getMigrationVersion()).toBe(1);
+    const version = getMigrationVersion();
+    expect(version).toBeGreaterThanOrEqual(1);
     runMigrations(); // second call should not fail
-    expect(getMigrationVersion()).toBe(1);
+    expect(getMigrationVersion()).toBe(version);
   });
 });
 

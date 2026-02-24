@@ -426,20 +426,20 @@ describe("Agent log ingestion + storage", () => {
     expect(body.bytes_received).toBe(logData.length);
   });
 
-  test("subsequent log POST appends data and blob grows", async () => {
-    // Verify the blob exists from the first POST
-    const blobBefore = queryOne<{ id: number; size_bytes: number }>(
-      `SELECT b.id, b.size_bytes FROM blobs b
-       JOIN objects o ON o.blob_id = b.id
-       WHERE o.type = 'log' AND o.metadata_json LIKE ?
-       ORDER BY o.id DESC LIMIT 1`,
-      [`%"run_id":${testRunId}%"stream":"stdout"%`]
+  test("subsequent log POST appends data and total log bytes grow", async () => {
+    // Count total log bytes stored in log_chunks before second POST
+    const chunksBefore = queryOne<{ total: number | null }>(
+      "SELECT SUM(size_bytes) as total FROM log_chunks WHERE run_id = ? AND stream = 'stdout'",
+      [testRunId]
     );
-    expect(blobBefore).toBeDefined();
-    const sizeBefore = blobBefore!.size_bytes;
+    // Also count in-memory buffer bytes (via log-chunk blob count as proxy)
+    const chunkCountBefore = queryOne<{ cnt: number }>(
+      "SELECT COUNT(*) as cnt FROM log_chunks WHERE run_id = ? AND stream = 'stdout'",
+      [testRunId]
+    );
 
-    // Send second log chunk
-    const logData2 = "Second line of output\nThird line\n";
+    // Send second log chunk (large enough to trigger a flush: >4KB threshold)
+    const logData2 = "X".repeat(5000) + "\n";
     const res2 = await testFetch(`${baseUrl}/v1/agent/logs`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -458,13 +458,14 @@ describe("Agent log ingestion + storage", () => {
     expect(body2.ack).toBe(true);
     expect(body2.bytes_received).toBe(logData2.length);
 
-    // Verify blob grew
-    const blobAfter = queryOne<{ size_bytes: number }>(
-      "SELECT size_bytes FROM blobs WHERE id = ?",
-      [blobBefore!.id]
+    // Verify log chunks grew — either more chunks or larger total bytes
+    const chunksAfter = queryOne<{ total: number | null }>(
+      "SELECT SUM(size_bytes) as total FROM log_chunks WHERE run_id = ? AND stream = 'stdout'",
+      [testRunId]
     );
-    expect(blobAfter).toBeDefined();
-    expect(blobAfter!.size_bytes).toBeGreaterThan(sizeBefore);
+    const totalBefore = chunksBefore?.total ?? 0;
+    const totalAfter = chunksAfter?.total ?? 0;
+    expect(totalAfter).toBeGreaterThan(totalBefore);
   });
 
   test("separate streams (stdout/stderr) create separate blobs", async () => {

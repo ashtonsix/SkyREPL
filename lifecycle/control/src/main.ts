@@ -21,9 +21,12 @@ import { holdExpiryTask } from "./resource/allocation";
 import { heartbeatTimeoutCheck } from "./resource/instance";
 import { manifestCleanupCheck } from "./intent/cleanup-manifest";
 import { warmPoolReconciliation } from "./resource/allocation";
-import { storageGarbageCollection } from "./material/storage";
+import { storageGarbageCollection, refreshSqlStorageSizeCache, getSqlStorageSizeCache, SQL_STORAGE_ADVISORY_BYTES, SQL_STORAGE_STRONG_BYTES } from "./material/storage";
+import { periodicFlush, periodicLogCompaction } from "./background/log-streaming";
 import { seedApiKey } from "./material/db/tenants";
 import { terminateOrphanedVMs, scanAll } from "./orphan/scanner";
+import { execute, queryOne } from "./material/db";
+import { clearBlobProviderCache } from "./provider/storage/registry";
 
 // =============================================================================
 // Module-level State
@@ -47,6 +50,7 @@ export async function startup(): Promise<void> {
   initializeDatabase();
   setupWorkflowEngine();
   registerProviders();
+  checkSqlStorageAtStartup();
 
   const port = parseInt(process.env.SKYREPL_PORT ?? process.env.PORT ?? "3000", 10);
   startHttpServer(port);
@@ -113,6 +117,92 @@ export function registerProviders(): void {
   // (lazy-loaded on first use via providerRegistry in provider/registry.ts)
   // No explicit registration needed — getProvider("orbstack") handles it
   console.log("[control] Providers: orbstack (lazy-loaded via registry)");
+  autoConfigureBlobProvider();
+}
+
+// =============================================================================
+// Auto-configure Blob Provider
+// =============================================================================
+
+export function autoConfigureBlobProvider(): void {
+  // Skip if the default tenant already has a non-SQL blob provider configured
+  const existing = queryOne<{ provider_name: string }>(
+    "SELECT provider_name FROM blob_provider_configs WHERE tenant_id = 1",
+    []
+  );
+  if (existing && existing.provider_name !== "sql") {
+    console.log(`[control] Blob provider already configured: ${existing.provider_name}`);
+    return;
+  }
+
+  // Detect MinIO: binary present OR MINIO_ENDPOINT env var set
+  const minioBinaryPath = join(homedir(), ".repl", "minio", "minio");
+  const minioEnvEndpoint = process.env.MINIO_ENDPOINT;
+  const minioAvailable = existsSync(minioBinaryPath) || !!minioEnvEndpoint;
+
+  if (!minioAvailable) {
+    console.log("[control] No blob provider configured and MinIO not detected — using SQL blob storage");
+    return;
+  }
+
+  const endpoint = minioEnvEndpoint ?? "http://127.0.0.1:9000";
+
+  // Determine presignedUrlEndpoint for OrbStack when endpoint is localhost
+  let presignedUrlEndpoint: string | undefined;
+  const isLocalhost = endpoint.includes("127.0.0.1") || endpoint.includes("localhost");
+  if (isLocalhost) {
+    if (process.env.MINIO_EXTERNAL_ENDPOINT) {
+      presignedUrlEndpoint = process.env.MINIO_EXTERNAL_ENDPOINT;
+    } else if (existsSync("/opt/orbstack-guest") || process.env.ORB_VERSION) {
+      // Running inside an OrbStack VM — use the standard OrbStack host IP
+      presignedUrlEndpoint = "http://198.19.249.1:9000";
+    }
+  }
+
+  const config: Record<string, unknown> = {
+    endpoint,
+    region: process.env.MINIO_REGION ?? "us-east-1",
+    bucket: process.env.MINIO_BUCKET ?? "skyrepl",
+    accessKeyId: process.env.MINIO_ACCESS_KEY ?? "minioadmin",
+    secretAccessKey: process.env.MINIO_SECRET_KEY ?? "minioadmin",
+    forcePathStyle: true,
+  };
+  if (presignedUrlEndpoint) {
+    config.presignedUrlEndpoint = presignedUrlEndpoint;
+  }
+
+  const now = Date.now();
+  execute(
+    `INSERT INTO blob_provider_configs (tenant_id, provider_name, config_json, created_at, updated_at)
+     VALUES (1, 'minio', ?, ?, ?)
+     ON CONFLICT (tenant_id) DO UPDATE SET provider_name = 'minio', config_json = excluded.config_json, updated_at = excluded.updated_at`,
+    [JSON.stringify(config), now, now]
+  );
+
+  clearBlobProviderCache();
+  console.log(
+    `[control] Auto-configured MinIO blob provider (endpoint=${endpoint}${presignedUrlEndpoint ? `, presignedUrlEndpoint=${presignedUrlEndpoint}` : ""})`
+  );
+}
+
+// =============================================================================
+// SQL Storage Startup Warning
+// =============================================================================
+
+export function checkSqlStorageAtStartup(): void {
+  refreshSqlStorageSizeCache();
+  const bytes = getSqlStorageSizeCache();
+  if (bytes >= SQL_STORAGE_STRONG_BYTES) {
+    const gb = (bytes / (1024 * 1024 * 1024)).toFixed(1);
+    console.warn(
+      `[storage] WARNING: SQL blob storage at ${gb}GB — strongly recommended to upgrade to S3/MinIO for reliability and performance.`
+    );
+  } else if (bytes >= SQL_STORAGE_ADVISORY_BYTES) {
+    const gb = (bytes / (1024 * 1024 * 1024)).toFixed(1);
+    console.warn(
+      `[storage] SQL blob storage at ${gb}GB. Consider upgrading to S3/MinIO for better performance.`
+    );
+  }
 }
 
 // =============================================================================
@@ -201,6 +291,21 @@ export function startBackgroundTasks(): void {
     );
   }, TIMING.ORPHAN_SCAN_INTERVAL_MS);
   intervalHandles.push(orphanScanHandle);
+
+  // Log chunk periodic flush (every 30s)
+  const logFlushHandle = setInterval(() => {
+    try { periodicFlush(); }
+    catch (err) { console.error("[control] periodicFlush error:", err); }
+  }, 30_000);
+  intervalHandles.push(logFlushHandle);
+
+  // Log compaction: gather completed run chunks into larger blobs (every hour)
+  const logCompactionHandle = setInterval(() => {
+    periodicLogCompaction().catch((err) =>
+      console.error("[control] periodicLogCompaction error:", err)
+    );
+  }, 3600_000);
+  intervalHandles.push(logCompactionHandle);
 
   console.log("[control] Background tasks started");
 }

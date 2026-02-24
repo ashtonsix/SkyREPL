@@ -98,6 +98,10 @@ export function findOrphanedBlobs(cutoff24hAgo: number): Blob[] {
        AND NOT EXISTS (
          SELECT 1 FROM objects o
          WHERE o.blob_id = b.id
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM log_chunks lc
+         WHERE lc.blob_id = b.id
        )`,
     [cutoff24hAgo]
   );
@@ -113,14 +117,21 @@ export function deleteBlobBatch(blobIds: number[]): void {
 }
 
 export function deleteBlob(id: number): void {
-  // Used by GC only - checks no objects reference this blob
+  // Used by GC only - checks no objects or log_chunks reference this blob
   const refs = queryOne<{ count: number }>(
     "SELECT COUNT(*) as count FROM objects WHERE blob_id = ?",
     [id]
   );
-
   if (refs && refs.count > 0) {
     throw new ConflictError("Cannot delete blob with referencing objects");
+  }
+
+  const logRefs = queryOne<{ count: number }>(
+    "SELECT COUNT(*) as count FROM log_chunks WHERE blob_id = ?",
+    [id]
+  );
+  if (logRefs && logRefs.count > 0) {
+    throw new ConflictError("Cannot delete blob with referencing log chunks");
   }
 
   execute("DELETE FROM blobs WHERE id = ?", [id]);

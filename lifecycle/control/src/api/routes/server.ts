@@ -15,6 +15,9 @@ import { checkRateLimit, getRateLimitInfo } from "../middleware/rate-limit";
 import { registerResourceRoutes } from "./resources";
 import { registerOperationRoutes } from "./operations";
 import { registerPreflightRoutes } from "./preflight";
+import { getSqlStorageSizeCache, SQL_STORAGE_ADVISORY_BYTES, SQL_STORAGE_STRONG_BYTES } from "../../material/storage";
+import { getDefaultBlobProvider } from "../../provider/storage/registry";
+import { SqlBlobProvider } from "../../provider/storage/sql-blob";
 
 // =============================================================================
 // Types
@@ -167,10 +170,30 @@ export function createServer(config: ServerConfig): Elysia {
   });
 
   // Health check
-  app.get("/v1/health", () => ({
-    status: "ok",
-    timestamp: Date.now(),
-  }));
+  app.get("/v1/health", () => {
+    const response: Record<string, unknown> = {
+      status: "ok",
+      timestamp: Date.now(),
+    };
+
+    // Include SQL storage size info when the default provider is SQL
+    const provider = getDefaultBlobProvider();
+    if (provider instanceof SqlBlobProvider) {
+      const bytes = getSqlStorageSizeCache();
+      const gb = (bytes / (1024 * 1024 * 1024)).toFixed(2);
+      let storageStatus = "ok";
+      if (bytes >= SQL_STORAGE_STRONG_BYTES) storageStatus = "warning_strong";
+      else if (bytes >= SQL_STORAGE_ADVISORY_BYTES) storageStatus = "warning_advisory";
+      response.storage = {
+        provider: "sql",
+        total_bytes: bytes,
+        total_gb: gb,
+        status: storageStatus,
+      };
+    }
+
+    return response;
+  });
 
   // Register route groups
   registerResourceRoutes(app);
