@@ -148,7 +148,7 @@ async function configureMinioProvider() {
   const minioConfig = {
     endpoint: "http://127.0.0.1:9000",
     region: "us-east-1",
-    bucket: "skyrepl-blobs",
+    bucket: "skyrepl",
     accessKeyId: "minioadmin",
     secretAccessKey: "minioadmin",
     forcePathStyle: true,
@@ -499,7 +499,7 @@ async function testSqlProviderProxy() {
   const minioConfig = {
     endpoint: "http://127.0.0.1:9000",
     region: "us-east-1",
-    bucket: "skyrepl-blobs",
+    bucket: "skyrepl",
     accessKeyId: "minioadmin",
     secretAccessKey: "minioadmin",
     forcePathStyle: true,

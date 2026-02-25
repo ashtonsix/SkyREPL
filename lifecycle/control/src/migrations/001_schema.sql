@@ -503,7 +503,7 @@ CREATE TABLE cost_events (
         'network_egress',
         'adjustment'
     )),
-    tenant_id TEXT NOT NULL,
+    tenant_id INTEGER NOT NULL DEFAULT 1,
     instance_id TEXT,
     manifest_id TEXT,
     run_id TEXT,

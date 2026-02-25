@@ -15,7 +15,7 @@ import { createHash, randomBytes } from "node:crypto";
 const MINIO_CONFIG: S3BlobProviderConfig = {
   endpoint: "http://127.0.0.1:9000",
   region: "us-east-1",
-  bucket: "skyrepl-blobs",
+  bucket: "skyrepl",
   accessKeyId: "minioadmin",
   secretAccessKey: "minioadmin",
   forcePathStyle: true,
