@@ -496,13 +496,40 @@ export class ApiClient {
     return (await response.json()) as PreflightResponse;
   }
 
-  // Stubs for future slices (not needed for Slice 1)
-  async checkBlobs(_checksums: string[]): Promise<CheckBlobsResponse> {
-    throw new Error('checkBlobs not implemented');
+  /**
+   * Check which blobs already exist on the control plane.
+   * POST /v1/blobs/check
+   */
+  async checkBlobs(checksums: string[]): Promise<CheckBlobsResponse> {
+    if (checksums.length === 0) return { missing: [], urls: {} };
+    const response = await fetch(`${this.baseUrl}/v1/blobs/check`, {
+      method: 'POST',
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ checksums }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const msg = (body as any)?.error?.message ?? `HTTP ${response.status}`;
+      throw new Error(`checkBlobs failed: ${msg}`);
+    }
+    return (await response.json()) as CheckBlobsResponse;
   }
 
-  async uploadBlob(_checksum: string, _data: Buffer): Promise<void> {
-    throw new Error('uploadBlob not implemented');
+  /**
+   * Upload a blob to the control plane by checksum.
+   * PUT /v1/blobs/by-checksum/:checksum/data
+   */
+  async uploadBlob(checksum: string, data: Buffer): Promise<void> {
+    const response = await fetch(`${this.baseUrl}/v1/blobs/upload/${encodeURIComponent(checksum)}`, {
+      method: 'PUT',
+      headers: this.headers({ 'Content-Type': 'application/octet-stream' }),
+      body: data,
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const msg = (body as any)?.error?.message ?? `HTTP ${response.status}`;
+      throw new Error(`uploadBlob failed: ${msg}`);
+    }
   }
 
   /**
@@ -623,12 +650,13 @@ export interface LaunchRunRequest {
   artifact_patterns: string[];
   env?: Record<string, string>;
   spot?: boolean;
+  disk_size_gb?: number;
 }
 
 export interface FileManifestEntry {
   path: string;
   checksum: string;
-  sizeBytes: number;
+  size_bytes: number;
 }
 
 export interface LaunchRunResponse {

@@ -13,7 +13,11 @@ export interface Profile {
   workdir?: string;
   max_duration?: string;
   hold_duration?: string;
+  init?: string;
+  files?: string[];
+  artifacts?: string[];
   env?: Record<string, string>;
+  disk_size_gb?: number;
 }
 
 export interface ProjectConfig {

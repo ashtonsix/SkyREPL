@@ -130,6 +130,7 @@ export const LaunchRunRequestSchema = Type.Object({
   artifact_patterns: Type.Optional(Type.Array(Type.String(), { default: [] })),
   env: Type.Optional(Type.Record(Type.String(), Type.String())),
   idempotency_key: Type.Optional(Type.String()),
+  disk_size_gb: Type.Optional(Type.Integer({ minimum: 1, maximum: 16384 })),
 });
 export type LaunchRunRequest = Static<typeof LaunchRunRequestSchema>;
 

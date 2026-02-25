@@ -54,6 +54,8 @@ def configure(control_plane_url: str, workdir_base: str = "/workspace", auth_tok
 
 def _http_get(url: str, timeout: int = 300) -> bytes:
     """GET raw bytes from a URL (for file downloads)."""
+    from http_client import _auth_token  # type: ignore[attr-defined]
+
     parsed = urlparse(url)
 
     # If relative URL, prepend control plane
@@ -69,8 +71,12 @@ def _http_get(url: str, timeout: int = 300) -> bytes:
     if parsed.query:
         path = f"{path}?{parsed.query}"
 
+    headers = {}
+    if _auth_token:
+        headers["Authorization"] = f"Bearer {_auth_token}"
+
     try:
-        conn.request("GET", path)
+        conn.request("GET", path, headers=headers)
         resp = conn.getresponse()
         if resp.status != 200:
             raise Exception(f"HTTP {resp.status}: {resp.reason}")
@@ -209,12 +215,48 @@ class RunExecutor:
 
             # Step 6: Collect artifacts (best-effort, before log flush)
             artifact_patterns = msg.get("artifacts", [])
+            _log("INFO", f"Artifact patterns for run {run_id}: {artifact_patterns}")
             if artifact_patterns:
                 try:
-                    from artifacts import collect_and_upload
-                    collect_and_upload(run_id, workdir, artifact_patterns)
+                    import glob as _glob
+                    debug_parts = [f"patterns={artifact_patterns}"]
+                    for p in artifact_patterns:
+                        full_p = os.path.join(workdir, p)
+                        matches = _glob.glob(full_p, recursive=True)
+                        debug_parts.append(f"glob('{full_p}') -> {matches}")
+                        parent = os.path.dirname(full_p)
+                        if os.path.isdir(parent):
+                            contents = os.listdir(parent)
+                            debug_parts.append(f"ls({parent}) -> {contents}")
+                        else:
+                            debug_parts.append(f"parent dir {parent} DOES NOT EXIST")
+                    from artifacts import collect_and_upload, _debug_trace
+                    _debug_trace.clear()
+                    n = collect_and_upload(run_id, workdir, artifact_patterns)
+                    debug_parts.append(f"collect_and_upload returned {n}")
+                    if _debug_trace:
+                        debug_parts.append("trace=[" + "; ".join(_debug_trace) + "]")
+                    debug_msg = "[artifact-debug] " + " | ".join(debug_parts) + "\n"
+                    log_buffer.append({
+                        "type": "log",
+                        "run_id": run_id,
+                        "allocation_id": allocation_id,
+                        "stream": "stderr",
+                        "data": debug_msg,
+                        "phase": "execution",
+                        "timestamp": time.time() * 1000,
+                    })
                 except Exception as e:
                     _log("WARN", f"Artifact collection failed (best-effort): {e}")
+                    log_buffer.append({
+                        "type": "log",
+                        "run_id": run_id,
+                        "allocation_id": allocation_id,
+                        "stream": "stderr",
+                        "data": f"[artifact-debug] EXCEPTION: {e}\n",
+                        "phase": "execution",
+                        "timestamp": time.time() * 1000,
+                    })
 
             # Step 7: Flush logs then report completion
             # Flush all buffered logs before sending terminal status, otherwise

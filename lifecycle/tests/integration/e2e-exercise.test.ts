@@ -935,10 +935,6 @@ describe("API error handling", () => {
     expect(body.error).toBeDefined();
   });
 
-  test("GET /v1/blobs/999/download returns 404", async () => {
-    const res = await testFetch(`${baseUrl}/v1/blobs/999/download`);
-    expect(res.status).toBe(404);
-  });
 });
 
 // =============================================================================

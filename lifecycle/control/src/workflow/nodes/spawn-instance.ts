@@ -184,6 +184,7 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
       controlId: ctx.controlId,
       manifestId: ctx.manifestId,
       region: input.region,
+      diskSizeGb: input.diskSizeGb,
     });
 
     // ─── Phase 3: DB Update — record provider-assigned IDs + actual region ──

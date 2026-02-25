@@ -1,10 +1,14 @@
 import { getControlPlaneUrl, isConnectionRefused } from '../config';
 import { ApiClient } from '../client';
+import type { FileManifestEntry } from '../client';
 import { findProjectConfig, parseDuration } from '../project';
 import type { Profile } from '../project';
 import type { WorkflowStatus, WorkflowStreamEvent } from '../client';
 import { idToSlug } from '@skyrepl/contracts';
 import { runPreflight, displayWarnings } from '../preflight';
+import { createHash } from 'crypto';
+import { readFileSync, statSync } from 'fs';
+import { resolve, dirname } from 'path';
 
 // Terminal workflow states — when the workflow reaches one of these, we're done
 const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled']);
@@ -86,8 +90,8 @@ export async function runCommand(args: string[]): Promise<void> {
     // If no -p and no [default], just proceed with no profile (use defaults)
   }
 
-  // Resolve command: -c flag > profile command
-  const command = (flags['--command'] as string) ?? profile.command;
+  // Resolve command: -c flag > profile command (init prepended if present)
+  let command = (flags['--command'] as string) ?? profile.command;
   if (!command) {
     console.error('Usage: repl run [options]');
     console.error('');
@@ -151,6 +155,46 @@ export async function runCommand(args: string[]): Promise<void> {
     }
   }
 
+  // Prepend init script to command if present
+  const initScript = profile.init;
+  if (initScript) {
+    command = `${initScript} && ${command}`;
+  }
+
+  // Resolve files from profile: read, hash, and upload to control plane
+  const fileEntries: FileManifestEntry[] = [];
+  const profileFiles = profile.files ?? [];
+  if (profileFiles.length > 0 && project) {
+    const projectDir = dirname(project.path);
+    for (const relPath of profileFiles) {
+      const absPath = resolve(projectDir, relPath);
+      try {
+        const data = readFileSync(absPath);
+        const checksum = createHash('sha256').update(data).digest('hex');
+        const size_bytes = statSync(absPath).size;
+        fileEntries.push({ path: relPath, checksum, size_bytes });
+      } catch (err) {
+        console.error(`Failed to read file "${relPath}": ${err instanceof Error ? err.message : err}`);
+        process.exit(2);
+      }
+    }
+
+    // Check which blobs already exist, upload missing ones
+    const checksums = fileEntries.map(f => f.checksum);
+    const { missing } = await client.checkBlobs(checksums);
+    const missingSet = new Set(missing);
+
+    for (const entry of fileEntries) {
+      if (missingSet.has(entry.checksum)) {
+        const absPath = resolve(projectDir, entry.path);
+        const data = readFileSync(absPath);
+        await client.uploadBlob(entry.checksum, data);
+      }
+    }
+  }
+
+  const artifactPatterns = profile.artifacts ?? [];
+
   // Launch the run
   let workflowId: number;
   let runId: number;
@@ -163,10 +207,11 @@ export async function runCommand(args: string[]): Promise<void> {
       workdir,
       max_duration_ms: maxDurationMs,
       hold_duration_ms: holdDurationMs,
-      files: [],
-      artifact_patterns: [],
+      files: fileEntries,
+      artifact_patterns: artifactPatterns,
       create_snapshot: false,
       env: profile.env,
+      ...(profile.disk_size_gb ? { disk_size_gb: profile.disk_size_gb } : {}),
     });
     workflowId = result.workflow_id;
     runId = result.run_id;

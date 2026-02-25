@@ -883,8 +883,9 @@ export function createRealAgentBridge(): AgentBridge {
         command: msg.command as string,
         workdir: msg.workdir as string,
         files: agentFiles,
-        artifacts: [],
+        artifacts: (msg.artifactPatterns as string[]) || [],
       };
+      console.log("[agent-bridge] start_run artifacts:", command.artifacts);
       await sseManager.sendCommand(instanceId, command);
     },
 

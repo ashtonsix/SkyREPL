@@ -28,6 +28,9 @@ MAX_ARTIFACT_SIZE = 50 * 1024 * 1024
 # Maximum number of artifacts per run
 MAX_ARTIFACTS_PER_RUN = 100
 
+# Debug trace buffer — read by executor.py after collect_and_upload
+_debug_trace: List[str] = []
+
 
 def collect_and_upload(run_id: int, workdir: str, patterns: List[str]) -> int:
     """
@@ -49,7 +52,7 @@ def collect_and_upload(run_id: int, workdir: str, patterns: List[str]) -> int:
         _log("INFO", f"No artifacts found for run {run_id}")
         return 0
 
-    _log("INFO", f"Found {len(matched)} artifacts for run {run_id}")
+    _log("INFO", f"Found {len(matched)} artifacts for run {run_id}: {matched}")
 
     # Prepare artifact entries
     artifacts = []
@@ -61,14 +64,20 @@ def collect_and_upload(run_id: int, workdir: str, patterns: List[str]) -> int:
         entry = _prepare_artifact(workdir, path)
         if entry:
             artifacts.append(entry)
+            _log("INFO", f"Prepared artifact: {path} ({entry['size_bytes']} bytes)")
+        else:
+            _log("WARN", f"Failed to prepare artifact: {path}")
 
     if not artifacts:
+        _log("WARN", f"No artifacts prepared from {len(matched)} matched files")
         return 0
 
     # Upload one artifact at a time
     uploaded = 0
     for artifact in artifacts:
-        if _upload_single(run_id, artifact):
+        success = _upload_single(run_id, artifact)
+        _log("INFO", f"Upload {'OK' if success else 'FAILED'}: {artifact['path']}")
+        if success:
             uploaded += 1
 
     _log("INFO", f"Uploaded {uploaded}/{len(artifacts)} artifacts for run {run_id}")
@@ -204,27 +213,35 @@ def _upload_single(run_id: int, artifact: dict) -> bool:
             _put_binary(upload_url, raw_data, timeout=60)
         else:
             # Absolute URL = external presigned URL (no auth)
+            # Primary path: upload straight to S3/MinIO via presigned URL.
+            # Fallback: if presigned URL fails (timeout, connection, expired),
+            # re-negotiate and retry. If that also fails, fall back to CP proxy.
             try:
                 _put_binary_external(upload_url, raw_data, timeout=60)
-            except urllib.error.HTTPError as e:
-                expired = e.code == 403 or (
-                    e.code == 400 and "expired" in (e.read() or b"").decode("utf-8", errors="replace").lower()
-                )
-                if not expired:
-                    raise
-                _log("WARN", f"Presigned URL expired for {artifact['path']}, re-negotiating...")
-                reneg_resp = http_post("/v1/agent/blobs/upload-url", {
-                    "checksum": artifact["checksum"],
-                    "size_bytes": artifact["size_bytes"],
-                    "run_id": run_id,
-                }, timeout=10)
-                reneg_data = json.loads(reneg_resp.read())
-                if "error" in reneg_data:
-                    _log("WARN", f"Re-negotiation failed: {reneg_data['error']}")
-                    return False
-                blob_id = reneg_data["blob_id"]
-                upload_url = reneg_data["url"]
-                _put_binary_external(upload_url, raw_data, timeout=60)
+            except Exception as presign_err:
+                _log("WARN", f"Presigned URL failed for {artifact['path']}: {presign_err}, re-negotiating...")
+                try:
+                    reneg_resp = http_post("/v1/agent/blobs/upload-url", {
+                        "checksum": artifact["checksum"],
+                        "size_bytes": artifact["size_bytes"],
+                        "run_id": run_id,
+                    }, timeout=10)
+                    reneg_data = json.loads(reneg_resp.read())
+                    if "error" in reneg_data:
+                        _log("WARN", f"Re-negotiation failed: {reneg_data['error']}")
+                        return False
+                    blob_id = reneg_data["blob_id"]
+                    new_url = reneg_data["url"]
+                    if new_url.startswith("/"):
+                        # CP proxy fallback
+                        _log("INFO", f"Falling back to CP proxy for {artifact['path']}")
+                        _put_binary(new_url, raw_data, timeout=60)
+                    else:
+                        _put_binary_external(new_url, raw_data, timeout=60)
+                except Exception as retry_err:
+                    # Last resort: upload via CP proxy endpoint
+                    _log("WARN", f"Retry failed ({retry_err}), falling back to CP proxy for {artifact['path']}")
+                    _put_binary(f"/v1/agent/blobs/{blob_id}/upload", raw_data, timeout=60)
 
         # Step 3: Confirm upload
         confirm_resp = http_post("/v1/agent/blobs/confirm", {
@@ -255,6 +272,7 @@ def _upload_single(run_id: int, artifact: dict) -> bool:
 
 
 def _log(level: str, message: str) -> None:
-    """Internal logging (not sent to control plane)."""
+    """Internal logging (not sent to control plane). Also appends to _debug_trace."""
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] [{level}] [artifacts] {message}")
+    _debug_trace.append(f"[{level}] {message}")

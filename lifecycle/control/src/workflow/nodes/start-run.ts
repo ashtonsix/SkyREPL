@@ -112,6 +112,7 @@ export const startRunExecutor: NodeExecutor<StartRunInput, StartRunOutput> = {
       env: input.env || {},
       files: input.files || [],
       maxDurationMs: input.maxDurationMs,
+      artifactPatterns: input.artifactPatterns || [],
     });
 
     // Wait for agent to complete file sync (CLAIMED -> ACTIVE transition

@@ -318,53 +318,6 @@ export function registerBlobRoutes(app: Elysia<any>): void {
     return { missing, urls };
   }, { body: BlobCheckSchema });
 
-  // ─── Blob Download (by ID) ──────────────────────────────────────────
-
-  app.get("/v1/blobs/:id/download", async ({ params, set, request }) => {
-    const id = params.id;
-    const auth = getAuthContext(request);
-    const blob = queryOne<{ id: number; payload: Buffer | null; s3_key: string | null; size_bytes: number; tenant_id: number }>(
-      `SELECT id, payload, s3_key, size_bytes, tenant_id FROM blobs WHERE id = ?${auth ? ' AND tenant_id = ?' : ''}`,
-      auth ? [id, auth.tenantId] : [id]
-    );
-    if (!blob) {
-      set.status = 404;
-      return { error: { code: "OBJECT_NOT_FOUND", message: `Blob ${id} not found`, category: "not_found" } };
-    }
-
-    // Inline blob
-    if (blob.payload !== null) {
-      return new Response(new Uint8Array(blob.payload), {
-        headers: {
-          "Content-Type": "application/octet-stream",
-          "Content-Length": String(blob.size_bytes),
-        },
-      });
-    }
-
-    // External blob: use provider
-    if (blob.s3_key) {
-      const provider = getBlobProvider(blob.tenant_id);
-      if (provider.capabilities.supportsPresignedUrls) {
-        const url = await provider.generatePresignedUrl(blob.s3_key, "GET", { ttlMs: PRESIGNED_GET_TTL_MS });
-        set.status = 302;
-        set.headers["Location"] = url;
-        return;
-      } else {
-        const data = await provider.download(blob.s3_key);
-        return new Response(new Uint8Array(data), {
-          headers: {
-            "Content-Type": "application/octet-stream",
-            "Content-Length": String(data.length),
-          },
-        });
-      }
-    }
-
-    set.status = 400;
-    return { error: { code: "INVALID_INPUT", message: "Blob has no inline payload or external storage key", category: "validation" } };
-  }, { params: IdParams });
-
   // ─── Blob Download (by checksum) ──────────────────────────────────
   // Agent bridge sends /v1/blobs/<checksum> as file URLs in start_run messages
 
@@ -429,6 +382,64 @@ export function registerBlobRoutes(app: Elysia<any>): void {
 
     set.status = 400;
     return { error: { code: "INVALID_INPUT", message: "Blob has no inline payload or external storage key", category: "validation" } };
+  });
+
+  // ─── CLI Blob Upload (by checksum) ──────────────────────────────────
+  // Used by `repl run` to upload source files before launching a run.
+
+  app.put("/v1/blobs/upload/:checksum", async ({ params, set, request }) => {
+    const checksum = decodeURIComponent(params.checksum);
+    const auth = getAuthContext(request);
+
+    if (!auth) {
+      set.status = 401;
+      return { error: { code: "UNAUTHORIZED", message: "API key required", category: "auth" } };
+    }
+
+    const rawBody = await request.arrayBuffer();
+    const data = Buffer.from(rawBody);
+
+    // Verify checksum
+    const actual = createHash("sha256").update(data).digest("hex");
+    if (actual !== checksum) {
+      set.status = 400;
+      return { error: { code: "CHECKSUM_MISMATCH", message: `Expected ${checksum}, got ${actual}`, category: "validation" } };
+    }
+
+    const now = Date.now();
+    const controlId = getControlId(getDatabase());
+    const isSmall = data.length < SBO_THRESHOLD;
+    const s3Key = isSmall ? null : `blobs/${controlId}/${auth.tenantId}/run-files/${checksum}`;
+
+    // createBlob handles dedup for "run-files" bucket
+    const blob = createBlob({
+      checksum,
+      bucket: "run-files",
+      checksum_bytes: null,
+      s3_key: s3Key,
+      s3_bucket: null,
+      payload: null,
+      size_bytes: data.length,
+      last_referenced_at: now,
+    }, auth.tenantId);
+
+    // Only store data if this is a new blob (not deduped)
+    const needsData = queryOne<{ payload: Buffer | null; s3_key: string | null }>(
+      "SELECT payload, s3_key FROM blobs WHERE id = ?",
+      [blob.id]
+    );
+    if (needsData && needsData.payload === null && !needsData.s3_key) {
+      // New blob, no data yet
+      if (isSmall) {
+        storeInline(blob.id, data);
+      } else {
+        const provider = getBlobProvider(auth.tenantId);
+        await provider.upload(s3Key!, data);
+        updateBlobStorageKey(blob.id, s3Key!);
+      }
+    }
+
+    return { ack: true, blob_id: blob.id };
   });
 
   // ─── Agent Blob Upload URL (presigned URL flow) ─────────────────────

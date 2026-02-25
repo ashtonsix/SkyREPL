@@ -114,8 +114,11 @@ export class SSEManager {
   /** Active CLI workflow subscribers: workflowId -> Set<WebSocket> */
   private workflowSubscribers = new Map<string, Set<WebSocket>>();
 
-  /** Command ID counter for acknowledgment protocol */
-  private nextCommandId = 1;
+  /** Command ID counter for acknowledgment protocol.
+   *  Seeded from Date.now() to avoid collisions after control plane restarts
+   *  (agents dedup by command_id, so restarting from 1 would cause them to
+   *  silently skip commands whose IDs were already processed). */
+  private nextCommandId = Date.now();
 
   /** Unacknowledged commands: instanceId -> Map<commandId, CommandDeliveryState> */
   private unackedCommands = new Map<string, Map<number, CommandDeliveryState>>();

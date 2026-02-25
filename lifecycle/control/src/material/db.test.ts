@@ -456,7 +456,7 @@ describe("manifests", () => {
     const resources = getManifestResources(manifest.id);
     expect(resources.length).toBe(2);
 
-    const expiresAt = Date.now() + 1;
+    const expiresAt = Date.now() + 60_000;
     const result = sealManifest(manifest.id, expiresAt);
     expect(result.success).toBe(true);
 
@@ -466,7 +466,7 @@ describe("manifests", () => {
     expect(sealed!.expires_at).not.toBeNull();
     expect(sealed!.expires_at!).toBeGreaterThanOrEqual(sealed!.released_at!);
 
-    const expired = listExpiredManifests(Date.now() + 100);
+    const expired = listExpiredManifests(Date.now() + 120_000);
     expect(expired.length).toBe(1);
   });
 

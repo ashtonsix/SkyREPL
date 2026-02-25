@@ -138,6 +138,7 @@ export interface SpawnOptions {
   snapshotId?: string;
   volumeId?: string;
   networkConfig?: NetworkConfig;
+  diskSizeGb?: number;
 }
 
 export interface ProviderInstance {

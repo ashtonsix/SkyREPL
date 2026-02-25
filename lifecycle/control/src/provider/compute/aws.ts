@@ -404,6 +404,20 @@ export class AWSProvider implements Provider<AWSInstance, AWSSnapshot> {
         : {}),
     };
 
+    // Root volume size override
+    if (options.diskSizeGb) {
+      runParams.BlockDeviceMappings = [
+        {
+          DeviceName: "/dev/sda1",
+          Ebs: {
+            VolumeSize: options.diskSizeGb,
+            VolumeType: "gp3",
+            DeleteOnTermination: true,
+          },
+        },
+      ];
+    }
+
     // Network config: per-call overrides, then provider defaults, then startup-ensured cache
     let securityGroupIds =
       options.networkConfig?.securityGroupIds ?? this.config.defaultSecurityGroupIds;
@@ -1051,5 +1065,7 @@ export function createAwsHooks(provider: AWSProvider): ProviderLifecycleHooks {
 // Credentials come from the default credential chain (env, ~/.aws/credentials, IAM role).
 const defaultRegion =
   process.env.AWS_DEFAULT_REGION ?? process.env.AWS_REGION ?? "us-east-1";
+const defaultSubnetId =
+  process.env.AWS_DEFAULT_SUBNET ?? undefined;
 
-export default new AWSProvider({ region: defaultRegion });
+export default new AWSProvider({ region: defaultRegion, defaultSubnetId });

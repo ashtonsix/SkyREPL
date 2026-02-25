@@ -67,16 +67,20 @@ function isLocalControlPlane(): boolean {
 }
 
 async function spawnControlPlane(): Promise<number | null> {
+  // Enforce single-instance invariant: kill any existing CP before starting a new one
+  await killExistingControlPlanes();
+  await new Promise(r => setTimeout(r, 200));
+
   const repoRoot = resolve(__dirname, '../../../..');
   const controlMain = resolve(repoRoot, 'lifecycle/control/src/main.ts');
   if (!existsSync(controlMain)) return null;
 
   const { openSync } = await import('fs');
   const logFd = openSync(join(REPL_DIR, 'control.log'), 'a');
-  const child = spawn('bun', ['run', controlMain], {
+  const child = spawn('bun', [controlMain], {
     detached: true,
     stdio: ['ignore', logFd, logFd],
-    env: { ...process.env },
+    env: { ...process.env, SKYREPL_CONTROL_PLANE: '1' },
   });
   child.unref();
 
@@ -110,7 +114,47 @@ async function stopControlPlane(pid: number): Promise<void> {
     // Already cleaned up
   }
 
+  // Enforce single-instance: kill any surviving CP processes
+  await killExistingControlPlanes();
+
   console.log(`Control plane stopped (PID ${pid}).`);
+}
+
+/**
+ * Kill all existing control plane processes. There can only be one.
+ *
+ * Identifies CP processes unambiguously via the SKYREPL_CONTROL_PLANE=1 env var
+ * (set by spawnControlPlane). On Linux, reads /proc/{pid}/environ. Falls back
+ * to the PID file on platforms where /proc is unavailable.
+ */
+async function killExistingControlPlanes(): Promise<void> {
+  const myPid = process.pid;
+  const killed = new Set<number>();
+
+  // Primary: scan /proc for processes with our env marker (Linux)
+  if (process.platform === 'linux') {
+    try {
+      for (const entry of readdirSync('/proc')) {
+        const pid = parseInt(entry, 10);
+        if (isNaN(pid) || pid === myPid) continue;
+        try {
+          const environ = readFileSync(`/proc/${pid}/environ`, 'utf-8');
+          if (environ.includes('SKYREPL_CONTROL_PLANE=1')) {
+            process.kill(pid, 'SIGTERM');
+            killed.add(pid);
+          }
+        } catch {} // process exited or no permission
+      }
+    } catch {}
+  }
+
+  // Fallback: PID file (covers macOS and any /proc scan misses)
+  try {
+    const pid = parseInt(readFileSync(PID_FILE, 'utf-8').trim(), 10);
+    if (!isNaN(pid) && pid !== myPid && !killed.has(pid)) {
+      try { process.kill(pid, 'SIGTERM'); } catch {}
+    }
+  } catch {}
 }
 
 async function downloadMinio(): Promise<boolean> {
@@ -154,7 +198,7 @@ async function ensureDefaultBucket(): Promise<void> {
       credentials: { accessKeyId: 'minioadmin', secretAccessKey: 'minioadmin' },
       forcePathStyle: true,
     });
-    await client.send(new CreateBucketCommand({ Bucket: 'skyrepl-blobs' }));
+    await client.send(new CreateBucketCommand({ Bucket: 'skyrepl' }));
   } catch (err: any) {
     if (err.name !== 'BucketAlreadyOwnedByYou' && err.name !== 'BucketAlreadyExists') {
       console.warn(`[minio] Bucket creation: ${err.message}`);
@@ -403,15 +447,14 @@ async function controlStop(): Promise<void> {
   const cpPid = readPid();
   const minioPid = readMinioPid();
 
-  if (!cpPid && !minioPid) {
-    console.log('Nothing is running.');
-    return;
-  }
-
   await Promise.all([
-    cpPid ? stopControlPlane(cpPid) : Promise.resolve(),
+    cpPid ? stopControlPlane(cpPid) : killExistingControlPlanes(),
     stopMinio(),
   ]);
+
+  if (!cpPid && !minioPid) {
+    console.log('Nothing was running (cleaned up any orphans).');
+  }
 }
 
 async function controlStatus(): Promise<void> {

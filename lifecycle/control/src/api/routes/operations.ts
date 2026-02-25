@@ -121,6 +121,7 @@ export function registerOperationRoutes(app: Elysia<any>): void {
       artifactPatterns: body.artifact_patterns ?? [],
       idempotencyKey: body.idempotency_key,
       tenantId: auth?.tenantId,
+      diskSizeGb: body.disk_size_gb ?? undefined,
     };
 
     try {

@@ -35,6 +35,7 @@ export const LaunchRunWorkflowInputSchema = Type.Object({
   holdDurationMs: Type.Optional(Type.Number()),
   createSnapshot: Type.Optional(Type.Boolean()),
   idempotencyKey: Type.Optional(Type.String()),
+  diskSizeGb: Type.Optional(Type.Number()),
 });
 
 export type LaunchRunWorkflowInput = Static<typeof LaunchRunWorkflowInputSchema>;

@@ -82,6 +82,9 @@ export interface LaunchRunInput {
 
   /** Tenant ID (from auth context) */
   tenantId?: number;
+
+  /** Root disk size in GB (default: AMI default, typically 8GB) */
+  diskSizeGb?: number;
 }
 
 // =============================================================================

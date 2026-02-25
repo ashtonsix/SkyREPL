@@ -23,11 +23,6 @@ export interface UploadUrlResult {
   inline: boolean;
 }
 
-export interface DownloadUrlResult {
-  url: string;
-  inline: boolean;
-}
-
 // =============================================================================
 // Constants
 // =============================================================================
@@ -68,22 +63,6 @@ export function refreshSqlStorageSizeCache(): void {
 // =============================================================================
 // Presigned URLs (async — supports all provider types)
 // =============================================================================
-
-export async function generateDownloadUrlAsync(blobId: number): Promise<DownloadUrlResult> {
-  const blob = getBlob(blobId);
-  if (!blob) throw new Error(`Blob ${blobId} not found`);
-  if (blob.payload !== null) {
-    return { url: `/v1/blobs/${blobId}/data`, inline: true };
-  }
-  if (blob.s3_key) {
-    const provider = getBlobProvider(blob.tenant_id);
-    if (provider.capabilities.supportsPresignedUrls) {
-      const url = await provider.generatePresignedUrl(blob.s3_key, "GET", { ttlMs: PRESIGNED_GET_TTL_MS });
-      return { url, inline: false };
-    }
-  }
-  return { url: `/v1/blobs/${blobId}/download`, inline: false };
-}
 
 export async function generateUploadUrlAsync(
   blobId: number,
