@@ -9,7 +9,8 @@
     "composite": true,
     "noEmit": true,
     "rootDir": "..",
-    "types": ["bun-types"]
+    "types": ["bun-types"],
+    "jsx": "react-jsx"
   },
   "include": [".", "../cli/src", "../daemon"]
 }

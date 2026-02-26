@@ -377,11 +377,12 @@ describe("Engine Core", () => {
       expect(updatedNode!.retry_reason).toBe("spot_retry");
     });
 
-    test("fallback retry at attempt>0 fails node and logs fallback pattern", async () => {
+    test("fallback retry at attempt>1 fails node and creates on-demand fallback via RWA", async () => {
       const wf = createTestWorkflow({ status: "running", started_at: Date.now() });
       const node = createTestWorkflowNode(wf.id, "spot-node-2", "spot-type", {
         status: "running",
         attempt: 2,
+        input_json: JSON.stringify({ region: "us-east-1", is_spot: true }),
         started_at: Date.now(),
       });
 
@@ -395,18 +396,26 @@ describe("Engine Core", () => {
         shouldRetry: true,
         strategy: "fallback",
         delayMs: 0,
-        maxAttempts: 1,
+        maxAttempts: 3,
       };
 
-      // When attempt > 0, should fail the node and apply conditional branch (log warning)
-      const nodeWithAttempt1 = { ...node, attempt: 1 };
-      await handleRetry(wf.id, nodeWithAttempt1, error, decision);
+      // When attempt > 1 (second execution), should fail the node and create on-demand fallback
+      const nodeWithAttempt2 = { ...node, attempt: 2 };
+      await handleRetry(wf.id, nodeWithAttempt2, error, decision);
 
       const nodes = getWorkflowNodes(wf.id);
       const updatedNode = nodes.find(n => n.node_id === "spot-node-2");
       expect(updatedNode!.status).toBe("failed");
       const errorJson = JSON.parse(updatedNode!.error_json!);
-      expect(errorJson.retried_with).toBe("fallback");
+      expect(errorJson.retried_with).toBe("fallback_on_demand");
+
+      // On-demand fallback node should have been created via RWA
+      const fallbackNode = nodes.find(n => n.node_id === "spot-node-2-ondemand");
+      expect(fallbackNode).not.toBeNull();
+      expect(fallbackNode!.status).toBe("pending");
+      const fallbackInput = JSON.parse(fallbackNode!.input_json);
+      expect(fallbackInput.is_spot).toBe(false);
+      expect(fallbackInput.region).toBe("us-east-1");
     });
   });
 
@@ -896,16 +905,6 @@ describe("Engine Core", () => {
       expect(wf!.error_json).not.toBeNull();
     });
 
-    // NOTE: The engine has a known issue where executeNode calls failNode()
-    // on a pending node when no executor is found. failNode requires running
-    // status, so the transition fails silently and the node stays pending,
-    // causing an infinite loop. This is tracked as a bug to fix in the
-    // implementation. The test below verifies the executor lookup path
-    // using a synchronous check instead.
-    test("getNodeExecutor returns undefined for unregistered type", () => {
-      const executor = getNodeExecutor("totally-nonexistent-executor");
-      expect(executor).toBeUndefined();
-    });
   });
 });
 
@@ -987,7 +986,7 @@ describe("Patterns", () => {
       expect(deps).toContain("branch-b");
     });
 
-    test("triggerOnError mode: both options created as pending", () => {
+    test("triggerOnError mode: both options created as pending, fallback gated on primary", () => {
       const wf = createTestWorkflow();
       createTestWorkflowNode(wf.id, "join", "join-type");
 
@@ -1004,9 +1003,13 @@ describe("Patterns", () => {
 
       expect(primary!.status).toBe("pending");
       expect(fallback!.status).toBe("pending");
+      // Fallback depends on primary and carries the cb_fallback marker
+      const fallbackDeps = JSON.parse(fallback!.depends_on!) as string[];
+      expect(fallbackDeps).toContain("primary");
+      expect(fallback!.retry_reason).toBe("cb_fallback_for:primary");
     });
 
-    test("triggerOnError mode updates join dependencies", () => {
+    test("triggerOnError mode: join depends only on fallback branch", () => {
       const wf = createTestWorkflow();
       createTestWorkflowNode(wf.id, "join", "join-type");
 
@@ -1022,8 +1025,9 @@ describe("Patterns", () => {
         [wf.id, "join"]
       );
       const deps = JSON.parse(joinNode!.depends_on!) as string[];
-      expect(deps).toContain("primary");
+      // Join depends only on fallback (which is skipped on success, or runs on failure)
       expect(deps).toContain("fallback");
+      expect(deps).not.toContain("primary");
     });
 
     test("throws when join node does not exist", () => {
@@ -1182,5 +1186,361 @@ describe("Patterns", () => {
       // Should not throw
       updateJoinDependencies(wf.id, "nonexistent", ["dep-a"]);
     });
+  });
+});
+
+// =============================================================================
+// NodeExecutor.validate() Hook (#WF2-08)
+// =============================================================================
+
+describe("NodeExecutor.validate() Hook (#WF2-08)", () => {
+  test("node with failing validate never executes", async () => {
+    const executeCalls: string[] = [];
+
+    registerNodeExecutor({
+      name: "validate-fail-type",
+      idempotent: true,
+      async validate() {
+        throw Object.assign(new Error("Input is invalid"), {
+          code: "VALIDATION_ERROR",
+          category: "validation",
+        });
+      },
+      async execute() {
+        executeCalls.push("should-not-run");
+        return {};
+      },
+    });
+
+    registerBlueprint({
+      type: "test-validate-fail",
+      entryNode: "step",
+      nodes: {
+        step: { type: "validate-fail-type", dependsOn: [] },
+      },
+    });
+
+    const result = await submit({ type: "test-validate-fail", input: {} });
+    const wf = await waitForWorkflow(result.workflowId);
+
+    expect(wf.status).toBe("failed");
+    expect(executeCalls).toEqual([]); // execute never called
+
+    // Verify node failed with VALIDATION_ERROR
+    const nodes = getWorkflowNodes(result.workflowId);
+    const step = nodes.find(n => n.node_id === "step");
+    expect(step!.status).toBe("failed");
+    const err = JSON.parse(step!.error_json!);
+    expect(err.code).toBe("VALIDATION_ERROR");
+  });
+
+  test("validate failure produces VALIDATION_ERROR even if error code differs", async () => {
+    registerNodeExecutor({
+      name: "validate-generic-err-type",
+      idempotent: true,
+      async validate() {
+        throw new Error("bad input");
+      },
+      async execute() {
+        return {};
+      },
+    });
+
+    registerBlueprint({
+      type: "test-validate-generic-err",
+      entryNode: "step",
+      nodes: {
+        step: { type: "validate-generic-err-type", dependsOn: [] },
+      },
+    });
+
+    const result = await submit({ type: "test-validate-generic-err", input: {} });
+    const wf = await waitForWorkflow(result.workflowId);
+
+    expect(wf.status).toBe("failed");
+    const nodes = getWorkflowNodes(result.workflowId);
+    const step = nodes.find(n => n.node_id === "step");
+    const err = JSON.parse(step!.error_json!);
+    expect(err.code).toBe("VALIDATION_ERROR");
+  });
+
+  test("validate failure does not trigger compensation", async () => {
+    const compensateCalls: string[] = [];
+
+    registerNodeExecutor({
+      name: "validate-no-comp-type",
+      idempotent: true,
+      async validate() {
+        throw Object.assign(new Error("invalid"), {
+          code: "VALIDATION_ERROR",
+        });
+      },
+      async execute() {
+        return {};
+      },
+      async compensate(ctx) {
+        compensateCalls.push(ctx.nodeId);
+      },
+    });
+
+    registerBlueprint({
+      type: "test-validate-no-comp",
+      entryNode: "step",
+      nodes: {
+        step: { type: "validate-no-comp-type", dependsOn: [] },
+      },
+    });
+
+    const result = await submit({ type: "test-validate-no-comp", input: {} });
+    await waitForWorkflow(result.workflowId);
+
+    // Compensation should NOT be called since execute never ran
+    expect(compensateCalls).toEqual([]);
+  });
+
+  test("node with passing validate proceeds to execute", async () => {
+    const executeCalls: string[] = [];
+    const validateCalls: string[] = [];
+
+    registerNodeExecutor({
+      name: "validate-pass-type",
+      idempotent: true,
+      async validate() {
+        validateCalls.push("validated");
+      },
+      async execute() {
+        executeCalls.push("executed");
+        return { ok: true };
+      },
+    });
+
+    registerBlueprint({
+      type: "test-validate-pass",
+      entryNode: "step",
+      nodes: {
+        step: { type: "validate-pass-type", dependsOn: [] },
+      },
+    });
+
+    const result = await submit({ type: "test-validate-pass", input: {} });
+    const wf = await waitForWorkflow(result.workflowId);
+
+    expect(wf.status).toBe("completed");
+    expect(validateCalls).toEqual(["validated"]);
+    expect(executeCalls).toEqual(["executed"]);
+  });
+});
+
+// =============================================================================
+// CB Try-Fallback (#WF2-02)
+// =============================================================================
+
+describe("CB Try-Fallback (#WF2-02)", () => {
+  test("CB triggerOnError: option1 succeeds -> option2 skipped, join runs", async () => {
+    const executionLog: string[] = [];
+
+    registerNodeExecutor({
+      name: "cb-source-success",
+      idempotent: true,
+      async execute(ctx) {
+        ctx.applyPattern("conditional-branch", {
+          triggerOnError: true,
+          option1: { id: "try-node", type: "cb-try-fast", input: {} },
+          option2: { id: "fallback-node", type: "cb-fallback-alt", input: {} },
+          joinNode: "join",
+        });
+        executionLog.push("source");
+        return { done: true };
+      },
+    });
+
+    registerNodeExecutor({
+      name: "cb-try-fast",
+      idempotent: true,
+      async execute() {
+        executionLog.push("try");
+        return { ok: true };
+      },
+    });
+
+    registerNodeExecutor({
+      name: "cb-fallback-alt",
+      idempotent: true,
+      async execute() {
+        executionLog.push("fallback");
+        return { fallback: true };
+      },
+    });
+
+    registerNodeExecutor({
+      name: "cb-join-type",
+      idempotent: true,
+      async execute() {
+        executionLog.push("join");
+        return { joined: true };
+      },
+    });
+
+    registerBlueprint({
+      type: "test-cb-success-path",
+      entryNode: "source",
+      nodes: {
+        source: { type: "cb-source-success", dependsOn: [] },
+        join: { type: "cb-join-type", dependsOn: ["source"] },
+      },
+    });
+
+    const result = await submit({ type: "test-cb-success-path", input: {} });
+    const wf = await waitForWorkflow(result.workflowId);
+
+    expect(wf.status).toBe("completed");
+    // try-node ran, fallback was skipped, join ran
+    expect(executionLog).toContain("source");
+    expect(executionLog).toContain("try");
+    expect(executionLog).not.toContain("fallback");
+    expect(executionLog).toContain("join");
+
+    // Verify node states
+    const nodes = getWorkflowNodes(result.workflowId);
+    const tryNode = nodes.find(n => n.node_id === "try-node");
+    const fallbackNode = nodes.find(n => n.node_id === "fallback-node");
+    expect(tryNode!.status).toBe("completed");
+    expect(fallbackNode!.status).toBe("skipped");
+  });
+
+  test("CB triggerOnError: option1 fails -> option2 runs, join runs", async () => {
+    const executionLog: string[] = [];
+
+    registerNodeExecutor({
+      name: "cb-source-fail",
+      idempotent: true,
+      async execute(ctx) {
+        ctx.applyPattern("conditional-branch", {
+          triggerOnError: true,
+          option1: { id: "try-fail", type: "cb-try-fails", input: {} },
+          option2: { id: "fallback-runs", type: "cb-fallback-runs", input: {} },
+          joinNode: "join",
+        });
+        executionLog.push("source");
+        return { done: true };
+      },
+    });
+
+    registerNodeExecutor({
+      name: "cb-try-fails",
+      idempotent: true,
+      async execute() {
+        executionLog.push("try");
+        throw Object.assign(new Error("primary failed"), {
+          code: "VALIDATION_ERROR",
+          category: "validation",
+        });
+      },
+    });
+
+    registerNodeExecutor({
+      name: "cb-fallback-runs",
+      idempotent: true,
+      async execute() {
+        executionLog.push("fallback");
+        return { fallback: true };
+      },
+    });
+
+    registerNodeExecutor({
+      name: "cb-join-type-2",
+      idempotent: true,
+      async execute() {
+        executionLog.push("join");
+        return { joined: true };
+      },
+    });
+
+    registerBlueprint({
+      type: "test-cb-failure-path",
+      entryNode: "source",
+      nodes: {
+        source: { type: "cb-source-fail", dependsOn: [] },
+        join: { type: "cb-join-type-2", dependsOn: ["source"] },
+      },
+    });
+
+    const result = await submit({ type: "test-cb-failure-path", input: {} });
+    const wf = await waitForWorkflow(result.workflowId);
+
+    expect(wf.status).toBe("completed");
+    // try-fail ran and failed, fallback ran, join ran
+    expect(executionLog).toContain("source");
+    expect(executionLog).toContain("try");
+    expect(executionLog).toContain("fallback");
+    expect(executionLog).toContain("join");
+
+    // Verify node states
+    const nodes = getWorkflowNodes(result.workflowId);
+    const tryNode = nodes.find(n => n.node_id === "try-fail");
+    const fallbackNode = nodes.find(n => n.node_id === "fallback-runs");
+    expect(tryNode!.status).toBe("failed");
+    expect(fallbackNode!.status).toBe("completed");
+  });
+
+  test("SPOT_INTERRUPTED: first attempt retries spot, second attempt creates on-demand fallback", async () => {
+    let spawnAttempt = 0;
+    const executionLog: string[] = [];
+
+    registerNodeExecutor({
+      name: "spot-spawn-test",
+      idempotent: true,
+      async execute() {
+        spawnAttempt++;
+        executionLog.push(`spawn-attempt-${spawnAttempt}`);
+        // Always fail with SPOT_INTERRUPTED
+        throw Object.assign(new Error("Spot instance reclaimed"), {
+          code: "SPOT_INTERRUPTED",
+          category: "provider",
+        });
+      },
+    });
+
+    registerNodeExecutor({
+      name: "spot-join-type",
+      idempotent: true,
+      async execute() {
+        executionLog.push("join");
+        return { joined: true };
+      },
+    });
+
+    registerBlueprint({
+      type: "test-spot-fallback",
+      entryNode: "spawn",
+      nodes: {
+        spawn: { type: "spot-spawn-test", dependsOn: [] },
+        join: { type: "spot-join-type", dependsOn: ["spawn"] },
+      },
+    });
+
+    const result = await submit({
+      type: "test-spot-fallback",
+      input: { is_spot: true, region: "us-east-1" },
+    });
+
+    const wf = await waitForWorkflow(result.workflowId);
+
+    // The workflow should eventually fail (both spot attempts fail, on-demand fallback also fails)
+    // or it creates the fallback node.
+    // Since the same executor is used for both spot and on-demand, both fail.
+    expect(wf.status).toBe("failed");
+
+    // Verify the spot node was retried once (attempt 0 -> attempt 1)
+    expect(spawnAttempt).toBeGreaterThanOrEqual(2);
+
+    // Verify an on-demand fallback node was created
+    const nodes = getWorkflowNodes(result.workflowId);
+    const fallbackNode = nodes.find(n => n.node_id === "spawn-ondemand");
+    expect(fallbackNode).not.toBeUndefined();
+    if (fallbackNode) {
+      const fallbackInput = JSON.parse(fallbackNode.input_json);
+      expect(fallbackInput.is_spot).toBe(false);
+    }
   });
 });

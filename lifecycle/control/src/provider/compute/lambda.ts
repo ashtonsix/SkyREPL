@@ -28,6 +28,7 @@ import {
 import { assembleShellBootstrap } from "../bootstrap/shell";
 import { formatResourceName } from "../../material/control-id";
 import type { ProviderLifecycleHooks, TaskReceipt, HeartbeatExpectations } from "../extensions";
+import { setWithAutoTTL } from "../extensions";
 
 // =============================================================================
 // Constants
@@ -624,6 +625,23 @@ export function createLambdaHooks(provider: LambdaLabsProvider): ProviderLifecyc
               receipts.push({ type: task.type, status: "failed", reason: String(err) });
             }
             break;
+
+          case "refresh_pricing": {
+            // Lambda /instance-types returns pricing inline
+            try {
+              const specs = await provider.listAvailableSpecs();
+              const pricing = specs.map(s => ({
+                spec: s.name,
+                hourlyRate: s.hourlyRate,
+                regions: s.availableRegions,
+              }));
+              await setWithAutoTTL("lambda", "on_demand_prices:all", pricing);
+              receipts.push({ type: task.type, status: "completed", result: { specs: specs.length } });
+            } catch (err) {
+              receipts.push({ type: task.type, status: "failed", reason: String(err) });
+            }
+            break;
+          }
 
           default:
             receipts.push({

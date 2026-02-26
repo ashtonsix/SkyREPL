@@ -188,7 +188,7 @@ CREATE TABLE workflows (
     type TEXT NOT NULL,
     parent_workflow_id INTEGER,
     depth INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'paused', 'completed', 'failed', 'cancelled', 'rolling_back')),
+    status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'paused', 'cancelling', 'completed', 'failed', 'cancelled', 'rolling_back')),
     current_node TEXT,
     input_json TEXT NOT NULL,
     output_json TEXT,

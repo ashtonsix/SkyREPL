@@ -16,6 +16,7 @@ import {
   completeWorkflow as completeWorkflowTransition,
   failWorkflow as failWorkflowTransition,
   cancelWorkflow as cancelWorkflowTransition,
+  finalizeCancellation,
   failNode,
   resetNodeForRetry,
   skipNode,
@@ -85,7 +86,17 @@ export const ERROR_RETRY_MAPPING: Record<
 
   // Retryable -- fallback path (fundamentally different approach needed)
   // Resource lost mid-operation; relaunch on on-demand instead of retrying spot.
-  SPOT_INTERRUPTED: { retryable: true, strategy: "fallback", maxRetries: 1 },
+  // maxRetries=3: attempt=1 retries spot, attempt=2 creates on-demand fallback via RWA.
+  // The on-demand fallback is a new node, so the original node's attempt never reaches 3.
+  SPOT_INTERRUPTED: { retryable: true, strategy: "fallback", maxRetries: 3 },
+
+  // Retryable -- unexpected errors (plain Error with no code, §normalizeToNodeError)
+  // Conservative: 2 retries with exponential backoff before permanent failure.
+  INTERNAL_ERROR: {
+    retryable: true,
+    strategy: "exponential_backoff",
+    maxRetries: 2,
+  },
 
   // Non-retryable -- fail immediately (deterministic failures, retry won't help)
   VALIDATION_ERROR: {
@@ -140,14 +151,15 @@ export function determineRetryStrategy(
   }
 
   // Exponential backoff: min(2^attempt * base, max)
-  // Respects retry_after_ms from error details if present (RATE_LIMITED)
-  const delayMs =
-    mapping.strategy === "exponential_backoff"
-      ? Math.min(
-          Math.pow(2, attempt) * TIMING.RETRY_BASE_DELAY_MS,
-          TIMING.RETRY_MAX_DELAY_MS
-        )
-      : (error.details?.retry_after_ms as number) ?? 0;
+  // Provider-supplied retry_after_ms takes precedence over computed backoff.
+  const providerDelay = (error.details?.retry_after_ms as number) ?? 0;
+  const computedBackoff = mapping.strategy === "exponential_backoff"
+    ? Math.min(
+        Math.pow(2, attempt) * TIMING.RETRY_BASE_DELAY_MS,
+        TIMING.RETRY_MAX_DELAY_MS
+      )
+    : 0;
+  const delayMs = providerDelay > 0 ? providerDelay : computedBackoff;
 
   return {
     shouldRetry: true,
@@ -194,50 +206,103 @@ export async function handleRetry(
         await compensateFailedNode(workflowId, node.node_id);
       }
       {
-        const alternativeRegions = error.details?.alternative_regions as
-          | string[]
-          | undefined;
+        const currentInput: Record<string, unknown> = node.input_json
+          ? JSON.parse(node.input_json)
+          : {};
+
+        // Use error.details?.alternative_regions if the spawner already populated them,
+        // otherwise ask orbital to discover alternatives for us.
+        let alternativeRegions = error.details?.alternative_regions as string[] | undefined;
+        let alternativeSpec: string | undefined;
+        let alternativeProvider: string | undefined;
+
+        if (!alternativeRegions?.length) {
+          try {
+            const { resolveAlternativeViaOrbital } = await import("../../provider/orbital");
+            const altResult = await resolveAlternativeViaOrbital(
+              String(currentInput.spec ?? ""),
+              String(currentInput.provider ?? ""),
+              String(currentInput.spec ?? ""),
+            );
+            if (altResult && altResult.alternatives.length > 0) {
+              const alt = altResult.alternatives[0]!;
+              alternativeRegions = alt.instance.regions;
+              alternativeSpec = alt.spec;
+              alternativeProvider = alt.provider;
+            }
+          } catch {
+            // Orbital unavailable — no alternative available, node stays failed
+          }
+        }
+
         const alternativeRegion = alternativeRegions?.[0];
         if (alternativeRegion) {
-          const currentInput = node.input_json
-            ? JSON.parse(node.input_json)
-            : {};
           applyRetryWithAlternative(workflowId, node.node_id, {
             id: `${node.node_id}-alt-${node.attempt + 1}`,
             type: node.node_type,
-            input: { ...currentInput, region: alternativeRegion },
+            input: {
+              ...currentInput,
+              region: alternativeRegion,
+              ...(alternativeSpec !== undefined ? { spec: alternativeSpec } : {}),
+              ...(alternativeProvider !== undefined ? { provider: alternativeProvider } : {}),
+            },
           });
         }
       }
       break;
 
-    case "fallback":
-      // Spot interrupted: retry spot once, then fallback to on-demand
-      if (node.attempt === 0) {
+    case "fallback": {
+      // Spot interrupted: retry spot once, then fallback to on-demand (§6.6.1)
+      // Note: startNode increments attempt before execute, so first execution has attempt=1
+      const currentInput = node.input_json ? JSON.parse(node.input_json) : {};
+      const alreadyOnDemand = currentInput.is_spot === false;
+
+      if (alreadyOnDemand) {
+        // Already running as on-demand fallback -- no further fallback possible, just fail
+        failNode(node.id, JSON.stringify({
+          code: error.code,
+          message: error.message,
+          retried_with: "fallback_exhausted",
+        }));
+      } else if (node.attempt <= 1) {
         failNode(node.id, JSON.stringify({ code: error.code, message: error.message, retried_with: "fallback_spot_retry" }));
         resetNodeForRetry(node.id, "spot_retry");
       } else {
-        // Fail the node, apply conditional branch for on-demand fallback
+        // Fail the node, apply RWA to swap in an on-demand fallback node
         failNode(
           node.id,
           JSON.stringify({
             code: error.code,
             message: error.message,
-            retried_with: "fallback",
+            retried_with: "fallback_on_demand",
           })
         );
-        const currentInput = node.input_json
-          ? JSON.parse(node.input_json)
-          : {};
-        // NOT YET IMPLEMENTED -- deferred to future slice
-        // CB pattern stub - full implementation needs a joinNode
-        // For Slice 1, just log the intent
-        console.warn(
-          "[workflow] Fallback pattern triggered but CB requires joinNode config",
-          { workflowId, nodeId: node.node_id, input: currentInput }
-        );
+        {
+          // Compensate the failed spot node before launching on-demand fallback.
+          // Best-effort: if compensation throws, proceed with fallback anyway.
+          // Compensation is cleanup; the on-demand fallback is the critical path.
+          try {
+            const { compensateFailedNode } = await import("../compensation");
+            await compensateFailedNode(workflowId, node.node_id);
+          } catch (compError) {
+            console.error("[retry] Compensation failed during spot→on-demand fallback, proceeding with fallback anyway", {
+              workflowId,
+              nodeId: node.node_id,
+              error: compError instanceof Error ? compError.message : String(compError),
+            });
+          }
+        }
+        {
+          // Create on-demand fallback node via RWA pattern: same type, is_spot=false
+          applyRetryWithAlternative(workflowId, node.node_id, {
+            id: `${node.node_id}-ondemand`,
+            type: node.node_type,
+            input: { ...currentInput, is_spot: false },
+          });
+        }
       }
       break;
+    }
   }
 }
 
@@ -274,9 +339,12 @@ export function handlePfoBranchFailure(workflowId: number, failedBranchNodeId: s
 
     if (sibling.status === "pending") {
       skipNode(sibling.id);
+    } else if (sibling.status === "running") {
+      failNode(sibling.id, JSON.stringify({
+        code: "PFO_CANCELLED",
+        message: "PFO branch cancelled: sibling branch failed in first-failure-cancels mode",
+      }));
     }
-    // Note: running siblings will eventually complete or fail on their own;
-    // the DAG engine handles the final failure via handleWorkflowFailure.
   }
 }
 
@@ -506,6 +574,32 @@ export async function handleCancellation(workflowId: number): Promise<void> {
     }
   }
 
+  // Send cancel_run to agent via SSE (fire-and-forget, §6.7)
+  const wf = getWorkflow(workflowId);
+  const wfInputForCancel = wf?.input_json ? JSON.parse(wf.input_json) : {};
+  if (wfInputForCancel.runId) {
+    // Find the instance from spawn-instance node output
+    const spawnNode = nodes.find(n => n.node_type === "spawn-instance" && n.output_json);
+    const instanceId = spawnNode?.output_json
+      ? JSON.parse(spawnNode.output_json).providerId
+      : undefined;
+    if (instanceId) {
+      try {
+        const { getCommandBus } = await import("../../events/command-bus");
+        const bus = getCommandBus();
+        if (bus) {
+          bus.sendCommand(instanceId, {
+            type: "cancel_run" as const,
+            command_id: crypto.randomUUID(),
+            run_id: wfInputForCancel.runId,
+          });
+        }
+      } catch {
+        // Fire-and-forget: failure is logged by SSE layer
+      }
+    }
+  }
+
   // Cancel child workflows (#WF-03: cancel propagation)
   // NOTE: cancelWorkflow is imported from lifecycle.ts -- circular import resolved at call time
   const { cancelWorkflow } = await import("./lifecycle");
@@ -554,6 +648,15 @@ export async function handleCancellation(workflowId: number): Promise<void> {
     }
   }
 
+  // Finalize the cancellation transition (cancelling -> cancelled).
+  // This is an atomic transition — if it fails, another caller already finalized
+  // the cancellation and emitted events. Guard all event emission on this result.
+  const cancellationResult = finalizeCancellation(workflowId);
+  if (!cancellationResult.success) {
+    // Already cancelled by another caller — skip event emission to prevent duplicates
+    return;
+  }
+
   // Sync run.workflow_state and emit run:finished (#3.01/#3.04)
   const wfInput = workflow?.input_json ? JSON.parse(workflow.input_json) : {};
   if (wfInput.runId) {
@@ -575,9 +678,6 @@ export async function handleCancellation(workflowId: number): Promise<void> {
       spotInterrupted: false,
     });
   }
-
-  // Finalize the cancellation transition
-  cancelWorkflowTransition(workflowId);
 
   // Emit workflow_failed event so SSE clients learn about the cancellation
   workflowEvents.emit("workflow_failed", {

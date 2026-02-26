@@ -6,7 +6,8 @@
     "lifecycle/control",
     "shell/cli",
     "shell/proxy",
-    "orbital/impl"
+    "orbital/impl",
+    "scaffold"
   ],
   "dependencies": {
     "@aws-sdk/client-ec2": "^3.992.0",

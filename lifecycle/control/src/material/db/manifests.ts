@@ -8,6 +8,7 @@
 
 import { ConflictError } from "@skyrepl/contracts";
 import { getDatabase, queryOne, queryMany, execute } from "./helpers";
+import { generateUniqueName } from "../../naming/wordlist";
 
 export interface Manifest {
   id: number;
@@ -17,6 +18,7 @@ export interface Manifest {
   default_cleanup_priority: number;
   retention_ms: number | null;
   created_by: number | null;
+  display_name: string | null;
   created_at: number;
   released_at: number | null;
   expires_at: number | null;
@@ -55,21 +57,27 @@ export function getManifest(id: number): Manifest | null {
 
 export function createManifest(
   workflowId: number,
-  options?: { default_cleanup_priority?: number; retention_ms?: number; tenant_id?: number; created_by?: number | null }
+  options?: { default_cleanup_priority?: number; retention_ms?: number; tenant_id?: number; created_by?: number | null; display_name?: string | null }
 ): Manifest {
   const now = Date.now();
   const db = getDatabase();
+  const tenantId = options?.tenant_id ?? 1;
+
+  const displayName = options?.display_name !== undefined
+    ? options.display_name
+    : generateUniqueName(tenantId, "manifest");
 
   const stmt = db.prepare(`
-    INSERT INTO manifests (workflow_id, tenant_id, status, default_cleanup_priority, retention_ms, created_at, released_at, expires_at, updated_at)
-    VALUES (?, ?, 'DRAFT', ?, ?, ?, NULL, NULL, ?)
+    INSERT INTO manifests (workflow_id, tenant_id, status, default_cleanup_priority, retention_ms, display_name, created_at, released_at, expires_at, updated_at)
+    VALUES (?, ?, 'DRAFT', ?, ?, ?, ?, NULL, NULL, ?)
   `);
 
   const result = stmt.run(
     workflowId,
-    options?.tenant_id ?? 1,
+    tenantId,
     options?.default_cleanup_priority ?? 50,
     options?.retention_ms ?? null,
+    displayName,
     now,
     now
   );

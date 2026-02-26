@@ -1,8 +1,9 @@
 // tests/unit/cleanup-manifest.test.ts - Cleanup Manifest Intent Tests
-// Covers: #LIFE-09 (blueprint + nodes) and #LIFE-10 (background trigger wiring)
+// Covers: #LIFE-09 (blueprint + nodes), #LIFE-10 (background trigger wiring),
+//         and parameterised contract suites (#WF2-06)
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { setupTest, waitForWorkflow } from "../harness";
+import { setupTest, waitForWorkflow, verifyWorkflowInvariant } from "../harness";
 import {
   createInstance,
   createAllocation,
@@ -17,6 +18,7 @@ import {
   getInstance,
   queryOne,
   queryMany,
+  getWorkflowNodes,
   type Manifest,
   type Workflow,
 } from "../../control/src/material/db";
@@ -27,8 +29,12 @@ import {
 
 import {
   submit,
+  submit as submitWf,
   registerBlueprint,
   registerNodeExecutor,
+  getBlueprint,
+  getNodeExecutor,
+  createWorkflowEngine,
 } from "../../control/src/workflow/engine";
 
 import { registerCleanupManifest, cleanupManifest } from "../../control/src/intent/cleanup-manifest";
@@ -425,23 +431,6 @@ describe("Cleanup Manifest - Node Executors", () => {
       expect(updatedInstance?.workflow_state).toBe("terminate:complete");
     });
 
-    test("stubs snapshot and artifact cleanup", async () => {
-      const { manifest } = createSealedManifestWithResources();
-
-      const ctx = buildMockNodeContext({ manifestId: manifest.id }, {
-        "sort-and-group": {
-          groups: [
-            { type: "snapshot", priority: 10, resourceIds: ["1"] },
-            { type: "artifact", priority: 70, resourceIds: ["2"] },
-          ],
-        },
-      });
-
-      const output = await cleanupResourcesExecutor.execute(ctx);
-
-      expect(output.skipped).toBe(2);
-      expect(output.cleaned).toBe(0);
-    });
   });
 
   // ---------------------------------------------------------------------------
@@ -603,34 +592,35 @@ describe("Cleanup Manifest - Background Trigger (#LIFE-10)", () => {
   test("skips manifests with active cleanup workflow", async () => {
     // Create an expired sealed manifest with claimed resources (eligible for cleanup)
     const { manifest } = createSealedManifestWithResources({ expiresAt: Date.now() - 60_000, claimedResources: true });
+    const targetManifestId = manifest.id;
 
     // Submit a cleanup workflow for it first
     const result = await submit({
       type: "cleanup-manifest",
-      input: { manifestId: manifest.id },
+      input: { manifestId: targetManifestId },
     });
 
     // Wait for the workflow to finish
     await waitForWorkflow(result.workflowId);
 
-    // Count current cleanup workflows
-    const before = queryMany<{ id: number }>(
-      "SELECT id FROM workflows WHERE type = 'cleanup-manifest'",
-      []
-    );
+    // Count cleanup workflows targeting the ORIGINAL manifest (via input_json).
+    // We scope by input_json to avoid counting workflows for unrelated expired manifests
+    // (e.g., the cleanup-manifest workflow's own empty manifest which also expires immediately).
+    const countForManifest = () => queryMany<{ id: number }>(
+      `SELECT id FROM workflows WHERE type = 'cleanup-manifest' AND input_json LIKE ?`,
+      [`%"manifestId":${targetManifestId}%`]
+    ).length;
 
-    // Run the background check — should not spawn a duplicate
+    const before = countForManifest();
+
+    // Run the background check — should not spawn a duplicate for the original manifest
     await manifestCleanupCheck();
 
-    const after = queryMany<{ id: number }>(
-      "SELECT id FROM workflows WHERE type = 'cleanup-manifest'",
-      []
-    );
+    const after = countForManifest();
 
-    // The first workflow already completed (terminal), so manifestCleanupCheck
-    // won't see it as "active". But the manifest was deleted by cleanup,
-    // so listExpiredManifests won't return it either. No new workflow spawned.
-    expect(after.length).toBeLessThanOrEqual(before.length + 1);
+    // The original manifest was deleted by the first cleanup workflow, so
+    // listExpiredManifests won't return it again. No new workflow is spawned for it.
+    expect(after).toEqual(before);
   });
 
   test("does not spawn for non-expired manifests", async () => {
@@ -692,5 +682,497 @@ describe("Cleanup Manifest - Entry Point Validation", () => {
     const workflow = await cleanupManifest({ manifestId: manifest.id });
     expect(workflow).toBeDefined();
     expect(workflow.type).toBe("cleanup-manifest");
+  });
+});
+
+// =============================================================================
+// Parameterised Contract Tests (#WF2-06)
+//
+// Contract: for any manifest configuration, if cleanup-manifest completes,
+// these invariants MUST hold. We run the suite across different resource
+// compositions to prove properties aren't accidentally resource-specific.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Contract Suite Factory
+//
+// runCleanupManifestContract(name, setupFn) registers a describe block that
+// runs all behavioral invariants for one manifest/resource configuration.
+//
+// setupFn returns the fixture created by the test; the contract tests assert
+// invariants against whatever it returns.
+// ---------------------------------------------------------------------------
+
+type ManifestFixture = {
+  manifest: ReturnType<typeof getManifest>;
+  instance: ReturnType<typeof createTestInstance>;
+  alloc: ReturnType<typeof createAllocation>;
+  run: ReturnType<typeof createRun>;
+};
+
+type SetupFn = () => ManifestFixture;
+
+function runCleanupManifestContract(suiteName: string, setupFn: SetupFn) {
+  describe(`Cleanup Manifest Contract: ${suiteName}`, () => {
+    // The outer file-level beforeEach (setupTest + orbstack mock) already runs
+    // before each test. We only need to register blueprints here.
+    beforeEach(() => {
+      registerCleanupManifest();
+      registerLaunchRun();
+    });
+
+    // -------------------------------------------------------------------------
+    // CONTRACT: terminal state invariant
+    // "For any manifest configuration, a successful cleanup must produce a
+    //  completed workflow and a deleted manifest."
+    // -------------------------------------------------------------------------
+
+    test("CONTRACT: completed workflow deletes manifest", async () => {
+      const { manifest } = setupFn();
+
+      const result = await submitWf({
+        type: "cleanup-manifest",
+        input: { manifestId: manifest!.id },
+      });
+
+      const wf = await waitForWorkflow(result.workflowId);
+      expect(wf.status).toBe("completed");
+
+      const deleted = getManifest(manifest!.id);
+      expect(deleted).toBeNull();
+    });
+
+    // -------------------------------------------------------------------------
+    // CONTRACT: node sequence invariant
+    // "All 4 nodes must complete in dependency order."
+    // -------------------------------------------------------------------------
+
+    test("CONTRACT: all 4 nodes complete in dependency order", async () => {
+      const { manifest } = setupFn();
+
+      const result = await submitWf({
+        type: "cleanup-manifest",
+        input: { manifestId: manifest!.id },
+      });
+
+      await waitForWorkflow(result.workflowId);
+
+      const nodes = getWorkflowNodes(result.workflowId);
+      expect(nodes.length).toBe(4);
+
+      const byId: Record<string, string> = {};
+      for (const n of nodes) byId[n.node_id] = n.status;
+
+      expect(byId["load-manifest-resources"]).toBe("completed");
+      expect(byId["sort-and-group"]).toBe("completed");
+      expect(byId["cleanup-resources"]).toBe("completed");
+      expect(byId["delete-manifest"]).toBe("completed");
+    });
+
+    // -------------------------------------------------------------------------
+    // CONTRACT: priority ordering invariant
+    // "Resources within a manifest must be cleaned in descending priority order.
+    //  Higher-priority types (allocation=90) must be processed before
+    //  lower-priority types (instance=50)."
+    // -------------------------------------------------------------------------
+
+    test("CONTRACT: sort-and-group produces groups in descending priority", async () => {
+      const { manifest } = setupFn();
+
+      const result = await submitWf({
+        type: "cleanup-manifest",
+        input: { manifestId: manifest!.id },
+      });
+
+      await waitForWorkflow(result.workflowId);
+
+      const nodes = getWorkflowNodes(result.workflowId);
+      const sortNode = nodes.find((n) => n.node_id === "sort-and-group");
+      expect(sortNode).toBeDefined();
+      expect(sortNode!.output_json).not.toBeNull();
+
+      const sortOutput = JSON.parse(sortNode!.output_json!) as { groups: Array<{ type: string; priority: number }> };
+      const priorities = sortOutput.groups.map((g) => g.priority);
+
+      // Verify non-increasing order
+      for (let i = 1; i < priorities.length; i++) {
+        expect(priorities[i]).toBeLessThanOrEqual(priorities[i - 1]!);
+      }
+    });
+
+    // -------------------------------------------------------------------------
+    // CONTRACT: manifest_resources cleaned
+    // "After cleanup, there must be no manifest_resources entries remaining
+    //  for the deleted manifest."
+    // -------------------------------------------------------------------------
+
+    test("CONTRACT: no manifest_resources remain after cleanup", async () => {
+      const { manifest } = setupFn();
+      const manifestId = manifest!.id;
+
+      const result = await submitWf({
+        type: "cleanup-manifest",
+        input: { manifestId },
+      });
+
+      await waitForWorkflow(result.workflowId);
+
+      const remaining = getManifestResources(manifestId);
+      expect(remaining.length).toBe(0);
+    });
+
+    // -------------------------------------------------------------------------
+    // CONTRACT: workflow invariants hold
+    // Uses verifyWorkflowInvariant to assert finished_at set, all nodes
+    // terminal — independent of resource configuration.
+    // -------------------------------------------------------------------------
+
+    test("CONTRACT: post-completion workflow invariants hold", async () => {
+      const { manifest } = setupFn();
+
+      const result = await submitWf({
+        type: "cleanup-manifest",
+        input: { manifestId: manifest!.id },
+      });
+
+      await waitForWorkflow(result.workflowId);
+
+      verifyWorkflowInvariant(result.workflowId, {
+        expectManifestSealed: false, // cleanup-manifest deletes manifest, not seals it
+        checkAllocations: false,
+      });
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Manifest Configurations Under Test
+// ---------------------------------------------------------------------------
+
+// We need the setupTest to already be called (top-level beforeEach handles it),
+// but each runCleanupManifestContract suite also adds a nested beforeEach for
+// re-registration. The outer beforeEach from the top-level handles DB init.
+
+// Configuration 1: Full manifest (allocation + run + instance)
+runCleanupManifestContract("full manifest (allocation + run + instance)", () => {
+  // The DB is already set up by the file-level beforeEach.
+  // Just create the fixture.
+  return createSealedManifestWithResources() as ManifestFixture;
+});
+
+// Configuration 2: Minimal manifest (allocation only)
+runCleanupManifestContract("minimal manifest (allocation only)", () => {
+  const fixture = createSealedManifestWithResources();
+
+  // Remove run and instance from manifest_resources — test with just allocation
+  queryMany(
+    "DELETE FROM manifest_resources WHERE manifest_id = ? AND resource_type != 'allocation'",
+    [fixture.manifest.id]
+  );
+
+  return fixture as ManifestFixture;
+});
+
+// Configuration 3: Manifest with many allocations of same type
+runCleanupManifestContract("manifest with multiple same-type resources", () => {
+  const wf = createDummyWorkflow();
+  const manifest = createManifest(wf.id);
+  const instance = createTestInstance();
+
+  // Create 3 allocations
+  for (let i = 0; i < 3; i++) {
+    const alloc = createAllocation({
+      run_id: null,
+      instance_id: instance.id,
+      status: "COMPLETE",
+      current_manifest_id: manifest.id,
+      user: "test-user",
+      workdir: "/tmp/test",
+      debug_hold_until: null,
+      completed_at: Date.now(),
+    });
+    addResourceToManifest(manifest.id, "allocation", String(alloc.id), { cleanupPriority: 90 });
+  }
+
+  addResourceToManifest(manifest.id, "instance", String(instance.id), { cleanupPriority: 50 });
+
+  sealManifest(manifest.id, Date.now() - 1000);
+
+  const sealed = getManifest(manifest.id)!;
+  return {
+    manifest: sealed,
+    instance,
+    alloc: null as any,
+    run: null as any,
+  } as ManifestFixture;
+});
+
+// =============================================================================
+// Cleanup Manifest Contract: Partial Failure Handling
+//
+// Tests that the cleanup workflow correctly handles individual resource
+// failures without aborting the entire cleanup.
+// =============================================================================
+
+describe("Cleanup Manifest Contract: partial failure handling", () => {
+  beforeEach(async () => {
+    await registerProvider({
+      provider: {
+        name: "orbstack",
+        capabilities: {} as Provider["capabilities"],
+        async spawn() { throw new Error("not implemented"); },
+        async terminate() {},
+        async list() { return []; },
+        async get() { return null; },
+        generateBootstrap() { return { content: "", format: "shell" as const, checksum: "" }; },
+      } as Provider,
+    });
+    registerCleanupManifest();
+    registerLaunchRun();
+  });
+
+  test("PARTIAL FAILURE: non-existent resource IDs are skipped without failing workflow", async () => {
+    const wf = createDummyWorkflow();
+    const manifest = createManifest(wf.id);
+
+    // Add a reference to a non-existent allocation (ID 99999)
+    addResourceToManifest(manifest.id, "allocation", "99999", { cleanupPriority: 90 });
+
+    sealManifest(manifest.id, Date.now() - 1000);
+
+    const result = await submitWf({
+      type: "cleanup-manifest",
+      input: { manifestId: manifest.id },
+    });
+
+    const completedWf = await waitForWorkflow(result.workflowId);
+    expect(completedWf.status).toBe("completed");
+
+    // Workflow completed even though the allocation didn't exist
+    const deleted = getManifest(manifest.id);
+    expect(deleted).toBeNull();
+  });
+
+  test("PARTIAL FAILURE: already-deleted instance is skipped (idempotent)", async () => {
+    const { manifest, instance } = createSealedManifestWithResources();
+
+    // Pre-delete the instance to simulate a partially-processed manifest.
+    // Must delete dependent rows first (allocations FK-reference instances).
+    queryMany("DELETE FROM allocations WHERE instance_id = ?", [instance.id]);
+    queryMany("DELETE FROM instances WHERE id = ?", [instance.id]);
+
+    const result = await submitWf({
+      type: "cleanup-manifest",
+      input: { manifestId: manifest.id },
+    });
+
+    const completedWf = await waitForWorkflow(result.workflowId);
+    // Workflow must complete even though instance was already gone
+    expect(completedWf.status).toBe("completed");
+  });
+
+  test("PARTIAL FAILURE: cleanup-resources counts skipped correctly for non-existent resources", async () => {
+    const wf = createDummyWorkflow();
+    const manifest = createManifest(wf.id);
+
+    // Add non-existent resources of different types
+    addResourceToManifest(manifest.id, "allocation", "88881", { cleanupPriority: 90 });
+    addResourceToManifest(manifest.id, "run", "88882", { cleanupPriority: 80 });
+
+    sealManifest(manifest.id, Date.now() - 1000);
+
+    const result = await submitWf({
+      type: "cleanup-manifest",
+      input: { manifestId: manifest.id },
+    });
+
+    await waitForWorkflow(result.workflowId);
+
+    const nodes = getWorkflowNodes(result.workflowId);
+    const cleanupNode = nodes.find((n) => n.node_id === "cleanup-resources");
+    expect(cleanupNode?.output_json).not.toBeNull();
+
+    const output = JSON.parse(cleanupNode!.output_json!) as { cleaned: number; skipped: number; failed: number };
+    // Both were non-existent so they should be skipped
+    expect(output.skipped).toBe(2);
+    expect(output.cleaned).toBe(0);
+  });
+});
+
+// =============================================================================
+// Cleanup Manifest Contract: Idempotency at the Node Level
+//
+// Tests that individual nodes are safe to re-run and produce consistent output.
+// =============================================================================
+
+describe("Cleanup Manifest Contract: node-level idempotency", () => {
+  test("load-manifest-resources is idempotent: same output on repeated calls", async () => {
+    const { manifest } = createSealedManifestWithResources();
+
+    const ctx = buildMockNodeContext({ manifestId: manifest.id });
+
+    const output1 = await loadManifestResourcesExecutor.execute(ctx);
+    const output2 = await loadManifestResourcesExecutor.execute(ctx);
+
+    expect(output1.manifestId).toBe(output2.manifestId);
+    expect(output1.resourceCount).toBe(output2.resourceCount);
+    expect(output1.resources.map(r => r.id).sort()).toEqual(
+      output2.resources.map(r => r.id).sort()
+    );
+  });
+
+  test("sort-and-group is deterministic: same groups on repeated calls", async () => {
+    const resources = [
+      { type: "allocation", id: "1", priority: 90 },
+      { type: "run", id: "2", priority: 80 },
+      { type: "instance", id: "3", priority: 50 },
+    ];
+    const nodeOutputs = {
+      "load-manifest-resources": { manifestId: 1, resourceCount: 3, resources },
+    };
+
+    const ctx1 = buildMockNodeContext({}, nodeOutputs);
+    const ctx2 = buildMockNodeContext({}, nodeOutputs);
+
+    const out1 = await sortAndGroupExecutor.execute(ctx1);
+    const out2 = await sortAndGroupExecutor.execute(ctx2);
+
+    expect(out1.groups.map(g => g.type)).toEqual(out2.groups.map(g => g.type));
+    expect(out1.groups.map(g => g.priority)).toEqual(out2.groups.map(g => g.priority));
+  });
+
+  test("delete-manifest is idempotent: second call on already-deleted manifest succeeds", async () => {
+    const { manifest } = createSealedManifestWithResources();
+    const manifestId = manifest.id;
+
+    const ctx = buildMockNodeContext({ manifestId });
+
+    // First deletion
+    const out1 = await deleteManifestExecutor.execute(ctx);
+    expect(out1.deleted).toBe(true);
+
+    // Second deletion on already-deleted manifest
+    const ctx2 = buildMockNodeContext({ manifestId });
+    const out2 = await deleteManifestExecutor.execute(ctx2);
+    expect(out2.deleted).toBe(true); // Must not throw
+  });
+
+  test("cleanup-resources is idempotent for allocations: second run skips already-deleted", async () => {
+    const { manifest, alloc } = createSealedManifestWithResources();
+
+    const groups = [{ type: "allocation", priority: 90, resourceIds: [String(alloc.id)] }];
+    const ctx1 = buildMockNodeContext({ manifestId: manifest.id }, { "sort-and-group": { groups } });
+
+    // First run deletes the allocation
+    const out1 = await cleanupResourcesExecutor.execute(ctx1);
+    expect(out1.cleaned).toBe(1);
+    expect(getAllocation(alloc.id)).toBeNull();
+
+    // Second run on the same group — allocation already gone
+    const ctx2 = buildMockNodeContext({ manifestId: manifest.id }, { "sort-and-group": { groups } });
+    const out2 = await cleanupResourcesExecutor.execute(ctx2);
+    expect(out2.skipped).toBe(1); // Already deleted → skipped
+    expect(out2.cleaned).toBe(0);
+  });
+});
+
+// =============================================================================
+// Cleanup Manifest Contract: Priority Ordering Correctness
+//
+// The priority system is a core contract property: if allocations (priority 90)
+// are cleaned before instances (priority 50), then when instance cleanup runs,
+// no active allocations can block or observe stale state.
+// =============================================================================
+
+describe("Cleanup Manifest Contract: priority ordering correctness", () => {
+  test("sort-and-group places allocation(90) before run(80) before instance(50)", async () => {
+    const resources = [
+      { type: "instance", id: "3", priority: 50 },
+      { type: "allocation", id: "1", priority: 90 },
+      { type: "run", id: "2", priority: 80 },
+    ];
+
+    const ctx = buildMockNodeContext({}, {
+      "load-manifest-resources": { manifestId: 1, resourceCount: 3, resources },
+    });
+
+    const output = await sortAndGroupExecutor.execute(ctx);
+
+    expect(output.groups[0]!.type).toBe("allocation");
+    expect(output.groups[1]!.type).toBe("run");
+    expect(output.groups[2]!.type).toBe("instance");
+  });
+
+  test("sort-and-group merges multiple resources of same type into one group", async () => {
+    const resources = [
+      { type: "allocation", id: "1", priority: 90 },
+      { type: "allocation", id: "2", priority: 90 },
+      { type: "allocation", id: "3", priority: 90 },
+    ];
+
+    const ctx = buildMockNodeContext({}, {
+      "load-manifest-resources": { manifestId: 1, resourceCount: 3, resources },
+    });
+
+    const output = await sortAndGroupExecutor.execute(ctx);
+
+    expect(output.groups.length).toBe(1);
+    expect(output.groups[0]!.type).toBe("allocation");
+    expect(output.groups[0]!.resourceIds.length).toBe(3);
+  });
+
+  test("sort-and-group uses highest priority within a mixed-priority type group", async () => {
+    // This can happen if resources of the same type have different priorities
+    const resources = [
+      { type: "allocation", id: "1", priority: 70 },
+      { type: "allocation", id: "2", priority: 90 }, // Higher
+      { type: "instance", id: "3", priority: 50 },
+    ];
+
+    const ctx = buildMockNodeContext({}, {
+      "load-manifest-resources": { manifestId: 1, resourceCount: 3, resources },
+    });
+
+    const output = await sortAndGroupExecutor.execute(ctx);
+
+    // Allocation group should use max priority (90)
+    const allocGroup = output.groups.find((g) => g.type === "allocation");
+    expect(allocGroup!.priority).toBe(90);
+    // Should still be first (higher than instance=50)
+    expect(output.groups[0]!.type).toBe("allocation");
+  });
+
+  test("cleanup-resources processes groups strictly in priority order from sort-and-group", async () => {
+    const { manifest, alloc, run, instance } = createSealedManifestWithResources();
+
+    // Submit full workflow to observe real execution order
+    const result = await (async () => {
+      // Re-register needed since this is a nested describe without its own beforeEach
+      await registerProvider({
+        provider: {
+          name: "orbstack",
+          capabilities: {} as Provider["capabilities"],
+          async spawn() { throw new Error("not implemented"); },
+          async terminate() {},
+          async list() { return []; },
+          async get() { return null; },
+          generateBootstrap() { return { content: "", format: "shell" as const, checksum: "" }; },
+        } as Provider,
+      });
+      registerCleanupManifest();
+      registerLaunchRun();
+
+      return submitWf({
+        type: "cleanup-manifest",
+        input: { manifestId: manifest.id },
+      });
+    })();
+
+    await waitForWorkflow(result.workflowId);
+
+    // Allocation (90) must have been cleaned before instance (50):
+    // allocation deleted (null), instance marked terminate:complete
+    expect(getAllocation(alloc.id)).toBeNull();
+    expect(getInstance(instance.id)?.workflow_state).toBe("terminate:complete");
   });
 });

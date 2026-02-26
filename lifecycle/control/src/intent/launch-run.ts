@@ -114,32 +114,138 @@ import { waitCompletionExecutor } from "../workflow/nodes/wait-completion";
 import { finalizeExecutor } from "../workflow/nodes/finalize";
 
 // =============================================================================
+// Spec Resolution (D4)
+// =============================================================================
+
+import { resolveSpecViaOrbital, type OrbitalResolveResult } from "../provider/orbital";
+import { isProviderRegistered } from "../provider/registry";
+import { SkyREPLError } from "@skyrepl/contracts";
+
+/**
+ * Validate and resolve spec at submission time.
+ *
+ * Rules:
+ * - "provider:spec" prefix bypasses orbital (power-user override)
+ * - Zero results → throw 400 with suggestions
+ * - Exactly one result → proceed (potentially rewrite provider/spec)
+ * - Multiple results + no provider → return all for now (dead-simple)
+ * - Orbital down → passthrough to existing behaviour
+ */
+export async function validateSpec(input: LaunchRunInput): Promise<LaunchRunInput> {
+  const spec = input.spec;
+
+  // Power-user bypass: "provider:spec" prefix (e.g. "aws:p4d.24xlarge")
+  if (spec.includes(":") && !spec.includes("/")) {
+    const colonIdx = spec.indexOf(":");
+    const prefix = spec.slice(0, colonIdx);
+    if (isProviderRegistered(prefix)) {
+      // Region comes from provider config when not specified by user.
+      // Orbital resolution is skipped for explicit provider:spec syntax.
+      return {
+        ...input,
+        provider: prefix,
+        spec: spec.slice(colonIdx + 1),
+      };
+    }
+  }
+
+  // Call orbital for resolution
+  const result = await resolveSpecViaOrbital(spec, input.provider, input.region);
+
+  // Orbital down → passthrough
+  if (!result) return input;
+
+  // Zero results → 400
+  if (!result.results || result.results.length === 0) {
+    throw new SkyREPLError(
+      "SPEC_NOT_FOUND",
+      `No matching instance type found for spec "${spec}". Try a provider-native spec (e.g. "p4d.24xlarge", "gpu_1x_a100") or a GPU name (e.g. "a100", "h100").`,
+      "validation",
+    );
+  }
+
+  // Use scored results if available (orbital now returns scored specs).
+  // Scored results are pre-sorted by composite score (match + price + capability).
+  // Falls back to raw results sorted by price if scoring unavailable.
+  const scored = result.scored;
+
+  if (scored && scored.length > 0) {
+    // Filter by explicit provider if given
+    const candidates = input.provider
+      ? scored.filter(s => s.resolved.provider === input.provider)
+      : scored;
+
+    if (candidates.length > 0) {
+      const best = candidates[0]!;
+      return {
+        ...input,
+        provider: input.provider ?? best.resolved.provider,
+        spec: best.resolved.spec,
+        region: input.region ?? best.resolved.instance.regions[0],
+      };
+    }
+  }
+
+  // Fallback: use raw results (scoring unavailable or no scored matches)
+  let candidates = result.results;
+  if (input.provider) {
+    const forProvider = candidates.filter(r => r.provider === input.provider);
+    if (forProvider.length > 0) candidates = forProvider;
+  }
+
+  // Exactly one result → use it
+  if (candidates.length === 1) {
+    const resolved = candidates[0]!;
+    return {
+      ...input,
+      provider: input.provider ?? resolved.provider,
+      spec: resolved.spec,
+      region: input.region ?? resolved.instance.regions[0],
+    };
+  }
+
+  // Multiple results — sort by price as fallback
+  const sorted = candidates.sort((a, b) =>
+    (a.instance.onDemandHourly ?? Infinity) - (b.instance.onDemandHourly ?? Infinity)
+  );
+  return {
+    ...input,
+    provider: input.provider ?? sorted[0]!.provider,
+    spec: sorted[0]!.spec,
+    region: input.region ?? sorted[0]!.instance.regions[0],
+  };
+}
+
+// =============================================================================
 // Entry Point
 // =============================================================================
 
 export async function launchRun(input: LaunchRunInput): Promise<Workflow> {
+  // Validate and resolve spec before workflow submission (D4)
+  const resolvedInput = await validateSpec(input);
+
   // Create a Run record in the database
   const run = createRunRecord({
-    command: input.command,
-    workdir: input.workdir ?? "/workspace",
-    max_duration_ms: input.maxDurationMs ?? TIMING.DEFAULT_WORKFLOW_TIMEOUT_MS,
+    command: resolvedInput.command,
+    workdir: resolvedInput.workdir ?? "/workspace",
+    max_duration_ms: resolvedInput.maxDurationMs ?? TIMING.DEFAULT_WORKFLOW_TIMEOUT_MS,
     workflow_state: "launch-run:pending",
     workflow_error: null,
     current_manifest_id: null,
     exit_code: null,
-    init_checksum: input.initChecksum ?? null,
-    create_snapshot: input.createSnapshot ? 1 : 0,
+    init_checksum: resolvedInput.initChecksum ?? null,
+    create_snapshot: resolvedInput.createSnapshot ? 1 : 0,
     spot_interrupted: 0,
     started_at: null,
     finished_at: null,
-  }, input.tenantId);
+  }, resolvedInput.tenantId);
 
   // Submit the workflow
   const result = await submit({
     type: "launch-run",
-    input: { ...input, runId: run.id } as unknown as Record<string, unknown>,
-    idempotencyKey: input.idempotencyKey,
-    tenantId: input.tenantId,
+    input: { ...resolvedInput, runId: run.id } as unknown as Record<string, unknown>,
+    idempotencyKey: resolvedInput.idempotencyKey,
+    tenantId: resolvedInput.tenantId,
   });
 
   // Return the workflow record
@@ -200,17 +306,6 @@ export const launchRunBlueprint: WorkflowBlueprint = {
 // =============================================================================
 // Error Handling Map
 // =============================================================================
-
-export const LAUNCH_RUN_ERROR_HANDLING: Record<string, string> = {
-  "check-budget": "fail_workflow",
-  "resolve-instance": "fail_workflow",
-  "claim-warm-allocation": "trigger_on_error_branch",
-  "spawn-instance": "fail_workflow",
-  "wait-for-boot": "fail_and_terminate",
-  "sync-files": "fail_allocation_and_terminate",
-  "await-completion": "timeout_then_cancel",
-  "finalize-run": "skip_and_continue",
-};
 
 // =============================================================================
 // Registration

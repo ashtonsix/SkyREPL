@@ -1,9 +1,10 @@
 // tests/unit/terminate-instance.test.ts - Terminate Instance Intent Tests
 // Covers: blueprint registration, full workflow execution, API endpoint,
-//         and select node executor edge cases not covered by E2E
+//         select node executor edge cases not covered by E2E,
+//         and parameterised contract suites (#WF2-06)
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { setupTest } from "../harness";
+import { setupTest, waitForWorkflow, verifyWorkflowInvariant } from "../harness";
 import { seedTestApiKey, testFetch } from "../integration/helpers/test-auth";
 import {
   createInstance,
@@ -299,29 +300,6 @@ describe("Terminate Instance - Node Executor Edge Cases", () => {
       await unregisterProvider("mock-provider");
     });
 
-    test("handles empty providerId gracefully", async () => {
-      const ctx = createMockNodeContext({
-        workflowInput: { instanceId: 1 },
-        getNodeOutput: (nodeId: string) => {
-          if (nodeId === "validate-instance") {
-            return {
-              instanceId: 1,
-              provider: "mock-provider",
-              providerId: "",
-              spec: "cpu-1x",
-              region: "local",
-            };
-          }
-          return undefined;
-        },
-      });
-
-      const result = await terminateProviderExecutor.execute(ctx);
-
-      expect(result.terminated).toBe(true);
-      expect(result.providerId).toBe("");
-    });
-
     test("re-throws genuine provider errors", async () => {
       const mockProvider = createMockProvider();
       mockProvider.terminate = async () => {
@@ -607,5 +585,420 @@ describe("Terminate Instance - API", () => {
     expect(response.status).toBe(202);
     const body = await response.json() as any;
     expect(body.workflow_id).toBeGreaterThan(0);
+  });
+});
+
+// =============================================================================
+// Parameterised Contract Tests (#WF2-06)
+//
+// Contract: for any provider configuration, if terminate-instance completes,
+// these invariants MUST hold. We run the suite against several provider
+// configurations to prove the properties aren't accidentally provider-specific.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Contract Suite Factory
+//
+// runTerminateInstanceContract(name, providerFactory) registers a describe block
+// that runs all behavioral invariants for one provider configuration.
+// ---------------------------------------------------------------------------
+
+type ProviderFactory = () => Provider;
+
+function runTerminateInstanceContract(suiteName: string, providerFactory: ProviderFactory) {
+  describe(`Terminate Instance Contract: ${suiteName}`, () => {
+    let currentCleanup: () => Promise<void>;
+    let provider: Provider;
+
+    beforeEach(async () => {
+      currentCleanup = setupTest({ engine: true });
+      createWorkflowEngine();
+      registerLaunchRun();
+      registerTerminateInstance();
+      terminateCalls = [];
+      provider = providerFactory();
+      await registerProvider({ provider });
+    });
+
+    afterEach(async () => {
+      await unregisterProvider(provider.name as string);
+      await currentCleanup();
+    });
+
+    // -------------------------------------------------------------------------
+    // CONTRACT: terminal state invariant
+    // "For any provider, a successful termination must leave the instance in
+    //  terminate:complete and the workflow in completed."
+    // -------------------------------------------------------------------------
+
+    test("CONTRACT: successful termination produces terminate:complete instance state", async () => {
+      const instance = createTestInstance({ provider: provider.name as any });
+
+      const { workflowId } = await submit({
+        type: "terminate-instance",
+        input: { instanceId: instance.id },
+      });
+
+      const wf = await waitForWorkflow(workflowId);
+      expect(wf.status).toBe("completed");
+
+      const updated = getInstance(instance.id);
+      expect(updated?.workflow_state).toBe("terminate:complete");
+    });
+
+    // -------------------------------------------------------------------------
+    // CONTRACT: node sequence invariant
+    // "All 6 nodes must complete, in dependency order."
+    // -------------------------------------------------------------------------
+
+    test("CONTRACT: all 6 nodes complete in dependency order", async () => {
+      const instance = createTestInstance({ provider: provider.name as any });
+
+      const { workflowId } = await submit({
+        type: "terminate-instance",
+        input: { instanceId: instance.id },
+      });
+
+      await waitForWorkflow(workflowId);
+
+      const nodes = getWorkflowNodes(workflowId);
+      expect(nodes.length).toBe(6);
+
+      const byId: Record<string, string> = {};
+      for (const n of nodes) byId[n.node_id] = n.status;
+
+      const expectedNodes = [
+        "validate-instance",
+        "drain-allocations",
+        "drain-ssh-sessions",
+        "cleanup-features",
+        "terminate-provider",
+        "cleanup-records",
+      ];
+      for (const id of expectedNodes) {
+        expect(byId[id]).toBe("completed");
+      }
+
+      // Dependency ordering: finished_at must be non-decreasing along the chain
+      // (each node must have finished_at >= the previous node's started_at).
+      const ordered = nodes.sort((a, b) =>
+        (a.finished_at ?? 0) - (b.finished_at ?? 0)
+      );
+      for (let i = 1; i < ordered.length; i++) {
+        if (ordered[i - 1].finished_at != null && ordered[i].started_at != null) {
+          expect(ordered[i].started_at!).toBeGreaterThanOrEqual(ordered[i - 1].started_at!);
+        }
+      }
+    });
+
+    // -------------------------------------------------------------------------
+    // CONTRACT: provider.terminate called exactly once
+    // "For any provider, terminate-provider must invoke provider.terminate with
+    //  the correct provider_id."
+    // -------------------------------------------------------------------------
+
+    test("CONTRACT: provider.terminate called with instance provider_id", async () => {
+      const instance = createTestInstance({
+        provider: provider.name as any,
+        provider_id: `contract-test-${Date.now()}`,
+      });
+
+      const { workflowId } = await submit({
+        type: "terminate-instance",
+        input: { instanceId: instance.id },
+      });
+
+      await waitForWorkflow(workflowId);
+
+      expect(terminateCalls).toContain(instance.provider_id);
+    });
+
+    // -------------------------------------------------------------------------
+    // CONTRACT: non-terminal allocations are drained
+    // "For any provider, all AVAILABLE allocations on the instance must be
+    //  transitioned to FAILED before workflow completes."
+    // -------------------------------------------------------------------------
+
+    test("CONTRACT: non-terminal allocations are drained to FAILED", async () => {
+      const instance = createTestInstance({ provider: provider.name as any });
+      const alloc1 = createTestAllocation(instance.id, "AVAILABLE");
+      const alloc2 = createTestAllocation(instance.id, "AVAILABLE");
+
+      const { workflowId } = await submit({
+        type: "terminate-instance",
+        input: { instanceId: instance.id },
+      });
+
+      await waitForWorkflow(workflowId);
+
+      const a1 = getAllocation(alloc1.id);
+      const a2 = getAllocation(alloc2.id);
+      expect(a1?.status).toBe("FAILED");
+      expect(a2?.status).toBe("FAILED");
+    });
+
+    // -------------------------------------------------------------------------
+    // CONTRACT: workflow invariants hold
+    // Uses the shared verifyWorkflowInvariant helper to assert finished_at set,
+    // all nodes terminal, etc. — independent of provider.
+    // -------------------------------------------------------------------------
+
+    test("CONTRACT: post-completion workflow invariants hold", async () => {
+      const instance = createTestInstance({ provider: provider.name as any });
+
+      const { workflowId } = await submit({
+        type: "terminate-instance",
+        input: { instanceId: instance.id },
+      });
+
+      await waitForWorkflow(workflowId);
+
+      verifyWorkflowInvariant(workflowId, { checkAllocations: false });
+    });
+
+    // -------------------------------------------------------------------------
+    // CONTRACT: already-terminated instance is handled gracefully
+    // "validate-instance must still pass if the instance is already in
+    //  terminate:complete — it should return successfully (idempotent)."
+    // -------------------------------------------------------------------------
+
+    test("CONTRACT: terminate:complete instance passes validate-instance (idempotent node)", async () => {
+      const instance = createTestInstance({
+        provider: provider.name as any,
+        workflow_state: "terminate:complete",
+      });
+
+      // Execute the executor directly — it should return without throwing
+      const ctx = createMockNodeContext({
+        workflowInput: { instanceId: instance.id },
+      });
+
+      const result = await validateInstanceExecutor.execute(ctx);
+      expect(result.instanceId).toBe(instance.id);
+    });
+
+    // -------------------------------------------------------------------------
+    // CONTRACT: error classification — provider error propagates
+    // "If provider.terminate throws a non-idempotent error, the workflow must
+    //  fail (not silently swallow it)."
+    // -------------------------------------------------------------------------
+
+    test("CONTRACT: genuine provider error fails the terminate-provider node", async () => {
+      // Override terminate to throw a non-idempotent error
+      const originalTerminate = provider.terminate;
+      provider.terminate = async () => {
+        throw new Error("Rate limit exceeded");
+      };
+
+      const instance = createTestInstance({ provider: provider.name as any });
+
+      const { workflowId } = await submit({
+        type: "terminate-instance",
+        input: { instanceId: instance.id },
+      });
+
+      const wf = await waitForWorkflow(workflowId);
+      expect(wf.status).toBe("failed");
+
+      const nodes = getWorkflowNodes(workflowId);
+      const terminateNode = nodes.find((n) => n.node_id === "terminate-provider");
+      expect(terminateNode?.status).toBe("failed");
+
+      // Restore
+      provider.terminate = originalTerminate;
+    });
+
+    // -------------------------------------------------------------------------
+    // CONTRACT: idempotent error handling — "not found" is treated as success
+    // "If provider.terminate returns a not-found error, terminate-provider must
+    //  succeed (idempotent for already-gone instances)."
+    // -------------------------------------------------------------------------
+
+    test("CONTRACT: provider not-found error is idempotent (treated as success)", async () => {
+      provider.terminate = async (providerId) => {
+        throw new Error(`Instance ${providerId} not found`);
+      };
+
+      const instance = createTestInstance({ provider: provider.name as any });
+
+      const { workflowId } = await submit({
+        type: "terminate-instance",
+        input: { instanceId: instance.id },
+      });
+
+      const wf = await waitForWorkflow(workflowId);
+      // "not found" must not fail the workflow
+      expect(wf.status).toBe("completed");
+
+      const updated = getInstance(instance.id);
+      expect(updated?.workflow_state).toBe("terminate:complete");
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Provider Configurations Under Test
+// ---------------------------------------------------------------------------
+
+// Configuration 1: Basic provider (no spot, no GPU)
+runTerminateInstanceContract("basic on-demand provider", () => {
+  const p = createMockProvider();
+  return p;
+});
+
+// Configuration 2: Spot-capable provider (same termination contract, different capabilities)
+runTerminateInstanceContract("spot-capable provider", () => {
+  const p: Provider = {
+    ...createMockProvider(),
+    name: "mock-provider" as any,
+    capabilities: {
+      snapshots: false,
+      spot: true,
+      gpu: false,
+      multiRegion: true,
+      persistentVolumes: false,
+      warmVolumes: false,
+      hibernation: false,
+      costExplorer: false,
+      tailscaleNative: false,
+      idempotentSpawn: true,
+      customNetworking: false,
+    },
+  };
+  return p;
+});
+
+// Configuration 3: Provider with slow terminate (tests timing robustness)
+runTerminateInstanceContract("slow-terminate provider", () => {
+  const base = createMockProvider();
+  const original = base.terminate.bind(base);
+  base.terminate = async (providerId: string) => {
+    // Simulate network latency with a brief yield
+    await new Promise((r) => setTimeout(r, 1));
+    return original(providerId);
+  };
+  return base;
+});
+
+// ---------------------------------------------------------------------------
+// Spot Instance Contract Tests
+// (Separate from the parameterised suite — spot adds extra DB state concerns)
+// ---------------------------------------------------------------------------
+
+describe("Terminate Instance Contract: spot instance handling", () => {
+  let currentCleanup: () => Promise<void>;
+
+  beforeEach(async () => {
+    currentCleanup = setupTest({ engine: true });
+    createWorkflowEngine();
+    registerLaunchRun();
+    registerTerminateInstance();
+    terminateCalls = [];
+    const mockProvider = createMockProvider();
+    await registerProvider({ provider: mockProvider });
+  });
+
+  afterEach(async () => {
+    await unregisterProvider("mock-provider");
+    await currentCleanup();
+  });
+
+  test("spot instance with no spot_request_id terminates cleanly", async () => {
+    const instance = createTestInstance({
+      is_spot: 1,
+      spot_request_id: null,
+    });
+
+    const { workflowId } = await submit({
+      type: "terminate-instance",
+      input: { instanceId: instance.id },
+    });
+
+    const wf = await waitForWorkflow(workflowId);
+    expect(wf.status).toBe("completed");
+
+    const updated = getInstance(instance.id);
+    expect(updated?.workflow_state).toBe("terminate:complete");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Instance State Transition Invariants
+//
+// Property: the validate-instance node atomically locks the instance into
+// terminate:draining. Once that lock is acquired, no other workflow can
+// acquire it for the same instance.
+// ---------------------------------------------------------------------------
+
+describe("Terminate Instance Contract: state machine invariants", () => {
+  let currentCleanup: () => Promise<void>;
+
+  beforeEach(async () => {
+    currentCleanup = setupTest({ engine: true });
+    createWorkflowEngine();
+    registerTerminateInstance();
+    terminateCalls = [];
+    const mockProvider = createMockProvider();
+    await registerProvider({ provider: mockProvider });
+  });
+
+  afterEach(async () => {
+    await unregisterProvider("mock-provider");
+    await currentCleanup();
+  });
+
+  test("INVARIANT: after validate-instance, instance is in terminate:draining or later", async () => {
+    const instance = createTestInstance({ workflow_state: "launch:complete" });
+
+    const ctx = createMockNodeContext({
+      workflowInput: { instanceId: instance.id },
+    });
+
+    await validateInstanceExecutor.execute(ctx);
+
+    const updated = getInstance(instance.id);
+    // Must have advanced from launch:complete to a terminate:* state
+    expect(updated?.workflow_state).toMatch(/^terminate:/);
+  });
+
+  test("INVARIANT: double-submit of terminate is rejected once instance enters terminate: state", async () => {
+    const instance = createTestInstance({ workflow_state: "terminate:draining" });
+
+    // Already mid-termination — second submission must be rejected
+    await expect(terminateInstance({ instanceId: instance.id })).rejects.toThrow(
+      /already being terminated/i
+    );
+  });
+
+  test("INVARIANT: usage records are closed when workflow completes", async () => {
+    const instance = createTestInstance();
+    const usageRecord = createUsageRecord({
+      instance_id: instance.id,
+      allocation_id: null,
+      run_id: null,
+      provider: "mock-provider",
+      spec: "cpu-1x",
+      region: "local",
+      is_spot: 0,
+      started_at: Date.now() - 120_000,
+      finished_at: null,
+      duration_ms: null,
+      estimated_cost_usd: null,
+    });
+
+    const { workflowId } = await submit({
+      type: "terminate-instance",
+      input: { instanceId: instance.id },
+    });
+
+    await waitForWorkflow(workflowId);
+
+    const closed = queryOne<{ finished_at: number | null; duration_ms: number | null }>(
+      "SELECT finished_at, duration_ms FROM usage_records WHERE id = ?",
+      [usageRecord.id]
+    );
+    // finished_at must be set and duration_ms must be positive
+    expect(closed?.finished_at).not.toBeNull();
+    expect(closed?.duration_ms).toBeGreaterThan(0);
   });
 });

@@ -14,6 +14,9 @@ export interface NodeExecutor<TInput = unknown, TOutput = unknown> {
   /** Whether this node is safe to retry after crash */
   idempotent: boolean;
 
+  /** Optional pre-execution validation (§6.2). Rejects with VALIDATION_ERROR (non-retryable, no compensation). */
+  validate?(ctx: NodeContext): Promise<void>;
+
   /** Execute the node logic */
   execute(ctx: NodeContext): Promise<TOutput>;
 

@@ -1,0 +1,110 @@
+Equivalence Classes — Design Direction
+=======================================
+
+When a user says "A100 in us-east-1", which substitutions are acceptable?
+The answer depends on the user, not the hardware.
+
+This document describes the target scoring model for orbital's placement
+decisions. The stub implementation ships a cheapest-match heuristic;
+the full model is deferred to #ADVISORY-04 through #ADVISORY-07.
+
+
+1. THE PROBLEM
+──────────────
+
+Equivalence is not a property of hardware — it's a property of user
+constraints. Two users asking for "A100" may have entirely different
+equivalence classes:
+
+  Dimension         Example question                 Who decides?
+  ─────────────     ──────────────────────────────   ────────────
+  Region            us-east-2 instead of us-east-1?  User (data locality)
+  GPU tier          A10G instead of A100?             User (perf requirement)
+  GPU count         2×A10G instead of 1×A100?         System (if perf-equivalent)
+  Provider          Lambda instead of AWS?             User (credential scope)
+  Country           Canada instead of US?              User (compliance)
+  Spot vs on-demand Spot instead of on-demand?        User (reliability need)
+
+
+2. SCORING MODEL (target)
+─────────────────────────
+
+Input:
+  { candidates: ResolvedSpec[],
+    constraints: UserConstraints,
+    context: { budget_remaining?, data_locality_hints? } }
+
+Output:
+  { ranked: ScoredSpec[],
+    also_consider?: ScoredSpec[],
+    auto_proceed: boolean,
+    reasoning: string }
+
+ScoredSpec extends ResolvedSpec with:
+  { score: number,
+    diversity_contribution: number,
+    constraint_violations: string[] }
+
+Three sub-scores compose the final score:
+
+  a) Match score (50%): How well does this candidate match the user's
+     intent? Exact match > GPU name match > fuzzy match.
+
+  b) Price score (30%): How does the price compare to the user's budget
+     or the cheapest alternative? Closer to budget is better, not just
+     cheapest — underspending a budget is wasted capacity.
+
+  c) Capability score (20%): Does this candidate have the structural
+     capabilities the workload needs? GPU, spot, lifecycle, NVLink.
+     Missing a required capability is a hard constraint violation.
+
+
+3. DIVERSITY, NOT TOP-N
+───────────────────────
+
+The selection algorithm MUST NOT return top-N-by-price. It selects a
+DIVERSE subset: spread across providers, regions, and tiers. The user
+should see meaningfully different options, not five Lambda instances at
+slightly different prices.
+
+Diversity contribution: each candidate scores higher if it represents
+a provider/region/tier combination not already in the result set.
+
+Target: select 3-5 options that maximise the product of utility and
+diversity, not the sum of individual scores.
+
+
+4. USER HISTORY + DELEGATION
+─────────────────────────────
+
+Over time, orbital builds knowledge of each user's equivalence classes:
+
+  - What they've chosen before (implicit preference signal)
+  - What they've explicitly delegated ("region doesn't matter to me")
+  - What they've rejected ("never suggest A10G for this workload")
+
+Where no equivalence relation has been identified, decisions cannot be
+automated — only proposed. The auto_proceed flag starts false and
+graduates to true only when orbital has sufficient confidence in the
+user's equivalence class for that dimension.
+
+
+5. "ALSO CONSIDER"
+──────────────────
+
+High-utility options that violate a hard constraint may be surfaced as
+also_consider when the user should reconsider:
+
+  "Your constraint says us-east-1, but us-west-2 has 3× availability
+   at 40% lower spot price."
+
+This is advisory only. Hard constraints are never auto-overridden.
+
+
+6. DEFERRED CAPABILITIES (backlog)
+──────────────────────────────────
+
+  #ADVISORY-04: Diversity+utility scoring algorithm
+  #ADVISORY-05: User equivalence history tracking
+  #ADVISORY-06: Delegated authority / auto-proceed learning
+  #ADVISORY-07: "Also consider" constraint relaxation suggestions

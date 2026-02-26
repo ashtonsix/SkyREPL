@@ -9,6 +9,7 @@
 import { type SQLQueryBindings } from "bun:sqlite";
 import { ConflictError } from "@skyrepl/contracts";
 import { getDatabase, queryOne, queryMany } from "./helpers";
+import { generateUniqueName } from "../../naming/wordlist";
 
 export interface Instance {
   id: number;
@@ -27,6 +28,7 @@ export interface Instance {
   init_checksum: string | null;
   registration_token_hash: string | null;
   provider_metadata: string | null;
+  display_name: string | null;
   created_at: number;
   last_heartbeat: number;
 }
@@ -69,9 +71,11 @@ export function createInstance(
   const now = Date.now();
   const db = getDatabase();
 
+  const displayName = data.display_name ?? generateUniqueName(tenantId, "instance");
+
   const stmt = db.prepare(`
-    INSERT INTO instances (tenant_id, provider, provider_id, spec, region, ip, workflow_state, workflow_error, current_manifest_id, spawn_idempotency_key, is_spot, spot_request_id, init_checksum, registration_token_hash, provider_metadata, created_at, last_heartbeat)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO instances (tenant_id, provider, provider_id, spec, region, ip, workflow_state, workflow_error, current_manifest_id, spawn_idempotency_key, is_spot, spot_request_id, init_checksum, registration_token_hash, provider_metadata, display_name, created_at, last_heartbeat)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const result = stmt.run(
@@ -90,6 +94,7 @@ export function createInstance(
     data.init_checksum,
     data.registration_token_hash,
     data.provider_metadata,
+    displayName,
     now,
     data.last_heartbeat
   );

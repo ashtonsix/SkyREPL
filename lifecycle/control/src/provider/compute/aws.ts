@@ -59,6 +59,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { mkdir, writeFile, chmod } from "fs/promises";
 import type { ProviderLifecycleHooks, TaskReceipt, HeartbeatExpectations } from "../extensions";
+import { setWithAutoTTL } from "../extensions";
 
 // =============================================================================
 // AWS-Specific Types
@@ -1042,6 +1043,25 @@ export function createAwsHooks(provider: AWSProvider): ProviderLifecycleHooks {
               receipts.push({ type: task.type, status: "failed", reason: String(err) });
             }
             break;
+
+          case "refresh_pricing": {
+            // Fetch spot pricing for common instance types
+            const specSamples = ["t4g.micro", "g4dn.xlarge", "p4d.24xlarge"];
+            try {
+              for (const spec of specSamples) {
+                const prices = await provider.getSpotPrices(spec);
+                if (prices.length > 0) {
+                  await setWithAutoTTL("aws", `spot_prices:${spec}`, prices);
+                }
+              }
+              // On-demand prices are static (seeded in catalog), cache a marker
+              await setWithAutoTTL("aws", "on_demand_prices:refreshed", { at: Date.now() });
+              receipts.push({ type: task.type, status: "completed", result: { specs: specSamples.length } });
+            } catch (err) {
+              receipts.push({ type: task.type, status: "failed", reason: String(err) });
+            }
+            break;
+          }
 
           default:
             receipts.push({

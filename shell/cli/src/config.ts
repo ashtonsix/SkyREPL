@@ -1,6 +1,10 @@
 import { readFileSync, existsSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
+import { getConsumer } from './consumer';
+import { formatAgentData } from './output/agent';
+import { formatProgramData } from './output/program';
+import { idToSlug } from '@skyrepl/contracts';
 
 // ─── Output Mode (CLI-01) ────────────────────────────────────────────────────
 
@@ -16,21 +20,35 @@ export function getOutputMode(): OutputMode {
 }
 
 /**
- * Output data respecting the current output mode.
+ * Output data respecting the current consumer type and output mode.
  *
- * - json:   emit `{ "data": ... }` envelope as JSON
- * - quiet:  emit just the id field (or nothing if no id)
- * - normal: call humanFormat() if provided, otherwise no-op
+ * Priority:
+ *   1. --json flag / consumer=program → JSON envelope via formatProgramData
+ *   2. consumer=agent                 → plain-text via formatAgentData
+ *   3. --quiet flag                   → IDs only (one per line for arrays)
+ *   4. human (default)               → call humanFormat() if provided
  */
-export function output(data: unknown, humanFormat?: () => void): void {
+export function output(data: unknown, humanFormat?: () => void, agentLabel?: string): void {
   const mode = getOutputMode();
-  if (mode === 'json') {
-    console.log(JSON.stringify({ data }, null, 2));
+  const consumer = getConsumer();
+
+  if (mode === 'json' || consumer === 'program') {
+    formatProgramData(data);
+  } else if (consumer === 'agent') {
+    formatAgentData(agentLabel ?? 'results', data);
   } else if (mode === 'quiet') {
-    if (typeof data === 'object' && data !== null && 'id' in data) {
-      console.log((data as any).id);
+    // Arrays: print slug of each item's id on its own line
+    if (Array.isArray(data)) {
+      for (const item of data) {
+        if (item && typeof item === 'object' && 'id' in item) {
+          console.log(idToSlug((item as any).id));
+        }
+      }
+    } else if (typeof data === 'object' && data !== null && 'id' in data) {
+      console.log(idToSlug((data as any).id));
     }
   } else {
+    // Human mode: delegate to the caller's formatter
     if (humanFormat) humanFormat();
   }
 }
@@ -57,6 +75,30 @@ export function loadEnvFile(filePath: string): void {
     if (process.env[key] === undefined) {
       process.env[key] = value;
     }
+  }
+}
+
+/**
+ * Load a KEY=VALUE env file, always overwriting existing values.
+ * Used for authoritative config (e.g. ~/.repl/control.env) that must win
+ * over Bun's automatic .env loading from the workspace root.
+ */
+export function forceLoadEnvFile(filePath: string): void {
+  if (!existsSync(filePath)) return;
+  const content = readFileSync(filePath, 'utf-8');
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    let value = trimmed.slice(eqIdx + 1).trim();
+    // Strip optional quotes
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    // Always overwrite — this is the authoritative config source
+    process.env[key] = value;
   }
 }
 

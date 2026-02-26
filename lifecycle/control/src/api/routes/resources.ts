@@ -250,14 +250,14 @@ export function registerResourceRoutes(app: Elysia<any>): void {
       cursorValues.push(decoded.value, decoded.id);
     }
     const sql = `
-      SELECT a.*, i.ip as instance_ip, i.provider as instance_provider
+      SELECT a.*, i.ip as instance_ip, i.provider as instance_provider, i.display_name as instance_display_name
       FROM allocations a
       LEFT JOIN instances i ON a.instance_id = i.id
       WHERE 1=1 ${filters.where}${cursorClause}
       ORDER BY a.created_at DESC
       LIMIT ${limit + 1}
     `;
-    const rows = queryMany<Allocation & { instance_ip: string | null; instance_provider: string | null }>(
+    const rows = queryMany<Allocation & { instance_ip: string | null; instance_provider: string | null; instance_display_name: string | null }>(
       sql, [...filters.values, ...cursorValues]
     );
     const hasMore = rows.length > limit;

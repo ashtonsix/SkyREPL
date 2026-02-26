@@ -5,6 +5,7 @@
 // Connection and migration management
 export {
   initDatabase,
+  setDatabase,
   closeDatabase,
   getMigrationVersion,
   runMigrations,

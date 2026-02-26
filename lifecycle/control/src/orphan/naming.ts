@@ -80,12 +80,10 @@ export function validateResourceName(name: string): ValidationResult {
 }
 
 /**
- * Check whether a specific provider resource uses the expected name.
+ * Check whether a resource name conforms to the SkyREPL naming convention.
  * Returns compliance status and both actual and expected names for diffing.
  */
 export function enforceNamingConvention(
-  _provider: string,
-  _providerId: string,
   expectedName: string
 ): ComplianceCheck {
   // The "actual" name we check is the expectedName itself — callers pass in the

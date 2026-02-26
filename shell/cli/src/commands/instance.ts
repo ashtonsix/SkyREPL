@@ -24,14 +24,14 @@ async function instanceList(): Promise<void> {
     const { data } = await client.listInstances();
 
     if (data.length === 0) {
-      output([], () => { console.log('No instances found.'); });
+      output([], () => { console.log('No instances found.'); }, 'instance');
       return;
     }
 
     const rows = data.map((inst: any) => {
       const created = inst.created_at ? new Date(inst.created_at).toISOString().slice(0, 16).replace('T', ' ') : '-';
       return [
-        idToSlug(inst.id),
+        inst.display_name || idToSlug(inst.id),
         inst.provider || '-',
         inst.spec || '-',
         displayState(inst.workflow_state),
@@ -41,8 +41,8 @@ async function instanceList(): Promise<void> {
     });
 
     output(data, () => {
-      printTable(['ID', 'PROVIDER', 'SPEC', 'STATE', 'IP', 'CREATED'], rows, [4, 10, 10, 14, 18, 16]);
-    });
+      printTable(['NAME', 'PROVIDER', 'SPEC', 'STATE', 'IP', 'CREATED'], rows, [20, 10, 10, 14, 18, 16]);
+    }, 'instance');
   } catch (err) {
     if (isConnectionRefused(err)) {
       console.error(`Control plane not reachable at ${getControlPlaneUrl()}. Start it with \`repl control start\`.`);

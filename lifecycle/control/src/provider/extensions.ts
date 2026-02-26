@@ -28,6 +28,7 @@ export interface HeartbeatTask {
   // - 'heartbeat_timeout_scan': detect stale instances, provider can annotate expected latency
   // - 'reconcile_instances': provider returns live instance state for comparison
   // - 'orphan_scan': provider returns list of all running resources for orphan detection
+  // - 'refresh_pricing': fetch current pricing from provider API and cache it
   type: string;
   priority: 'high' | 'normal' | 'low';
   lastRun?: number;
@@ -96,6 +97,7 @@ const AWS_TTL_CONFIG: TTLConfig = {
 
   byPrefix: {
     'spot_prices:': 300_000,       // 5 minutes
+    'on_demand_prices:': 3600_000, // 1 hour (stable pricing)
     'capacity:': 60_000,           // 1 minute
     'instance:': 30_000,           // 30 seconds
     'warm_volume_pool:': null,     // No TTL (explicitly managed)
@@ -122,6 +124,7 @@ const DIGITALOCEAN_TTL_CONFIG: TTLConfig = {
     'instance:': 30_000,           // 30 seconds
     'capacity:': 60_000,           // 1 minute
     'snapshot:': 300_000,          // 5 minutes
+    'on_demand_prices:': 600_000,  // 10 minutes
   },
 };
 
@@ -132,6 +135,7 @@ const LAMBDA_TTL_CONFIG: TTLConfig = {
   byPrefix: {
     'instance:': 30_000,           // 30 seconds
     'capacity:': 10_000,           // 10 seconds (Lambda capacity is volatile)
+    'on_demand_prices:': 600_000,  // 10 minutes (Lambda pricing is stable)
   },
 };
 

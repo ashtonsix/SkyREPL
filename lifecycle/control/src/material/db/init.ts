@@ -20,6 +20,11 @@ export function initDatabase(path: string): Database {
   return connection;
 }
 
+/** Inject an already-opened Database (used by scaffold/catalog path). */
+export function setDatabase(db: Database): void {
+  connection = db;
+}
+
 export function getDatabase(): Database {
   if (!connection) {
     throw new SkyREPLError("DATABASE_ERROR", "Database not initialized", "internal");

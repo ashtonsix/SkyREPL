@@ -21,7 +21,7 @@ async function allocationList(): Promise<void> {
     const { data } = await client.listAllocations();
 
     if (data.length === 0) {
-      output([], () => { console.log('No allocations found.'); });
+      output([], () => { console.log('No allocations found.'); }, 'allocation');
       return;
     }
 
@@ -30,7 +30,7 @@ async function allocationList(): Promise<void> {
       return [
         idToSlug(alloc.id),
         alloc.run_id != null ? idToSlug(alloc.run_id) : '-',
-        idToSlug(alloc.instance_id),
+        alloc.instance_display_name || idToSlug(alloc.instance_id),
         alloc.status || '-',
         created,
       ];
@@ -38,7 +38,7 @@ async function allocationList(): Promise<void> {
 
     output(data, () => {
       printTable(['ID', 'RUN', 'INSTANCE', 'STATUS', 'CREATED'], rows, [4, 5, 10, 12, 16]);
-    });
+    }, 'allocation');
   } catch (err) {
     if (isConnectionRefused(err)) {
       console.error(`Control plane not reachable at ${getControlPlaneUrl()}. Start it with \`repl control start\`.`);

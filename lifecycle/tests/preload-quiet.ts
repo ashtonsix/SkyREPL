@@ -14,6 +14,23 @@ import { afterAll } from "bun:test";
 
 const logPath = "/tmp/skyrepl-test-detail.log";
 
+// Isolate tests from any ambient orbital service. When the service fabric is
+// running (scaffold/main.ts), orbital listens on :3002 and responds with real
+// catalog data, causing 30+ tests to fail (they assume orbital is unreachable).
+// Point to a guaranteed-dead port so resolveSpecViaOrbital() returns null.
+if (!process.env.ORBITAL_URL) {
+  process.env.ORBITAL_URL = "http://127.0.0.1:19999";
+}
+if (!process.env.ORBITAL_TIMEOUT_MS) {
+  process.env.ORBITAL_TIMEOUT_MS = "100";
+}
+
+// Shorten retry base delay in tests to avoid multi-second backoff accumulating
+// across spawn failures in integration tests (default: 2000ms).
+if (!process.env.REPL_RETRY_BASE_DELAY) {
+  process.env.REPL_RETRY_BASE_DELAY = "10ms";
+}
+
 if (!process.env.SKYREPL_TEST_VERBOSE) {
   // Truncate on first load
   writeFileSync(logPath, "");

@@ -31,6 +31,7 @@ import {
 import { assembleCloudInit } from "../bootstrap/cloud-init";
 import { formatResourceName } from "../../material/control-id";
 import type { ProviderLifecycleHooks, TaskReceipt, HeartbeatExpectations } from "../extensions";
+import { setWithAutoTTL } from "../extensions";
 
 // =============================================================================
 // DO Status Mapping
@@ -601,6 +602,28 @@ export function createDigitalOceanHooks(provider: DigitalOceanProvider): Provide
               receipts.push({ type: task.type, status: "failed", reason: String(err) });
             }
             break;
+
+          case "refresh_pricing": {
+            // DO /sizes returns pricing inline
+            try {
+              const result = await (provider as any).request("GET", "/v2/sizes?per_page=100");
+              const sizes = result?.sizes ?? [];
+              const pricing = sizes.map((s: any) => ({
+                slug: s.slug,
+                priceHourly: s.price_hourly,
+                priceMonthly: s.price_monthly,
+                vcpus: s.vcpus,
+                memoryMb: s.memory,
+                diskGb: s.disk,
+                regions: s.regions,
+              }));
+              await setWithAutoTTL("digitalocean", "on_demand_prices:all", pricing);
+              receipts.push({ type: task.type, status: "completed", result: { sizes: sizes.length } });
+            } catch (err) {
+              receipts.push({ type: task.type, status: "failed", reason: String(err) });
+            }
+            break;
+          }
 
           default:
             receipts.push({

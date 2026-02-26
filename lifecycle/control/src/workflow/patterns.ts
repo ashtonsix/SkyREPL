@@ -137,8 +137,12 @@ export function applyConditionalBranch(
   }
 
   if (config.triggerOnError) {
-    // Mode 2: Try-fallback mode
-    // Create option1 node as 'pending'
+    // Mode 2: Try-fallback mode (§6.3.2)
+    // option1 runs immediately. If option1 succeeds, option2 is skipped.
+    // If option1 fails, option2 runs as a fallback.
+    // Join depends only on option2 — the DAG progresses once the "winner" finishes.
+
+    // Create option1 node as 'pending' (runs immediately, no deps)
     createWorkflowNode({
       workflow_id: workflowId,
       node_id: config.option1.id,
@@ -155,10 +159,10 @@ export function applyConditionalBranch(
       updated_at: Date.now(),
     });
 
-    // Create option2 node as 'pending' with trigger_on_failure_of
-    // Note: trigger_on_failure_of is not in the WorkflowNode interface yet,
-    // but the L2 pseudocode shows it should be there. For now, we'll create
-    // the node as pending and rely on the engine to handle the failure trigger.
+    // Create option2 as 'pending', gated on option1.
+    // retry_reason encodes the CB fallback trigger: "cb_fallback_for:<option1_id>"
+    // depends_on includes option1 so findReadyNodes gates it until option1 terminates.
+    // findReadyNodes treats a failed dep as satisfied for cb_fallback nodes.
     createWorkflowNode({
       workflow_id: workflowId,
       node_id: config.option2.id,
@@ -167,17 +171,16 @@ export function applyConditionalBranch(
       input_json: JSON.stringify(config.option2.input),
       output_json: null,
       error_json: null,
-      depends_on: JSON.stringify([]),
+      depends_on: JSON.stringify([config.option1.id]),
       attempt: 0,
-      retry_reason: null,
+      retry_reason: `cb_fallback_for:${config.option1.id}`,
       started_at: null,
       finished_at: null,
       updated_at: Date.now(),
     });
 
-    // Update join node to depend on both branches
+    // Join depends only on option2 (which is skipped on success path, or runs on failure path)
     updateJoinDependencies(workflowId, config.joinNode, [
-      config.option1.id,
       config.option2.id,
     ]);
   } else {

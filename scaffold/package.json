@@ -1,0 +1,9 @@
+{
+  "name": "@skyrepl/scaffold",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "src/main.ts",
+  "dependencies": {
+    "@skyrepl/contracts": "workspace:*"
+  }
+}

@@ -10,7 +10,7 @@ import {
   type WorkflowNode,
 } from "../material/db";
 import { getNodeExecutor, buildNodeContext, engineSleep } from "./engine";
-import { TIMING } from "@skyrepl/contracts";
+import { TIMING, calculateBackoff } from "@skyrepl/contracts";
 
 // =============================================================================
 // Types
@@ -66,9 +66,7 @@ export async function compensateWithRetry(
     } catch (error) {
       clearTimeout(timerId);
       if (attempt < maxRetries && isRetryableError(error)) {
-        // Exponential backoff: 1s, 2s, 4s (uses engine sleep for test shimming)
-        const delay = Math.pow(2, attempt) * 1000;
-        await engineSleep(delay);
+        await engineSleep(calculateBackoff(attempt));
         continue;
       }
       // Non-retryable or final attempt — propagate
@@ -138,7 +136,7 @@ export async function compensateFailedNode(
   }
 
   // If node is not in a terminal-failure state, skip
-  if (node.status !== "failed" && node.status !== "completed") {
+  if (node.status !== "failed") {
     return { success: true, skippedReason: "already_compensated" };
   }
 

@@ -18,7 +18,6 @@ import {
   startNode,
   completeNode,
   failNode,
-  startRollback,
 } from "../../control/src/workflow/state-transitions";
 import {
   registerBlueprint,
@@ -31,6 +30,7 @@ import {
   shouldCompensate,
 } from "../../control/src/workflow/compensation";
 import { setupTest, waitForWorkflow } from "../harness";
+import { TIMING } from "@skyrepl/contracts";
 
 // =============================================================================
 // Test Helpers
@@ -289,13 +289,11 @@ describe("Compensation Framework", () => {
       // Only node-3 should be compensated — completed nodes are NOT touched
       expect(compensateCalls).toEqual(["node-3"]);
 
-      // Verify explicitly: calling compensateFailedNode on a completed node
-      // CAN invoke the handler if called directly, but the architecture ensures
-      // it's only ever called for failed nodes by the engine.
-      // There is NO function that cascades through completed nodes.
+      // Verify explicitly: completed nodes MUST NOT be compensated.
+      // The guard in compensation.ts rejects status !== "failed".
       compensateCalls.length = 0; // Reset
       await compensateFailedNode(wf.id, "node-1");
-      expect(compensateCalls.length).toBeLessThanOrEqual(1);
+      expect(compensateCalls.length).toBe(0);
     });
   });
 
@@ -352,28 +350,48 @@ describe("Compensation Framework", () => {
       expect(attempts).toBe(1);
     });
 
-    test("compensation timeout fires on slow handler", async () => {
-      // Override COMPENSATION_TIMEOUT_MS for this test via direct call
-      // We use a very short timeout by calling compensateWithRetry with a handler
-      // that takes too long. The actual TIMING.COMPENSATION_TIMEOUT_MS is 5min,
-      // so we test the timeout mechanism via the Promise.race pattern.
-      let timedOut = false;
+    test("backoff delays increase exponentially with jitter (§6.8.2)", async () => {
+      // Track sleep durations by replacing the sleep shim
+      const sleepDurations: number[] = [];
+      const { _setSleepForTest } = await import("../../control/src/workflow/engine");
+      _setSleepForTest(async (ms: number) => {
+        sleepDurations.push(ms);
+      });
 
+      let attempts = 0;
       try {
-        // Create a function that races timeout at a short duration
-        const fn = async () => {
-          await new Promise((resolve) => setTimeout(resolve, 100));
-        };
-        // Direct call should succeed within 5 min timeout
-        await compensateWithRetry(fn, 0);
-        // If we get here, the fast fn completed fine
+        await compensateWithRetry(async () => {
+          attempts++;
+          throw Object.assign(new Error("rate limited"), {
+            code: "RATE_LIMITED",
+          });
+        }, 3);
       } catch {
-        timedOut = true;
+        // Expected: exhausted retries
       }
 
-      // The fast fn should complete — this validates the race mechanism works
-      expect(timedOut).toBe(false);
+      // 4 attempts (0,1,2,3), 3 sleeps between retries
+      expect(attempts).toBe(4);
+      expect(sleepDurations.length).toBe(3);
+
+      // Verify delays increase: each delay should be roughly 2x the previous
+      // (with ±10% jitter). Base delay reads from TIMING.RETRY_BASE_DELAY_MS
+      // which respects REPL_RETRY_BASE_DELAY env var (default: 2000ms).
+      const base = TIMING.RETRY_BASE_DELAY_MS;
+      // attempt 0: min(2^0 * base, 60000) = base ± 10%
+      // attempt 1: min(2^1 * base, 60000) = 2*base ± 10%
+      // attempt 2: min(2^2 * base, 60000) = 4*base ± 10%
+      expect(sleepDurations[0]).toBeGreaterThanOrEqual(Math.floor(base * 0.9));
+      expect(sleepDurations[0]).toBeLessThanOrEqual(Math.ceil(base * 1.1));
+      expect(sleepDurations[1]).toBeGreaterThanOrEqual(Math.floor(base * 2 * 0.9));
+      expect(sleepDurations[1]).toBeLessThanOrEqual(Math.ceil(base * 2 * 1.1));
+      expect(sleepDurations[2]).toBeGreaterThanOrEqual(Math.floor(base * 4 * 0.9));
+      expect(sleepDurations[2]).toBeLessThanOrEqual(Math.ceil(base * 4 * 1.1));
+
+      // Reset sleep shim
+      _setSleepForTest(() => new Promise((r) => setTimeout(r, 0)));
     });
+
   });
 
   // ===========================================================================
@@ -422,27 +440,6 @@ describe("Compensation Framework", () => {
       const check = shouldCompensate(wf1.id, node);
       expect(check.compensate).toBe(false);
       expect(check.reason).toBe("resource_transferred");
-    });
-  });
-
-  // ===========================================================================
-  // startRollback transition
-  // ===========================================================================
-
-  describe("startRollback transition", () => {
-    test("transitions workflow from running to rolling_back, fails from non-running state", () => {
-      // Valid transition: running → rolling_back
-      const wf1 = createTestWorkflow({ status: "running", started_at: Date.now() });
-      const result1 = startRollback(wf1.id);
-      expect(result1.success).toBe(true);
-      if (result1.success) {
-        expect(result1.data.status).toBe("rolling_back");
-      }
-
-      // Invalid transition: pending → rolling_back
-      const wf2 = createTestWorkflow({ status: "pending" });
-      const result2 = startRollback(wf2.id);
-      expect(result2.success).toBe(false);
     });
   });
 

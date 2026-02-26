@@ -813,6 +813,11 @@ export function createOrbStackHooks(provider: OrbStackProvider): ProviderLifecyc
             }
             break;
 
+          case "refresh_pricing":
+            // OrbStack is local — no pricing to fetch
+            receipts.push({ type: task.type, status: "completed", result: { local: true } });
+            break;
+
           default:
             receipts.push({
               type: task.type,

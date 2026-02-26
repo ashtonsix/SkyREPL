@@ -414,6 +414,7 @@ export type WorkflowStatus =
   | "pending"
   | "running"
   | "paused"
+  | "cancelling"
   | "completed"
   | "failed"
   | "cancelled"
@@ -471,7 +472,7 @@ export function failWorkflow(
 
 /**
  * Cancel a running or paused workflow.
- * [running, paused] -> cancelled. Sets finished_at.
+ * [running, paused] -> cancelling. finalizeCancellation completes the transition.
  */
 export function cancelWorkflow(
   workflowId: number
@@ -480,6 +481,20 @@ export function cancelWorkflow(
     "workflows",
     workflowId,
     ["running", "paused"],
+    "cancelling"
+  );
+}
+
+/**
+ * Finalize cancellation: cancelling -> cancelled. Sets finished_at.
+ */
+export function finalizeCancellation(
+  workflowId: number
+): TransitionResult<Workflow> {
+  return atomicTransition<Workflow>(
+    "workflows",
+    workflowId,
+    "cancelling",
     "cancelled",
     { finished_at: Date.now() }
   );

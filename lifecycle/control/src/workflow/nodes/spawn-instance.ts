@@ -13,6 +13,8 @@ import { getInstanceByIdempotencyKey } from "../../material/db";
 import type { ProviderName } from "../../provider/types";
 import type { Instance } from "../../material/db";
 import type { SpawnInstanceOutput, LaunchRunWorkflowInput } from "../../intent/launch-run.schema";
+import { classifySpawnError, scanProviderTargeted } from "../../orphan/scanner";
+import { formatResourceName } from "../../material/control-id";
 
 // =============================================================================
 // Types
@@ -177,15 +179,52 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
         SKYREPL_INSTANCE_ID: String(instance.id),
       },
     };
-    const providerResult = await provider.spawn({
-      spec: input.spec,
-      bootstrap: bootstrapConfig,
-      instanceId: instance.id,
-      controlId: ctx.controlId,
-      manifestId: ctx.manifestId,
-      region: input.region,
-      diskSizeGb: input.diskSizeGb,
-    });
+    let providerResult;
+    try {
+      providerResult = await provider.spawn({
+        spec: input.spec,
+        bootstrap: bootstrapConfig,
+        instanceId: instance.id,
+        controlId: ctx.controlId,
+        manifestId: ctx.manifestId,
+        region: input.region,
+        diskSizeGb: input.diskSizeGb,
+      });
+    } catch (spawnErr) {
+      // ─── Orphan risk: classify error and trigger targeted scan if needed ──
+      const classification = classifySpawnError(spawnErr);
+      if (classification.orphanRisk && classification.action === "scan_immediately") {
+        // Build the expected resource name prefix for this instance so we can
+        // scan only for resources that match what we tried to create.
+        const expectedPrefix = formatResourceName(
+          ctx.controlId,
+          ctx.manifestId,
+          instance.id
+        );
+        ctx.log("warn", "Spawn failure with orphan risk — triggering targeted scan", {
+          instanceId: instance.id,
+          provider: providerName,
+          classification,
+          expectedPrefix,
+        });
+        // Fire-and-forget: scan runs asynchronously so it doesn't block the error propagation.
+        scanProviderTargeted(providerName, expectedPrefix).then(orphans => {
+          if (orphans.length > 0) {
+            console.warn(
+              `[orphan] Potential orphan detected after spawn failure: ` +
+              `provider=${providerName} count=${orphans.length} ` +
+              `ids=${orphans.map(o => o.providerId).join(",")}`
+            );
+          }
+        }).catch(scanErr => {
+          console.warn(
+            `[orphan] Targeted scan failed after spawn failure: ` +
+            `provider=${providerName} error=${scanErr instanceof Error ? scanErr.message : String(scanErr)}`
+          );
+        });
+      }
+      throw spawnErr;
+    }
 
     // ─── Phase 3: DB Update — record provider-assigned IDs + actual region ──
     updateInstanceRecord(instance.id, {

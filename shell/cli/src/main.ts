@@ -11,11 +11,13 @@ import { setupCommand } from './commands/setup';
 import { authCommand } from './commands/auth';
 import { teamCommand } from './commands/team';
 import { extendCommand, releaseCommand } from './commands/hold';
-import { getControlPlaneUrl, isConnectionRefused, loadEnvFile, REPL_DIR, printTable, displayState, setOutputMode, output } from './config';
+import { orphanCommand } from './commands/orphan';
+import { getControlPlaneUrl, isConnectionRefused, loadEnvFile, forceLoadEnvFile, REPL_DIR, printTable, displayState, setOutputMode, output } from './config';
 import { ApiClient } from './client';
 import { idToSlug, parseInputId } from '@skyrepl/contracts';
 import { regenerateSSHConfig, ensureSSHConfigInclude } from './ssh';
-import { startDaemon, stopDaemon, isDaemonRunning, ensureDaemon } from '../../daemon/lifecycle';
+import { ensureDaemon } from '../../daemon/lifecycle';
+import { detectConsumer, setConsumer } from './consumer';
 
 /**
  * Extract --json and --quiet from the raw argv array.
@@ -42,9 +44,12 @@ function printUsage(exitCode = 1) {
   out('  run attach <run-id>    Attach to a running run\'s log stream');
   out('  run list               List runs');
   out('  run cancel <id>        Cancel a workflow');
-  out('  control <subcommand>   Manage control plane (start|stop|restart|status|reset)');
+  out('  control <subcommand>   Manage services (start|stop|restart|status|reset) [service]');
   out('  instance list          List instances');
   out('  allocation list        List allocations');
+  out('  orphan whitelist add   Add to orphan whitelist');
+  out('  orphan whitelist remove Remove from orphan whitelist');
+  out('  orphan whitelist list   List orphan whitelist entries');
   out('  artifact list <run-id> List artifacts for a run');
   out('  artifact download <id> Download an artifact');
   out('  extend <id> [duration] Extend debug hold on an allocation (default: 30m)');
@@ -61,9 +66,6 @@ function printUsage(exitCode = 1) {
   out('  auth list-keys         List API keys (admin only)');
   out('  setup [subcommand]     First-run setup (URL, SSH, auth)');
   out('  ssh-config             Regenerate SSH config');
-  out('  daemon start           Start the local daemon');
-  out('  daemon stop            Stop the local daemon');
-  out('  daemon status          Show daemon status');
   out('  completion <shell>     Generate shell completion script');
   out('  help                   Show this help');
   out('');
@@ -76,14 +78,25 @@ function printUsage(exitCode = 1) {
 
 async function main() {
   mkdirSync(REPL_DIR, { recursive: true });
+  // control.env wins over Bun-auto-loaded .env from the workspace root
+  forceLoadEnvFile(join(REPL_DIR, 'control.env'));
   loadEnvFile(join(REPL_DIR, 'cli.env'));
 
   const rawArgs = process.argv.slice(2);
   const { json, quiet, remainingArgs: args } = parseGlobalFlags(rawArgs);
 
-  // Apply output mode before any command runs
-  if (json) setOutputMode('json');
-  else if (quiet) setOutputMode('quiet');
+  // Detect consumer type early. --json flag overrides to program mode.
+  if (json) {
+    setConsumer('program');
+    setOutputMode('json');
+  } else if (quiet) {
+    setOutputMode('quiet');
+  } else {
+    // Auto-detect: set the cached consumer type for the rest of this process
+    const detected = detectConsumer();
+    setConsumer(detected);
+    if (detected === 'program') setOutputMode('json');
+  }
 
   if (args.length === 0 || args[0] === '-h' || args[0] === '--help') {
     printUsage(0);
@@ -99,11 +112,15 @@ async function main() {
     return;
   }
 
-  // Ensure control plane + daemon for commands that need them
-  const localOnly = ['help', 'control', 'setup', 'completion', 'daemon'];
+  // Ensure services are running for commands that need them.
+  // Scaffold starts the daemon in-process; standalone daemon only needed when remote.
+  const localOnly = ['help', 'control', 'setup', 'completion'];
   if (!localOnly.includes(command)) {
     await ensureControlPlane();
-    ensureDaemon();
+    // When control is remote, scaffold isn't local — start standalone daemon
+    const url = getControlPlaneUrl();
+    const isLocal = ['localhost', '127.0.0.1', '::1'].some(h => url.includes(h));
+    if (!isLocal) ensureDaemon();
   }
 
   switch (command) {
@@ -146,6 +163,9 @@ async function main() {
     case 'artifact':
       await artifactCommand(commandArgs);
       break;
+    case 'orphan':
+      await orphanCommand(commandArgs);
+      break;
     case 'team':
       await teamCommand(commandArgs);
       break;
@@ -157,9 +177,6 @@ async function main() {
       break;
     case 'ssh-config':
       await sshConfigCommand();
-      break;
-    case 'daemon':
-      await daemonCommand(commandArgs);
       break;
     case 'completion': {
       const { completionCommand } = await import('./commands/completion');
@@ -204,7 +221,7 @@ async function runList(): Promise<void> {
     const { data } = runResult;
 
     if (data.length === 0) {
-      output([], () => { console.log('No runs found.'); });
+      output([], () => { console.log('No runs found.'); }, 'run');
       return;
     }
 
@@ -231,7 +248,7 @@ async function runList(): Promise<void> {
 
     output(data, () => {
       printTable(['ID', 'COMMAND', 'STATE', 'EXIT', 'CREATED'], rows, [4, 37, 12, 5, 16]);
-    });
+    }, 'run');
   } catch (err) {
     if (isConnectionRefused(err)) {
       console.error(`Control plane not reachable at ${getControlPlaneUrl()}. Start it with \`repl control start\`.`);
@@ -334,44 +351,6 @@ async function runAttach(args: string[]): Promise<void> {
       }
     },
   );
-}
-
-async function daemonCommand(args: string[]): Promise<void> {
-  const sub = args[0];
-
-  if (!sub || sub === 'status') {
-    const running = isDaemonRunning();
-    if (running) {
-      console.log('Daemon is running.');
-    } else {
-      console.log('Daemon is not running.');
-    }
-    return;
-  }
-
-  if (sub === 'start') {
-    if (isDaemonRunning()) {
-      console.log('Daemon is already running.');
-      return;
-    }
-    const pid = startDaemon();
-    console.log(`Daemon started (PID ${pid}).`);
-    return;
-  }
-
-  if (sub === 'stop') {
-    const stopped = stopDaemon();
-    if (stopped) {
-      console.log('Daemon stopped.');
-    } else {
-      console.log('Daemon was not running.');
-    }
-    return;
-  }
-
-  console.error(`Unknown daemon subcommand: ${sub}`);
-  console.error('Usage: repl daemon start|stop|status');
-  process.exit(2);
 }
 
 main().catch((error) => {

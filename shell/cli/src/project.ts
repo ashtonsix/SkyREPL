@@ -18,6 +18,7 @@ export interface Profile {
   artifacts?: string[];
   env?: Record<string, string>;
   disk_size_gb?: number;
+  ssh_aliases?: Record<string, string>;
 }
 
 export interface ProjectConfig {

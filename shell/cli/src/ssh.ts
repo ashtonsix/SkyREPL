@@ -3,6 +3,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 import { idToSlug } from '@skyrepl/contracts';
 import type { ApiClient } from './client';
+import { findProjectConfig } from './project';
 
 // =============================================================================
 // Paths
@@ -23,7 +24,7 @@ const INCLUDE_LINE = 'Include ~/.repl/ssh_config';
  * - ACTIVE allocations are always accessible.
  * - COMPLETE allocations are accessible only while debug_hold_until is in the future.
  */
-function isSSHAccessible(alloc: {
+export function isSSHAccessible(alloc: {
   status: string;
   debug_hold_until: number | null;
 }): boolean {
@@ -39,16 +40,51 @@ function isSSHAccessible(alloc: {
 // =============================================================================
 
 /**
+ * Resolve the SSH Host slug for an allocation.
+ * Priority: alias (from config) > display_name > base36 slug
+ *
+ * Warns on stderr if multiple alias keys map to the same allocation target.
+ */
+export function resolveSSHSlug(alloc: {
+  id: number;
+  display_name?: string | null;
+}, aliases?: Record<string, string>): string {
+  // Check alias map: keys are alias names, values are display_names or slugs
+  if (aliases) {
+    const slug = idToSlug(alloc.id);
+    const displayName = alloc.display_name;
+    const matchingAliases = Object.entries(aliases).filter(([, target]) =>
+      target === slug || (displayName && target === displayName)
+    );
+    if (matchingAliases.length > 1) {
+      const names = matchingAliases.map(([alias]) => alias).join(', ');
+      process.stderr.write(
+        `warning: multiple aliases map to the same allocation (id=${alloc.id}): ${names} — using first match\n`
+      );
+    }
+    if (matchingAliases.length > 0) {
+      return matchingAliases[0]![0];
+    }
+  }
+  // Prefer display_name, fall back to base36 slug
+  if (alloc.display_name) {
+    return alloc.display_name;
+  }
+  return idToSlug(alloc.id);
+}
+
+/**
  * Generate a single SSH Host block for one allocation.
- * Uses full base36 allocation ID as the slug.
+ * Host slug: display_name if available, otherwise base36 allocation ID slug.
  */
 function generateHostEntry(alloc: {
   id: number;
   instance_ip: string | null;
   user: string;
   workdir: string;
-}): string {
-  const slug = idToSlug(alloc.id);
+  display_name?: string | null;
+}, aliases?: Record<string, string>): string {
+  const slug = resolveSSHSlug(alloc, aliases);
   const ip = alloc.instance_ip ?? '0.0.0.0';
   const lines = [
     `Host repl-${slug}`,
@@ -62,7 +98,7 @@ function generateHostEntry(alloc: {
     `  ProxyCommand ~/.repl/bin/ssh_proxy.sh %h`,
   ];
   if (alloc.workdir) {
-    lines.push(`  RemoteCommand cd ${alloc.workdir} && exec $SHELL -l`);
+    lines.push(`  RemoteCommand cd '${(alloc.workdir || '~').replace(/'/g, "'\\''")}' && exec $SHELL -l`);
   }
   return lines.join('\n');
 }
@@ -84,11 +120,39 @@ const CATCH_ALL_ENTRY = `Host repl-*
 export async function regenerateSSHConfig(client: ApiClient): Promise<number> {
   const { data: allocations } = await client.listAllocations();
 
+  // Load SSH aliases from repl.toml if available
+  const project = findProjectConfig();
+  const aliases: Record<string, string> = {};
+  if (project) {
+    for (const profile of Object.values(project.profiles)) {
+      if (profile.ssh_aliases) {
+        Object.assign(aliases, profile.ssh_aliases);
+      }
+    }
+  }
+  const hasAliases = Object.keys(aliases).length > 0;
+
   // Filter to SSH-accessible allocations that have an IP
-  const sshAllocations = allocations.filter((a: any) => isSSHAccessible(a));
+  const sshAllocations = allocations.filter((a: any) =>
+    isSSHAccessible(a) && a.instance_ip
+  );
 
   // Build config content: per-allocation entries first, catch-all last
-  const hostEntries = sshAllocations.map((a: any) => generateHostEntry(a));
+  // Deduplicate slugs: two allocations resolving to the same slug → skip with warning
+  const emittedSlugs = new Set<string>();
+  const hostEntries: string[] = [];
+  for (const a of sshAllocations) {
+    const allocWithName = { ...a, display_name: a.instance_display_name ?? a.display_name };
+    const slug = resolveSSHSlug(allocWithName, hasAliases ? aliases : undefined);
+    if (emittedSlugs.has(slug)) {
+      process.stderr.write(
+        `warning: duplicate SSH slug 'repl-${slug}' for allocation id=${a.id} — skipping (first match wins)\n`
+      );
+      continue;
+    }
+    emittedSlugs.add(slug);
+    hostEntries.push(generateHostEntry(allocWithName, hasAliases ? aliases : undefined));
+  }
 
   const header = [
     '# SkyREPL SSH Config',
@@ -107,7 +171,7 @@ export async function regenerateSSHConfig(client: ApiClient): Promise<number> {
   // chmod 600: contains IPs; no keys but still sensitive
   chmodSync(SSH_CONFIG_PATH, 0o600);
 
-  return sshAllocations.length;
+  return hostEntries.length;
 }
 
 /**

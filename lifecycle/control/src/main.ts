@@ -3,7 +3,7 @@
 import { createServer } from "./api/routes";
 import { registerAgentRoutes, createRealAgentBridge } from "./api/agent";
 import { registerWebSocketRoutes, registerSSEWorkflowStream } from "./api/sse-protocol";
-import { initDatabase, runMigrations } from "./material/db";
+import { initDatabase, setDatabase, runMigrations } from "./material/db";
 import { createWorkflowEngine, recoverWorkflows, requestEngineShutdown, awaitEngineQuiescence } from "./workflow/engine";
 import { registerLaunchRun } from "./intent/launch-run";
 import { registerTerminateInstance } from "./intent/terminate-instance";
@@ -12,6 +12,7 @@ import { setAgentBridge } from "./workflow/nodes/start-run";
 import { TIMING } from "@skyrepl/contracts";
 import { cleanExpiredIdempotencyKeys } from "./api/middleware/idempotency";
 import type { WorkflowEngine } from "./workflow/engine";
+import type { Catalog } from "../../../scaffold/src/catalog";
 import { readFileSync, existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
@@ -24,7 +25,7 @@ import { warmPoolReconciliation } from "./resource/allocation";
 import { storageGarbageCollection, refreshSqlStorageSizeCache, getSqlStorageSizeCache, SQL_STORAGE_ADVISORY_BYTES, SQL_STORAGE_STRONG_BYTES } from "./material/storage";
 import { periodicFlush, periodicLogCompaction } from "./background/log-streaming";
 import { seedApiKey } from "./material/db/tenants";
-import { terminateOrphanedVMs, scanAll } from "./orphan/scanner";
+import { scanAll } from "./orphan/scanner";
 import { execute, queryOne } from "./material/db";
 import { clearBlobProviderCache, invokeAllStorageHeartbeats } from "./provider/storage/registry";
 import { invokeAllHeartbeats, type HeartbeatExpectations } from "./provider/extensions";
@@ -77,6 +78,53 @@ export async function startup(): Promise<void> {
   });
 
   console.log("[control] Control plane started successfully");
+}
+
+// =============================================================================
+// Catalog-aware Init (service fabric entry point)
+// =============================================================================
+
+export async function initControl(catalog: Catalog): Promise<{ shutdown: () => Promise<void> }> {
+  console.log("[control] Starting control plane...");
+
+  // Inject the catalog's already-initialized DB into the module-level singleton
+  setDatabase(catalog.getSQLite());
+  runMigrations();
+  seedApiKey();
+  console.log("[control] Database initialized");
+
+  setupWorkflowEngine();
+  registerProviders();
+  checkSqlStorageAtStartup();
+
+  const port = catalog.getConfig().ports.control;
+  const app = createServer({ port, corsOrigins: ["*"], maxBodySize: 10 * 1024 * 1024 });
+  registerAgentRoutes(app);
+  registerWebSocketRoutes(app);
+  registerSSEWorkflowStream(app);
+  httpServer = app.listen({ port, idleTimeout: 0 });
+  console.log(`[control] Control plane listening on port ${port}`);
+
+  catalog.registerService("control", {
+    mode: "local",
+    version: catalog.getConfig().version,
+    ref: app,
+  });
+
+  // If orbital will be co-located, point the orbital client at localhost.
+  // Check config (not catalog registration) because orbital inits after control.
+  if (catalog.getConfig().services.includes("orbital")) {
+    const { setOrbitalUrl } = await import("./provider/orbital");
+    setOrbitalUrl(`http://localhost:${catalog.getConfig().ports.orbital}`);
+  }
+
+  startBackgroundTasks();
+
+  console.log("[control] Control plane started successfully");
+
+  return {
+    shutdown: () => serviceShutdown(),
+  };
 }
 
 // =============================================================================
@@ -346,7 +394,11 @@ export async function computeHeartbeatDispatch(): Promise<void> {
       lastReconciliation = Date.now();
     }
     if (tasks.some(t => t.type === "orphan_scan")) {
-      await scanAll();
+      const scanResults = await scanAll();
+      const orphanCount = scanResults.reduce((n, r) => n + r.orphans.filter(o => o.classification !== 'whitelisted').length, 0);
+      if (orphanCount > 0) {
+        console.warn(`[orphan] Scheduled scan found ${orphanCount} orphaned resource(s) across ${scanResults.length} provider(s)`);
+      }
       lastOrphanScan = Date.now();
     }
   } catch (err) {
@@ -399,13 +451,14 @@ export async function storageHeartbeatDispatch(): Promise<void> {
 // Shutdown
 // =============================================================================
 
-export async function shutdown(): Promise<void> {
+/** Service-level shutdown: stop HTTP, drain engine, clear intervals.
+ *  Does NOT touch the database — caller (standalone or scaffold) owns DB lifecycle. */
+async function serviceShutdown(): Promise<void> {
   if (isShuttingDown) return;
   isShuttingDown = true;
   console.log("[control] Graceful shutdown initiated...");
 
-  // 1. Stop accepting new requests (stop the HTTP server)
-  // server.stop(true) in Bun closes the listener but lets in-flight finish
+  // 1. Stop accepting new requests
   if (httpServer) {
     httpServer.server!.stop(true);
     console.log("[control] HTTP server stopped accepting connections");
@@ -421,14 +474,13 @@ export async function shutdown(): Promise<void> {
   requestEngineShutdown();
   await awaitEngineQuiescence(30_000);
 
-  // 4. Terminate orphaned VMs
-  try {
-    await terminateOrphanedVMs();
-  } catch (err) {
-    console.warn("[control] Error during VM cleanup:", err);
-  }
+  console.log("[control] Service shutdown complete");
+}
 
-  // 5. WAL checkpoint
+/** Standalone shutdown: service shutdown + DB cleanup + exit. */
+export async function shutdown(): Promise<void> {
+  await serviceShutdown();
+
   try {
     const { walCheckpoint } = await import("./material/db");
     walCheckpoint();
@@ -437,12 +489,10 @@ export async function shutdown(): Promise<void> {
     console.warn("[control] WAL checkpoint failed:", err);
   }
 
-  // 6. Close database
   const { closeDatabase } = await import("./material/db");
   closeDatabase();
   console.log("[control] Database closed");
 
-  console.log("[control] Shutdown complete");
   process.exit(0);
 }
 
@@ -471,10 +521,12 @@ function loadControlEnvFile(): void {
 }
 
 // =============================================================================
-// Entry Point
+// Entry Point (standalone only — scaffold uses initControl)
 // =============================================================================
 
-startup().catch((err) => {
-  console.error("Failed to start control plane:", err);
-  process.exit(1);
-});
+if (import.meta.main) {
+  startup().catch((err) => {
+    console.error("Failed to start control plane:", err);
+    process.exit(1);
+  });
+}

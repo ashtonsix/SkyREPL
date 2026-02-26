@@ -15,6 +15,7 @@ import { checkRateLimit, getRateLimitInfo } from "../middleware/rate-limit";
 import { registerResourceRoutes } from "./resources";
 import { registerOperationRoutes } from "./operations";
 import { registerPreflightRoutes } from "./preflight";
+import { registerOrphanRoutes } from "./orphans";
 import { getSqlStorageSizeCache, SQL_STORAGE_ADVISORY_BYTES, SQL_STORAGE_STRONG_BYTES } from "../../material/storage";
 import { getDefaultBlobProvider } from "../../provider/storage/registry";
 import { SqlBlobProvider } from "../../provider/storage/sql-blob";
@@ -199,6 +200,7 @@ export function createServer(config: ServerConfig): Elysia {
   registerResourceRoutes(app);
   registerOperationRoutes(app);
   registerPreflightRoutes(app);
+  registerOrphanRoutes(app);
 
   return app;
 }

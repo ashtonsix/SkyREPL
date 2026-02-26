@@ -52,7 +52,7 @@ async function createKey(args: string[]): Promise<void> {
       console.log(`  ${result.raw_key}`);
       console.log('');
       console.log('  Store this key securely — it will not be shown again.');
-    });
+    }, 'auth');
   } catch (err) {
     if (isConnectionRefused(err)) {
       console.error(`Control plane not reachable at ${getControlPlaneUrl()}. Start it with \`repl control start\`.`);
@@ -94,7 +94,7 @@ async function listKeys(): Promise<void> {
   try {
     const { data } = await client.listKeys();
     if (data.length === 0) {
-      output([], () => { console.log('No API keys found.'); });
+      output([], () => { console.log('No API keys found.'); }, 'auth');
       return;
     }
     const rows = data.map((k: any) => {
@@ -105,7 +105,7 @@ async function listKeys(): Promise<void> {
     });
     output(data, () => {
       printTable(['ID', 'NAME', 'ROLE', 'STATUS', 'LAST USED', 'CREATED'], rows, [4, 20, 8, 8, 12, 12]);
-    });
+    }, 'auth');
   } catch (err) {
     if (isConnectionRefused(err)) {
       console.error(`Control plane not reachable at ${getControlPlaneUrl()}. Start it with \`repl control start\`.`);

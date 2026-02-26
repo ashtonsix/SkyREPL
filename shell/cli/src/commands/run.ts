@@ -9,6 +9,10 @@ import { runPreflight, displayWarnings } from '../preflight';
 import { createHash } from 'crypto';
 import { readFileSync, statSync } from 'fs';
 import { resolve, dirname } from 'path';
+import { getConsumer } from '../consumer';
+import { formatAgentRunOutput } from '../output/agent';
+import { formatProgramRunOutput } from '../output/program';
+import { createRunDir, initRunStatus } from '../../../daemon/run-artifacts';
 
 // Terminal workflow states — when the workflow reaches one of these, we're done
 const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled']);
@@ -105,7 +109,7 @@ export async function runCommand(args: string[]): Promise<void> {
     console.error('  --timeout <duration>    Override max duration (e.g. "1h", "30m")');
     console.error('  --hold <duration>       Override hold duration');
     console.error('  --dry-run               Show resolved config without launching');
-  console.error('  --no-preflight          Skip preflight checks (for CI/scripting)');
+    console.error('  --no-preflight          Skip preflight checks (for CI/scripting)');
     console.error('');
     console.error('Examples:');
     console.error('  repl run                              # uses [default] profile command');
@@ -120,7 +124,9 @@ export async function runCommand(args: string[]): Promise<void> {
   }
 
   // Merge: flag > profile > default
-  const provider = (flags['--provider'] as string) ?? profile.provider ?? DEFAULTS.provider;
+  // Only apply DEFAULTS.provider if the user explicitly passed --provider or the profile sets it.
+  // When neither is present, pass undefined so the API/orbital can resolve the best provider.
+  const provider = (flags['--provider'] as string) ?? profile.provider ?? undefined;
   const region = (flags['--region'] as string) ?? profile.region;
   const spec = (flags['--spec'] as string) ?? profile.spec ?? DEFAULTS.spec;
   const workdir = (flags['--workdir'] as string) ?? profile.workdir ?? DEFAULTS.workdir;
@@ -224,8 +230,46 @@ export async function runCommand(args: string[]): Promise<void> {
     process.exit(2);
   }
 
-  console.log(`Launched run ${idToSlug(runId)}, workflow ${idToSlug(workflowId)}`);
+  const runSlug = idToSlug(runId);
+  const workflowSlug = idToSlug(workflowId);
 
+  // ── Consumer fork ────────────────────────────────────────────────────────
+  // agent and program consumers exit immediately after printing launch info.
+  // Only human consumers block and display the progress spinner.
+  const consumer = getConsumer();
+  const runContext = {
+    runId,
+    workflowId,
+    provider,
+    spec,
+    region,
+    command,
+    runSlug,
+    workflowSlug,
+  };
+
+  if (consumer === 'agent') {
+    // Eagerly create the run artifact dir so the agent has files to watch
+    const dirCreated = createRunDir(runSlug);
+    if (dirCreated) {
+      // Initialize status.json with submission metadata immediately (E4)
+      initRunStatus(runSlug, { runId, workflowId, submittedAt: Date.now() });
+    }
+    formatAgentRunOutput({ ...runContext, runDirAvailable: dirCreated });
+    process.exit(0);
+  }
+
+  if (consumer === 'program') {
+    const dirCreated = createRunDir(runSlug);
+    if (dirCreated) {
+      initRunStatus(runSlug, { runId, workflowId, submittedAt: Date.now() });
+    }
+    formatProgramRunOutput(runContext);
+    process.exit(0);
+  }
+
+  // human: log and fall through to progress display below
+  console.log(`Launched run ${runSlug}, workflow ${workflowSlug}`);
   // Eagerly fetch total node count for progress display
   let initialTotalNodes = 0;
   try {
@@ -238,7 +282,7 @@ export async function runCommand(args: string[]): Promise<void> {
   // Ctrl-C: detach from run, don't cancel
   process.on('SIGINT', () => {
     process.stdout.write('\r\x1b[K'); // Clear spinner line
-    console.log(`Run ${idToSlug(runId)} continuing in background. Use \`repl cancel ${idToSlug(workflowId)}\` to stop it.`);
+    console.log(`Run ${runSlug} continuing in background. Use \`repl cancel ${workflowSlug}\` to stop it.`);
     process.exit(0);
   });
 
@@ -464,8 +508,23 @@ export async function runCommand(args: string[]): Promise<void> {
   finalStatus = await pollPromise;
   stopSpinner();
 
+  // Fetch allocation to get instance display name (best-effort, non-fatal)
+  let instanceDisplayName: string | null = null;
+  try {
+    const allocResult = await client.listAllocations({ run_id: runId });
+    const alloc = allocResult.data?.[0];
+    if (alloc?.instance_display_name) {
+      instanceDisplayName = alloc.instance_display_name as string;
+    }
+  } catch {
+    // Non-fatal — display name is informational
+  }
+
   // Print summary and exit
   console.log('');
+  if (instanceDisplayName) {
+    console.log(`Instance: ${instanceDisplayName}  (ssh repl-${instanceDisplayName})`);
+  }
   if (finalStatus.status === 'completed') {
     // Propagate command exit code: workflow succeeded but command may have failed
     // Output is a map of node outputs keyed by node_id
@@ -474,18 +533,18 @@ export async function runCommand(args: string[]): Promise<void> {
     if (exitCode !== 0) {
       console.log(`Command exited with code ${exitCode}.`);
     } else {
-      console.log(`Workflow ${idToSlug(workflowId)} completed.`);
+      console.log(`Workflow ${workflowSlug} completed.`);
     }
     process.exit(exitCode);
   } else if (finalStatus.status === 'failed') {
     const errMsg = finalStatus.error?.message ?? 'unknown error';
-    console.log(`Workflow ${idToSlug(workflowId)} failed: ${errMsg}`);
+    console.log(`Workflow ${workflowSlug} failed: ${errMsg}`);
     process.exit(1);
   } else if (finalStatus.status === 'cancelled') {
-    console.log(`Workflow ${idToSlug(workflowId)} was cancelled.`);
+    console.log(`Workflow ${workflowSlug} was cancelled.`);
     process.exit(1);
   } else {
-    console.log(`Workflow ${idToSlug(workflowId)} ended with status: ${finalStatus.status}`);
+    console.log(`Workflow ${workflowSlug} ended with status: ${finalStatus.status}`);
     process.exit(1);
   }
 }

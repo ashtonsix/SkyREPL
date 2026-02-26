@@ -31,6 +31,7 @@ import {
   completeWorkflow,
   failWorkflow,
   cancelWorkflow as cancelWorkflowTransition,
+  finalizeCancellation,
   pauseWorkflow,
   resumeWorkflow,
   startRollback,
@@ -107,12 +108,13 @@ function makeAllocation(status: AllocStatus): Allocation {
   });
 }
 
-type WfStatus = "pending" | "running" | "paused" | "completed" | "failed" | "cancelled" | "rolling_back";
+type WfStatus = "pending" | "running" | "paused" | "cancelling" | "completed" | "failed" | "cancelled" | "rolling_back";
 
 function makeWorkflow(status: WfStatus): Workflow {
   const now = Date.now();
   const isActive = !["pending"].includes(status);
   const isTerminal = ["completed", "failed", "cancelled"].includes(status);
+  // cancelling is active but not terminal
   return createWorkflow({
     type: "test-sm",
     parent_workflow_id: null,
@@ -272,13 +274,14 @@ describe("Allocation State Machine", () => {
 
 describe("Workflow State Machine", () => {
   const ALL_STATUSES: WfStatus[] = [
-    "pending", "running", "paused", "completed", "failed", "cancelled", "rolling_back",
+    "pending", "running", "paused", "cancelling", "completed", "failed", "cancelled", "rolling_back",
   ];
 
   const VALID_TRANSITIONS: Record<WfStatus, WfStatus[]> = {
     pending:      ["running", "failed"],
-    running:      ["completed", "failed", "cancelled", "paused", "rolling_back"],
-    paused:       ["running", "failed", "cancelled"],
+    running:      ["completed", "failed", "cancelling", "paused", "rolling_back"],
+    paused:       ["running", "failed", "cancelling"],
+    cancelling:   ["cancelled"],
     completed:    [],
     failed:       [],
     cancelled:    [],
@@ -296,7 +299,8 @@ describe("Workflow State Machine", () => {
         return startWorkflow(wf.id);
       case "completed": return completeWorkflow(wf.id, { ok: true });
       case "failed": return failWorkflow(wf.id, "test error");
-      case "cancelled": return cancelWorkflowTransition(wf.id);
+      case "cancelling": return cancelWorkflowTransition(wf.id);
+      case "cancelled": return finalizeCancellation(wf.id);
       case "paused": return pauseWorkflow(wf.id);
       case "rolling_back": return startRollback(wf.id);
       default: throw new Error(`Unknown target status: ${toStatus}`);
@@ -304,7 +308,7 @@ describe("Workflow State Machine", () => {
   }
 
   test("covers all workflow states and 'pending' is creation-only", () => {
-    const expected: WfStatus[] = ["pending", "running", "paused", "completed", "failed", "cancelled", "rolling_back"];
+    const expected: WfStatus[] = ["pending", "running", "paused", "cancelling", "completed", "failed", "cancelled", "rolling_back"];
     expect(ALL_STATUSES.sort()).toEqual(expected.sort());
     for (const from of ALL_STATUSES) {
       expect(VALID_TRANSITIONS[from].includes("pending")).toBe(false);

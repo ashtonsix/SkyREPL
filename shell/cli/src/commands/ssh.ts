@@ -1,6 +1,7 @@
 import { getControlPlaneUrl, isConnectionRefused } from '../config';
 import { ApiClient } from '../client';
 import { parseInputId, idToSlug } from '@skyrepl/contracts';
+import { isSSHAccessible } from '../ssh';
 
 export async function sshCommand(args: string[]): Promise<void> {
   if (args.length === 0) {
@@ -10,6 +11,7 @@ export async function sshCommand(args: string[]): Promise<void> {
     console.error('or COMPLETE with an active debug hold.');
     console.error('');
     console.error('Examples:');
+    console.error('  repl ssh serene-otter    # allocation by display name');
     console.error('  repl ssh abc123          # allocation by slug');
     console.error('  repl ssh repl-abc123     # also works (prefix stripped)');
     process.exit(2);
@@ -21,14 +23,23 @@ export async function sshCommand(args: string[]): Promise<void> {
     input = input.slice(5);
   }
 
-  const allocId = parseInputId(input);
   const client = new ApiClient(getControlPlaneUrl());
 
-  // Fetch allocation
+  // Fetch allocation — try display_name first (display names may look like valid base36),
+  // fall back to base-36 slug parse
   let alloc: any;
   try {
     const { data } = await client.listAllocations();
-    alloc = data.find((a: any) => a.id === allocId);
+    // Try display_name match first (e.g. "serene-otter", or base36-looking names like "bold", "cafe")
+    alloc = data.find((a: any) => a.instance_display_name === input || a.display_name === input);
+    // Fall back to base-36 slug parse
+    if (!alloc) {
+      let allocId: number | null = null;
+      try { allocId = parseInputId(input); } catch { /* not a valid slug */ }
+      if (allocId !== null) {
+        alloc = data.find((a: any) => a.id === allocId);
+      }
+    }
   } catch (err) {
     if (isConnectionRefused(err)) {
       console.error(`Control plane not reachable at ${getControlPlaneUrl()}. Start it with \`repl control start\`.`);
@@ -45,23 +56,23 @@ export async function sshCommand(args: string[]): Promise<void> {
     return;
   }
 
-  // Check SSH accessibility
+  // Check SSH accessibility using the canonical check function
   const slug = idToSlug(alloc.id);
-  if (alloc.status === 'COMPLETE') {
-    if (!alloc.debug_hold_until || alloc.debug_hold_until <= Date.now()) {
+  if (!isSSHAccessible(alloc)) {
+    if (alloc.status === 'COMPLETE') {
       console.error(`Allocation ${slug} is COMPLETE and debug hold has expired.`);
       console.error(`Extend the hold with: repl extend ${slug}`);
-      process.exit(2);
-      return;
+    } else {
+      console.error(`Allocation ${slug} is ${alloc.status} — SSH is only available for ACTIVE or held COMPLETE allocations.`);
     }
-    // COMPLETE with active hold — OK, but inform user
+    process.exit(2);
+    return;
+  }
+  // COMPLETE with active hold — accessible, but inform user of remaining hold time
+  if (alloc.status === 'COMPLETE') {
     const remainMs = alloc.debug_hold_until - Date.now();
     const remainMin = Math.ceil(remainMs / 60_000);
     console.log(`Allocation ${slug} is COMPLETE (hold: ${remainMin}m remaining)`);
-  } else if (alloc.status !== 'ACTIVE') {
-    console.error(`Allocation ${slug} is ${alloc.status} — SSH is only available for ACTIVE or held COMPLETE allocations.`);
-    process.exit(2);
-    return;
   }
 
   const ip = alloc.instance_ip;

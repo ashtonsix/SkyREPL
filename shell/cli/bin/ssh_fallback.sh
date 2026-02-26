@@ -25,9 +25,9 @@ fi
 # Strip the repl- prefix to get the slug
 SLUG="${HOSTNAME#repl-}"
 
-# Validate slug: alphanumeric only (base36)
-if ! [[ "$SLUG" =~ ^[0-9a-z]+$ ]]; then
-  echo "ssh_fallback.sh: invalid slug format '${SLUG}' (expected base36)" >&2
+# Validate slug: base36 alphanumeric or display-name (hyphenated lowercase)
+if ! [[ "$SLUG" =~ ^[0-9a-z]([0-9a-z-]*[0-9a-z])?$ ]]; then
+  echo "ssh_fallback.sh: invalid slug format '${SLUG}' (expected base36 or display-name format)" >&2
   exit 1
 fi
 

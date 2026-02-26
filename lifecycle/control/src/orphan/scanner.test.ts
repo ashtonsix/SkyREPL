@@ -322,14 +322,14 @@ describe("naming validation", () => {
     const controlId = getControlId(db);
     const name = formatResourceName(controlId, 1, 1);
 
-    const check = enforceNamingConvention("orbstack", "vm-1", name);
+    const check = enforceNamingConvention(name);
     expect(check.compliant).toBe(true);
     expect(check.actual).toBe(name);
     expect(check.expected).toBe(name);
   });
 
   test("enforceNamingConvention: non-convention name is non-compliant", () => {
-    const check = enforceNamingConvention("orbstack", "vm-1", "random-vm-name");
+    const check = enforceNamingConvention("random-vm-name");
     expect(check.compliant).toBe(false);
   });
 });

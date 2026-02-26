@@ -71,9 +71,10 @@ export function registerOperationRoutes(app: Elysia<any>): void {
       }
     }
 
-    // Validate provider name (static capabilities OR runtime-registered, e.g. "mock" in tests)
-    const providerName = body.provider ?? "orbstack";
-    if (!(providerName in PROVIDER_CAPABILITIES) && !isProviderRegistered(providerName)) {
+    // Validate provider name if explicitly provided (static capabilities OR runtime-registered, e.g. "mock" in tests).
+    // When undefined, orbital/validateSpec handles provider selection via scoring.
+    const providerName = body.provider ?? undefined;
+    if (providerName && !(providerName in PROVIDER_CAPABILITIES) && !isProviderRegistered(providerName)) {
       set.status = 400;
       return {
         error: {
@@ -210,31 +211,10 @@ export function registerOperationRoutes(app: Elysia<any>): void {
       return { error: { code: "WORKFLOW_NOT_FOUND", message: `Workflow ${workflowId} not found`, category: "not_found" } };
     }
 
-    // After successful cancel, send cancel_run SSE command to the agent
-    if (result.success || result.status === "cancelled") {
-      const workflow = getWorkflow(workflowId);
-      if (workflow) {
-        try {
-          const nodes = getWorkflowNodes(workflowId);
-          const allocNode = nodes.find(n => n.node_id === "create-allocation");
-          const wfInput = workflow.input_json ? JSON.parse(workflow.input_json) : {};
-          const runId = wfInput.runId;
-          if (allocNode?.output_json) {
-            const output = JSON.parse(allocNode.output_json);
-            if (output.instanceId && runId) {
-              const { sseManager } = await import("../sse-protocol");
-              await sseManager.sendCommand(String(output.instanceId), {
-                type: "cancel_run",
-                command_id: Math.floor(Math.random() * 1000000),
-                run_id: runId,
-              });
-            }
-          }
-        } catch (err) {
-          console.warn("[routes] Failed to send cancel_run SSE command", { workflowId, error: err });
-        }
-      }
-    }
+    // A20 fix: cancel_run SSE is sent exclusively by handleCancellation() in retry.ts via
+    // the command bus. Sending it here too caused the agent to receive two cancel commands.
+    // The route handler is responsible only for triggering the workflow cancel; the engine
+    // handles all downstream side-effects (including notifying the agent).
 
     return {
       workflow_id: workflowId,

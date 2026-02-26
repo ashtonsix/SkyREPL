@@ -144,7 +144,7 @@ export function buildNodeContext(
 
     checkCancellation(): void {
       const current = getWorkflow(workflowId);
-      if (current && current.status === "cancelled") {
+      if (current && (current.status === "cancelled" || current.status === "cancelling")) {
         throw Object.assign(new Error("Workflow cancelled"), {
           code: "CANCELLED",
           category: "internal" as const,
@@ -186,7 +186,7 @@ export function buildNodeContext(
           while (true) {
             // Check if parent was cancelled or failed
             const parent = getWorkflow(parentId);
-            if (parent && (parent.status === "cancelled" || parent.status === "failed")) {
+            if (parent && (parent.status === "cancelled" || parent.status === "cancelling" || parent.status === "failed")) {
               await cancelWorkflow(result.workflowId, "parent_cancelled");
             }
 

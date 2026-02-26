@@ -32,9 +32,9 @@ fi
 # Strip the repl- prefix to get the allocation slug
 SLUG="${HOSTNAME#repl-}"
 
-# Validate slug: base36 alphanumeric only
-if ! [[ "$SLUG" =~ ^[0-9a-z]+$ ]]; then
-  echo "ssh_proxy.sh: invalid slug format '${SLUG}' (expected base36)" >&2
+# Validate slug: base36 alphanumeric or display-name (hyphenated lowercase)
+if ! [[ "$SLUG" =~ ^[0-9a-z]([0-9a-z-]*[0-9a-z])?$ ]]; then
+  echo "ssh_proxy.sh: invalid slug format '${SLUG}' (expected base36 or display-name format)" >&2
   exit 1
 fi
 
@@ -125,7 +125,11 @@ ALLOC_RESP="$(api_get "${CONTROL_PLANE_URL}/v1/allocations?slug=${SLUG}")" || {
 }
 validate_response "$ALLOC_RESP" "GET /v1/allocations"
 
-DATA_COUNT="$(echo "$ALLOC_RESP" | grep -o '"id":[0-9]*' | wc -l | tr -d ' ')"
+if command -v jq >/dev/null 2>&1; then
+  DATA_COUNT="$(echo "$ALLOC_RESP" | jq '.data | length' 2>/dev/null || echo "$ALLOC_RESP" | grep -o '"id":[0-9]*' | wc -l | tr -d ' ')"
+else
+  DATA_COUNT="$(echo "$ALLOC_RESP" | grep -o '"id":[0-9]*' | wc -l | tr -d ' ')"
+fi
 
 if [[ "$DATA_COUNT" -eq 0 ]]; then
   echo "ssh_proxy.sh: No allocation found for 'repl-${SLUG}'" >&2

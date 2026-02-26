@@ -193,9 +193,10 @@ export class ApiClient {
    * List allocations.
    * GET /v1/allocations
    */
-  async listAllocations(filters?: { status?: string }): Promise<{ data: any[] }> {
+  async listAllocations(filters?: { status?: string; run_id?: number }): Promise<{ data: any[] }> {
     const params = new URLSearchParams();
     if (filters?.status) params.set('status', filters.status);
+    if (filters?.run_id !== undefined) params.set('run_id', String(filters.run_id));
     const qs = params.toString();
     const response = await fetch(`${this.baseUrl}/v1/allocations${qs ? '?' + qs : ''}`, {
       headers: this.headers(),
@@ -456,6 +457,58 @@ export class ApiClient {
       throw new Error(`user update failed: ${msg}`);
     }
     return (await response.json()) as { data: any };
+  }
+
+  // ─── Orphan Whitelist (ORPH-03) ──────────────────────────────────────
+
+  async listOrphanWhitelist(provider?: string): Promise<{ data: any[] }> {
+    const params = new URLSearchParams();
+    if (provider) params.set('provider', provider);
+    const qs = params.toString();
+    const response = await fetch(`${this.baseUrl}/v1/orphans/whitelist${qs ? '?' + qs : ''}`, {
+      headers: this.headers(),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const msg = (body as any)?.error?.message ?? `HTTP ${response.status}`;
+      throw new Error(`list orphan whitelist failed: ${msg}`);
+    }
+    return (await response.json()) as { data: any[] };
+  }
+
+  async addOrphanWhitelist(entry: {
+    provider: string;
+    provider_id: string;
+    reason: string;
+    resource_type?: string;
+    acknowledged_by?: string;
+  }): Promise<{ data: any }> {
+    const response = await fetch(`${this.baseUrl}/v1/orphans/whitelist`, {
+      method: 'POST',
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(entry),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const msg = (body as any)?.error?.message ?? `HTTP ${response.status}`;
+      throw new Error(`add orphan whitelist failed: ${msg}`);
+    }
+    return (await response.json()) as { data: any };
+  }
+
+  async removeOrphanWhitelist(provider: string, providerId: string): Promise<void> {
+    const response = await fetch(
+      `${this.baseUrl}/v1/orphans/whitelist/${encodeURIComponent(provider)}/${encodeURIComponent(providerId)}`,
+      {
+        method: 'DELETE',
+        headers: this.headers(),
+      }
+    );
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      const msg = (body as any)?.error?.message ?? `HTTP ${response.status}`;
+      throw new Error(`remove orphan whitelist failed: ${msg}`);
+    }
   }
 
   async getUsage(): Promise<{ data: any }> {

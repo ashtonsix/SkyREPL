@@ -7,6 +7,7 @@
     { "path": "shell/cli" },
     { "path": "shell/proxy" },
     { "path": "shell/tests" },
-    { "path": "orbital/impl" }
+    { "path": "orbital/impl" },
+    { "path": "scaffold" }
   ]
 }

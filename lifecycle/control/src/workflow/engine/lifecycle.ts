@@ -26,13 +26,16 @@ import {
   cancelWorkflow as cancelWorkflowTransition,
   pauseWorkflow as pauseWorkflowTransition,
   resumeWorkflow as resumeWorkflowTransition,
+  atomicTransition,
   failNode,
   resetNodeForRetry,
+  skipNode,
 } from "../state-transitions";
 import { executeLoop } from "./executor";
 import { activeLoops, isShutdownRequested as _isShutdownRequested, _setShutdownRequested, _clearActiveLoops } from "./executor";
-import { handleWorkflowFailure } from "./retry";
+import { handleWorkflowFailure, handleCancellation } from "./retry";
 import { sleep, sealManifestSafe, POLL_INTERVAL_MS, MAX_SUBWORKFLOW_DEPTH } from "./helpers";
+import { workflowEvents } from "../events";
 
 // =============================================================================
 // Engine Shutdown Coordination
@@ -263,18 +266,88 @@ export async function cancelWorkflow(
     return { success: true, status: workflow.status };
   }
 
-  // Only running or paused workflows can be cancelled
+  // Already cancelling -- idempotent success
+  if (workflow.status === "cancelling") {
+    return { success: true, status: "cancelled" };
+  }
+
+  // For pending workflows: skip straight to cancelled (no running nodes to wait on)
+  if (workflow.status === "pending") {
+    // A19 fix: use atomicTransition for pending->cancelled to guard against a concurrent
+    // executeLoop that may have already started the workflow (pending->running). If the
+    // transition is lost, re-read the new status and fall through to the running cancel path.
+    const pendingToCancelledResult = atomicTransition<Workflow>(
+      "workflows",
+      workflowId,
+      "pending",
+      "cancelled",
+      { error_json: JSON.stringify({ code: "CANCELLED", reason }), finished_at: Date.now() }
+    );
+
+    if (!pendingToCancelledResult.success) {
+      // Race lost: executeLoop already transitioned pending->running. Re-read and handle.
+      const current = getWorkflow(workflowId);
+      if (current && (current.status === "running" || current.status === "paused")) {
+        const result = cancelWorkflowTransition(workflowId);
+        if (result.success) {
+          updateWorkflow(workflowId, {
+            error_json: JSON.stringify({ code: "CANCELLED", reason }),
+          });
+          await handleCancellation(workflowId);
+          return { success: true, status: "cancelled" };
+        }
+      }
+      return { success: false, status: current?.status ?? workflow.status };
+    }
+
+    // Transition succeeded: skip all pending nodes now that workflow is cancelled.
+    const allNodes = getWorkflowNodes(workflowId);
+    for (const node of allNodes) {
+      if (node.status === "pending") {
+        skipNode(node.id);
+      }
+    }
+
+    // A18 fix: seal the manifest so it doesn't stay DRAFT indefinitely.
+    const wfAfterCancel = getWorkflow(workflowId);
+    if (wfAfterCancel?.manifest_id) {
+      try {
+        sealManifestSafe(wfAfterCancel.manifest_id);
+      } catch (err) {
+        console.warn("[workflow] Failed to seal manifest on pending cancel", {
+          workflowId,
+          manifestId: wfAfterCancel.manifest_id,
+          error: err,
+        });
+      }
+    }
+
+    // A18 fix: emit workflow_failed event so SSE clients learn about the cancellation.
+    workflowEvents.emit("workflow_failed", {
+      workflowId,
+      error: "Workflow cancelled",
+      timestamp: Date.now(),
+    });
+
+    return { success: true, status: "cancelled" };
+  }
+
+  // Only running or paused workflows can be cancelled (besides pending handled above)
   if (workflow.status !== "running" && workflow.status !== "paused") {
     return { success: false, status: workflow.status };
   }
 
-  // Atomically guarded cancellation (B5 fix)
+  // Atomically guarded cancellation: running/paused -> cancelling (B5 fix)
   const result = cancelWorkflowTransition(workflowId);
   if (result.success) {
     // Update error_json separately after successful transition
     updateWorkflow(workflowId, {
       error_json: JSON.stringify({ code: "CANCELLED", reason }),
     });
+    // Run cancellation cleanup inline (skip nodes, cancel children, seal manifest)
+    // and finalize: cancelling -> cancelled. This is idempotent — if the execute loop
+    // also calls handleCancellation, the second finalizeCancellation is a no-op.
+    await handleCancellation(workflowId);
     return { success: true, status: "cancelled" };
   }
 
@@ -352,7 +425,15 @@ export async function recoverWorkflows(): Promise<void> {
     const hasResetNodes = updatedNodes.some(n => n.status === "pending");
     const hasFailedNodes = updatedNodes.some(n => n.status === "failed");
 
-    if (hasResetNodes && !hasFailedNodes) {
+    if (workflow.status === "cancelling") {
+      // Cancelling workflow interrupted by crash: re-enter execute loop to complete cancellation
+      executeLoop(workflow.id).catch((err) => {
+        console.error("[workflow] executeLoop unhandled error (cancelling recovery)", {
+          workflowId: workflow.id,
+          error: err,
+        });
+      });
+    } else if (hasResetNodes && !hasFailedNodes) {
       // Resume the workflow
       executeLoop(workflow.id).catch((err) => {
         console.error("[workflow] executeLoop unhandled error", {

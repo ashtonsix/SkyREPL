@@ -79,7 +79,6 @@ const commandDescriptions: Record<string, string> = {
   auth: 'Manage API keys',
   setup: 'First-run setup',
   'ssh-config': 'Regenerate SSH config',
-  daemon: 'Manage local daemon',
   completion: 'Shell completion scripts',
   help: 'Show help',
 };
@@ -106,11 +105,11 @@ const commandSpecs: Record<string, CompletionSpec> = {
   },
   control: {
     subcommands: [
-      { name: 'start', desc: 'Start control plane' },
-      { name: 'stop', desc: 'Stop control plane' },
-      { name: 'restart', desc: 'Restart control plane' },
-      { name: 'status', desc: 'Show status' },
-      { name: 'reset', desc: 'Reset control plane' },
+      { name: 'start', desc: 'Start services', positional: [{ source: ['scaffold', 'daemon', 'minio'] }] },
+      { name: 'stop', desc: 'Stop services', positional: [{ source: ['scaffold', 'daemon', 'minio'] }] },
+      { name: 'restart', desc: 'Restart services', positional: [{ source: ['scaffold', 'daemon', 'minio'] }] },
+      { name: 'status', desc: 'Show all service status' },
+      { name: 'reset', desc: 'Reset services', positional: [{ source: ['scaffold', 'minio'] }] },
     ],
   },
   instance: {
@@ -171,13 +170,6 @@ const commandSpecs: Record<string, CompletionSpec> = {
   },
   setup: {
     subcommands: [{ name: 'tailscale', desc: 'Configure Tailscale' }],
-  },
-  daemon: {
-    subcommands: [
-      { name: 'start', desc: 'Start daemon' },
-      { name: 'stop', desc: 'Stop daemon' },
-      { name: 'status', desc: 'Show daemon status' },
-    ],
   },
   completion: {
     subcommands: [

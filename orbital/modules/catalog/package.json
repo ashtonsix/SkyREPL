@@ -1,0 +1,6 @@
+{
+  "name": "@skyrepl/orbital-catalog",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "main.ts"
+}

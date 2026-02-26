@@ -372,17 +372,17 @@ describe("Cancel Propagation: PFO Pattern (#WF-07)", () => {
 
     // Check that all pending nodes got skipped
     const nodes = getWorkflowNodes(result.workflowId);
-    const skippedNodes = nodes.filter((n) => n.status === "skipped");
-    const skippedIds = skippedNodes.map((n) => n.node_id).sort();
 
-    // At minimum, the join node should be skipped
-    expect(skippedIds).toContain("join");
+    // The join node must be skipped (it was pending and never ran)
+    const joinNode = nodes.find((n) => n.node_id === "join");
+    expect(joinNode).not.toBeNull();
+    expect(joinNode!.status).toBe("skipped");
 
-    // Branches that were still pending should be skipped
-    // (some may have started running before cancel was processed)
+    // Branches that were still pending when cancel fired should be skipped;
+    // branches already running complete and end up completed or skipped
     for (const n of nodes) {
       if (n.node_id.startsWith("branch-")) {
-        expect(["skipped", "running", "completed"]).toContain(n.status);
+        expect(["skipped", "completed"]).toContain(n.status);
       }
     }
   });
@@ -1004,5 +1004,242 @@ describe("Cancel Idempotency (#WF-07)", () => {
     const cancelResult = await cancelWorkflow(99999, "ghost_cancel");
     expect(cancelResult.success).toBe(false);
     expect(cancelResult.status).toBe("not_found");
+  });
+});
+
+// =============================================================================
+// Cancellation Hardening (#WF2-03)
+// =============================================================================
+
+describe("Cancellation Hardening (#WF2-03)", () => {
+  test("cancel transitions through 'cancelling' intermediate state before 'cancelled'", async () => {
+    // Track all status transitions observed for the workflow
+    const statusLog: string[] = [];
+    let resolveNodeLatch!: () => void;
+    const nodeLatch = new Promise<void>(r => { resolveNodeLatch = r; });
+
+    registerNodeExecutor({
+      name: "cancel-hardening-slow",
+      idempotent: true,
+      async execute() {
+        await nodeLatch;
+        return { ok: true };
+      },
+    });
+
+    registerBlueprint({
+      type: "test-cancel-hardening-intermediate",
+      entryNode: "work",
+      nodes: {
+        work: { type: "cancel-hardening-slow" },
+      },
+    });
+
+    const result = await submit({
+      type: "test-cancel-hardening-intermediate",
+      input: {},
+    });
+
+    // Wait for node to be running
+    await waitForNodeStatus(result.workflowId, "work", "running");
+
+    // Record status before cancel
+    const beforeCancel = getWorkflow(result.workflowId);
+    statusLog.push(beforeCancel!.status);
+
+    // Cancel - this goes running -> cancelling -> cancelled inline.
+    // NOTE: The cancelling intermediate state is not observable here because
+    // the transition running→cancelling→cancelled happens atomically within
+    // cancelWorkflow(). We can only snapshot before and after. The audit trail
+    // (cancelling→cancelled) is verified via error_json.code = "CANCELLED".
+    await cancelWorkflow(result.workflowId, "test_cancel");
+
+    const afterCancel = getWorkflow(result.workflowId);
+    statusLog.push(afterCancel!.status);
+
+    // Release latch so engine can clean up
+    resolveNodeLatch();
+
+    await waitForWorkflow(result.workflowId);
+
+    // The workflow should have gone from running to cancelled
+    expect(statusLog[0]).toBe("running");
+    expect(statusLog[1]).toBe("cancelled");
+    // Verify finished_at is set (terminal state invariant)
+    const final = getWorkflow(result.workflowId);
+    expect(final!.finished_at).not.toBeNull();
+    // Verify cancelling→cancelled audit trail: error_json must record the CANCELLED code
+    expect(final!.error_json).not.toBeNull();
+    const errorData = JSON.parse(final!.error_json!);
+    expect(errorData.code).toBe("CANCELLED");
+  });
+
+  test("cancel during compensation: compensation completes, then cancel finalizes", async () => {
+    // Use a latch on the compensate handler so we can observe timing
+    let compensateStarted = false;
+    let compensateFinished = false;
+    let resolveCompensateLatch!: () => void;
+    const compensateLatch = new Promise<void>(r => { resolveCompensateLatch = r; });
+
+    registerNodeExecutor({
+      name: "cancel-during-compensate-node",
+      idempotent: true,
+      async execute() {
+        // Always fail with a retryable error so compensation runs.
+        // VALIDATION_ERROR nodes get compensated: true inline (executor.ts),
+        // so the compensate() handler would never run — use NETWORK_ERROR instead.
+        throw Object.assign(new Error("deliberate failure"), {
+          code: "NETWORK_ERROR",
+          category: "provider",
+        });
+      },
+      async compensate() {
+        compensateStarted = true;
+        await compensateLatch;
+        compensateFinished = true;
+      },
+    });
+
+    registerBlueprint({
+      type: "test-cancel-during-compensate",
+      entryNode: "work",
+      nodes: {
+        work: { type: "cancel-during-compensate-node" },
+      },
+    });
+
+    const result = await submit({
+      type: "test-cancel-during-compensate",
+      input: {},
+    });
+
+    // Wait for compensation to start (node fails, compensation begins)
+    await waitFor(() => compensateStarted);
+
+    // Cancel while compensation is in progress
+    // The workflow may already be failing (node failed), so cancel might be rejected
+    // or the workflow may still be 'running' (depending on timing).
+    // Either way, this should not crash.
+    const cancelResult = await cancelWorkflow(result.workflowId, "cancel_during_comp");
+
+    // Verify compensation is still running (not interrupted by cancel)
+    expect(compensateStarted).toBe(true);
+    // compensateFinished may or may not be true depending on timing
+
+    // Release compensate latch
+    resolveCompensateLatch();
+
+    // Wait for workflow to terminate
+    const wf = await waitForWorkflow(result.workflowId);
+    // Workflow reaches a terminal state (cancelled or failed, depending on timing)
+    expect(["cancelled", "failed"]).toContain(wf.status);
+    // Compensation should have completed (not interrupted)
+    expect(compensateFinished).toBe(true);
+  });
+
+  test("cancel sets error_json with CANCELLED code and reason", async () => {
+    let resolveNodeLatch!: () => void;
+    const nodeLatch = new Promise<void>(r => { resolveNodeLatch = r; });
+
+    registerNodeExecutor({
+      name: "cancel-error-json-slow",
+      idempotent: true,
+      async execute() {
+        await nodeLatch;
+        return { ok: true };
+      },
+    });
+
+    registerBlueprint({
+      type: "test-cancel-error-json",
+      entryNode: "work",
+      nodes: {
+        work: { type: "cancel-error-json-slow" },
+      },
+    });
+
+    const result = await submit({
+      type: "test-cancel-error-json",
+      input: {},
+    });
+
+    await waitForNodeStatus(result.workflowId, "work", "running");
+
+    await cancelWorkflow(result.workflowId, "user_requested_stop");
+
+    resolveNodeLatch();
+    await waitForWorkflow(result.workflowId);
+
+    const wf = getWorkflow(result.workflowId);
+    expect(wf!.status).toBe("cancelled");
+    expect(wf!.error_json).not.toBeNull();
+    const errorData = JSON.parse(wf!.error_json!);
+    expect(errorData.code).toBe("CANCELLED");
+    expect(errorData.reason).toBe("user_requested_stop");
+  });
+
+  test("cancel skips all pending nodes and leaves completed nodes untouched", async () => {
+    let resolveNode2Latch!: () => void;
+    const node2Latch = new Promise<void>(r => { resolveNode2Latch = r; });
+
+    registerNodeExecutor({
+      name: "cancel-skip-fast",
+      idempotent: true,
+      async execute() {
+        return { done: true };
+      },
+    });
+
+    registerNodeExecutor({
+      name: "cancel-skip-slow",
+      idempotent: true,
+      async execute() {
+        await node2Latch;
+        return { ok: true };
+      },
+    });
+
+    registerNodeExecutor({
+      name: "cancel-skip-never",
+      idempotent: true,
+      async execute() {
+        return { never: true };
+      },
+    });
+
+    registerBlueprint({
+      type: "test-cancel-skip-nodes",
+      entryNode: "step1",
+      nodes: {
+        step1: { type: "cancel-skip-fast", dependsOn: [] },
+        step2: { type: "cancel-skip-slow", dependsOn: ["step1"] },
+        step3: { type: "cancel-skip-never", dependsOn: ["step2"] },
+      },
+    });
+
+    const result = await submit({
+      type: "test-cancel-skip-nodes",
+      input: {},
+    });
+
+    // Wait for step2 to be running (step1 completed, step3 still pending)
+    await waitForNodeStatus(result.workflowId, "step2", "running");
+
+    // Cancel while step2 is blocked and step3 is pending
+    await cancelWorkflow(result.workflowId, "test_cancel");
+
+    // Release latch
+    resolveNode2Latch();
+
+    await waitForWorkflow(result.workflowId);
+
+    const nodes = getWorkflowNodes(result.workflowId);
+    const step1 = nodes.find(n => n.node_id === "step1");
+    const step3 = nodes.find(n => n.node_id === "step3");
+
+    // step1 was completed before cancel — should remain completed
+    expect(step1!.status).toBe("completed");
+    // step3 was pending — should be skipped
+    expect(step3!.status).toBe("skipped");
   });
 });

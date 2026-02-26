@@ -16,6 +16,7 @@ import {
   startNode,
   completeNode,
   failNode,
+  skipNode,
 } from "../state-transitions";
 import { workflowEvents } from "../events";
 import { buildNodeContext } from "./context";
@@ -29,6 +30,9 @@ import { determineRetryStrategy, handleRetry, handlePfoBranchFailure, handleWork
 // These are imported by lifecycle.ts for shutdown coordination.
 // The activeLoops set tracks in-flight execute loops for graceful shutdown.
 export const activeLoops = new Set<Promise<void>>();
+// Tracks which workflowIds currently have an active executeLoop to prevent
+// duplicate loops (e.g., when recoverWorkflows races with submit).
+export const activeWorkflowIds = new Set<number>();
 let shutdownRequested = false;
 
 export function isShutdownRequested(): boolean {
@@ -41,6 +45,7 @@ export function _setShutdownRequested(value: boolean): void {
 
 export function _clearActiveLoops(): void {
   activeLoops.clear();
+  activeWorkflowIds.clear();
 }
 
 // The blueprints and nodeExecutors maps live in lifecycle.ts (the registries).
@@ -69,7 +74,16 @@ async function _executeLoopInner(
 ): Promise<void> {
   try {
     // Transition workflow to 'running'
-    startWorkflow(workflowId);
+    const startResult = startWorkflow(workflowId);
+    if (!startResult.success) {
+      // Another loop is already executing this workflow (e.g., from recoverWorkflows).
+      // Only continue if the workflow is in a 'cancelling' state that still needs handling.
+      const wf = getWorkflow(workflowId);
+      if (!wf || wf.status !== "cancelling") {
+        return; // Another loop is handling this workflow
+      }
+      // Fall through: cancelling workflows need handleCancellation even without startWorkflow success
+    }
 
     while (true) {
       // Check engine shutdown signal before any DB access
@@ -87,8 +101,8 @@ async function _executeLoopInner(
         break;
       }
 
-      // Check cancellation
-      if (workflow.status === "cancelled") {
+      // Check cancellation (handle both 'cancelling' intermediate and 'cancelled' terminal)
+      if (workflow.status === "cancelling" || workflow.status === "cancelled") {
         await handleCancellation(workflowId);
         break;
       }
@@ -112,7 +126,17 @@ async function _executeLoopInner(
         const allNodes = getWorkflowNodes(workflowId);
         const pending = allNodes.filter((n) => n.status === "pending").length;
         const running = allNodes.filter((n) => n.status === "running").length;
-        const failed = allNodes.filter((n) => n.status === "failed").length;
+
+        // Count truly unhandled failures: exclude failed nodes whose CB fallback ran
+        const failedNodes = allNodes.filter((n) => n.status === "failed");
+        const handledByFallback = new Set<string>();
+        for (const n of allNodes) {
+          if (n.retry_reason?.startsWith("cb_fallback_for:") &&
+              (n.status === "completed" || n.status === "skipped")) {
+            handledByFallback.add(n.retry_reason.replace("cb_fallback_for:", ""));
+          }
+        }
+        const unhandledFailed = failedNodes.filter(n => !handledByFallback.has(n.node_id)).length;
 
         if (running > 0) {
           if (inFlight.size > 0) {
@@ -124,14 +148,29 @@ async function _executeLoopInner(
           }
           continue;
         }
-        if (pending === 0 && failed === 0) {
-          // All nodes completed successfully
+        if (pending === 0 && unhandledFailed === 0) {
+          // All nodes completed (or failed with successful fallback)
           await handleWorkflowComplete(workflowId, allNodes);
           break;
         }
-        if (failed > 0) {
+        if (unhandledFailed > 0) {
           // Unrecoverable failure
           await handleWorkflowFailure(workflowId, allNodes);
+          break;
+        }
+        if (pending > 0 && unhandledFailed === 0) {
+          // Stuck: pending nodes exist but none are ready and none are running.
+          // Caused by an unresolvable dependency (e.g., depends on a non-existent node).
+          // This state cannot self-resolve — fail immediately to avoid spinning CPU.
+          const errorJson = JSON.stringify({
+            code: "UNRESOLVABLE_DEPENDENCY",
+            message: "Workflow stuck: pending nodes with no ready or running nodes and no failures — likely a dependency on a non-existent node",
+          });
+          failWorkflowTransition(workflowId, errorJson);
+          const wf = getWorkflow(workflowId);
+          if (wf?.manifest_id) {
+            sealManifestSafe(wf.manifest_id);
+          }
           break;
         }
       }
@@ -214,6 +253,32 @@ export async function executeNode(
   // Build NodeContext
   const ctx = buildNodeContext(workflowId, node);
 
+  // Pre-execution validation (§6.2): if validate() rejects, fail immediately
+  // with VALIDATION_ERROR. No retries, no compensation (node never executed).
+  if (executor.validate) {
+    try {
+      await executor.validate(ctx);
+    } catch (validationError) {
+      const nodeError = normalizeToNodeError(validationError);
+      // Force VALIDATION_ERROR code if not already set
+      if (nodeError.code !== "VALIDATION_ERROR") {
+        nodeError.code = "VALIDATION_ERROR";
+        nodeError.category = "validation";
+      }
+      // Mark as compensated: true — node never executed, nothing to compensate.
+      // This prevents handleWorkflowFailure safety net from calling compensate().
+      failNode(node.id, JSON.stringify({ ...nodeError, compensated: true }));
+      workflowEvents.emit("node_failed", {
+        workflowId,
+        nodeId: node.node_id,
+        nodeType: node.node_type,
+        error: nodeError.message,
+        timestamp: Date.now(),
+      });
+      return;
+    }
+  }
+
   try {
     // Execute with node-level timeout
     let nodeTimeoutMs = TIMING.DEFAULT_NODE_TIMEOUT_MS;
@@ -250,6 +315,14 @@ export async function executeNode(
       const outputRecord =
         output && typeof output === "object" ? (output as Record<string, unknown>) : {};
       completeNode(node.id, outputRecord);
+
+      // CB try-fallback: if this node succeeded and a fallback node exists for it, skip it (§6.3.2)
+      const allNodesForCb = getWorkflowNodes(workflowId);
+      for (const candidate of allNodesForCb) {
+        if (candidate.retry_reason === `cb_fallback_for:${node.node_id}` && candidate.status === "pending") {
+          skipNode(candidate.id);
+        }
+      }
 
       // Hook 2: node_completed
       workflowEvents.emit("node_completed", {

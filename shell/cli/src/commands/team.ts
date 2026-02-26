@@ -65,7 +65,7 @@ async function teamCreate(args: string[]): Promise<void> {
       if (data.budget_usd !== null) {
         console.log(`  Budget:   $${data.budget_usd}`);
       }
-    });
+    }, 'team');
   } catch (err) {
     handleError(err, 'create team');
   }
@@ -105,7 +105,7 @@ async function teamInvite(args: string[]): Promise<void> {
     output(data, () => {
       console.log(`Invited ${data.email} as ${data.role}`);
       console.log(`  User ID: ${data.id}`);
-    });
+    }, 'team');
   } catch (err) {
     handleError(err, 'invite user');
   }
@@ -140,7 +140,7 @@ async function teamList(): Promise<void> {
     const { data: users } = await client.listTenantUsers(tenantId);
 
     if (users.length === 0) {
-      output([], () => { console.log('No team members found.'); });
+      output([], () => { console.log('No team members found.'); }, 'team');
       return;
     }
 
@@ -151,7 +151,7 @@ async function teamList(): Promise<void> {
     });
     output(users, () => {
       printTable(['ID', 'EMAIL', 'ROLE', 'BUDGET', 'CREATED'], rows, [4, 30, 8, 10, 12]);
-    });
+    }, 'team');
   } catch (err) {
     handleError(err, 'list team');
   }
@@ -181,7 +181,7 @@ async function teamInfo(args: string[]): Promise<void> {
           console.log(`    ${u.email} (${u.role}): $${u.used_usd.toFixed(2)}${cap}`);
         }
       }
-    });
+    }, 'team');
   } catch (err) {
     handleError(err, 'get team info');
   }

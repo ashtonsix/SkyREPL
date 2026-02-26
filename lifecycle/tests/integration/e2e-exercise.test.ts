@@ -94,7 +94,10 @@ beforeAll(async () => {
         customNetworking: false,
       },
       async spawn() {
-        throw new Error("OrbStack not available in test environment");
+        // Use a non-retryable error code so tests don't wait for exponential backoff
+        const err = new Error("OrbStack not available in test environment") as Error & { code: string };
+        err.code = "UNSUPPORTED_OPERATION";
+        throw err;
       },
       async terminate() {},
       async list() {

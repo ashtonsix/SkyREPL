@@ -206,15 +206,23 @@ export function buildAllocationFilters(query: Record<string, unknown>, tenantId?
     clauses.push("a.run_id = ?");
     values.push(query.run_id);
   }
-  // slug: base36 allocation ID for SSH fallback lookup
+  // slug: base36 allocation ID or display_name for SSH proxy/fallback lookup
   if (query.slug) {
-    const slugId = parseInt(String(query.slug), 36);
-    if (Number.isFinite(slugId) && slugId > 0) {
-      clauses.push("a.id = ?");
-      values.push(slugId);
+    const slugStr = String(query.slug);
+    const slugId = parseInt(slugStr, 36);
+    // C17: verify the ENTIRE string was consumed by checking the round-trip.
+    // parseInt("serene-otter", 36) parses only "serene" and returns a large
+    // number, producing a spurious a.id match. The round-trip guard
+    // slugId.toString(36) === slugStr ensures the full string is valid base36.
+    const isValidBase36 = Number.isFinite(slugId) && slugId > 0 && slugId.toString(36) === slugStr;
+    if (isValidBase36) {
+      // Could be a numeric slug OR a display name — match either
+      clauses.push("(a.id = ? OR i.display_name = ?)");
+      values.push(slugId, slugStr);
     } else {
-      // Invalid slug — force no results
-      clauses.push("1 = 0");
+      // Not a valid base36 number — try as display_name only
+      clauses.push("i.display_name = ?");
+      values.push(slugStr);
     }
   }
 

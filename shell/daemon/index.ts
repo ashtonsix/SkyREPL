@@ -15,6 +15,8 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { notify } from './notify';
 import { triggerCompletionCacheUpdate } from './completion-cache';
+import { writeRunStatus, appendRunLog, cleanupOldRuns } from './run-artifacts';
+import type { Catalog } from '../../scaffold/src/catalog';
 
 // Lazy import: regenerateSSHConfig needs ApiClient which reads process.env at
 // call time, so we import these after env is loaded.
@@ -168,11 +170,33 @@ export function handleSSEEvent(eventType: string, dataStr: string): void {
     triggerSSHRegen();
     triggerCompletionCacheUpdate();
     notify('SkyREPL', 'Run completed');
+    // Update run status artifact if we have a run slug
+    const runSlug = typeof data.run_slug === 'string' ? data.run_slug : null;
+    if (runSlug) {
+      writeRunStatus(runSlug, { state: 'completed', ...data });
+    }
   } else if (eventType === 'workflow_failed') {
     triggerSSHRegen();
     triggerCompletionCacheUpdate();
     const errMsg = typeof data.error === 'string' ? data.error : 'Workflow failed';
     notify('SkyREPL', errMsg);
+    const runSlug = typeof data.run_slug === 'string' ? data.run_slug : null;
+    if (runSlug) {
+      writeRunStatus(runSlug, { state: 'failed', error: errMsg, ...data });
+    }
+  } else if (eventType === 'node_started') {
+    // Update run status so agents see early progress events (E4)
+    const runSlug = typeof data.run_slug === 'string' ? data.run_slug : null;
+    const nodeId = typeof data.node_id === 'string' ? data.node_id : '';
+    if (runSlug) {
+      writeRunStatus(runSlug, { state: 'running', current_node: nodeId, ...data });
+    }
+  } else if (eventType === 'workflow_started') {
+    // Update run status on workflow start (E4)
+    const runSlug = typeof data.run_slug === 'string' ? data.run_slug : null;
+    if (runSlug) {
+      writeRunStatus(runSlug, { state: 'running', ...data });
+    }
   } else if (eventType === 'node_completed') {
     // spawn-instance or similar nodes completing means a new allocation may
     // have become SSH-accessible
@@ -180,6 +204,18 @@ export function handleSSEEvent(eventType: string, dataStr: string): void {
     if (nodeId.includes('spawn') || nodeId.includes('allocation')) {
       triggerSSHRegen();
       triggerCompletionCacheUpdate();
+    }
+    // Update run status artifact on node progress
+    const runSlug = typeof data.run_slug === 'string' ? data.run_slug : null;
+    if (runSlug) {
+      writeRunStatus(runSlug, { state: 'running', current_node: nodeId, ...data });
+    }
+  } else if (eventType === 'log') {
+    // Persist log data to output.log (E2)
+    const runSlug = typeof data.run_slug === 'string' ? data.run_slug : null;
+    const logData = typeof data.data === 'string' ? data.data : null;
+    if (runSlug && logData) {
+      appendRunLog(runSlug, logData);
     }
   }
 }
@@ -341,8 +377,44 @@ function shutdown(): void {
   process.exit(0);
 }
 
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+// =============================================================================
+// initDaemon — programmatic entry point for service fabric
+// =============================================================================
+
+export async function initDaemon(catalog: Catalog): Promise<{ shutdown: () => Promise<void> }> {
+  // Start IPC server first so CLI commands can reach us immediately
+  startIPCServer();
+
+  // Start listening for control plane events
+  connectEventStream();
+
+  // Warm the completion cache on boot so the first tab-completion is fast
+  triggerCompletionCacheUpdate();
+
+  // Check tunnel processes every 30s
+  const tunnelInterval = setInterval(checkTunnels, 30_000);
+
+  // Clean up old run artifact directories daily
+  cleanupOldRuns();
+  const cleanupInterval = setInterval(cleanupOldRuns, 24 * 60 * 60 * 1000);
+
+  // Register ourselves in the catalog so other services can discover us
+  catalog.registerService('daemon', {
+    mode: 'local',
+    version: catalog.getConfig().version,
+    ref: { ipcSockPath: SOCK_PATH },
+  });
+
+  return {
+    async shutdown() {
+      clearInterval(tunnelInterval);
+      clearInterval(cleanupInterval);
+      if (existsSync(SOCK_PATH)) {
+        try { unlinkSync(SOCK_PATH); } catch { /* ignore */ }
+      }
+    },
+  };
+}
 
 // =============================================================================
 // Main — only runs when this file is the entry point, not when imported
@@ -355,6 +427,10 @@ if (import.meta.main) {
 
   mkdirSync(REPL_DIR, { recursive: true });
 
+  // Signal handlers — only for standalone mode; under scaffold, scaffold owns signals
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+
   // Start IPC server first so CLI commands can reach us immediately
   startIPCServer();
 
@@ -366,4 +442,8 @@ if (import.meta.main) {
 
   // Check tunnel processes every 30s
   setInterval(checkTunnels, 30_000);
+
+  // Clean up old run artifact directories daily
+  cleanupOldRuns();
+  setInterval(cleanupOldRuns, 24 * 60 * 60 * 1000);
 }

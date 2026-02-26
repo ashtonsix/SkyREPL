@@ -19,6 +19,7 @@ export interface Workflow {
     | "pending"
     | "running"
     | "paused"
+    | "cancelling"
     | "completed"
     | "failed"
     | "cancelled"
@@ -192,16 +193,26 @@ export function findReadyNodes(workflowId: number): WorkflowNode[] {
       .filter(n => n.status === 'completed' || n.status === 'skipped')
       .map(n => n.node_id)
   );
+  // CB fallback nodes treat a failed primary as a satisfied dependency (§6.3.2)
+  const failedNodeIds = new Set(
+    nodes.filter(n => n.status === 'failed').map(n => n.node_id)
+  );
   return nodes.filter(node => {
     if (node.status !== 'pending') return false;
     if (!node.depends_on || node.depends_on === '[]') return true;
     const deps = JSON.parse(node.depends_on) as string[];
-    return deps.every(depId => completedOrSkipped.has(depId));
+    // For CB fallback nodes, a failed primary node counts as a satisfied dep
+    const isCbFallback = node.retry_reason?.startsWith('cb_fallback_for:');
+    return deps.every(depId => {
+      if (completedOrSkipped.has(depId)) return true;
+      if (isCbFallback && failedNodeIds.has(depId)) return true;
+      return false;
+    });
   });
 }
 
 export function findActiveWorkflows(): Workflow[] {
-  return queryMany<Workflow>("SELECT * FROM workflows WHERE status IN ('pending', 'running')");
+  return queryMany<Workflow>("SELECT * FROM workflows WHERE status IN ('pending', 'running', 'cancelling')");
 }
 
 export function deleteWorkflow(id: number): void {

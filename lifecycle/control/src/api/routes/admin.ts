@@ -364,6 +364,31 @@ export function registerAdminRoutes(app: Elysia<any>): void {
     }
   }, { params: IdParams });
 
+  // ─── Pricing Cache (D5) ─────────────────────────────────────────────
+  //
+  // GET /v1/admin/pricing
+  //
+  // Returns cached pricing data from provider heartbeats.
+  // No auth required — pricing is not tenant-specific.
+
+  app.get("/v1/admin/pricing", async ({ query }) => {
+    const { invokeAllHeartbeats } = await import("../../provider/extensions");
+    // Return a summary — actual cached pricing is in the in-memory cache.
+    // This endpoint triggers a pricing refresh and returns the results.
+    const receipts = await invokeAllHeartbeats({
+      tasks: [{ type: "refresh_pricing", priority: "low" }],
+      deadline: Date.now() + 10_000,
+    });
+
+    const results: Record<string, unknown> = {};
+    for (const [provider, receipt] of receipts.entries()) {
+      const pricingReceipt = receipt.receipts.find(r => r.type === "refresh_pricing");
+      results[provider] = pricingReceipt ?? { status: "not_available" };
+    }
+
+    return { data: results };
+  });
+
   // ─── Usage Summary (TENANT-03: budget context) ─────────────────────
 
   app.get("/v1/usage", ({ query, request, set }) => {
