@@ -561,10 +561,31 @@ export async function handleWorkflowTimeout(
 }
 
 // =============================================================================
-// Cancellation
+// Cancellation — Two-Phase Integrity-First Protocol (Track B, WL-060)
 // =============================================================================
 
-export async function handleCancellation(workflowId: number): Promise<void> {
+// Phase 1 init tracking: records which workflows have already had their
+// one-time cancellation setup performed (skip pending, send SSE, cancel children).
+const cancelInitDone = new Set<number>();
+
+/** Reset cancel init tracking. Test-only. */
+export function _clearCancelInitState(): void {
+  cancelInitDone.clear();
+}
+
+/**
+ * Phase 1 — Immediate cancellation setup (called once when cancelling detected).
+ * - Skips all pending nodes (prevents new work from starting)
+ * - Sends cancel_run SSE to agent (fire-and-forget)
+ * - Cancels child workflows (propagate cancellation immediately so children
+ *   can begin their own drain, avoiding deadlocks with parent nodes that
+ *   are awaiting child completion)
+ * - Does NOT finalize, seal manifest, or clean allocations.
+ */
+async function handleCancellingInit(workflowId: number): Promise<void> {
+  if (cancelInitDone.has(workflowId)) return;
+  cancelInitDone.add(workflowId);
+
   const nodes = getWorkflowNodes(workflowId);
 
   // Skip pending nodes
@@ -578,7 +599,6 @@ export async function handleCancellation(workflowId: number): Promise<void> {
   const wf = getWorkflow(workflowId);
   const wfInputForCancel = wf?.input_json ? JSON.parse(wf.input_json) : {};
   if (wfInputForCancel.runId) {
-    // Find the instance from spawn-instance node output
     const spawnNode = nodes.find(n => n.node_type === "spawn-instance" && n.output_json);
     const instanceId = spawnNode?.output_json
       ? JSON.parse(spawnNode.output_json).providerId
@@ -600,8 +620,10 @@ export async function handleCancellation(workflowId: number): Promise<void> {
     }
   }
 
-  // Cancel child workflows (#WF-03: cancel propagation)
-  // NOTE: cancelWorkflow is imported from lifecycle.ts -- circular import resolved at call time
+  // Cancel child workflows immediately (#WF-03: cancel propagation).
+  // Children must be cancelled in Phase 1 (not deferred to finalization)
+  // to avoid deadlocks: parent nodes that spawn subworkflows and await
+  // handle.wait() are "running" during the drain phase.
   const { cancelWorkflow } = await import("./lifecycle");
   const childWorkflows = queryMany<Workflow>(
     "SELECT * FROM workflows WHERE parent_workflow_id = ? AND status NOT IN ('completed', 'failed', 'cancelled')",
@@ -610,10 +632,17 @@ export async function handleCancellation(workflowId: number): Promise<void> {
   for (const child of childWorkflows) {
     await cancelWorkflow(child.id, "parent_cancelled");
   }
+}
+
+/**
+ * Finalization — Cleanup after the drain phase completes.
+ * Clean allocations, seal manifest, finalizeCancellation.
+ * Note: child workflow cancellation is in Phase 1 (handleCancellingInit).
+ */
+async function handleCancellingFinalize(workflowId: number): Promise<void> {
+  const nodes = getWorkflowNodes(workflowId);
 
   // Complete any ACTIVE/CLAIMED allocations for this workflow's run.
-  // The finalize-run node (which normally calls completeAllocation) was
-  // skipped, so we must clean up here to avoid stuck ACTIVE allocations.
   const allocNode = nodes.find(n => n.node_id === "create-allocation" && n.output_json);
   if (allocNode?.output_json) {
     try {
@@ -622,7 +651,6 @@ export async function handleCancellation(workflowId: number): Promise<void> {
         const { completeAllocation } = await import("../state-transitions");
         const result = completeAllocation(allocOutput.allocationId);
         if (!result.success) {
-          // Try failing it instead (may be CLAIMED, not ACTIVE)
           const { failAllocationAnyState } = await import("../state-transitions");
           failAllocationAnyState(allocOutput.allocationId);
         }
@@ -649,11 +677,9 @@ export async function handleCancellation(workflowId: number): Promise<void> {
   }
 
   // Finalize the cancellation transition (cancelling -> cancelled).
-  // This is an atomic transition — if it fails, another caller already finalized
-  // the cancellation and emitted events. Guard all event emission on this result.
   const cancellationResult = finalizeCancellation(workflowId);
+  cancelInitDone.delete(workflowId);
   if (!cancellationResult.success) {
-    // Already cancelled by another caller — skip event emission to prevent duplicates
     return;
   }
 
@@ -679,10 +705,85 @@ export async function handleCancellation(workflowId: number): Promise<void> {
     });
   }
 
-  // Emit workflow_failed event so SSE clients learn about the cancellation
   workflowEvents.emit("workflow_failed", {
     workflowId,
     error: "Workflow cancelled",
     timestamp: Date.now(),
   });
+}
+
+/**
+ * Phase 2 — Polling drain loop (called each execute loop iteration while status='cancelling').
+ *
+ * Checks three conditions in order:
+ * a) Running nodes still active? Let them complete normally.
+ * b) Compensation timeout exceeded? Force-fail remaining running nodes.
+ * c) Agent ack or verification timeout? Check run_complete or CANCEL_VERIFICATION_MS elapsed.
+ *
+ * Returns true when finalization is complete (caller should break the loop).
+ * Returns false when drain is still in progress (caller should continue polling).
+ */
+export async function handleCancellingPoll(
+  workflowId: number,
+  workflow: Workflow
+): Promise<boolean> {
+  // Phase 1: one-time init (skip pending, send SSE, cancel children)
+  await handleCancellingInit(workflowId);
+
+  const nodes = getWorkflowNodes(workflowId);
+  const runningNodes = nodes.filter(n => n.status === "running");
+
+  // Condition (a)+(b): Running nodes still active
+  if (runningNodes.length > 0) {
+    const cancelAnchorTime = workflow.updated_at;
+    const elapsed = Date.now() - cancelAnchorTime;
+
+    if (elapsed > TIMING.CANCEL_COMPENSATION_TIMEOUT_MS) {
+      // Compensation timeout exceeded — force-fail remaining running nodes.
+      console.warn("[workflow] Cancel compensation timeout exceeded, force-failing running nodes", {
+        workflowId,
+        runningNodeCount: runningNodes.length,
+        elapsedMs: elapsed,
+      });
+      for (const node of runningNodes) {
+        failNode(node.id, JSON.stringify({
+          code: "CANCEL_COMPENSATION_TIMEOUT",
+          message: "Node force-failed: cancellation compensation timeout exceeded",
+        }));
+      }
+      // Fall through to finalization
+    } else {
+      // Still draining — continue polling
+      return false;
+    }
+  }
+
+  // All nodes are now terminal. Condition (c): agent ack or verification timeout.
+  const wfInput = workflow.input_json ? JSON.parse(workflow.input_json) : {};
+  if (wfInput.runId) {
+    const cancelAnchorTime = workflow.updated_at;
+    const elapsed = Date.now() - cancelAnchorTime;
+
+    const { getRun } = await import("../../material/db");
+    const run = getRun(wfInput.runId);
+    const agentAcked = run?.finished_at != null;
+
+    if (!agentAcked && elapsed < TIMING.CANCEL_VERIFICATION_MS) {
+      return false;
+    }
+  }
+
+  // All conditions satisfied — finalize
+  await handleCancellingFinalize(workflowId);
+  return true;
+}
+
+/**
+ * Legacy handleCancellation — immediate (non-polling) cancellation handler.
+ * Used by lifecycle.ts cancelWorkflow() for crash recovery and by the legacy
+ * handleCancellation export. Performs Phase 1 + finalization in a single call.
+ */
+export async function handleCancellation(workflowId: number): Promise<void> {
+  await handleCancellingInit(workflowId);
+  await handleCancellingFinalize(workflowId);
 }

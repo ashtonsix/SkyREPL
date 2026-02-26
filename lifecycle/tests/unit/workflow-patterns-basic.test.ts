@@ -342,11 +342,17 @@ describe("Workflow Patterns Basic (#WF-05, #WF-06)", () => {
       const paused = getWorkflow(result.workflowId);
       expect(paused!.status).toBe("paused");
 
-      // Cancel the paused workflow
+      // Cancel the paused workflow — two-phase protocol: running nodes drain first.
+      // The paused workflow still has a running node, so it transitions to 'cancelling'.
       const cancelResult = await engine.cancel(result.workflowId, "user requested");
       expect(cancelResult.success).toBe(true);
       expect(cancelResult.status).toBe("cancelled");
 
+      const afterCancel = getWorkflow(result.workflowId);
+      expect(afterCancel!.status).toBe("cancelling");
+
+      // Wait for the drain to complete and workflow to reach terminal state
+      await waitForWorkflow(result.workflowId);
       const cancelled = getWorkflow(result.workflowId);
       expect(cancelled!.status).toBe("cancelled");
     });

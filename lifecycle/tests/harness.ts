@@ -23,6 +23,7 @@ import {
   clearBlueprints,
   _setSleepForTest,
   _resetSleep,
+  _clearCancelInitState,
 } from "../control/src/workflow/engine";
 import {
   clearAllProviders,
@@ -64,6 +65,7 @@ export function setupTest(opts: SetupTestOptions = {}): () => Promise<void> {
   clearAllBlobProviders();
   cacheClear();
   cacheResetStats();
+  _clearCancelInitState();
 
   // 4. Fresh in-memory database
   initDatabase(":memory:");

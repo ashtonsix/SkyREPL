@@ -197,16 +197,30 @@ describe("Subworkflow Contract (#WF-03)", () => {
     // Wait for child executor to signal it is running
     await childStarted;
 
-    // Cancel parent — sets parent to "cancelled" in DB. The parent's node executor
-    // (handle.wait()) polls and detects parent cancellation, then cancels the child.
+    // Cancel parent — two-phase protocol: parent transitions to 'cancelling',
+    // then Phase 1 cascades cancellation to child.
     const cancelResult = await cancelWorkflow(result.workflowId, "user_request");
     expect(cancelResult.success).toBe(true);
 
-    // Poll until the child workflow is cancelled in the DB. The parent's
-    // handle.wait() loop detects the parent cancellation and cascades it.
+    // Poll until the child workflow reaches 'cancelling' (two-phase: it can't
+    // finalize to 'cancelled' until its running node completes the drain).
     const deadline = Date.now() + 5_000;
     let children: Workflow[] = [];
     while (Date.now() < deadline) {
+      children = queryMany<Workflow>(
+        "SELECT * FROM workflows WHERE parent_workflow_id = ?",
+        [result.workflowId]
+      );
+      if (children.length > 0 && (children[0].status === "cancelling" || children[0].status === "cancelled")) break;
+      await Bun.sleep(5);
+    }
+
+    // Release latch so the running node can complete (drain phase)
+    resolveChildLatch!();
+
+    // Wait for child to finalize to 'cancelled'
+    const childDeadline = Date.now() + 5_000;
+    while (Date.now() < childDeadline) {
       children = queryMany<Workflow>(
         "SELECT * FROM workflows WHERE parent_workflow_id = ?",
         [result.workflowId]
@@ -215,10 +229,8 @@ describe("Subworkflow Contract (#WF-03)", () => {
       await Bun.sleep(5);
     }
 
-    // Release latch so cleanup (awaitEngineQuiescence) can drain
-    resolveChildLatch!();
-
-    const parentWf = getWorkflow(result.workflowId)!;
+    // Wait for parent to fully terminate
+    const parentWf = await waitForWorkflow(result.workflowId);
     expect(parentWf.status).toBe("cancelled");
     expect(children.length).toBe(1);
     expect(children[0].status).toBe("cancelled");

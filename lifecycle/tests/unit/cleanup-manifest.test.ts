@@ -47,8 +47,9 @@ import { cleanupResourcesExecutor } from "../../control/src/workflow/nodes/clean
 import { deleteManifestExecutor } from "../../control/src/workflow/nodes/delete-manifest";
 
 import type { NodeContext } from "../../control/src/workflow/engine.types";
-import { registerProvider } from "../../control/src/provider/registry";
+import { registerProvider, unregisterProvider } from "../../control/src/provider/registry";
 import type { Provider } from "../../control/src/provider/types";
+import { makeMockProvider, mockQueue } from "../mock-provider";
 
 // =============================================================================
 // Top-level harness setup
@@ -1174,5 +1175,347 @@ describe("Cleanup Manifest Contract: priority ordering correctness", () => {
     // allocation deleted (null), instance marked terminate:complete
     expect(getAllocation(alloc.id)).toBeNull();
     expect(getInstance(instance.id)?.workflow_state).toBe("terminate:complete");
+  });
+});
+
+// =============================================================================
+// C5: Parameterised Provider Contract Tests (#WF2-06 Phase 2)
+//
+// Contract: for any named provider ('orbstack', 'aws', 'lambda'), the
+// cleanup-manifest workflow must satisfy all behavioral invariants.
+// The outer file-level beforeEach (setupTest + orbstack mock) runs before
+// each test. Each suite re-registers under the exact provider name so
+// instance DB records resolve correctly.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Helper: build a sealed manifest with instance/allocation/run for a
+// specific provider, register a mock for that provider name.
+// ---------------------------------------------------------------------------
+
+function createProviderManifest(providerName: string, terminateImpl?: (id: string) => void) {
+  const workflow = createDummyWorkflow();
+  const manifest = createManifest(workflow.id);
+
+  const instance = createInstance({
+    provider: providerName as any,
+    provider_id: `${providerName}-vm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    spec: "cpu-1x",
+    region: "local",
+    ip: "127.0.0.1",
+    workflow_state: "launch:complete",
+    workflow_error: null,
+    current_manifest_id: manifest.id,
+    spawn_idempotency_key: null,
+    is_spot: 0,
+    spot_request_id: null,
+    init_checksum: null,
+    registration_token_hash: null,
+    last_heartbeat: Date.now(),
+  });
+
+  const alloc = createAllocation({
+    run_id: null,
+    instance_id: instance.id,
+    status: "COMPLETE",
+    current_manifest_id: manifest.id,
+    user: "test-user",
+    workdir: "/tmp/test",
+    debug_hold_until: null,
+    completed_at: Date.now(),
+  });
+
+  const run = createRun({
+    command: "echo test",
+    workdir: "/tmp/test",
+    max_duration_ms: 3600000,
+    workflow_state: "launch-run:finalized",
+    workflow_error: null,
+    current_manifest_id: manifest.id,
+    exit_code: 0,
+    init_checksum: null,
+    create_snapshot: 0,
+    spot_interrupted: 0,
+    started_at: Date.now(),
+    finished_at: Date.now(),
+  });
+
+  addResourceToManifest(manifest.id, "allocation", String(alloc.id), { cleanupPriority: 90 });
+  addResourceToManifest(manifest.id, "run", String(run.id), { cleanupPriority: 80 });
+  addResourceToManifest(manifest.id, "instance", String(instance.id), { cleanupPriority: 50 });
+
+  sealManifest(manifest.id, Date.now() - 1000);
+
+  return { manifest: getManifest(manifest.id)!, instance, alloc, run };
+}
+
+const C5_PROVIDERS = ["orbstack", "aws", "lambda"] as const;
+
+for (const providerName of C5_PROVIDERS) {
+  describe(`C5: cleanup-manifest contract [provider: ${providerName}]`, () => {
+    // The file-level beforeEach already ran setupTest (with engine) and registered orbstack.
+    // We need to register our named mock additionally (or overwrite for orbstack).
+
+    beforeEach(async () => {
+      registerCleanupManifest();
+      registerLaunchRun();
+
+      // For aws/lambda, register an extra mock under that provider name.
+      // For orbstack, the file-level beforeEach already registered a mock —
+      // re-registering overwrites the cache entry with our configured mock.
+      const mock = makeMockProvider({
+        terminate: (_id: string) => { /* success */ },
+      });
+      (mock as any).name = providerName;
+      await registerProvider({ provider: mock });
+    });
+
+    afterEach(async () => {
+      if (providerName !== "orbstack") {
+        // orbstack is managed by the file-level cleanup; unregister extras only
+        await unregisterProvider(providerName);
+      }
+    });
+
+    // -------------------------------------------------------------------------
+    // C5-1: cleans up all resources for provider
+    // -------------------------------------------------------------------------
+
+    test("cleans up all resources for provider", async () => {
+      const { manifest, alloc, run, instance } = createProviderManifest(providerName);
+
+      const result = await submitWf({
+        type: "cleanup-manifest",
+        input: { manifestId: manifest.id },
+      });
+
+      const wf = await waitForWorkflow(result.workflowId);
+      expect(wf.status).toBe("completed");
+
+      // Manifest deleted
+      expect(getManifest(manifest.id)).toBeNull();
+      // Allocation deleted
+      expect(getAllocation(alloc.id)).toBeNull();
+      // Run marked cleanup:complete
+      expect(getRun(run.id)?.workflow_state).toBe("cleanup:complete");
+      // Instance marked terminate:complete
+      expect(getInstance(instance.id)?.workflow_state).toBe("terminate:complete");
+    });
+
+    // -------------------------------------------------------------------------
+    // C5-2: resilient to partial failure — non-NOT_FOUND errors on instance
+    // terminate are isolated at the provider level (workflow still completes)
+    // -------------------------------------------------------------------------
+
+    test("resilient to partial failure (provider error on instance → counted as failed, workflow completes)", async () => {
+      // Register mock that throws a generic (non-NOT_FOUND) error on terminate.
+      // cleanup-resources catches non-DATABASE_ERROR exceptions at the resource level,
+      // increments failed counter, and continues — the workflow still completes.
+      const failMock = makeMockProvider({
+        terminate: (_id: string) => {
+          throw new Error(`${providerName}: internal server error`);
+        },
+      });
+      (failMock as any).name = providerName;
+      await registerProvider({ provider: failMock });
+
+      const { manifest, alloc, run } = createProviderManifest(providerName);
+
+      const result = await submitWf({
+        type: "cleanup-manifest",
+        input: { manifestId: manifest.id },
+      });
+
+      const wf = await waitForWorkflow(result.workflowId);
+      // The workflow completes: cleanup-resources treats non-NOT_FOUND/non-DB errors
+      // as resource-level failures (best-effort), not workflow-level failures.
+      expect(wf.status).toBe("completed");
+
+      // cleanup-resources node must have completed
+      const nodes = getWorkflowNodes(result.workflowId);
+      const cleanupNode = nodes.find((n) => n.node_id === "cleanup-resources");
+      expect(cleanupNode).toBeDefined();
+      expect(cleanupNode!.status).toBe("completed");
+
+      const output = JSON.parse(cleanupNode!.output_json!) as {
+        cleaned: number;
+        skipped: number;
+        failed: number;
+      };
+      // Instance terminate failed → counted as failed (not cleaned, not skipped)
+      expect(output.failed).toBeGreaterThanOrEqual(1);
+
+      // Allocation and run should still be cleaned (they don't call terminate)
+      expect(getAllocation(alloc.id)).toBeNull();
+      expect(getRun(run.id)?.workflow_state).toBe("cleanup:complete");
+    });
+
+    // -------------------------------------------------------------------------
+    // C5-3: NOT_FOUND resources are skipped (idempotent cleanup)
+    // -------------------------------------------------------------------------
+
+    test("NOT_FOUND resources skipped (idempotent)", async () => {
+      const workflow = createDummyWorkflow();
+      const manifest = createManifest(workflow.id);
+
+      // Reference a non-existent allocation ID — simulates already-deleted resource
+      addResourceToManifest(manifest.id, "allocation", "99999", { cleanupPriority: 90 });
+
+      sealManifest(manifest.id, Date.now() - 1000);
+
+      const result = await submitWf({
+        type: "cleanup-manifest",
+        input: { manifestId: manifest.id },
+      });
+
+      const wf = await waitForWorkflow(result.workflowId);
+      expect(wf.status).toBe("completed");
+
+      const nodes = getWorkflowNodes(result.workflowId);
+      const cleanupNode = nodes.find((n) => n.node_id === "cleanup-resources");
+      const output = JSON.parse(cleanupNode!.output_json!) as { skipped: number; cleaned: number; failed: number };
+      expect(output.skipped).toBe(1);
+      expect(output.cleaned).toBe(0);
+      expect(output.failed).toBe(0);
+    });
+
+    // -------------------------------------------------------------------------
+    // C5-4: post-completion workflow invariants hold
+    // -------------------------------------------------------------------------
+
+    test("post-completion workflow invariants hold", async () => {
+      const { manifest } = createProviderManifest(providerName);
+
+      const result = await submitWf({
+        type: "cleanup-manifest",
+        input: { manifestId: manifest.id },
+      });
+
+      await waitForWorkflow(result.workflowId);
+
+      verifyWorkflowInvariant(result.workflowId, {
+        expectManifestSealed: false,
+        checkAllocations: false,
+      });
+    });
+  });
+}
+
+// =============================================================================
+// C5: Multi-Provider Error Isolation
+//
+// When resources from two providers are in the same manifest, one provider
+// failing its instance terminate must not block the other provider's cleanup.
+// =============================================================================
+
+describe("C5: cleanup-manifest multi-provider error isolation", () => {
+  beforeEach(async () => {
+    registerCleanupManifest();
+    registerLaunchRun();
+
+    // aws: will fail on terminate (provider internal error)
+    const awsFail = makeMockProvider({
+      terminate: (_id: string) => {
+        throw new Error("aws: internal server error");
+      },
+    });
+    (awsFail as any).name = "aws";
+    await registerProvider({ provider: awsFail });
+
+    // lambda: succeeds
+    const lambdaOk = makeMockProvider({
+      terminate: (_id: string) => { /* success */ },
+    });
+    (lambdaOk as any).name = "lambda";
+    await registerProvider({ provider: lambdaOk });
+  });
+
+  afterEach(async () => {
+    await unregisterProvider("aws");
+    await unregisterProvider("lambda");
+  });
+
+  test("per-provider error isolation: one provider fails, others continue", async () => {
+    // Build a single manifest with resources from both providers
+    const workflow = createDummyWorkflow();
+    const manifest = createManifest(workflow.id);
+
+    // AWS instance (will fail on terminate)
+    const awsInstance = createInstance({
+      provider: "aws" as any,
+      provider_id: `aws-vm-${Date.now()}`,
+      spec: "cpu-1x",
+      region: "us-east-1",
+      ip: "10.0.0.1",
+      workflow_state: "launch:complete",
+      workflow_error: null,
+      current_manifest_id: manifest.id,
+      spawn_idempotency_key: null,
+      is_spot: 0,
+      spot_request_id: null,
+      init_checksum: null,
+      registration_token_hash: null,
+      last_heartbeat: Date.now(),
+    });
+    addResourceToManifest(manifest.id, "instance", String(awsInstance.id), { cleanupPriority: 50 });
+
+    // Lambda instance (will succeed)
+    const lambdaInstance = createInstance({
+      provider: "lambda" as any,
+      provider_id: `lambda-vm-${Date.now()}`,
+      spec: "cpu-1x",
+      region: "us-east-1",
+      ip: "10.0.0.2",
+      workflow_state: "launch:complete",
+      workflow_error: null,
+      current_manifest_id: manifest.id,
+      spawn_idempotency_key: null,
+      is_spot: 0,
+      spot_request_id: null,
+      init_checksum: null,
+      registration_token_hash: null,
+      last_heartbeat: Date.now(),
+    });
+    addResourceToManifest(manifest.id, "instance", String(lambdaInstance.id), { cleanupPriority: 50 });
+
+    sealManifest(manifest.id, Date.now() - 1000);
+
+    const result = await submitWf({
+      type: "cleanup-manifest",
+      input: { manifestId: getManifest(manifest.id)!.id },
+    });
+
+    const wf = await waitForWorkflow(result.workflowId);
+    // Workflow completes despite aws provider failing
+    expect(wf.status).toBe("completed");
+
+    // Lambda instance was successfully terminated despite AWS failure
+    const lambdaFinal = getInstance(lambdaInstance.id);
+    expect(lambdaFinal?.workflow_state).toBe("terminate:complete");
+
+    // AWS instance was NOT marked terminate:complete (its provider errored)
+    const awsFinal = getInstance(awsInstance.id);
+    expect(awsFinal?.workflow_state).not.toBe("terminate:complete");
+
+    // cleanup-resources output shows per-provider breakdown
+    const nodes = getWorkflowNodes(result.workflowId);
+    const cleanupNode = nodes.find((n) => n.node_id === "cleanup-resources");
+    expect(cleanupNode).toBeDefined();
+
+    const cleanupOutput = JSON.parse(cleanupNode!.output_json!) as {
+      providerResults: Array<{ provider: string; error: string | null; cleaned: number }>;
+    };
+
+    const awsResult = cleanupOutput.providerResults.find((r) => r.provider === "aws");
+    const lambdaResult = cleanupOutput.providerResults.find((r) => r.provider === "lambda");
+
+    expect(awsResult).toBeDefined();
+    // AWS terminate error is counted as a resource-level failure (best-effort isolation)
+    expect(awsResult!.failed).toBeGreaterThanOrEqual(1);
+    expect(awsResult!.cleaned).toBe(0); // AWS instance was not cleaned
+
+    expect(lambdaResult).toBeDefined();
+    expect(lambdaResult!.error).toBeNull();   // Lambda had no provider-level error
+    expect(lambdaResult!.cleaned).toBe(1);    // Lambda instance cleaned
   });
 });

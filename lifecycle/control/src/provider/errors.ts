@@ -289,14 +289,6 @@ export function categorizeErrorCode(code: ProviderOperationErrorCode): ProviderO
   }
 }
 
-export function shouldRetryWithAlternative(error: ProviderOperationError): boolean {
-  return (
-    error.code === "CAPACITY_ERROR" ||
-    error.code === "SPOT_INTERRUPTED" ||
-    error.code === "REGION_UNAVAILABLE"
-  );
-}
-
 export function shouldRetry(error: ProviderOperationError): boolean {
   return error.retryable && error.category !== "auth";
 }

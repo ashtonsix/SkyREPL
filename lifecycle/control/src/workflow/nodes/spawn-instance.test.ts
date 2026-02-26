@@ -16,9 +16,10 @@ import {
   reconcileStalePendingSpawns,
 } from "../../background/reconciliation";
 import type { Instance } from "../../material/db";
-import type { Provider, ProviderInstance, ListFilter } from "../../provider/types";
+import type { Provider } from "../../provider/types";
 import { registerProvider as _registerProvider, clearAllProviders } from "../../provider/registry";
 import { TIMING } from "@skyrepl/contracts";
+import { makeMockProvider, makeMockInstance } from "../../../../tests/mock-provider";
 
 // =============================================================================
 // Helpers
@@ -42,50 +43,6 @@ function makeInstance(overrides: Partial<Omit<Instance, "id" | "created_at">> = 
     last_heartbeat: Date.now(),
     ...overrides,
   });
-}
-
-/**
- * Build a minimal mock provider. Pass `listResult` to control what list()
- * returns. If `listResult` is an Error, list() will throw it.
- */
-function makeMockProvider(listResult: ProviderInstance[] | Error = []): Provider {
-  return {
-    name: "orbstack" as const,
-    capabilities: {
-      snapshots: false,
-      spot: false,
-      gpu: false,
-      multiRegion: false,
-      persistentVolumes: false,
-      warmVolumes: false,
-      hibernation: false,
-      costExplorer: false,
-      tailscaleNative: false,
-      idempotentSpawn: true,
-      customNetworking: false,
-    },
-    async spawn() { throw new Error("not implemented"); },
-    async terminate() {},
-    async list(_filter?: ListFilter) {
-      if (listResult instanceof Error) throw listResult;
-      return listResult;
-    },
-    async get() { return null; },
-    generateBootstrap() {
-      return { content: "#!/bin/sh", format: "shell" as const, checksum: "abc" };
-    },
-  };
-}
-
-function makeMockInstance(id: string, ip?: string): ProviderInstance {
-  return {
-    id,
-    status: "running" as const,
-    spec: "ubuntu:noble:arm64",
-    ip: ip ?? null,
-    isSpot: false,
-    createdAt: Date.now(),
-  };
 }
 
 /** Seed a provider into the provider cache without invoking lifecycle hooks. */
@@ -203,9 +160,9 @@ describe("reconcilePendingSpawn", () => {
       spawn_idempotency_key: "spawn:ctrl-1-1",
     });
 
-    const provider = makeMockProvider([
-      makeMockInstance("provider-vm-99", "10.0.0.5"),
-    ]);
+    const provider = makeMockProvider({
+      list: [makeMockInstance("provider-vm-99", "10.0.0.5")],
+    });
     registerProvider("orbstack", provider);
 
     const result = await reconcilePendingSpawn(instance);
@@ -230,7 +187,7 @@ describe("reconcilePendingSpawn", () => {
       spawn_idempotency_key: "spawn:ctrl-1-2",
     });
 
-    const provider = makeMockProvider([]); // empty list → not found
+    const provider = makeMockProvider({ list: [] }); // empty list → not found
     registerProvider("orbstack", provider);
 
     const result = await reconcilePendingSpawn(instance);
@@ -249,10 +206,9 @@ describe("reconcilePendingSpawn", () => {
       spawn_idempotency_key: "spawn:ctrl-1-3",
     });
 
-    const provider = makeMockProvider([
-      makeMockInstance("provider-vm-A"),
-      makeMockInstance("provider-vm-B"),
-    ]);
+    const provider = makeMockProvider({
+      list: [makeMockInstance("provider-vm-A"), makeMockInstance("provider-vm-B")],
+    });
     registerProvider("orbstack", provider);
 
     const result = await reconcilePendingSpawn(instance);
@@ -273,7 +229,7 @@ describe("reconcilePendingSpawn", () => {
       provider_id: "already-set",
     });
 
-    const provider = makeMockProvider([]);
+    const provider = makeMockProvider({ list: [] });
     registerProvider("orbstack", provider);
 
     const result = await reconcilePendingSpawn(instance);
@@ -291,10 +247,11 @@ describe("reconcilePendingSpawn", () => {
       spawn_idempotency_key: "spawn:ctrl-1-4",
     });
 
+    const base = makeMockProvider({ list: [] });
     const nonIdempotentProvider: Provider = {
-      ...makeMockProvider([]),
+      ...base,
       capabilities: {
-        ...makeMockProvider([]).capabilities,
+        ...base.capabilities,
         idempotentSpawn: false,
       },
     };
@@ -314,7 +271,7 @@ describe("reconcilePendingSpawn", () => {
       spawn_idempotency_key: null,
     });
 
-    const provider = makeMockProvider([]);
+    const provider = makeMockProvider({ list: [] });
     registerProvider("orbstack", provider);
 
     const result = await reconcilePendingSpawn(instance);
@@ -349,7 +306,7 @@ describe("reconcileStalePendingSpawns", () => {
     getDatabase().prepare("UPDATE instances SET created_at = ? WHERE id = ?")
       .run(staleCutoff, staleInstance.id);
 
-    const provider = makeMockProvider([]); // no match → spawn:error
+    const provider = makeMockProvider({ list: [] }); // no match → spawn:error
     registerProvider("orbstack", provider);
 
     const processed = await reconcileStalePendingSpawns();
@@ -370,7 +327,7 @@ describe("reconcileStalePendingSpawns", () => {
     makeInstance({ spawn_idempotency_key: "spawn:new-1" }); // fresh
     makeInstance({ spawn_idempotency_key: "spawn:new-2" }); // fresh
 
-    const provider = makeMockProvider([]);
+    const provider = makeMockProvider({ list: [] });
     registerProvider("orbstack", provider);
 
     const processed = await reconcileStalePendingSpawns();
@@ -387,7 +344,9 @@ describe("reconcileStalePendingSpawns", () => {
     getDatabase().prepare("UPDATE instances SET created_at = ? WHERE id = ?")
       .run(staleCutoff, staleInstance.id);
 
-    const provider = makeMockProvider([makeMockInstance("provider-vm-recovered", "10.1.2.3")]);
+    const provider = makeMockProvider({
+      list: [makeMockInstance("provider-vm-recovered", "10.1.2.3")],
+    });
     registerProvider("orbstack", provider);
 
     const processed = await reconcileStalePendingSpawns();
@@ -412,10 +371,11 @@ describe("reconcileStalePendingSpawns", () => {
     getDatabase().prepare("UPDATE instances SET created_at = ? WHERE id = ?")
       .run(staleCutoff, staleInstance.id);
 
+    const base = makeMockProvider({ list: [] });
     const nonIdempotentProvider: Provider = {
-      ...makeMockProvider([]),
+      ...base,
       capabilities: {
-        ...makeMockProvider([]).capabilities,
+        ...base.capabilities,
         idempotentSpawn: false,
       },
     };

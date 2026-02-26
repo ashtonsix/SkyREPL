@@ -91,7 +91,17 @@ export async function terminateInstance(input: TerminateInstanceInput & { tenant
     );
   }
 
-  // Submit the workflow
+  // Submit the workflow.
+  //
+  // KNOWN GAP (WF2): The workflow-level idempotency_key is permanent dedup
+  // (UNIQUE index, no TTL). If this workflow fails, a retry with the same
+  // instanceId would return the failed workflow as "deduplicated" rather
+  // than creating a new attempt. This is partially mitigated by the
+  // workflow_state guard above (which rejects calls for instances already
+  // in a terminate:* state), but a failed workflow that left the instance
+  // in a non-terminal state would be unretriable until the idempotency_key
+  // row is manually cleared. Fix: submit() should only dedup against
+  // non-terminal workflows (#WF2-IDEM-RETRY).
   const result = await submit({
     type: "terminate-instance",
     input: { instanceId: input.instanceId } as unknown as Record<string, unknown>,

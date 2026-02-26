@@ -73,6 +73,18 @@ export async function cleanupManifest(input: CleanupManifestInput): Promise<Work
 // Workflow Blueprint
 // =============================================================================
 
+// Current: linear chain with per-provider error isolation inside cleanup-resources.
+//   load-manifest-resources → sort-and-group → cleanup-resources → delete-manifest
+//
+// sort-and-group produces providerGroups[], and cleanup-resources iterates them
+// sequentially with error isolation (one provider's failure doesn't block others).
+//
+// PFO upgrade path (§7.4): Replace cleanup-resources with a runtime-dynamic PFO:
+//   load-manifest-resources → sort-and-group → PFO(provider-cleanup branches) → delete-manifest
+// This requires a "setup" node (like resolve-instance in launch-run) that reads
+// providerGroups from sort-and-group output and calls applyParallelFanOut to
+// create one branch per provider. Each branch handles that provider's resources
+// in priority order. delete-manifest becomes the PFO join node.
 export const cleanupManifestBlueprint: WorkflowBlueprint = {
   type: "cleanup-manifest",
   entryNode: "load-manifest-resources",
@@ -121,13 +133,21 @@ export async function manifestCleanupCheck(): Promise<void> {
   for (const manifest of expiredManifests) {
     if (spawned >= MAX_CLEANUPS_PER_CYCLE) break;
 
-    // Check if a cleanup workflow is already running for this manifest.
+    // SQL dedup guard: check for active cleanup workflows for this manifest.
+    //
+    // Why SQL dedup instead of workflows.idempotency_key:
+    // The workflow-level idempotency_key uses a UNIQUE index with no TTL —
+    // once a workflow completes (even if it failed), a second submit() with
+    // the same key returns the stale result forever. For background cleanup
+    // we need re-submission after failure, so the SQL status guard is correct:
+    // it only blocks while a cleanup is actively in-flight.
+    //
     // manifest_id on cleanup-manifest workflows is set to the target manifest's
     // ID (not the workflow's own resource-tracking manifest) so this query is
     // exact, parameterized, and immune to the manifest_id=1 / 10 / 11 prefix
     // collision that LIKE-based substring matching would produce.
     const existing = queryOne<{ id: number }>(
-      `SELECT id FROM workflows WHERE type = 'cleanup-manifest' AND manifest_id = ? AND status IN ('pending','running')`,
+      `SELECT id FROM workflows WHERE type = 'cleanup-manifest' AND manifest_id = ? AND status IN ('pending','running','cancelling')`,
       [manifest.id]
     );
     if (existing) {

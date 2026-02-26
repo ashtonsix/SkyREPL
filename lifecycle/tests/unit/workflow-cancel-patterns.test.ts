@@ -617,14 +617,20 @@ describe("Cancel Propagation: Subworkflow (#WF-07)", () => {
     const cancelResult = await cancelWorkflow(result.workflowId, "user_cancel");
     expect(cancelResult.success).toBe(true);
 
-    // Wait for child to be marked cancelled in DB (parent's handleCancellation cascades)
-    // Do NOT release latch yet — child must be cancelled before its node completes.
+    // Two-phase protocol: child transitions to 'cancelling' first, then drains
+    // running nodes before finalizing to 'cancelled'. Wait for 'cancelling',
+    // release the latch, then wait for 'cancelled'.
+    const childrenCancelling = await waitForChildWorkflowStatus(result.workflowId, "cancelling");
+    expect(childrenCancelling.length).toBe(1);
+    expect(childrenCancelling[0].status).toBe("cancelling");
+
+    // Release child latch so the running node can complete (drain phase)
+    resolveChildLatch();
+
+    // Wait for child to finalize to 'cancelled'
     const children = await waitForChildWorkflowStatus(result.workflowId, "cancelled");
     expect(children.length).toBe(1);
     expect(children[0].status).toBe("cancelled");
-
-    // Now release child latch so engine loops can clean up
-    resolveChildLatch();
 
     // Wait for parent to fully terminate
     await waitForWorkflow(result.workflowId);
@@ -713,18 +719,26 @@ describe("Cancel Propagation: Subworkflow (#WF-07)", () => {
     const cancelResult = await cancelWorkflow(result.workflowId, "user_cancel");
     expect(cancelResult.success).toBe(true);
 
-    // Wait for child to be cancelled in DB (parent's handleCancellation cascades)
-    // Do NOT release latch yet — grandchild must be cancelled before its node completes.
-    const children = await waitForChildWorkflowStatus(result.workflowId, "cancelled");
-    expect(children.length).toBe(1);
+    // Two-phase protocol: child and grandchild transition to 'cancelling' first.
+    // Wait for the cascade to propagate, then release latches to allow drain.
+    const childrenCancelling = await waitForChildWorkflowStatus(result.workflowId, "cancelling");
+    expect(childrenCancelling.length).toBe(1);
 
-    // Wait for grandchild to be cancelled (cascading from child's handleCancellation)
-    const grandchildren = await waitForChildWorkflowStatus(children[0].id, "cancelled");
+    // Wait for grandchild to reach 'cancelling' (cascading from child's Phase 1)
+    const grandchildrenCancelling = await waitForChildWorkflowStatus(childrenCancelling[0].id, "cancelling");
+    expect(grandchildrenCancelling.length).toBe(1);
+
+    // Release grandchild latch so running nodes can drain
+    resolveGrandchildLatch();
+
+    // Wait for grandchild to finalize to 'cancelled'
+    const grandchildren = await waitForChildWorkflowStatus(childrenCancelling[0].id, "cancelled");
     expect(grandchildren.length).toBe(1);
     expect(grandchildren[0].status).toBe("cancelled");
 
-    // Now release grandchild latch so engine loops can clean up
-    resolveGrandchildLatch();
+    // Wait for child to finalize to 'cancelled'
+    const children = await waitForChildWorkflowStatus(result.workflowId, "cancelled");
+    expect(children.length).toBe(1);
 
     // Wait for parent to fully terminate
     await waitForWorkflow(result.workflowId);
@@ -788,13 +802,14 @@ describe("Cancel Propagation: Subworkflow (#WF-07)", () => {
     const cancelResult = await cancelWorkflow(result.workflowId, "user_cancel");
     expect(cancelResult.success).toBe(true);
 
-    // Wait for child to be marked cancelled (parent's handleCancellation cascades)
-    await waitForChildWorkflowStatus(result.workflowId, "cancelled");
+    // Two-phase: child transitions to 'cancelling' first, wait for that
+    await waitForChildWorkflowStatus(result.workflowId, "cancelling");
 
     // Now try to cancel child again — should not throw, should be idempotent
+    // (child is in 'cancelling' state, which is handled as idempotent success)
     expect(childWorkflowId).not.toBeNull();
     const childCancelResult = await cancelWorkflow(childWorkflowId!, "double_cancel");
-    // Should succeed (idempotent — already cancelled)
+    // Should succeed (idempotent — already cancelling)
     expect(childCancelResult.success).toBe(true);
     expect(childCancelResult.status).toBe("cancelled");
 
@@ -901,16 +916,24 @@ describe("Cancel Propagation: Mixed Patterns (#WF-07)", () => {
     const cancelResult = await cancelWorkflow(result.workflowId, "user_cancel");
     expect(cancelResult.success).toBe(true);
 
-    // Wait for all subworkflows to be cancelled in DB (cascading from parent)
-    // Do NOT release latch yet — subworkflows must be cancelled before their nodes complete.
-    const subWorkflows = await waitForChildWorkflowStatus(result.workflowId, "cancelled");
+    // Two-phase: subworkflows transition to 'cancelling' first, then drain.
+    // Wait for them to reach 'cancelling', release latches, then wait for 'cancelled'.
+    await waitFor(() => {
+      const subs = queryMany<Workflow>(
+        "SELECT * FROM workflows WHERE parent_workflow_id = ?",
+        [result.workflowId]
+      );
+      return subs.length > 0 && subs.every(s => s.status === "cancelling" || s.status === "cancelled");
+    });
 
+    // Release subworkflow latches so their running nodes can complete (drain phase)
+    resolveSubLatch();
+
+    // Wait for all subworkflows to finalize to 'cancelled'
+    const subWorkflows = await waitForChildWorkflowStatus(result.workflowId, "cancelled");
     for (const sub of subWorkflows) {
       expect(sub.status).toBe("cancelled");
     }
-
-    // Release subworkflow latches so engine loops can clean up
-    resolveSubLatch();
 
     // Wait for parent to reach terminal state
     const wf = await waitForWorkflow(result.workflowId);
@@ -1047,24 +1070,23 @@ describe("Cancellation Hardening (#WF2-03)", () => {
     const beforeCancel = getWorkflow(result.workflowId);
     statusLog.push(beforeCancel!.status);
 
-    // Cancel - this goes running -> cancelling -> cancelled inline.
-    // NOTE: The cancelling intermediate state is not observable here because
-    // the transition running→cancelling→cancelled happens atomically within
-    // cancelWorkflow(). We can only snapshot before and after. The audit trail
-    // (cancelling→cancelled) is verified via error_json.code = "CANCELLED".
+    // Cancel - two-phase integrity-first protocol (Track B, WL-060):
+    // cancelWorkflow() transitions running→cancelling inline. The execute loop
+    // then drains running nodes before finalizing to 'cancelled'. After
+    // cancelWorkflow() returns, we observe 'cancelling' (the intermediate state).
     await cancelWorkflow(result.workflowId, "test_cancel");
 
     const afterCancel = getWorkflow(result.workflowId);
     statusLog.push(afterCancel!.status);
 
-    // Release latch so engine can clean up
+    // Release latch so engine can drain and finalize
     resolveNodeLatch();
 
     await waitForWorkflow(result.workflowId);
 
-    // The workflow should have gone from running to cancelled
+    // The workflow should have gone from running to cancelling (two-phase protocol)
     expect(statusLog[0]).toBe("running");
-    expect(statusLog[1]).toBe("cancelled");
+    expect(statusLog[1]).toBe("cancelling");
     // Verify finished_at is set (terminal state invariant)
     const final = getWorkflow(result.workflowId);
     expect(final!.finished_at).not.toBeNull();

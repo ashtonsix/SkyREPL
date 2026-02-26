@@ -20,6 +20,8 @@ export {
   handleRetry,
   handleWorkflowTimeout,
   handleCancellation,
+  handleCancellingPoll,
+  _clearCancelInitState,
 } from "./retry";
 
 // --- context.ts ---

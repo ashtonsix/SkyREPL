@@ -33,7 +33,7 @@ import {
 } from "../state-transitions";
 import { executeLoop } from "./executor";
 import { activeLoops, isShutdownRequested as _isShutdownRequested, _setShutdownRequested, _clearActiveLoops } from "./executor";
-import { handleWorkflowFailure, handleCancellation } from "./retry";
+import { handleWorkflowFailure, handleCancellation, handleCancellingPoll } from "./retry";
 import { sleep, sealManifestSafe, POLL_INTERVAL_MS, MAX_SUBWORKFLOW_DEPTH } from "./helpers";
 import { workflowEvents } from "../events";
 
@@ -293,7 +293,7 @@ export async function cancelWorkflow(
           updateWorkflow(workflowId, {
             error_json: JSON.stringify({ code: "CANCELLED", reason }),
           });
-          await handleCancellation(workflowId);
+          // Two-phase: let the execute loop drain running nodes before finalizing.
           return { success: true, status: "cancelled" };
         }
       }
@@ -344,10 +344,18 @@ export async function cancelWorkflow(
     updateWorkflow(workflowId, {
       error_json: JSON.stringify({ code: "CANCELLED", reason }),
     });
-    // Run cancellation cleanup inline (skip nodes, cancel children, seal manifest)
-    // and finalize: cancelling -> cancelled. This is idempotent — if the execute loop
-    // also calls handleCancellation, the second finalizeCancellation is a no-op.
-    await handleCancellation(workflowId);
+    // Two-phase integrity-first cancellation (Track B, WL-060):
+    // Check if there are running nodes that need draining. If not, finalize
+    // immediately (handles manually-created workflows without an execute loop).
+    // If there are running nodes, the execute loop's handleCancellingPoll will
+    // perform Phase 1 (skip pending, send SSE, cancel children) and drain
+    // running/compensating nodes before finalizing.
+    const nodes = getWorkflowNodes(workflowId);
+    const hasRunningNodes = nodes.some(n => n.status === "running");
+    if (!hasRunningNodes) {
+      const { handleCancellation } = await import("./retry");
+      await handleCancellation(workflowId);
+    }
     return { success: true, status: "cancelled" };
   }
 

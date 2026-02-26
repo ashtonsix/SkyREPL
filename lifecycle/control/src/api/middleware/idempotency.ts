@@ -77,9 +77,13 @@ export function checkIdempotencyKey(
  * Store the response for an idempotent request.
  * Call after the handler has produced a response.
  *
- * - 2xx responses: cached for 24 hours
- * - 4xx responses: cached for 1 hour (allow retry with fixes)
+ * - 2xx responses: cached for SUCCESS_TTL_MS (24h), or custom ttlMs if provided
+ * - 4xx responses: cached for CLIENT_ERROR_TTL_MS (1h)
  * - 5xx responses: NOT cached (allow immediate retry)
+ *
+ * The optional `ttlMs` parameter overrides the default success TTL. Use this
+ * for destructive intents (e.g., terminate, cleanup) where a shorter window
+ * allows faster retry after transient failures — see TIMING.DESTRUCTIVE_INTENT_TTL_MS.
  */
 export function storeIdempotencyResponse(
   key: string,
@@ -88,6 +92,7 @@ export function storeIdempotencyResponse(
   responseStatus: number,
   responseBody: string,
   workflowId?: number | null,
+  ttlMs?: number,
 ): void {
   const now = Date.now();
 
@@ -96,7 +101,9 @@ export function storeIdempotencyResponse(
     return;
   }
 
-  const ttl = responseStatus >= 400 ? CLIENT_ERROR_TTL_MS : SUCCESS_TTL_MS;
+  const ttl = responseStatus >= 400
+    ? CLIENT_ERROR_TTL_MS
+    : (ttlMs ?? SUCCESS_TTL_MS);
 
   execute(
     `INSERT OR REPLACE INTO idempotency_keys

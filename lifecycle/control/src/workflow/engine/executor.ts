@@ -21,7 +21,7 @@ import {
 import { workflowEvents } from "../events";
 import { buildNodeContext } from "./context";
 import { normalizeToNodeError, createTimeout, sleep, sealManifestSafe, POLL_INTERVAL_MS } from "./helpers";
-import { determineRetryStrategy, handleRetry, handlePfoBranchFailure, handleWorkflowTimeout, handleWorkflowComplete, handleWorkflowFailure, handleCancellation } from "./retry";
+import { determineRetryStrategy, handleRetry, handlePfoBranchFailure, handleWorkflowTimeout, handleWorkflowComplete, handleWorkflowFailure, handleCancellingPoll } from "./retry";
 
 // =============================================================================
 // Module-level state (shared with lifecycle.ts)
@@ -101,10 +101,20 @@ async function _executeLoopInner(
         break;
       }
 
-      // Check cancellation (handle both 'cancelling' intermediate and 'cancelled' terminal)
-      if (workflow.status === "cancelling" || workflow.status === "cancelled") {
-        await handleCancellation(workflowId);
-        break;
+      // Check cancellation — two-phase integrity-first protocol (Track B, WL-060)
+      if (workflow.status === "cancelling") {
+        const finalized = await handleCancellingPoll(workflowId, workflow);
+        if (finalized) break;
+        // Drain in progress: running/compensating nodes need polling.
+        if (inFlight.size > 0) {
+          await Promise.race([...inFlight.values(), sleep(POLL_INTERVAL_MS)]);
+        } else {
+          await sleep(POLL_INTERVAL_MS);
+        }
+        continue;
+      }
+      if (workflow.status === "cancelled") {
+        break; // Already finalized by another path
       }
 
       // Check for paused state -- spin-wait until resumed, cancelled, or shutdown

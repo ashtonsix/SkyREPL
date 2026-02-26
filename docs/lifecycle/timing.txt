@@ -171,6 +171,7 @@ limits -- do not poll more aggressively than 5s.
 | Pending workflow timeout | REPL_PENDING_WORKFLOW_TIMEOUT  | 30m     | Stuck workflow cleanup |
 | Compensation timeout   | REPL_COMPENSATION_TIMEOUT        | 5m      | Rollback budget        |
 | Cancel verification    | REPL_CANCEL_VERIFICATION         | 90s     | 3x heartbeat           |
+| Cancel comp. timeout   | REPL_CANCEL_COMPENSATION_TIMEOUT | 10m     | Drain budget for comp. |
 
 ### Provider Operations
 
@@ -211,6 +212,17 @@ limits -- do not poll more aggressively than 5s.
 | SSE reconnect base   | REPL_SSE_RECONNECT_BASE    | 2s      |
 | SSE reconnect max    | REPL_SSE_RECONNECT_MAX     | 64s     |
 | SSE max retries      | REPL_SSE_MAX_RETRIES       | 10      |
+
+### Idempotency
+
+| Parameter              | Env Var                            | Default | Trade-off              |
+|------------------------|------------------------------------|---------|------------------------|
+| Destructive intent TTL | REPL_DESTRUCTIVE_INTENT_TTL        | 5m      | Retry window vs dedup  |
+
+DESTRUCTIVE_INTENT_TTL_MS: HTTP-layer idempotency TTL for destructive intent
+endpoints (terminate, cleanup). Shorter than standard SUCCESS_TTL_MS (24h) to
+allow retry after transient failure. Within the TTL window, duplicate requests
+return the cached response; after expiry, a new request re-executes.
 
 ### Cache TTLs
 

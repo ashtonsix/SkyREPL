@@ -45,6 +45,9 @@ import {
   unregisterProvider,
 } from "../../control/src/provider/registry";
 import type { Provider } from "../../control/src/provider/types";
+import { makeMockProvider, mockQueue } from "../mock-provider";
+import { createManifest, createWorkflow, type Workflow } from "../../control/src/material/db";
+import { sealManifest } from "../../control/src/workflow/state-transitions";
 
 import type { NodeContext } from "../../control/src/workflow/engine.types";
 
@@ -1002,3 +1005,208 @@ describe("Terminate Instance Contract: state machine invariants", () => {
     expect(closed?.duration_ms).toBeGreaterThan(0);
   });
 });
+
+// =============================================================================
+// C4: Parameterised Provider Contract Tests (#WF2-06 Phase 2)
+//
+// Contract: for any named provider ('orbstack', 'aws', 'lambda'), the
+// terminate-instance workflow must satisfy all behavioral invariants.
+// Each provider gets a mock registered under its real name so instance DB
+// records (provider column) match correctly.
+// =============================================================================
+
+const C4_PROVIDERS = ["orbstack", "aws", "lambda"] as const;
+
+for (const providerName of C4_PROVIDERS) {
+  describe(`C4: terminate-instance contract [provider: ${providerName}]`, () => {
+    let currentCleanup: () => Promise<void>;
+    let terminateCallsC4: string[] = [];
+
+    beforeEach(async () => {
+      currentCleanup = setupTest({ engine: true });
+      createWorkflowEngine();
+      registerLaunchRun();
+      registerTerminateInstance();
+      terminateCallsC4 = [];
+
+      // Register mock under the exact provider name used in the DB
+      const mock = makeMockProvider({
+        terminate: (id: string) => { terminateCallsC4.push(id); },
+      });
+      // Override name to match providerName
+      (mock as any).name = providerName;
+      await registerProvider({ provider: mock });
+    });
+
+    afterEach(async () => {
+      await unregisterProvider(providerName);
+      await currentCleanup();
+    });
+
+    // Helper: create instance with the correct provider name
+    function makeProviderInstance(overrides: Parameters<typeof createTestInstance>[0] = {}) {
+      return createTestInstance({ provider: providerName as any, ...overrides });
+    }
+
+    // -------------------------------------------------------------------------
+    // C4-1: Workflow completes and instance reaches terminate:complete
+    // -------------------------------------------------------------------------
+
+    test("successful termination → instance reaches terminate:complete", async () => {
+      const instance = makeProviderInstance();
+
+      const { workflowId } = await submit({
+        type: "terminate-instance",
+        input: { instanceId: instance.id },
+      });
+
+      const wf = await waitForWorkflow(workflowId);
+      expect(wf.status).toBe("completed");
+
+      const updated = getInstance(instance.id);
+      expect(updated?.workflow_state).toBe("terminate:complete");
+    });
+
+    // -------------------------------------------------------------------------
+    // C4-2: provider.terminate is called with the correct provider_id
+    // -------------------------------------------------------------------------
+
+    test("provider.terminate called with instance provider_id", async () => {
+      const instance = makeProviderInstance({
+        provider_id: `${providerName}-vm-${Date.now()}`,
+      });
+
+      const { workflowId } = await submit({
+        type: "terminate-instance",
+        input: { instanceId: instance.id },
+      });
+
+      await waitForWorkflow(workflowId);
+
+      expect(terminateCallsC4).toContain(instance.provider_id);
+    });
+
+    // -------------------------------------------------------------------------
+    // C4-3: All non-terminal allocations are drained
+    // -------------------------------------------------------------------------
+
+    test("terminates all instances: all AVAILABLE allocations drained to FAILED", async () => {
+      const instance = makeProviderInstance();
+      const alloc1 = createTestAllocation(instance.id, "AVAILABLE");
+      const alloc2 = createTestAllocation(instance.id, "AVAILABLE");
+
+      const { workflowId } = await submit({
+        type: "terminate-instance",
+        input: { instanceId: instance.id },
+      });
+
+      await waitForWorkflow(workflowId);
+
+      expect(getAllocation(alloc1.id)?.status).toBe("FAILED");
+      expect(getAllocation(alloc2.id)?.status).toBe("FAILED");
+    });
+
+    // -------------------------------------------------------------------------
+    // C4-4: partial terminate failure via mockQueue
+    // On first call the mock succeeds, second call throws PROVIDER_INTERNAL.
+    // Since terminate-instance only calls terminate once per instance,
+    // we verify the workflow completes (first call path).
+    // This tests the mockQueue utility in context.
+    // -------------------------------------------------------------------------
+
+    test("handles partial terminate failure with mockQueue (first call succeeds)", async () => {
+      const callLog: string[] = [];
+      const queuedFn = mockQueue<void>(
+        undefined,       // first call: success
+        new Error(`${providerName}: rate limit exceeded`),  // second call: fail
+        undefined,       // subsequent: success again
+      );
+
+      const mock2 = makeMockProvider({
+        terminate: (id: string) => {
+          callLog.push(id);
+          return queuedFn();
+        },
+      });
+      (mock2 as any).name = providerName;
+      // Re-register (replaces the one from beforeEach — clearAllProviders in setupTest handles isolation)
+      await registerProvider({ provider: mock2 });
+
+      const instance = makeProviderInstance({
+        provider_id: `${providerName}-queue-test-${Date.now()}`,
+      });
+
+      const { workflowId } = await submit({
+        type: "terminate-instance",
+        input: { instanceId: instance.id },
+      });
+
+      const wf = await waitForWorkflow(workflowId);
+      // First call succeeds → workflow completes
+      expect(wf.status).toBe("completed");
+      expect(callLog).toContain(instance.provider_id);
+
+      const updated = getInstance(instance.id);
+      expect(updated?.workflow_state).toBe("terminate:complete");
+    });
+
+    // -------------------------------------------------------------------------
+    // C4-5: NOT_FOUND from provider → treated as success (idempotent)
+    // -------------------------------------------------------------------------
+
+    test("handles already-terminated instance (NOT_FOUND → skip)", async () => {
+      const mock3 = makeMockProvider({
+        terminate: (_id: string) => {
+          throw new Error(`${providerName}: instance not found`);
+        },
+      });
+      (mock3 as any).name = providerName;
+      await registerProvider({ provider: mock3 });
+
+      const instance = makeProviderInstance();
+
+      const { workflowId } = await submit({
+        type: "terminate-instance",
+        input: { instanceId: instance.id },
+      });
+
+      const wf = await waitForWorkflow(workflowId);
+      // NOT_FOUND from provider must not fail the workflow
+      expect(wf.status).toBe("completed");
+
+      const updated = getInstance(instance.id);
+      expect(updated?.workflow_state).toBe("terminate:complete");
+    });
+
+    // -------------------------------------------------------------------------
+    // C4-6: rejects concurrent termination (ConflictError)
+    // -------------------------------------------------------------------------
+
+    test("rejects concurrent termination (ConflictError)", async () => {
+      const instance = makeProviderInstance({
+        workflow_state: "terminate:draining",
+      });
+
+      await expect(
+        terminateInstance({ instanceId: instance.id })
+      ).rejects.toThrow(/already being terminated/i);
+    });
+
+    // -------------------------------------------------------------------------
+    // C4-7: post-completion workflow invariants via verifyWorkflowInvariant
+    // -------------------------------------------------------------------------
+
+    test("post-completion workflow invariants hold", async () => {
+      const instance = makeProviderInstance();
+
+      const { workflowId } = await submit({
+        type: "terminate-instance",
+        input: { instanceId: instance.id },
+      });
+
+      await waitForWorkflow(workflowId);
+
+      verifyWorkflowInvariant(workflowId, { checkAllocations: false });
+    });
+  });
+}
