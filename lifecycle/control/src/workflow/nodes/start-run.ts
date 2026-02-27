@@ -3,6 +3,9 @@
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
 import { updateRunRecord } from "../../resource/run";
+import { getInstanceRecordRaw } from "../../resource/instance";
+import { emitAuditEvent } from "../../material/db";
+import { computeMeteringStopData } from "../../billing/metering";
 import type {
   StartRunOutput,
   LaunchRunWorkflowInput,
@@ -47,7 +50,7 @@ export interface AgentBridge {
   ): Promise<unknown>;
 }
 
-// Default bridge -- for Slice 1, immediately resolves (mock agent)
+// Default bridge -- immediately resolves (mock agent, replaced by createRealAgentBridge)
 let _bridge: AgentBridge = {
   async sendStartRun() {
     /* noop until Step 7-8 */
@@ -149,6 +152,7 @@ export const startRunExecutor: NodeExecutor<StartRunInput, StartRunOutput> = {
     };
     const allocOutput = ctx.getNodeOutput("create-allocation") as {
       instanceId: number;
+      allocationId?: number;
     } | null;
     if (!allocOutput) {
       ctx.log("warn", "create-allocation output not available during compensation", {
@@ -169,6 +173,49 @@ export const startRunExecutor: NodeExecutor<StartRunInput, StartRunOutput> = {
       ctx.log("warn", "Failed to send cancel during compensation", {
         runId: wfInput.runId,
       });
+    }
+
+    // Emit metering_stop if metering was active (instance reached boot:complete, so
+    // metering_start was emitted by wait-for-boot before start-run ran).
+    // M-10 fix: enriched with computeMeteringStopData (WL-061-6-2)
+    const instance = getInstanceRecordRaw(allocOutput.instanceId);
+    if (instance?.provider_id && instance.workflow_state === "boot:complete") {
+      const compensateNow = Date.now();
+      try {
+        const meterData = computeMeteringStopData(
+          allocOutput.instanceId,
+          instance.provider,
+          instance.spec,
+          instance.region ?? null,
+          instance.is_spot === 1,
+          compensateNow
+        );
+
+        emitAuditEvent({
+          event_type: "metering_stop",
+          tenant_id: instance.tenant_id,
+          instance_id: allocOutput.instanceId,
+          provider: instance.provider,
+          spec: instance.spec,
+          region: instance.region ?? undefined,
+          source: "lifecycle",
+          is_cost: true,
+          is_usage: true,
+          data: {
+            provider_resource_id: instance.provider_id,
+            metering_window_end_ms: compensateNow,
+            reason: "start_run_compensation",
+            ...meterData,
+          },
+          dedupe_key: `${instance.provider}:${instance.provider_id}:metering_stop`,
+          occurred_at: compensateNow,
+        });
+      } catch (auditErr) {
+        ctx.log("warn", "Failed to emit metering_stop audit event during start-run compensation", {
+          instanceId: allocOutput.instanceId,
+          error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+        });
+      }
     }
   },
 };

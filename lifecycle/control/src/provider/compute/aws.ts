@@ -60,6 +60,7 @@ import { join } from "path";
 import { mkdir, writeFile, chmod } from "fs/promises";
 import type { ProviderLifecycleHooks, TaskReceipt, HeartbeatExpectations } from "../extensions";
 import { setWithAutoTTL } from "../extensions";
+import { emitAuditEvent } from "../../material/db";
 
 // =============================================================================
 // AWS-Specific Types
@@ -1052,6 +1053,25 @@ export function createAwsHooks(provider: AWSProvider): ProviderLifecycleHooks {
                 const prices = await provider.getSpotPrices(spec);
                 if (prices.length > 0) {
                   await setWithAutoTTL("aws", `spot_prices:${spec}`, prices);
+                  // Emit price_observation audit events (one per region entry)
+                  const priceMinute = Math.floor(Date.now() / 60000);
+                  for (const entry of prices as Array<{ region: string; price: number }>) {
+                    try {
+                      emitAuditEvent({
+                        event_type: "price_observation",
+                        tenant_id: 1,
+                        provider: "aws",
+                        spec,
+                        region: entry.region,
+                        source: "heartbeat",
+                        data: { rate_per_hour: entry.price, currency: "USD" },
+                        dedupe_key: `aws:${spec}:${entry.region}:price_observation:${priceMinute}`,
+                        occurred_at: Date.now(),
+                      });
+                    } catch {
+                      // Non-fatal: price observation failure should not block heartbeat
+                    }
+                  }
                 }
               }
               // On-demand prices are static (seeded in catalog), cache a marker

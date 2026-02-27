@@ -95,6 +95,8 @@ function seedInstance(tenantId: number = 1) {
       init_checksum: null,
       registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null,
+      display_name: null,
     },
     tenantId
   );

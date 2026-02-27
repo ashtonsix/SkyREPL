@@ -87,9 +87,9 @@ async function main() {
       instance_type: "t4g.nano",
       "skyrepl:control_id": "smoketest",
     },
+    controlId: "smoketest",
     instanceId: 1,
     manifestId: 0,
-    clientRequestId: `smoke-${Date.now()}`,
   });
   instanceId = instance.id;
   console.log("  Instance ID:", instance.id);

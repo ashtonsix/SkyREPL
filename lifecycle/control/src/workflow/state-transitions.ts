@@ -2,7 +2,7 @@
 // Canonical source for ALL resource state transitions (BT6 consolidation).
 
 import type { Allocation, Workflow, WorkflowNode, Manifest } from "../material/db";
-import { getDatabase, queryOne, transaction } from "../material/db";
+import { getDatabase, queryOne, transaction, emitAuditEvent } from "../material/db";
 import type { SQLQueryBindings } from "bun:sqlite";
 import type { AllocationStatus } from "@skyrepl/contracts";
 import { stateEvents, STATE_EVENT } from "./events";
@@ -115,7 +115,8 @@ export const ALLOCATION_TRANSITIONS: Record<AllocationStatus, AllocationStatus[]
  */
 export function claimAllocation(
   allocationId: number,
-  runId: number
+  runId: number,
+  userId?: number
 ): TransitionResult<Allocation> {
   const db = getDatabase();
 
@@ -136,13 +137,20 @@ export function claimAllocation(
     }
 
     // Phase 2: Optimistic-lock update
+    // Validate userId against users table to avoid FK violation.
+    // auth.userId may fall back to key_id when no user is linked to the API key.
+    let validatedUserId: number | null = null;
+    if (userId != null) {
+      const user = queryOne<{ id: number }>("SELECT id FROM users WHERE id = ?", [userId]);
+      if (user) validatedUserId = userId;
+    }
     const now = Date.now();
     const result = db.prepare(`
       UPDATE allocations
-      SET run_id = ?, status = 'CLAIMED', updated_at = ?
+      SET run_id = ?, claimed_by = ?, status = 'CLAIMED', updated_at = ?
       WHERE id = ? AND updated_at = ?
     `).run(
-      ...[runId, now, allocationId, allocation.updated_at] as SQLQueryBindings[]
+      ...[runId, validatedUserId, now, allocationId, allocation.updated_at] as SQLQueryBindings[]
     );
 
     if (result.changes === 0) {
@@ -239,7 +247,7 @@ export function completeAllocation(
 ): TransitionResult<Allocation> {
   const db = getDatabase();
 
-  return transaction(() => {
+  const result = transaction(() => {
     const allocation = queryOne<Allocation>(
       "SELECT * FROM allocations WHERE id = ?",
       [allocationId]
@@ -260,7 +268,7 @@ export function completeAllocation(
     }
 
     const now = Date.now();
-    const result = db.prepare(`
+    const dbResult = db.prepare(`
       UPDATE allocations
       SET status = 'COMPLETE', completed_at = ?, debug_hold_until = ?, updated_at = ?
       WHERE id = ? AND updated_at = ?
@@ -268,7 +276,7 @@ export function completeAllocation(
       ...[now, options?.debugHoldUntil ?? null, now, allocationId, allocation.updated_at] as SQLQueryBindings[]
     );
 
-    if (result.changes === 0) {
+    if (dbResult.changes === 0) {
       const latest = queryOne<Allocation>("SELECT * FROM allocations WHERE id = ?", [allocationId]);
       // If race lost to FAILED transition, treat as success
       if (latest?.status === "FAILED") {
@@ -280,6 +288,35 @@ export function completeAllocation(
     const updated = queryOne<Allocation>("SELECT * FROM allocations WHERE id = ?", [allocationId]);
     return transitionSuccess<Allocation>(updated!);
   });
+
+  if (result.success) {
+    _emitAttributionEnd(result.data, "complete");
+  }
+
+  return result;
+}
+
+/**
+ * Emit attribution_end for an allocation that has reached a terminal state.
+ * Non-fatal: errors are logged but do not block the transition.
+ */
+function _emitAttributionEnd(alloc: Allocation, reason: string): void {
+  try {
+    emitAuditEvent({
+      event_type: "attribution_end",
+      tenant_id: alloc.tenant_id,
+      instance_id: alloc.instance_id ?? undefined,
+      allocation_id: alloc.id,
+      run_id: alloc.run_id ?? undefined,
+      source: "lifecycle",
+      is_attribution: true,
+      data: { reason },
+      dedupe_key: `attribution_end:${alloc.id}`,
+      occurred_at: Date.now(),
+    });
+  } catch {
+    // Non-fatal: attribution_end emission failure should not block transitions
+  }
 }
 
 /**
@@ -308,6 +345,7 @@ export function failAllocation(
       fromStatus: expectedStatus,
       toStatus: "FAILED",
     });
+    _emitAttributionEnd(result.data, "failed");
   }
   return result;
 }
@@ -339,6 +377,7 @@ export function failAllocationAnyState(
       fromStatus: before?.status ?? "UNKNOWN",
       toStatus: "FAILED",
     });
+    _emitAttributionEnd(result.data, "failed_any_state");
   }
   return result;
 }

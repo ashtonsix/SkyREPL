@@ -47,6 +47,8 @@ describe("Authentication Middleware", () => {
         init_checksum: null,
         registration_token_hash: tokenHash,
         last_heartbeat: Date.now(),
+        provider_metadata: null,
+        display_name: null,
       });
 
       // Hash should be persisted directly via createInstance (not updateInstance)
@@ -73,6 +75,8 @@ describe("Authentication Middleware", () => {
         init_checksum: null,
         registration_token_hash: null,
         last_heartbeat: Date.now(),
+        provider_metadata: null,
+        display_name: null,
       });
 
       const result = verifyInstanceToken(instance.id, "any-token");
@@ -98,6 +102,8 @@ describe("Authentication Middleware", () => {
         init_checksum: null,
         registration_token_hash: null,
         last_heartbeat: Date.now(),
+        provider_metadata: null,
+        display_name: null,
       });
 
       updateInstance(instance.id, { registration_token_hash: tokenHash });
@@ -125,6 +131,8 @@ describe("Authentication Middleware", () => {
         init_checksum: null,
         registration_token_hash: null,
         last_heartbeat: Date.now(),
+        provider_metadata: null,
+        display_name: null,
       });
 
       updateInstance(instance.id, { registration_token_hash: tokenHash });
@@ -152,6 +160,8 @@ describe("Authentication Middleware", () => {
         init_checksum: null,
         registration_token_hash: null,
         last_heartbeat: Date.now(),
+        provider_metadata: null,
+        display_name: null,
       });
 
       updateInstance(instance.id, { registration_token_hash: tokenHash });
@@ -312,7 +322,7 @@ describe("API Key Authentication", () => {
 
   test("setAuthContext and getAuthContext round-trip", () => {
     const request = new Request("http://example.com");
-    const ctx = { tenantId: 42, userId: 7, role: "member" as const };
+    const ctx = { tenantId: 42, userId: 7, keyId: 0, role: "member" as const };
 
     expect(getAuthContext(request)).toBeNull();
     setAuthContext(request, ctx);
@@ -331,14 +341,14 @@ describe("Role Permissions", () => {
   ];
 
   test("admin has all permissions", () => {
-    const ctx = { tenantId: 1, userId: 1, role: "admin" as const };
+    const ctx = { tenantId: 1, userId: 1, keyId: 0, role: "admin" as const };
     for (const action of actions) {
       expect(checkPermission(ctx, action)).toBe(true);
     }
   });
 
   test("member has write + view_resources but not manage_*", () => {
-    const ctx = { tenantId: 1, userId: 1, role: "member" as const };
+    const ctx = { tenantId: 1, userId: 1, keyId: 0, role: "member" as const };
     expect(checkPermission(ctx, "launch_run")).toBe(true);
     expect(checkPermission(ctx, "terminate_instance")).toBe(true);
     expect(checkPermission(ctx, "cancel_workflow")).toBe(true);
@@ -349,7 +359,7 @@ describe("Role Permissions", () => {
   });
 
   test("viewer has view_resources only", () => {
-    const ctx = { tenantId: 1, userId: 1, role: "viewer" as const };
+    const ctx = { tenantId: 1, userId: 1, keyId: 0, role: "viewer" as const };
     expect(checkPermission(ctx, "view_resources")).toBe(true);
     expect(checkPermission(ctx, "launch_run")).toBe(false);
     expect(checkPermission(ctx, "terminate_instance")).toBe(false);
@@ -378,6 +388,8 @@ describe("Cross-Tenant Isolation", () => {
       init_checksum: null,
       registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null,
+      display_name: null,
     }, tenantId);
   }
 
@@ -672,6 +684,8 @@ describe("HTTP-Level Auth", () => {
       init_checksum: null,
       registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null,
+      display_name: null,
     }, 1);
 
     // Tenant 2 gets 404
@@ -918,6 +932,7 @@ describe("Auth + SSH Integration", () => {
       spawn_idempotency_key: null, is_spot: 0, spot_request_id: null,
       init_checksum: null, registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null, display_name: null,
     }, 10);
 
     const inst2 = createInstance({
@@ -929,6 +944,7 @@ describe("Auth + SSH Integration", () => {
       spawn_idempotency_key: null, is_spot: 0, spot_request_id: null,
       init_checksum: null, registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null, display_name: null,
     }, 20);
 
     createAllocation({
@@ -977,6 +993,7 @@ describe("Auth + SSH Integration", () => {
       spawn_idempotency_key: null, is_spot: 0, spot_request_id: null,
       init_checksum: null, registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null, display_name: null,
     }, 30);
 
     createAllocation({
@@ -1059,6 +1076,7 @@ describe("Tenant Post-check Audit: cross-tenant GET-by-ID returns 404", () => {
       current_manifest_id: null, spawn_idempotency_key: null,
       is_spot: 0, spot_request_id: null, init_checksum: null,
       registration_token_hash: null, last_heartbeat: Date.now(),
+      provider_metadata: null, display_name: null,
     }, 100);
 
     const resA = await app.handle(new Request(`http://localhost/v1/instances/${inst.id}`, {

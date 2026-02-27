@@ -2,6 +2,9 @@ node_modules/
 dist/
 bun.lock
 *.tsbuildinfo
+*.d.ts
+*.d.ts.map
+*.js.map
 __pycache__/
 data/
 .DS_Store

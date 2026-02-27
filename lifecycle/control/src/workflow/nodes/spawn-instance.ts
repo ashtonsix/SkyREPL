@@ -9,7 +9,7 @@ import crypto from "crypto";
 import type { NodeExecutor, NodeContext } from "../engine.types";
 import { createInstanceRecord, updateInstanceRecord, getInstanceRecordRaw } from "../../resource/instance";
 import { getProvider } from "../../provider/registry";
-import { getInstanceByIdempotencyKey } from "../../material/db";
+import { getInstanceByIdempotencyKey, emitAuditEvent } from "../../material/db";
 import type { ProviderName } from "../../provider/types";
 import type { Instance } from "../../material/db";
 import type { SpawnInstanceOutput, LaunchRunWorkflowInput } from "../../intent/launch-run.schema";
@@ -133,6 +133,8 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
         init_checksum: input.initChecksum || null,
         registration_token_hash: null,
         last_heartbeat: Date.now(),
+        provider_metadata: null,
+        display_name: null,
       }, ctx.tenantId);
       ctx.emitResource("instance", instance.id, 50);
     } else {
@@ -145,7 +147,36 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
       });
 
       if (retryResult.skipProviderCall) {
-        // Phase 2 already done — reconstruct output from existing record
+        // Phase 2 already done — reconstruct output from existing record.
+        // Emit metering_start with dedupe_key to ensure idempotency (RETRY RECONSTRUCT PATH).
+        const retryNow = Date.now();
+        try {
+          emitAuditEvent({
+            event_type: "metering_start",
+            tenant_id: ctx.tenantId,
+            instance_id: instance.id,
+            allocation_id: (input as any).allocationId ?? undefined,
+            run_id: (input as any).runId ?? undefined,
+            manifest_id: (input as any).manifestId ?? ctx.manifestId ?? undefined,
+            provider: instance.provider,
+            spec: instance.spec,
+            region: instance.region ?? undefined,
+            source: "lifecycle",
+            is_cost: true,
+            is_usage: true,
+            data: {
+              provider_resource_id: instance.provider_id,
+              metering_window_start_ms: retryNow,
+            },
+            dedupe_key: `${instance.provider}:${instance.provider_id}:metering_start`,
+            occurred_at: retryNow,
+          });
+        } catch (err) {
+          ctx.log("warn", "Failed to emit metering_start audit event on retry reconstruct", {
+            instanceId: instance.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
         return {
           instanceId: instance.id,
           providerId: instance.provider_id,
@@ -276,7 +307,7 @@ export const spawnInstanceExecutor: NodeExecutor<SpawnInstanceInput, SpawnInstan
 
 /**
  * Find a provider snapshot matching the given init checksum and spec.
- * Slice 1: returns undefined (no snapshot matching implemented yet).
+ * Returns undefined (no snapshot matching implemented yet).
  */
 export async function findProviderSnapshotId(
   _provider: string,

@@ -9,7 +9,8 @@
 //   - reconcilePendingSpawn: compares one spawn:pending DB record against provider API
 //   - reconcileStalePendingSpawns: periodic sweep over all stale spawn:pending records
 
-import { queryMany, queryOne, updateInstance, findStaleClaimed, findExpiredAvailable, type Allocation, type Instance } from "../material/db"; // raw-db: boutique queries (spawn:pending sweep, JOINs for warm pool health/orphaned claims/stalled transitions/provider sync), see WL-057
+import { queryMany, queryOne, updateInstance, findStaleClaimed, findExpiredAvailable, emitAuditEvent, type Allocation, type Instance } from "../material/db"; // raw-db: boutique queries (spawn:pending sweep, JOINs for warm pool health/orphaned claims/stalled transitions/provider sync), see WL-057
+import { computeMeteringStopData } from "../billing/metering";
 import {
   failAllocation,
   failAllocationAnyState,
@@ -360,17 +361,72 @@ async function reconcileProviderStateSync(): Promise<number> {
   }
 
   // Phase 2: Clean up allocations on terminated instances.
-  const terminated = queryMany<Allocation>(
-    `SELECT a.* FROM allocations a
+  // Also emit retroactive metering_stop for any terminated instance that doesn't have one yet.
+  const terminated = queryMany<{ alloc_id: number; instance_id: number; tenant_id: number; provider: string | null; provider_id: string | null; spec: string | null; region: string | null }>(
+    `SELECT a.id as alloc_id, i.id as instance_id, i.tenant_id, i.provider, i.provider_id, i.spec, i.region
+     FROM allocations a
      JOIN instances i ON a.instance_id = i.id
      WHERE a.status NOT IN ('COMPLETE', 'FAILED')
        AND i.workflow_state LIKE 'terminate:%'`,
     []
   );
   let count = 0;
-  for (const alloc of terminated) {
-    const r = failAllocationAnyState(alloc.id);
+  const emittedMeteringStop = new Set<number>();
+  for (const row of terminated) {
+    const r = failAllocationAnyState(row.alloc_id);
     if (r.success) count++;
+
+    // Emit retroactive metering_stop once per instance (dedupe_key prevents double-counting).
+    // Uses same dedupe_key as the normal lifecycle stop — idempotent if stop already emitted.
+    // NOTE: If NO prior stop exists, the retroactive stop lacks window_start_ms (unknown),
+    // so v_cost_priced computes $0. C-1 pre-computed amount_cents is not available in the
+    // retroactive path — the audit trail is complete but the cost amount requires manual recovery.
+    //
+    // NOTE: Spot interrupt complete (POST /v1/agent/spot-interrupt-complete) does not emit
+    // metering_stop directly. Billing gap between spot signal and reconciler detection is
+    // covered here. Deferred: add metering_stop to the spot-interrupt-complete handler.
+    if (!emittedMeteringStop.has(row.instance_id) && row.provider_id) {
+      emittedMeteringStop.add(row.instance_id);
+      const reconcileNow = Date.now();
+      // Get full instance for tenant_id
+      const inst = queryOne<Instance>("SELECT * FROM instances WHERE id = ?", [row.instance_id]);
+      if (inst) {
+        try {
+          // C-1: Compute amount_cents from paired metering_start and price observations
+          const meterData = computeMeteringStopData(
+            inst.id,
+            inst.provider ?? "",
+            inst.spec ?? "",
+            inst.region ?? null,
+            inst.is_spot === 1,
+            reconcileNow
+          );
+
+          emitAuditEvent({
+            event_type: "metering_stop",
+            tenant_id: inst.tenant_id,
+            instance_id: inst.id,
+            provider: inst.provider ?? undefined,
+            spec: inst.spec ?? undefined,
+            region: inst.region ?? undefined,
+            source: "reconciliation",
+            is_cost: true,
+            is_usage: true,
+            is_reconciliation: true,
+            data: {
+              provider_resource_id: inst.provider_id,
+              metering_window_end_ms: reconcileNow,
+              retroactive: true,
+              ...meterData,
+            },
+            dedupe_key: `${inst.provider}:${inst.provider_id}:metering_stop`,
+            occurred_at: reconcileNow,
+          });
+        } catch {
+          // Non-fatal: dedupe_key violation means metering_stop already emitted (expected)
+        }
+      }
+    }
   }
   return count;
 }
@@ -394,3 +450,5 @@ function reconcileAllocationAging(): number {
   }
   return count;
 }
+
+// Metering stop enrichment: shared helper in billing/metering.ts

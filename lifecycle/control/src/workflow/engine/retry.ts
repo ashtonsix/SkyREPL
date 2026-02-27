@@ -605,15 +605,12 @@ async function handleCancellingInit(workflowId: number): Promise<void> {
       : undefined;
     if (instanceId) {
       try {
-        const { getCommandBus } = await import("../../events/command-bus");
-        const bus = getCommandBus();
-        if (bus) {
-          bus.sendCommand(instanceId, {
-            type: "cancel_run" as const,
-            command_id: crypto.randomUUID(),
-            run_id: wfInputForCancel.runId,
-          });
-        }
+        const { commandBus } = await import("../../events/command-bus");
+        commandBus.sendCommand(instanceId, {
+          type: "cancel_run" as const,
+          command_id: Date.now(),
+          run_id: wfInputForCancel.runId,
+        });
       } catch {
         // Fire-and-forget: failure is logged by SSE layer
       }

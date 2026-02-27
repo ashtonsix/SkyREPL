@@ -12,10 +12,9 @@ import {
   queryOne,
   getTenant,
   getUser,
-  getTotalCostByTenant,
-  getUserCostByTenant,
 } from "../../material/db"; // raw-db: api_keys expiry check (Bucket D), see WL-057
 import { TIMING } from "@skyrepl/contracts";
+import { projectBudget } from "../../billing/budget";
 
 // =============================================================================
 // Types
@@ -56,7 +55,7 @@ export function registerPreflightRoutes(app: Elysia<any>): void {
   // All checks are scoped to the caller's tenant via API key auth (which the
   // global middleware in server.ts already enforces for all /v1/* routes).
 
-  app.get("/v1/preflight", ({ query, request, set }) => {
+  app.get("/v1/preflight", async ({ query, request, set }) => {
     const auth = getAuthContext(request);
     if (!auth) {
       // Should not reach here — global middleware rejects unauthenticated /v1/* requests.
@@ -112,9 +111,19 @@ export function registerPreflightRoutes(app: Elysia<any>): void {
 
     try {
       const tenant = getTenant(tenantId);
+      const now = Date.now();
+      const monthStart = new Date();
+      monthStart.setDate(1);
+      monthStart.setHours(0, 0, 0, 0);
+      const periodStartMs = monthStart.getTime();
 
       if (tenant?.budget_usd !== null && tenant?.budget_usd !== undefined) {
-        const totalCost = getTotalCostByTenant(tenantId);
+        const projection = await projectBudget({
+          tenant_id: tenantId,
+          period_start_ms: periodStartMs,
+          period_end_ms: now,
+        });
+        const totalCost = projection.total_cents / 100;
         const budget = tenant.budget_usd;
         const remaining = budget - totalCost;
 
@@ -137,7 +146,13 @@ export function registerPreflightRoutes(app: Elysia<any>): void {
       // Per-user budget
       const user = getUser(userId);
       if (user?.budget_usd !== null && user?.budget_usd !== undefined) {
-        const userCost = getUserCostByTenant(tenantId, userId);
+        const userProjection = await projectBudget({
+          tenant_id: tenantId,
+          user_id: userId,
+          period_start_ms: periodStartMs,
+          period_end_ms: now,
+        });
+        const userCost = userProjection.total_cents / 100;
         const userBudget = user.budget_usd;
 
         if (userCost >= userBudget) {

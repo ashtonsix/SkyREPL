@@ -9,6 +9,7 @@ export { registerBlobRoutes } from "./blobs";
 export { registerAdminRoutes, checkBudget } from "./admin";
 export { registerPreflightRoutes } from "./preflight";
 export { registerOrphanRoutes } from "./orphans";
+export { registerBillingRoutes } from "./billing";
 
 export {
   buildPaginatedQuery,

@@ -494,6 +494,8 @@ describe("ORPH-06: targeted scan", () => {
       init_checksum: null,
       registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null,
+      display_name: null,
     });
 
     const cloud = buildMockProvider("orbstack", [
@@ -531,6 +533,8 @@ describe("BL-60: tag-based orphan adoption (A13)", () => {
       init_checksum: null,
       registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null,
+      display_name: null,
     });
 
     // Cloud has a resource named with this instance's ID
@@ -593,6 +597,8 @@ describe("BL-60: tag-based orphan adoption (A13)", () => {
       init_checksum: null,
       registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null,
+      display_name: null,
     });
 
     const orphanName = formatResourceName(controlId, null, inst.id);
@@ -630,6 +636,8 @@ describe("BL-60: tag-based orphan adoption (A13)", () => {
       init_checksum: null,
       registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null,
+      display_name: null,
     });
 
     const orphanName = formatResourceName(controlId, null, inst.id);

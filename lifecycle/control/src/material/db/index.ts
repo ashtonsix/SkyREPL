@@ -126,17 +126,13 @@ export {
   getRecentScans,
 } from "./orphans";
 
-// Usage
+// Audit log
 export {
-  type UsageRecord,
-  createUsageRecord,
-  finishUsageRecord,
-  getMonthlyCostByProvider,
-  getActiveUsageRecords,
-  getOpenUsageRecordsForInstance,
-  getTotalCostByTenant,
-  getUserCostByTenant,
-} from "./usage";
+  type AuditEvent,
+  type AuditEventInput,
+  emitAuditEvent,
+  getAuditEvents,
+} from "./audit";
 
 // Tenants and Users
 export {
@@ -156,3 +152,10 @@ export {
   listTenantUsers,
   countTenantUsers,
 } from "./tenants";
+
+// Credit wallets (WL-061-3B §2)
+export {
+  creditDeposit,
+  creditDebit,
+  getCreditBalance,
+} from "./credits";

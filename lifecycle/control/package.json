@@ -4,10 +4,14 @@
   "type": "module",
   "main": "src/main.ts",
   "dependencies": {
+    "@aws-sdk/client-cost-explorer": "^3.996.0",
     "@aws-sdk/client-s3": "^3.996.0",
     "@aws-sdk/s3-request-presigner": "^3.996.0",
+    "@duckdb/node-api": "^1.4.4-r.1",
     "@sinclair/typebox": "^0.34",
     "@skyrepl/contracts": "workspace:*",
-    "elysia": "^1.2"
+    "@skyrepl/scaffold": "workspace:*",
+    "elysia": "^1.2",
+    "stripe": "^20.4.0"
   }
 }

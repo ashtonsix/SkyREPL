@@ -33,6 +33,7 @@ import {
 import { sseManager } from "../sse-protocol";
 import { checkBudget, registerAdminRoutes } from "./admin";
 import { registerBlobRoutes } from "./blobs";
+import { registerBillingRoutes } from "./billing";
 
 // ─── Request Body Schemas ─────────────────────────────────────────────────────
 
@@ -64,7 +65,7 @@ export function registerOperationRoutes(app: Elysia<any>): void {
 
     // Budget preflight (TENANT-03): reject if tenant or user budget exceeded
     if (auth) {
-      const budgetCheck = checkBudget(auth.tenantId, auth.userId);
+      const budgetCheck = await checkBudget(auth.tenantId, auth.userId);
       if (budgetCheck) {
         set.status = 429;
         return { error: { code: "BUDGET_EXCEEDED", message: budgetCheck, category: "rate_limit" } };
@@ -123,6 +124,7 @@ export function registerOperationRoutes(app: Elysia<any>): void {
       idempotencyKey: body.idempotency_key,
       tenantId: auth?.tenantId,
       diskSizeGb: body.disk_size_gb ?? undefined,
+      userId: auth?.userId,
     };
 
     try {
@@ -525,7 +527,112 @@ export function registerOperationRoutes(app: Elysia<any>): void {
     };
   }, { params: IdParams });
 
-  // Delegate blob and admin routes
+  // ─── Pricing Estimate (§4A) ──────────────────────────────────────────
+  //
+  // GET /v1/pricing/estimate?provider=aws&spec=g5.xlarge&region=us-east-1&is_spot=true&duration_hours=2
+
+  app.get("/v1/pricing/estimate", async ({ query, request, set }) => {
+    const auth = getAuthContext(request);
+    if (!auth) {
+      set.status = 401;
+      return { error: { code: "UNAUTHORIZED", message: "Missing API key", category: "auth" } };
+    }
+
+    const provider = String(query.provider ?? "");
+    const spec = String(query.spec ?? "");
+    const region = query.region ? String(query.region) : "";
+    const isSpot = query.is_spot === "true";
+    const durationHours = parseFloat(String(query.duration_hours ?? "1"));
+
+    if (!provider) {
+      set.status = 400;
+      return { error: { code: "INVALID_INPUT", message: "provider is required", category: "validation" } };
+    }
+
+    const { computeCost } = await import("../../billing/pricing");
+    const { projectBudget } = await import("../../billing/budget");
+    const { resolveSpecViaOrbital } = await import("../../provider/orbital");
+
+    // Look up catalog rate from orbital
+    let ratePerHour = 0;
+    const orbResult = await resolveSpecViaOrbital(spec, provider, region || undefined);
+    if (orbResult?.results?.[0]?.instance) {
+      const inst = orbResult.results[0].instance;
+      ratePerHour = (isSpot ? inst.spotHourly : null) ?? inst.onDemandHourly ?? 0;
+    }
+
+    const now = Date.now();
+    const durationMs = durationHours * 3600000;
+    const result = computeCost({
+      provider,
+      spec,
+      region,
+      is_spot: isSpot,
+      min_duration_ms: 0,
+      metering_pairs: [{ start_ms: now, stop_ms: now + durationMs }],
+      price_observations: ratePerHour > 0
+        ? [{ at_ms: now, rate_per_hour: ratePerHour }]
+        : [],
+      currency: "USD",
+    });
+
+    // Budget remaining
+    let budget: { remaining_cents: number; remaining_pct: number } = { remaining_cents: 0, remaining_pct: 100 };
+    try {
+      const periodStart = new Date(); periodStart.setDate(1); periodStart.setHours(0, 0, 0, 0);
+      const periodEnd = new Date(periodStart); periodEnd.setMonth(periodEnd.getMonth() + 1);
+      budget = await projectBudget({
+        tenant_id: auth.tenantId,
+        period_start_ms: periodStart.getTime(),
+        period_end_ms: periodEnd.getTime(),
+      });
+    } catch {
+      // DuckDB not yet initialized — budget info unavailable
+    }
+
+    return {
+      estimated_cost_cents: result.amount_cents,
+      currency: result.currency,
+      breakdown: result.breakdown,
+      budget_remaining_cents: budget.remaining_cents,
+      budget_remaining_pct: budget.remaining_pct,
+      warning: budget.remaining_pct < 10 ? "Less than 10% budget remaining" : null,
+    };
+  });
+
+  // ─── Budget Extend (§4D) ─────────────────────────────────────────────
+  //
+  // POST /v1/budget/extend
+  // Body: { amount_cents: number }
+
+  app.post("/v1/budget/extend", async ({ body, request, set }) => {
+    const auth = getAuthContext(request);
+    if (!auth) {
+      set.status = 401;
+      return { error: { code: "UNAUTHORIZED", message: "Missing API key", category: "auth" } };
+    }
+
+    const amountCents = (body as any)?.amount_cents;
+    if (typeof amountCents !== "number" || amountCents <= 0) {
+      set.status = 400;
+      return { error: { code: "INVALID_INPUT", message: "amount_cents must be a positive number", category: "validation" } };
+    }
+
+    const { updateUser, getUser } = await import("../../material/db");
+    const user = getUser(auth.userId);
+    if (!user) {
+      set.status = 404;
+      return { error: { code: "NOT_FOUND", message: `User ${auth.userId} not found`, category: "not_found" } };
+    }
+
+    const newBudget = (user.budget_usd ?? 0) + amountCents / 100;
+    updateUser(auth.userId, { budgetUsd: newBudget });
+
+    return { data: { new_budget_usd: newBudget } };
+  });
+
+  // Delegate blob, admin, and billing routes
   registerBlobRoutes(app);
   registerAdminRoutes(app);
+  registerBillingRoutes(app);
 }

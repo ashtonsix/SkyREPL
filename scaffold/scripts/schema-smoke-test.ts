@@ -72,7 +72,9 @@ async function testSchemaDDL() {
   // New tables exist
   const tables = db.query("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[];
   const tableNames = tables.map(t => t.name);
-  assert(tableNames.includes("cost_events"), "cost_events table exists");
+  assert(tableNames.includes("audit_log"), "audit_log table exists");
+  assert(!tableNames.includes("cost_events"), "cost_events table REMOVED");
+  assert(!tableNames.includes("usage_records"), "usage_records table REMOVED");
 
   // New columns on existing tables
   const instanceCols = db.query("PRAGMA table_info(instances)").all() as { name: string }[];
@@ -215,27 +217,36 @@ async function testCheckConstraints() {
     assert(e.message.includes("CHECK") || e.message.includes("constraint"), "manifest_resources.owner_type CHECK rejects 'invalid_owner'");
   }
 
-  // cost_events.event_type CHECK
+  // audit_log: INSERT succeeds with valid data
+  const testUuid = "01JR" + Math.random().toString(36).slice(2).toUpperCase().padEnd(22, "0").slice(0, 22);
   try {
     db.query(
-      `INSERT INTO cost_events (event_type, tenant_id, payload)
-       VALUES ('not_a_type', '1', '{}')`
-    ).run();
-    assert(false, "cost_events.event_type CHECK rejects 'not_a_type'");
+      `INSERT INTO audit_log (event_uuid, event_type, tenant_id, source, is_cost, data, occurred_at)
+       VALUES (?, 'metering_start', 1, 'smoke_test', 1, '{"test":true}', ?)`
+    ).run(testUuid, Date.now());
+    assert(true, "audit_log INSERT with valid data succeeds");
   } catch (e: any) {
-    assert(e.message.includes("CHECK") || e.message.includes("constraint"), "cost_events.event_type CHECK rejects 'not_a_type'");
+    assert(false, "audit_log INSERT with valid data succeeds: " + e.message);
   }
 
-  // cost_events.event_type CHECK accepts valid
+  // audit_log: UPDATE triggers ABORT
   try {
     db.query(
-      `INSERT INTO cost_events (event_type, tenant_id, payload)
-       VALUES ('instance_start', '1', '{"test": true}')`
-    ).run();
-    assert(true, "cost_events.event_type CHECK accepts 'instance_start'");
-    db.query("DELETE FROM cost_events WHERE payload = '{\"test\": true}'").run();
+      `UPDATE audit_log SET event_type = 'tampered' WHERE event_uuid = ?`
+    ).run(testUuid);
+    assert(false, "audit_log UPDATE → ABORT (trigger fires)");
   } catch (e: any) {
-    assert(false, "cost_events.event_type CHECK accepts 'instance_start': " + e.message);
+    assert(e.message.includes("append-only") || e.message.includes("ABORT"), "audit_log UPDATE → ABORT (trigger fires)");
+  }
+
+  // audit_log: DELETE triggers ABORT
+  try {
+    db.query(
+      `DELETE FROM audit_log WHERE event_uuid = ?`
+    ).run(testUuid);
+    assert(false, "audit_log DELETE → ABORT (trigger fires)");
+  } catch (e: any) {
+    assert(e.message.includes("append-only") || e.message.includes("ABORT"), "audit_log DELETE → ABORT (trigger fires)");
   }
 
   // Clean up test data

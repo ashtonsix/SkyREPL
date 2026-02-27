@@ -112,7 +112,9 @@ describe("handleRetry — SPOT_INTERRUPTED fallback", () => {
       updated_at: Date.now(),
     });
     // Start the node (increments attempt to 1)
-    startNode(wf.id, "spawn-instance");
+    const _nodes = getWorkflowNodes(wf.id);
+    const _spawnNode = _nodes.find(n => n.node_id === "spawn-instance")!;
+    startNode(_spawnNode.id);
     return wf.id;
   }
 
@@ -159,7 +161,9 @@ describe("handleRetry — SPOT_INTERRUPTED fallback", () => {
       const nodes1 = getWorkflowNodes(wfId);
       failNode(nodes1[0].id, JSON.stringify({ code: "SPOT_INTERRUPTED", message: "spot lost" }));
       resetNodeForRetry(nodes1[0].id, "spot_retry");
-      startNode(wfId, "spawn-instance"); // now attempt=2
+      const _nodes2 = getWorkflowNodes(wfId);
+      const _spawnNode2 = _nodes2.find(n => n.node_id === "spawn-instance")!;
+      startNode(_spawnNode2.id); // now attempt=2
 
       const nodes2 = getWorkflowNodes(wfId);
       const node = nodes2.find(n => n.node_id === "spawn-instance")!;

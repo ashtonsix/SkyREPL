@@ -59,6 +59,8 @@ function createTestInstance(lastHeartbeat: number, workflowState = "launch-run:p
     init_checksum: null,
     registration_token_hash: null,
     last_heartbeat: lastHeartbeat,
+    provider_metadata: null,
+    display_name: null,
   });
 }
 

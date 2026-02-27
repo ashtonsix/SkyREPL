@@ -91,6 +91,8 @@ function createTestInstance(overrides?: Partial<{
     init_checksum: overrides?.init_checksum !== undefined ? overrides.init_checksum : null,
     registration_token_hash: null,
     last_heartbeat: overrides?.last_heartbeat ?? now,
+    provider_metadata: null,
+    display_name: null,
   });
 }
 

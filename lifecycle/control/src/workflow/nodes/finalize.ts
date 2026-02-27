@@ -4,16 +4,19 @@
 
 import type { NodeExecutor, NodeContext } from "../engine.types";
 import { updateRunRecord } from "../../resource/run";
-import { getInstanceRecordRaw } from "../../resource/instance";
+import { getInstanceRecordRaw, updateInstanceRecord } from "../../resource/instance";
 import {
   getAllocation,
   createAllocation,
   countInstanceAllocations,
+  emitAuditEvent,
+  queryOne,
 } from "../../material/db";
 import { completeAllocation } from "../state-transitions";
 import { getProvider } from "../../provider/registry";
 import type { ProviderName } from "../../provider/types";
 import { TIMING } from "@skyrepl/contracts";
+import { computeMeteringStopData } from "../../billing/metering";
 import type {
   FinalizeOutput,
   LaunchRunWorkflowInput,
@@ -92,7 +95,7 @@ export const finalizeExecutor: NodeExecutor<FinalizeInput, FinalizeOutput> = {
     // policy (Step 10: finalize retention policy fix).
     const manifestSealed = false;
 
-    // Conditional snapshot (deferred for Slice 1 -- subworkflow not yet available)
+    // Conditional snapshot (deferred -- subworkflow not yet available)
     let snapshotId: number | undefined;
     // if (input.createSnapshot && input.exitCode === 0) { ... }
 
@@ -102,12 +105,63 @@ export const finalizeExecutor: NodeExecutor<FinalizeInput, FinalizeOutput> = {
 
     if (!replenished) {
       // No replenishment — terminate instance
+      const instance = getInstanceRecordRaw(input.instanceId);
       try {
-        const instance = getInstanceRecordRaw(input.instanceId);
         if (instance?.provider_id) {
           const provider = await getProvider(instance.provider as ProviderName);
           await provider.terminate(instance.provider_id);
           instanceTerminated = true;
+
+          // Bug fix (WL-061-2B §3B): set terminate:complete so DB state matches provider reality
+          updateInstanceRecord(input.instanceId, {
+            workflow_state: "terminate:complete",
+          });
+
+          // Emit metering_stop: instance is no longer billable (FINALIZE NON-REPLENISH PATH)
+          //
+          // NOTE: The REPLENISH path (tryReplenishWarmPool) now emits metering_stop
+          // before recycling, closing the billing window for the completed run.
+          //
+          // NOTE: If provider.terminate() throws, metering_stop is not emitted here.
+          // The reconciler handles the gap: it detects non-terminal instances and emits
+          // a retroactive metering_stop. Budget projection may overcount in the interim.
+          const finalizeNow = Date.now();
+          try {
+            // C-1: Compute amount_cents from paired metering_start and price observations
+            const meterData = computeMeteringStopData(
+              instance.id,
+              instance.provider,
+              instance.spec,
+              instance.region ?? null,
+              instance.is_spot === 1,
+              finalizeNow
+            );
+
+            emitAuditEvent({
+              event_type: "metering_stop",
+              tenant_id: instance.tenant_id,
+              instance_id: input.instanceId,
+              manifest_id: input.manifestId,
+              provider: instance.provider,
+              spec: instance.spec,
+              region: instance.region ?? undefined,
+              source: "lifecycle",
+              is_cost: true,
+              is_usage: true,
+              data: {
+                provider_resource_id: instance.provider_id,
+                metering_window_end_ms: finalizeNow,
+                ...meterData,
+              },
+              dedupe_key: `${instance.provider}:${instance.provider_id}:metering_stop`,
+              occurred_at: finalizeNow,
+            });
+          } catch (auditErr) {
+            ctx.log("warn", "Failed to emit metering_stop audit event during finalize", {
+              instanceId: input.instanceId,
+              error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+            });
+          }
         }
       } catch (err) {
         ctx.log("warn", "Failed to terminate instance during finalize", {
@@ -192,6 +246,45 @@ function tryReplenishWarmPool(ctx: NodeContext, input: FinalizeInput): boolean {
       return false;
     }
 
+    // Emit metering_stop: close the billing window for the completed run before
+    // recycling into the warm pool. Without this, the metering_start from boot
+    // stays open indefinitely (until the next run's reconciliation or termination).
+    const replenishNow = Date.now();
+    try {
+      const meterData = computeMeteringStopData(
+        instance.id,
+        instance.provider,
+        instance.spec,
+        instance.region ?? null,
+        instance.is_spot === 1,
+        replenishNow
+      );
+
+      emitAuditEvent({
+        event_type: "metering_stop",
+        tenant_id: instance.tenant_id,
+        instance_id: input.instanceId,
+        provider: instance.provider,
+        spec: instance.spec,
+        region: instance.region ?? undefined,
+        source: "lifecycle",
+        is_cost: true,
+        is_usage: true,
+        data: {
+          provider_resource_id: instance.provider_id,
+          metering_window_end_ms: replenishNow,
+          ...meterData,
+        },
+        dedupe_key: `${instance.provider}:${instance.provider_id}:metering_stop:replenish:${input.allocationId}`,
+        occurred_at: replenishNow,
+      });
+    } catch (auditErr) {
+      ctx.log("warn", "Failed to emit metering_stop audit event during warm pool replenishment", {
+        instanceId: input.instanceId,
+        error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+      });
+    }
+
     // Create new AVAILABLE allocation for this instance
     createAllocation({
       run_id: null,
@@ -219,3 +312,5 @@ function tryReplenishWarmPool(ctx: NodeContext, input: FinalizeInput): boolean {
     return false;
   }
 }
+
+// Metering stop enrichment: shared helper in billing/metering.ts

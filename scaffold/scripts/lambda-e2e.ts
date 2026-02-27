@@ -98,7 +98,6 @@ async function main() {
     controlId: "e2etst",
     manifestId: null,
     instanceId: 999,
-    instanceType: targetType,
   });
   spawnedId = instance.id;
   check("spawn returned instance ID", !!instance.id, instance.id);

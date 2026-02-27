@@ -43,6 +43,16 @@ function loadEnvFile(filePath: string): void {
 }
 
 // =============================================================================
+// Cross-boundary dynamic import helper
+// Casting import() to Promise<any> prevents TypeScript from following the
+// module's type graph into sub-projects (avoids TS6059/TS6307 composite errors).
+// =============================================================================
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function xImport(path: string): Promise<any> {
+  return import(path) as Promise<any>;
+}
+
+// =============================================================================
 // Service Init
 // =============================================================================
 
@@ -55,9 +65,7 @@ async function initServices(catalog: Catalog): Promise<void> {
 
   // Control plane (must init before others — owns the DB schema)
   if (has("control")) {
-    const { initControl } = await import(
-      "../../lifecycle/control/src/main"
-    );
+    const { initControl } = await xImport("../../lifecycle/control/src/main");
     const { shutdown } = await initControl(catalog);
     shutdownFns.push(shutdown);
     console.log("[scaffold] control plane initialized");
@@ -65,7 +73,7 @@ async function initServices(catalog: Catalog): Promise<void> {
 
   // Orbital advisory server
   if (has("orbital")) {
-    const { initOrbital } = await import("../../orbital/impl/src/main");
+    const { initOrbital } = await xImport("../../orbital/impl/src/main");
     const { shutdown } = await initOrbital(catalog);
     shutdownFns.push(shutdown);
     console.log("[scaffold] orbital initialized");
@@ -73,7 +81,7 @@ async function initServices(catalog: Catalog): Promise<void> {
 
   // Shell proxy
   if (has("proxy")) {
-    const { initProxy } = await import("../../shell/proxy/src/main");
+    const { initProxy } = await xImport("../../shell/proxy/src/main");
     const { shutdown } = await initProxy(catalog);
     shutdownFns.push(shutdown);
     console.log("[scaffold] proxy initialized");
@@ -81,7 +89,7 @@ async function initServices(catalog: Catalog): Promise<void> {
 
   // Shell daemon
   if (has("daemon")) {
-    const { initDaemon } = await import("../../shell/daemon/index");
+    const { initDaemon } = await xImport("../../shell/daemon/index");
     const { shutdown } = await initDaemon(catalog);
     shutdownFns.push(shutdown);
     console.log("[scaffold] daemon initialized");
@@ -107,9 +115,7 @@ async function startup(): Promise<void> {
   console.log(`[scaffold] version: ${config.version}`);
 
   // Init storage engines (scaffold opens DB; control plane owns schema/migrations)
-  const { initDatabase } = await import(
-    "../../lifecycle/control/src/material/db"
-  );
+  const { initDatabase } = await xImport("../../lifecycle/control/src/material/db");
 
   const sqlite = initDatabase(config.sqlitePath);
   console.log("[scaffold] SQLite initialized");
@@ -117,8 +123,21 @@ async function startup(): Promise<void> {
   const kv = createKVCache();
   console.log("[scaffold] KV cache initialized");
 
+  // DuckDB init (OLAP engine)
+  let duckdb: any = null;
+  if (config.services.includes("duckdb")) {
+    try {
+      const duckdbPath = join(replDir, "skyrepl-olap.duckdb");
+      const { initDuckDB } = await xImport("../../lifecycle/control/src/material/duckdb");
+      duckdb = await initDuckDB(duckdbPath, config.sqlitePath);
+      console.log("[scaffold] DuckDB initialized");
+    } catch (err) {
+      console.warn("[scaffold] DuckDB initialization failed (OLAP disabled):", err);
+    }
+  }
+
   // Create catalog
-  const catalog = createCatalog(config, sqlite, kv);
+  const catalog = createCatalog(config, sqlite, kv, duckdb);
 
   // Register storage engines in catalog
   catalog.registerService("sqlite", {
@@ -131,6 +150,13 @@ async function startup(): Promise<void> {
     version: config.version,
     ref: kv,
   });
+  if (duckdb) {
+    catalog.registerService("duckdb", {
+      mode: "local",
+      version: config.version,
+      ref: duckdb,
+    });
+  }
 
   // Init all configured services. If a later service fails, clean up earlier ones.
   try {
@@ -141,9 +167,13 @@ async function startup(): Promise<void> {
       try { await shutdownFns[i](); } catch (e) { console.error("[scaffold] cleanup error:", e); }
     }
     try {
-      const { walCheckpoint, closeDatabase } = await import(
-        "../../lifecycle/control/src/material/db"
-      );
+      if (duckdb) {
+        const { closeDuckDB } = await xImport("../../lifecycle/control/src/material/duckdb");
+        await closeDuckDB();
+      }
+    } catch { /* best-effort */ }
+    try {
+      const { walCheckpoint, closeDatabase } = await xImport("../../lifecycle/control/src/material/db");
       walCheckpoint();
       closeDatabase();
     } catch { /* best-effort */ }
@@ -166,11 +196,20 @@ async function startup(): Promise<void> {
       }
     }
 
+    // Close DuckDB before SQLite (DuckDB ATTACHes SQLite, must release first)
+    try {
+      if (duckdb) {
+        const { closeDuckDB } = await xImport("../../lifecycle/control/src/material/duckdb");
+        await closeDuckDB();
+        console.log("[scaffold] DuckDB closed");
+      }
+    } catch (err) {
+      console.warn("[scaffold] DuckDB cleanup error:", err);
+    }
+
     // WAL checkpoint
     try {
-      const { walCheckpoint, closeDatabase } = await import(
-        "../../lifecycle/control/src/material/db"
-      );
+      const { walCheckpoint, closeDatabase } = await xImport("../../lifecycle/control/src/material/db");
       walCheckpoint();
       closeDatabase();
       console.log("[scaffold] database closed");

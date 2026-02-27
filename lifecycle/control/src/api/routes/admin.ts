@@ -15,8 +15,6 @@ import {
   listTenantUsers,
   countTenantUsers,
   getUser,
-  getTotalCostByTenant,
-  getUserCostByTenant,
   type Tenant,
   type User,
 } from "../../material/db"; // raw-db: api_keys CRUD (Bucket D), see WL-057
@@ -45,12 +43,14 @@ const CreateTenantSchema = Type.Object({
   name: Type.String({ minLength: 1 }),
   seat_cap: Type.Optional(Type.Integer({ minimum: 1 })),
   budget_usd: Type.Optional(Type.Number({ minimum: 0 })),
+  account_type: Type.Optional(Type.Union([Type.Literal("byo"), Type.Literal("managed")], { default: "byo" })),
 });
 
 const PatchTenantSchema = Type.Object({
   name: Type.Optional(Type.String({ minLength: 1 })),
   seat_cap: Type.Optional(Type.Integer({ minimum: 1 })),
   budget_usd: Type.Optional(Type.Union([Type.Number({ minimum: 0 }), Type.Null()])),
+  account_type: Type.Optional(Type.Union([Type.Literal("byo"), Type.Literal("managed")])),
 });
 
 const CreateUserSchema = Type.Object({
@@ -73,6 +73,43 @@ const PatchUserSchema = Type.Object({
 // =============================================================================
 
 /**
+ * Get total cost for a tenant using projectBudget (WL-061-3B).
+ * Returns cost in USD (dollars) for backward compatibility with callers.
+ */
+async function getTotalCostForTenant(tenantId: number): Promise<number> {
+  const { projectBudget } = await import("../../billing/budget");
+  const now = Date.now();
+  const monthStart = new Date();
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+  const projection = await projectBudget({
+    tenant_id: tenantId,
+    period_start_ms: monthStart.getTime(),
+    period_end_ms: now,
+  });
+  return projection.total_cents / 100;
+}
+
+/**
+ * Get total cost for a specific user within a tenant using projectBudget.
+ * Returns cost in USD (dollars) for backward compatibility.
+ */
+async function getTotalCostForUser(tenantId: number, userId: number): Promise<number> {
+  const { projectBudget } = await import("../../billing/budget");
+  const now = Date.now();
+  const monthStart = new Date();
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+  const projection = await projectBudget({
+    tenant_id: tenantId,
+    user_id: userId,
+    period_start_ms: monthStart.getTime(),
+    period_end_ms: now,
+  });
+  return projection.total_cents / 100;
+}
+
+/**
  * Check budget limits for a tenant and user before allowing a launch.
  * Returns an error message if budget exceeded, null if OK.
  *
@@ -80,13 +117,13 @@ const PatchUserSchema = Type.Object({
  * For single-machine mode, this runs inline. In managed mode,
  * this check moves to the shell proxy layer.
  */
-export function checkBudget(tenantId: number, userId: number): string | null {
+export async function checkBudget(tenantId: number, userId: number): Promise<string | null> {
   const tenant = getTenant(tenantId);
   if (!tenant) return null; // No tenant = no budget enforcement
 
   // Check team budget
   if (tenant.budget_usd !== null) {
-    const totalCost = getTotalCostByTenant(tenantId);
+    const totalCost = await getTotalCostForTenant(tenantId);
     if (totalCost >= tenant.budget_usd) {
       return `Team budget exceeded: $${totalCost.toFixed(2)} / $${tenant.budget_usd} limit`;
     }
@@ -95,7 +132,7 @@ export function checkBudget(tenantId: number, userId: number): string | null {
   // Check per-user budget (claimed_by FK → users.id)
   const user = getUser(userId);
   if (user?.budget_usd !== null && user?.budget_usd !== undefined) {
-    const userCost = getUserCostByTenant(tenantId, userId);
+    const userCost = await getTotalCostForUser(tenantId, userId);
     if (userCost >= user.budget_usd) {
       return `User budget exceeded: $${userCost.toFixed(2)} / $${user.budget_usd} limit`;
     }
@@ -235,6 +272,7 @@ export function registerAdminRoutes(app: Elysia<any>): void {
         name: body.name.trim(),
         seatCap: typeof body.seat_cap === "number" ? body.seat_cap : undefined,
         budgetUsd: typeof body.budget_usd === "number" ? body.budget_usd : undefined,
+        accountType: body.account_type === "byo" || body.account_type === "managed" ? body.account_type : undefined,
       });
       set.status = 201;
       return { data: tenant };
@@ -259,6 +297,7 @@ export function registerAdminRoutes(app: Elysia<any>): void {
         name: typeof body.name === "string" ? body.name.trim() : undefined,
         seatCap: typeof body.seat_cap === "number" ? body.seat_cap : undefined,
         budgetUsd: body.budget_usd === null ? null : typeof body.budget_usd === "number" ? body.budget_usd : undefined,
+        accountType: body.account_type === "byo" || body.account_type === "managed" ? body.account_type : undefined,
       });
       return { data: tenant };
     } catch (err) {
@@ -391,7 +430,7 @@ export function registerAdminRoutes(app: Elysia<any>): void {
 
   // ─── Usage Summary (TENANT-03: budget context) ─────────────────────
 
-  app.get("/v1/usage", ({ query, request, set }) => {
+  app.get("/v1/usage", async ({ query, request, set }) => {
     const auth = getAuthContext(request);
     if (!auth) {
       set.status = 401;
@@ -401,13 +440,31 @@ export function registerAdminRoutes(app: Elysia<any>): void {
     const tenant = getTenant(tenantId);
     const users = listTenantUsers(tenantId);
 
-    // Aggregate usage from usage_records
-    const totalCostUsd = getTotalCostByTenant(tenantId);
+    const { projectBudget } = await import("../../billing/budget");
+    const now = Date.now();
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+    const periodStartMs = monthStart.getTime();
 
-    // Per-user usage (claimed_by FK → users.id)
+    // Tenant-level projection
+    const tenantProjection = await projectBudget({
+      tenant_id: tenantId,
+      period_start_ms: periodStartMs,
+      period_end_ms: now,
+    });
+    const totalCostUsd = tenantProjection.total_cents / 100;
+
+    // Per-user projections
     const userUsage: Record<number, number> = {};
     for (const user of users) {
-      userUsage[user.id] = getUserCostByTenant(tenantId, user.id);
+      const userProjection = await projectBudget({
+        tenant_id: tenantId,
+        user_id: user.id,
+        period_start_ms: periodStartMs,
+        period_end_ms: now,
+      });
+      userUsage[user.id] = userProjection.total_cents / 100;
     }
 
     return {
@@ -416,6 +473,7 @@ export function registerAdminRoutes(app: Elysia<any>): void {
         tenant_name: tenant?.name ?? "unknown",
         tenant_budget_usd: tenant?.budget_usd ?? null,
         total_cost_usd: totalCostUsd,
+        budget_projection: tenantProjection,
         users: users.map(u => ({
           id: u.id,
           email: u.email,

@@ -576,7 +576,7 @@ export class ApiClient {
     const response = await fetch(`${this.baseUrl}/v1/blobs/upload/${encodeURIComponent(checksum)}`, {
       method: 'PUT',
       headers: this.headers({ 'Content-Type': 'application/octet-stream' }),
-      body: data,
+      body: new Uint8Array(data),
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));

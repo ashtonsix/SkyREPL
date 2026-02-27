@@ -65,7 +65,7 @@ function createState(): MockState {
   };
 }
 
-function createMockFetch(state: MockState): typeof fetch {
+function createMockFetch(state: MockState): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : input.toString();
     const method = init?.method ?? "GET";
@@ -275,7 +275,7 @@ function createProvider(
     defaultRegion: "nyc3",
     defaultSizeSlug: "s-2vcpu-4gb",
     defaultSshKeyIds: [54322644],
-    _fetchImpl: createMockFetch(state),
+    _fetchImpl: createMockFetch(state) as unknown as typeof fetch,
     ...overrides,
   });
 }
@@ -321,7 +321,7 @@ describe("PROV-054C: mapDOStatus", () => {
       ["", "error"],
     ];
     for (const [input, expected] of cases) {
-      expect(mapDOStatus(input)).toBe(expected);
+      expect(mapDOStatus(input)).toBe(expected as any);
     }
   });
 });
@@ -345,7 +345,7 @@ describe("PROV-054C: mapDOError", () => {
     for (const [status, code, retryable] of cases) {
       const err = mapDOError(status, { id: "test", message: "test" });
       expect(err).toBeInstanceOf(ProviderOperationError);
-      expect(err.code).toBe(code);
+      expect(err.code).toBe(code as any);
       expect(err.retryable).toBe(retryable);
     }
   });
@@ -358,13 +358,13 @@ describe("PROV-054C: mapDOError", () => {
 describe("PROV-054C: doRequest", () => {
   test("parses 2xx JSON responses correctly", async () => {
     const mockFetch = async () => jsonResponse({ droplet: { id: 1 } });
-    const result = await doRequest<{ droplet: any }>("token", "GET", "/v2/droplets/1", undefined, mockFetch as typeof fetch);
+    const result = await doRequest<{ droplet: any }>("token", "GET", "/v2/droplets/1", undefined, mockFetch as unknown as typeof fetch);
     expect(result.droplet.id).toBe(1);
   });
 
   test("returns null for 204 No Content", async () => {
     const mockFetch = async () => new Response(null, { status: 204 });
-    const result = await doRequest<null>("token", "DELETE", "/v2/droplets/1", undefined, mockFetch as typeof fetch);
+    const result = await doRequest<null>("token", "DELETE", "/v2/droplets/1", undefined, mockFetch as unknown as typeof fetch);
     expect(result).toBeNull();
   });
 
@@ -372,7 +372,7 @@ describe("PROV-054C: doRequest", () => {
     // Single test proves doRequest → mapDOError wiring; exhaustive status mapping tested in mapDOError
     const mockFetch = async () => jsonResponse({ id: "unauthorized", message: "Bad token" }, 401);
     await expect(
-      doRequest("token", "GET", "/v2/account", undefined, mockFetch as typeof fetch),
+      doRequest("token", "GET", "/v2/account", undefined, mockFetch as unknown as typeof fetch),
     ).rejects.toMatchObject({ code: "AUTH_ERROR" });
   });
 });
@@ -760,7 +760,7 @@ describe("PROV-054C: list and get", () => {
     const page2 = [makeDroplet(101), makeDroplet(102)];
     let requestCount = 0;
 
-    const paginatingFetch: typeof fetch = async (input) => {
+    const paginatingFetch = async (input: URL | RequestInfo): Promise<Response> => {
       const url = typeof input === "string" ? input : input.toString();
       if (url.includes("/v2/droplets?")) {
         requestCount++;
@@ -779,7 +779,7 @@ describe("PROV-054C: list and get", () => {
 
     const provider = new DigitalOceanProvider({
       token: "test-token-abc", defaultRegion: "nyc3",
-      defaultSshKeyIds: [54322644], _fetchImpl: paginatingFetch as typeof fetch,
+      defaultSshKeyIds: [54322644], _fetchImpl: paginatingFetch as unknown as typeof fetch,
     });
 
     const all = await provider.list();

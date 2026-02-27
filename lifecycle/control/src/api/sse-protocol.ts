@@ -53,7 +53,10 @@ export type WorkflowStreamEvent =
   | { event: "subworkflow_completed"; data: { subworkflow_id: string; status: string } }
   | { event: "workflow_completed"; data: { status: string; output: unknown; timestamp: number } }
   | { event: "workflow_failed"; data: { error: string; node_id?: string; timestamp: number } }
-  | { event: "heartbeat"; data: { timestamp: number } };
+  | { event: "heartbeat"; data: { timestamp: number } }
+  // Budget events (WL-061-3B §6)
+  | { event: "budget_warning"; data: { tenant_id: number; remaining_cents: number; remaining_pct: number; total_cents: number; budget_cents: number; timestamp: number } }
+  | { event: "budget_extension_offer"; data: { tenant_id: number; suggested_cents: number; extend_url: string; timestamp: number } };
 
 // =============================================================================
 // SSE Manager
@@ -587,7 +590,7 @@ export function registerWebSocketRoutes(app: Elysia<any>): void {
       const workflowId = (ws.data as any).params.id;
       console.info("[sse] CLI workflow progress stream opened", { workflowId });
 
-      // Subscribe to live updates (no historical replay in Slice 1)
+      // Subscribe to live updates (no historical replay yet)
       sseManager.subscribeToWorkflow(
         workflowId,
         ws.raw as unknown as WebSocket

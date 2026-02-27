@@ -125,6 +125,8 @@ function createTestInstance() {
     init_checksum: null,
     registration_token_hash: null,
     last_heartbeat: Date.now(),
+    provider_metadata: null,
+    display_name: null,
   });
 }
 
@@ -1212,6 +1214,8 @@ function createProviderManifest(providerName: string, terminateImpl?: (id: strin
     init_checksum: null,
     registration_token_hash: null,
     last_heartbeat: Date.now(),
+    provider_metadata: null,
+    display_name: null,
   });
 
   const alloc = createAllocation({
@@ -1456,6 +1460,8 @@ describe("C5: cleanup-manifest multi-provider error isolation", () => {
       init_checksum: null,
       registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null,
+      display_name: null,
     });
     addResourceToManifest(manifest.id, "instance", String(awsInstance.id), { cleanupPriority: 50 });
 
@@ -1475,6 +1481,8 @@ describe("C5: cleanup-manifest multi-provider error isolation", () => {
       init_checksum: null,
       registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null,
+      display_name: null,
     });
     addResourceToManifest(manifest.id, "instance", String(lambdaInstance.id), { cleanupPriority: 50 });
 
@@ -1503,7 +1511,7 @@ describe("C5: cleanup-manifest multi-provider error isolation", () => {
     expect(cleanupNode).toBeDefined();
 
     const cleanupOutput = JSON.parse(cleanupNode!.output_json!) as {
-      providerResults: Array<{ provider: string; error: string | null; cleaned: number }>;
+      providerResults: Array<{ provider: string; error: string | null; cleaned: number; skipped: number; failed: number }>;
     };
 
     const awsResult = cleanupOutput.providerResults.find((r) => r.provider === "aws");

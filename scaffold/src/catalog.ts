@@ -141,6 +141,7 @@ export interface Catalog {
 
   // Database handles
   getSQLite(): Database;
+  getDuckDB(): any | null; // Use 'any' to avoid import dependency scaffold → lifecycle
 
   // KV cache (shared across all services)
   getKV(): KVCache;
@@ -153,8 +154,11 @@ export function createCatalog(
   config: CatalogConfig,
   sqlite: Database,
   kv: KVCache,
+  duckdb?: any | null,
 ): Catalog {
   const services = new Map<ServiceName, ServiceHandle>();
+  // Capture duckdb in closure (may be null/undefined for non-OLAP deployments)
+  const duckdbHandle: any | null = duckdb ?? null;
 
   return {
     getService(name: ServiceName): ServiceHandle | undefined {
@@ -171,6 +175,10 @@ export function createCatalog(
 
     getSQLite(): Database {
       return sqlite;
+    },
+
+    getDuckDB(): any | null {
+      return duckdbHandle;
     },
 
     getKV(): KVCache {

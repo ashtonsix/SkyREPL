@@ -16,6 +16,10 @@ import {
   type Workflow,
 } from "../control/src/material/db";
 import {
+  initDuckDB,
+  closeDuckDB,
+} from "../control/src/material/duckdb";
+import {
   resetEngineShutdown,
   requestEngineShutdown,
   awaitEngineQuiescence,
@@ -37,6 +41,8 @@ import { expect } from "bun:test";
 export interface SetupTestOptions {
   /** Initialize engine shutdown coordination (reset + quiescence on cleanup). Default: false. */
   engine?: boolean;
+  /** Initialize DuckDB in-memory for OLAP tests. Default: false. */
+  duckdb?: boolean;
 }
 
 /**
@@ -71,11 +77,24 @@ export function setupTest(opts: SetupTestOptions = {}): () => Promise<void> {
   initDatabase(":memory:");
   runMigrations();
 
+  // 5. Optional DuckDB in-memory (opt-in — avoids cold-start cost for most tests)
+  // Fire-and-forget the async init; store the promise so cleanup can await it.
+  let duckdbReady: Promise<void> = Promise.resolve();
+  if (opts.duckdb) {
+    // Use ":memory:" for both DuckDB path and sqlitePath in tests
+    duckdbReady = initDuckDB(":memory:", ":memory:").then(() => undefined);
+  }
+
   // Return cleanup function
   return async () => {
     if (opts.engine) {
       requestEngineShutdown();
       await awaitEngineQuiescence(5_000);
+    }
+    if (opts.duckdb) {
+      // Ensure DuckDB init completed before closing
+      await duckdbReady;
+      await closeDuckDB();
     }
     closeDatabase();
     _resetSleep();

@@ -29,6 +29,7 @@ CREATE TABLE tenants (
     name TEXT NOT NULL UNIQUE,
     seat_cap INTEGER NOT NULL DEFAULT 5,
     budget_usd REAL,
+    account_type TEXT NOT NULL DEFAULT 'byo' CHECK(account_type IN ('byo', 'managed')),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -101,11 +102,14 @@ CREATE TABLE instances (
     registration_token_hash TEXT,
     provider_metadata TEXT,
     created_at INTEGER NOT NULL,
+    display_name TEXT,
     last_heartbeat INTEGER NOT NULL,
     FOREIGN KEY (current_manifest_id) REFERENCES manifests(id)
 );
 
 CREATE INDEX idx_instances_tenant ON instances(tenant_id);
+CREATE INDEX idx_instances_display_name ON instances(tenant_id, display_name)
+    WHERE display_name IS NOT NULL;
 CREATE INDEX idx_instances_workflow_state ON instances(workflow_state);
 CREATE INDEX idx_instances_provider ON instances(provider, workflow_state);
 CREATE INDEX idx_instances_manifest ON instances(current_manifest_id);
@@ -341,12 +345,15 @@ CREATE TABLE manifests (
     released_at INTEGER,
     expires_at INTEGER,
     updated_at INTEGER NOT NULL,
+    display_name TEXT,
     FOREIGN KEY (workflow_id) REFERENCES workflows(id),
     FOREIGN KEY (created_by) REFERENCES users(id),
     FOREIGN KEY (parent_manifest_id) REFERENCES manifests(id)
 );
 
 CREATE INDEX idx_manifests_tenant ON manifests(tenant_id, status);
+CREATE INDEX idx_manifests_display_name ON manifests(tenant_id, display_name)
+    WHERE display_name IS NOT NULL;
 CREATE INDEX idx_manifests_status ON manifests(status, expires_at);
 CREATE INDEX idx_manifests_workflow ON manifests(workflow_id);
 CREATE INDEX idx_manifests_expires ON manifests(expires_at)
@@ -370,34 +377,59 @@ CREATE INDEX idx_manifest_resources_priority ON manifest_resources(manifest_id, 
 CREATE INDEX idx_manifest_resources_owner ON manifest_resources(manifest_id, owner_type);
 
 -- =============================================================================
--- Usage Tracking
+-- Audit Log (event-sourced ledger — append-only)
 -- =============================================================================
 
-CREATE TABLE usage_records (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tenant_id INTEGER NOT NULL DEFAULT 1,
-    instance_id INTEGER NOT NULL,
-    allocation_id INTEGER,
-    run_id INTEGER,
-    provider TEXT NOT NULL,
-    spec TEXT NOT NULL,
-    region TEXT,
-    is_spot INTEGER NOT NULL DEFAULT 0 CHECK(is_spot IN (0, 1)),
-    started_at INTEGER NOT NULL,
-    finished_at INTEGER,
-    duration_ms INTEGER,
-    estimated_cost_usd REAL,
-    FOREIGN KEY (instance_id) REFERENCES instances(id),
-    FOREIGN KEY (allocation_id) REFERENCES allocations(id),
-    FOREIGN KEY (run_id) REFERENCES runs(id)
+-- NOTE: audit_log FK columns use soft references (no REFERENCES clauses) by design.
+-- The ledger is append-only; referenced entities (instances, allocations) may be deleted
+-- without cascading FK violations. tenant_id is NOT NULL but unconstrained by FK.
+CREATE TABLE audit_log (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_uuid      TEXT NOT NULL UNIQUE,
+  event_type      TEXT NOT NULL,
+  tenant_id       INTEGER NOT NULL,
+  instance_id     INTEGER,
+  allocation_id   INTEGER,
+  run_id          INTEGER,
+  manifest_id     INTEGER,
+  user_id         INTEGER,
+  parent_event_id INTEGER,
+  provider        TEXT,
+  spec            TEXT,
+  region          TEXT,
+  source          TEXT,
+  is_cost         INTEGER NOT NULL DEFAULT 0 CHECK(is_cost IN (0, 1)),
+  is_usage        INTEGER NOT NULL DEFAULT 0 CHECK(is_usage IN (0, 1)),
+  is_attribution  INTEGER NOT NULL DEFAULT 0 CHECK(is_attribution IN (0, 1)),
+  is_reconciliation INTEGER NOT NULL DEFAULT 0 CHECK(is_reconciliation IN (0, 1)),
+  data            TEXT NOT NULL,
+  dedupe_key      TEXT UNIQUE,
+  occurred_at     INTEGER NOT NULL,
+  created_at      INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
+  event_version   INTEGER NOT NULL DEFAULT 1
 );
+-- Note: audit_log uses soft references (no FK constraints) to allow normal
+-- lifecycle operations (allocation/instance deletion) without FK violations.
+-- The ledger is append-only and immutable; referenced entities may be deleted.
+-- NOTE: tenant_id has no FK to tenants — misconfigured emitters can pass invalid IDs.
+-- Application-layer validation is the only guard. Deferred: tenant_id CHECK or FK.
+-- NOTE: dedupe_key UNIQUE does not protect unkeyed events (NULL != NULL in SQL).
+-- Cost events set a dedupe_key; attribution_start and other idempotent events may not.
 
-CREATE INDEX idx_usage_tenant ON usage_records(tenant_id, started_at);
-CREATE INDEX idx_usage_records_instance ON usage_records(instance_id);
-CREATE INDEX idx_usage_records_allocation ON usage_records(allocation_id);
-CREATE INDEX idx_usage_records_run ON usage_records(run_id);
-CREATE INDEX idx_usage_records_time ON usage_records(started_at, finished_at);
-CREATE INDEX idx_usage_records_cost ON usage_records(estimated_cost_usd DESC);
+CREATE TRIGGER audit_log_immutable_update BEFORE UPDATE ON audit_log
+  BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
+CREATE TRIGGER audit_log_immutable_delete BEFORE DELETE ON audit_log
+  BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END;
+
+CREATE INDEX idx_audit_log_tenant_time ON audit_log(tenant_id, occurred_at);
+CREATE INDEX idx_audit_log_instance ON audit_log(instance_id)
+  WHERE instance_id IS NOT NULL;
+CREATE INDEX idx_audit_log_run ON audit_log(run_id) WHERE run_id IS NOT NULL;
+CREATE INDEX idx_audit_log_manifest ON audit_log(manifest_id)
+  WHERE manifest_id IS NOT NULL;
+CREATE INDEX idx_audit_log_type ON audit_log(event_type, occurred_at);
+CREATE INDEX idx_audit_log_parent ON audit_log(parent_event_id)
+  WHERE parent_event_id IS NOT NULL;
 
 -- =============================================================================
 -- Supporting Tables
@@ -489,31 +521,55 @@ CREATE TABLE manifest_cleanup_state (
     FOREIGN KEY (manifest_id) REFERENCES manifests(id)
 );
 
+-- =========================================================================
+-- Audit Inbox (staging for DuckDB flush)
+-- =========================================================================
+
+CREATE TABLE audit_inbox (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_uuid  TEXT NOT NULL UNIQUE,
+  dedupe_key  TEXT UNIQUE,
+  payload     TEXT NOT NULL,
+  flushed     INTEGER NOT NULL DEFAULT 0,
+  created_at  INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
+);
+CREATE INDEX idx_audit_inbox_unflushed ON audit_inbox(flushed, created_at)
+  WHERE flushed = 0;
+
 -- =============================================================================
--- Cost Events (C0 DDL — no writers yet)
+-- Credit Wallets (WL-061-3B §2)
 -- =============================================================================
 
-CREATE TABLE cost_events (
-    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_type TEXT NOT NULL CHECK(event_type IN (
-        'instance_start', 'instance_stop',
-        'allocation_start', 'allocation_end',
-        'run_start', 'run_end',
-        'storage_snapshot', 'storage_artifact',
-        'network_egress',
-        'adjustment'
-    )),
-    tenant_id INTEGER NOT NULL DEFAULT 1,
-    instance_id TEXT,
-    manifest_id TEXT,
-    run_id TEXT,
-    payload TEXT NOT NULL,
-    dedupe_key TEXT UNIQUE,
-    event_version INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+CREATE TABLE credit_wallets (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  tenant_id  INTEGER NOT NULL REFERENCES tenants(id),
+  balance_cents INTEGER NOT NULL DEFAULT 0,
+  currency   TEXT NOT NULL DEFAULT 'USD',
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
+  UNIQUE(tenant_id, currency)
 );
 
-CREATE INDEX idx_cost_events_tenant ON cost_events(tenant_id, created_at);
-CREATE INDEX idx_cost_events_type ON cost_events(event_type, created_at);
-CREATE INDEX idx_cost_events_instance ON cost_events(instance_id)
-    WHERE instance_id IS NOT NULL;
+-- =============================================================================
+-- Settlement Batches (WL-061-4B §1)
+-- =============================================================================
+
+CREATE TABLE settlement_batches (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_uuid      TEXT NOT NULL UNIQUE,
+  tenant_id       INTEGER NOT NULL REFERENCES tenants(id),
+  period_start_ms INTEGER NOT NULL,
+  period_end_ms   INTEGER NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'open'
+                  CHECK(status IN ('open', 'settled', 'invoiced', 'paid')),
+  total_cents     INTEGER,
+  fee_cents       INTEGER,
+  credit_applied_cents INTEGER DEFAULT 0,
+  stripe_invoice_id TEXT,
+  created_at      INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
+  settled_at      INTEGER
+);
+
+CREATE UNIQUE INDEX idx_settlement_batches_period ON settlement_batches(tenant_id, period_start_ms, period_end_ms);
+CREATE INDEX idx_settlement_batches_tenant ON settlement_batches(tenant_id, status);
+CREATE INDEX idx_settlement_batches_uuid ON settlement_batches(batch_uuid);
+

@@ -85,6 +85,9 @@ export interface LaunchRunInput {
 
   /** Root disk size in GB (default: AMI default, typically 8GB) */
   diskSizeGb?: number;
+
+  /** User ID from auth context — threaded into allocation claimed_by for attribution */
+  userId?: number;
 }
 
 // =============================================================================
@@ -331,8 +334,33 @@ export function registerLaunchRun(): void {
 export const checkBudgetExecutor: NodeExecutor<unknown, { budgetOk: boolean }> = {
   name: "check-budget",
   idempotent: true,
-  async execute(_ctx: NodeContext): Promise<{ budgetOk: boolean }> {
-    // Slice 1: no budget enforcement
+  async execute(ctx: NodeContext): Promise<{ budgetOk: boolean }> {
+    // Advisory budget check — does not block launches (WL-061-3B §4C)
+    // Logs a warning if budget is exceeded but always returns budgetOk: true.
+    try {
+      const tenantId: number = ctx.tenantId;
+
+      const { projectBudget } = await import("../billing/budget");
+      const now = Date.now();
+      const monthStart = new Date();
+      monthStart.setDate(1);
+      monthStart.setHours(0, 0, 0, 0);
+
+      const projection = await projectBudget({
+        tenant_id: tenantId,
+        period_start_ms: monthStart.getTime(),
+        period_end_ms: now,
+      });
+
+      if (projection.budget_cents > 0 && projection.remaining_cents < 0) {
+        console.warn(
+          `[budget] Tenant ${tenantId} is over budget: ${projection.total_cents} cents spent, budget ${projection.budget_cents} cents`
+        );
+      }
+    } catch (err) {
+      // Non-fatal: budget check failure should not block launches
+      console.warn("[budget] checkBudgetExecutor: projection failed (advisory only):", err);
+    }
     return { budgetOk: true };
   },
 };

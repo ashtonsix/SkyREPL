@@ -80,7 +80,7 @@ export const createAllocationExecutor: NodeExecutor<CreateAllocationInput, Creat
       completed_at: null,
     }, ctx.tenantId);
 
-    const claimResult = claimAllocation(allocation.id, input.runId);
+    const claimResult = claimAllocation(allocation.id, input.runId, (ctx.workflowInput as any).userId);
     if (!claimResult.success) {
       throw new Error(
         `Failed to claim freshly created allocation ${allocation.id}: ${claimResult.reason}`

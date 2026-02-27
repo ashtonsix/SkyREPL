@@ -12,7 +12,7 @@ import { setAgentBridge } from "./workflow/nodes/start-run";
 import { TIMING } from "@skyrepl/contracts";
 import { cleanExpiredIdempotencyKeys } from "./api/middleware/idempotency";
 import type { WorkflowEngine } from "./workflow/engine";
-import type { Catalog } from "../../../scaffold/src/catalog";
+import type { Catalog } from "@skyrepl/scaffold/src/catalog";
 import { readFileSync, existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
@@ -30,6 +30,8 @@ import { execute, queryOne } from "./material/db";
 import { clearBlobProviderCache, invokeAllStorageHeartbeats } from "./provider/storage/registry";
 import { invokeAllHeartbeats, type HeartbeatExpectations } from "./provider/extensions";
 import type { StorageHeartbeatExpectations } from "./provider/storage/types";
+import { getDuckDB, flushInboxToDuckDB, closeDuckDB, initDuckDB } from "./material/duckdb";
+import { emitAuditEvent } from "./material/db/audit";
 
 // =============================================================================
 // Module-level State
@@ -46,6 +48,8 @@ let lastReconciliation = 0;
 let lastOrphanScan = 0;
 let lastStorageGc = 0;
 let lastLogCompaction = 0;
+let lastBudgetCheck = 0;
+const BUDGET_CHECK_INTERVAL_MS = 60_000;
 
 // =============================================================================
 // Startup
@@ -58,6 +62,18 @@ export async function startup(): Promise<void> {
   loadControlEnvFile();
 
   initializeDatabase();
+
+  // Initialize DuckDB OLAP engine (mirrors scaffold/src/main.ts pattern).
+  // Runs after SQLite so initDuckDB() can ATTACH the SQLite DB for cross queries.
+  const dbPath = process.env.SKYREPL_DB_PATH ?? join(homedir(), ".repl", "skyrepl-control.db");
+  const duckdbPath = process.env.SKYREPL_DUCKDB_PATH ?? join(homedir(), ".repl", "skyrepl-olap.duckdb");
+  try {
+    await initDuckDB(duckdbPath, dbPath);
+    console.log("[control] DuckDB initialized");
+  } catch (err) {
+    console.warn("[control] DuckDB initialization failed (OLAP/billing disabled):", err);
+  }
+
   setupWorkflowEngine();
   registerProviders();
   checkSqlStorageAtStartup();
@@ -170,7 +186,7 @@ export function setupWorkflowEngine(): void {
 // =============================================================================
 
 export function registerProviders(): void {
-  // For Slice 1: OrbStack provider is auto-registered via the provider registry
+  // OrbStack provider is auto-registered via the provider registry
   // (lazy-loaded on first use via providerRegistry in provider/registry.ts)
   // No explicit registration needed — getProvider("orbstack") handles it
   console.log("[control] Providers: orbstack (lazy-loaded via registry)");
@@ -342,6 +358,44 @@ export function startBackgroundTasks(): void {
   }, TIMING.BLOB_GC_INTERVAL_MS);
   intervalHandles.push(storageHbHandle);
 
+  // Audit inbox → DuckDB flush (every 10s).
+  // Conditional: DuckDB may be absent (e.g., disabled via SKYREPL_SERVICES or init failure).
+  // In standalone startup(), initDuckDB() runs before startBackgroundTasks(), so this
+  // branch is taken whenever DuckDB initialized successfully.
+  if (getDuckDB()) {
+    const auditFlushHandle = setInterval(() => {
+      flushInboxToDuckDB().catch((err) =>
+        console.error("[control] flushInboxToDuckDB error:", err)
+      );
+    }, 10_000);
+    intervalHandles.push(auditFlushHandle);
+  }
+
+  // skyrepl_infra COGS emitter (daily) — disabled until real COGS tracking is wired up.
+  // Enable by setting SKYREPL_ENABLE_COGS_EMITTER=1 once actual cost data is available.
+  if (process.env.SKYREPL_ENABLE_COGS_EMITTER === "1") {
+    const cogsHandle = setInterval(() => {
+      emitCOGSEvents().catch((err) => console.error("[control] COGS emitter error:", err));
+    }, 86_400_000); // 24h
+    intervalHandles.push(cogsHandle);
+  }
+
+  // Billing reconciliation (daily — 4A)
+  const billingReconHandle = setInterval(() => {
+    billingReconciliationTask().catch((err) =>
+      console.error("[control] billingReconciliationTask error:", err)
+    );
+  }, TIMING.BILLING_RECONCILIATION_INTERVAL_MS);
+  intervalHandles.push(billingReconHandle);
+
+  // Billing cycle check (monthly settlement — 4B)
+  const billingCycleHandle = setInterval(() => {
+    billingCycleTask().catch((err) =>
+      console.error("[control] billingCycleTask error:", err)
+    );
+  }, 3_600_000); // Check hourly
+  intervalHandles.push(billingCycleHandle);
+
   console.log("[control] Background tasks started");
 }
 
@@ -352,6 +406,164 @@ export async function holdExpiryCheck(): Promise<void> {
 export async function reconciliationTask(): Promise<void> {
   const { runReconciliation } = await import("./background/reconciliation");
   await runReconciliation();
+}
+
+// =============================================================================
+// COGS Emitter (skyrepl_infra virtual provider)
+// =============================================================================
+
+/**
+ * Emit daily infrastructure cost events for SkyREPL's own overhead (COGS).
+ * Uses dedupe_key to prevent duplicate events for the same day.
+ *
+ * NOTE: Deferred — real cost breakdown (DNS, compute, storage) not yet tracked.
+ * Gated behind SKYREPL_ENABLE_COGS_EMITTER=1 to avoid zero-value event pollution.
+ */
+async function emitCOGSEvents(): Promise<void> {
+  // NOTE: placeholder body — remove early return when real COGS data is available.
+  return;
+
+  // Dead code below — kept for reference on intended shape:
+  // const dateString = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  // emitAuditEvent({
+  //   event_type: "fee",
+  //   tenant_id: 1,
+  //   provider: "skyrepl_infra",
+  //   source: "cogs_emitter",
+  //   is_cost: true,
+  //   data: {
+  //     category: "dns",
+  //     amount_cents: 0,
+  //     currency: "USD",
+  //   },
+  //   dedupe_key: `skyrepl_infra:dns:${dateString}`,
+  //   occurred_at: Date.now(),
+  // });
+}
+
+// =============================================================================
+// Billing Reconciliation Task (WL-061-4A)
+// =============================================================================
+
+async function billingReconciliationTask(): Promise<void> {
+  try {
+    const { runBillingReconciliation } = await import("./billing/reconciliation/job");
+    const results = await runBillingReconciliation();
+    const totalDiscrepancies = results.reduce((n, r) => n + r.discrepancies, 0);
+    if (totalDiscrepancies > 0) {
+      console.warn(`[billing-recon] Found ${totalDiscrepancies} discrepancies across ${results.length} provider(s)`);
+    }
+  } catch (err) {
+    console.warn("[billing-recon] billingReconciliationTask error:", err);
+  }
+}
+
+// =============================================================================
+// Billing Cycle Task (WL-061-4B §7)
+// =============================================================================
+
+/**
+ * Lightweight monthly settlement check.
+ * Runs hourly; only settles on the 1st of each month.
+ * Idempotency: skips settlement if a batch already exists for the current month.
+ */
+async function billingCycleTask(): Promise<void> {
+  const now = new Date();
+  // Only run on the 1st of each month
+  if (now.getDate() !== 1) return;
+
+  try {
+    const { listSettlementBatches, settlePeriod } = await import("./billing/settlement");
+    const { listTenants } = await import("./material/db");
+
+    // Calculate previous month's period bounds
+    const monthEnd = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0); // Start of current month = end of prev month
+    const monthStart = new Date(monthEnd);
+    monthStart.setMonth(monthStart.getMonth() - 1); // Start of previous month
+    const periodStartMs = monthStart.getTime();
+    const periodEndMs = monthEnd.getTime();
+
+    const tenants = listTenants();
+    for (const tenant of tenants) {
+      // Check if we already settled this period for this tenant
+      const existing = listSettlementBatches(tenant.id).find(
+        b => b.period_start_ms === periodStartMs && b.period_end_ms === periodEndMs
+          && (b.status === "settled" || b.status === "invoiced" || b.status === "paid")
+      );
+      if (existing) continue;
+
+      try {
+        const batch = await settlePeriod(tenant.id, {
+          start_ms: periodStartMs,
+          end_ms: periodEndMs,
+        });
+        console.log(
+          `[billing-cycle] Settled tenant ${tenant.id} (${tenant.name}): ` +
+          `batch ${batch.batch_uuid}, total=${batch.total_cents} cents`
+        );
+
+        // Create Stripe invoice if configured
+        try {
+          const { createStripeInvoice } = await import("./billing/stripe");
+          const { getSettlementLineItems } = await import("./billing/settlement");
+          const lineItems = await getSettlementLineItems(batch.batch_uuid);
+          const result = await createStripeInvoice(batch, lineItems);
+          console.log(
+            `[billing-cycle] Invoiced tenant ${tenant.id}: ${result.invoice_id}`
+          );
+        } catch (stripeErr: any) {
+          // Stripe not configured or failed — batch stays "settled", retry next tick
+          if (!stripeErr?.message?.includes("Stripe not configured")) {
+            console.error(`[billing-cycle] Stripe invoice failed for tenant ${tenant.id}:`, stripeErr);
+          }
+        }
+      } catch (err) {
+        console.error(`[billing-cycle] Failed to settle tenant ${tenant.id}:`, err);
+      }
+    }
+  } catch (err) {
+    console.warn("[billing-cycle] billingCycleTask error:", err);
+  }
+}
+
+// =============================================================================
+// Budget Check Task (WL-061-3B §5)
+// =============================================================================
+
+/**
+ * Periodic budget check: logs a warning if any tenant is over budget.
+ * Runs every 60 seconds, piggybacked on the heartbeat dispatch loop.
+ * Future: emit SSE budget_warning events (§6).
+ */
+async function budgetCheckTask(): Promise<void> {
+  // TODO: full implementation with SSE notifications (WL-061-3B §6)
+  // For now, just log if any tenant is over budget
+  try {
+    const { listTenants } = await import("./material/db");
+    const { projectBudget } = await import("./billing/budget");
+    const tenants = listTenants();
+    const now = Date.now();
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+
+    for (const tenant of tenants) {
+      if (tenant.budget_usd == null) continue;
+      const projection = await projectBudget({
+        tenant_id: tenant.id,
+        period_start_ms: monthStart.getTime(),
+        period_end_ms: now,
+      });
+      if (projection.remaining_cents < 0) {
+        console.warn(
+          `[budget] Tenant ${tenant.id} (${tenant.name}) is over budget: ` +
+          `${projection.total_cents} cents spent, budget ${projection.budget_cents} cents`
+        );
+      }
+    }
+  } catch (err) {
+    console.warn("[budget] budgetCheckTask error:", err);
+  }
 }
 
 // =============================================================================
@@ -375,6 +587,9 @@ export async function computeHeartbeatDispatch(): Promise<void> {
   if (now - lastOrphanScan >= TIMING.ORPHAN_SCAN_INTERVAL_MS) {
     tasks.push({ type: "orphan_scan", priority: "low", lastRun: lastOrphanScan });
   }
+
+  // Budget check (§5): runs every 60s, piggybacked on the heartbeat loop
+  const doBudgetCheck = now - lastBudgetCheck >= BUDGET_CHECK_INTERVAL_MS;
 
   const expectations: HeartbeatExpectations = {
     tasks,
@@ -400,6 +615,10 @@ export async function computeHeartbeatDispatch(): Promise<void> {
         console.warn(`[orphan] Scheduled scan found ${orphanCount} orphaned resource(s) across ${scanResults.length} provider(s)`);
       }
       lastOrphanScan = Date.now();
+    }
+    if (doBudgetCheck) {
+      await budgetCheckTask();
+      lastBudgetCheck = Date.now();
     }
   } catch (err) {
     console.error("[control] computeHeartbeatDispatch error:", err);
@@ -451,8 +670,8 @@ export async function storageHeartbeatDispatch(): Promise<void> {
 // Shutdown
 // =============================================================================
 
-/** Service-level shutdown: stop HTTP, drain engine, clear intervals.
- *  Does NOT touch the database — caller (standalone or scaffold) owns DB lifecycle. */
+/** Service-level shutdown: stop HTTP, drain engine, clear intervals, flush DuckDB.
+ *  Does NOT touch SQLite — caller (standalone or scaffold) owns SQLite DB lifecycle. */
 async function serviceShutdown(): Promise<void> {
   if (isShuttingDown) return;
   isShuttingDown = true;
@@ -474,12 +693,22 @@ async function serviceShutdown(): Promise<void> {
   requestEngineShutdown();
   await awaitEngineQuiescence(30_000);
 
+  // 4. Close DuckDB (flushes remaining inbox rows, releases ATTACH on SQLite).
+  // Must happen before SQLite is closed by the caller. closeDuckDB() is idempotent
+  // so double-calling from shutdown() or scaffold is harmless.
+  try {
+    await closeDuckDB();
+    console.log("[control] DuckDB closed");
+  } catch (err) {
+    console.warn("[control] DuckDB close failed:", err);
+  }
+
   console.log("[control] Service shutdown complete");
 }
 
-/** Standalone shutdown: service shutdown + DB cleanup + exit. */
+/** Standalone shutdown: service shutdown + SQLite cleanup + exit. */
 export async function shutdown(): Promise<void> {
-  await serviceShutdown();
+  await serviceShutdown(); // serviceShutdown() closes DuckDB before returning
 
   try {
     const { walCheckpoint } = await import("./material/db");

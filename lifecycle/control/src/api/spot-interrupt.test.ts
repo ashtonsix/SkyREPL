@@ -79,6 +79,8 @@ function createSpotInstance(overrides: Partial<Instance> = {}): Instance {
     spot_request_id: `sfr-${instanceCounter}`,
     init_checksum: null,
     last_heartbeat: Date.now(),
+    provider_metadata: null,
+    display_name: null,
     ...overrides,
   });
 }

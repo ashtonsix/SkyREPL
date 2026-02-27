@@ -108,7 +108,7 @@ function createState(): MockState {
   };
 }
 
-function createMockFetch(state: MockState): typeof fetch {
+function createMockFetch(state: MockState): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : input.toString();
     const method = init?.method ?? "GET";
@@ -239,7 +239,7 @@ function createProvider(
     token: "test-lambda-token",
     defaultRegion: "us-west-1",
     sshKeyName: "my-key",
-    _fetchImpl: createMockFetch(state),
+    _fetchImpl: createMockFetch(state) as unknown as typeof fetch,
     ...overrides,
   });
 }
@@ -287,7 +287,7 @@ describe("PROV-054D: mapLambdaStatus", () => {
       ["", "pending"],
     ];
     for (const [input, expected] of cases) {
-      expect(mapLambdaStatus(input)).toBe(expected);
+      expect(mapLambdaStatus(input)).toBe(expected as any);
     }
   });
 });
@@ -310,7 +310,7 @@ describe("PROV-054D: mapLambdaError", () => {
     for (const [status, code, retryable] of cases) {
       const err = mapLambdaError(status, { error: { code: "test", message: "test" } });
       expect(err).toBeInstanceOf(ProviderOperationError);
-      expect(err.code).toBe(code);
+      expect(err.code).toBe(code as any);
       expect(err.retryable).toBe(retryable);
     }
   });
@@ -349,7 +349,7 @@ describe("PROV-054D: lambdaRequest", () => {
       "GET",
       "/api/v1/instances",
       undefined,
-      mockFetch as typeof fetch,
+      mockFetch as unknown as typeof fetch,
     );
     expect(result.data[0].id).toBe("inst-abc");
   });
@@ -358,7 +358,7 @@ describe("PROV-054D: lambdaRequest", () => {
     const mockFetch = async () =>
       jsonResponse({ error: { code: "unauthorized", message: "Bad token" } }, 401);
     await expect(
-      lambdaRequest("token", "GET", "/api/v1/instances", undefined, mockFetch as typeof fetch),
+      lambdaRequest("token", "GET", "/api/v1/instances", undefined, mockFetch as unknown as typeof fetch),
     ).rejects.toMatchObject({ code: "AUTH_ERROR" });
   });
 });

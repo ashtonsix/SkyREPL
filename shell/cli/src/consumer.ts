@@ -20,6 +20,8 @@
 // CLI invocations. The current 8-tier hierarchy covers the practical cases.
 // See BL-67 for the full signal list including deferred probing.
 
+import { readFileSync } from 'fs';
+
 export type ConsumerType = 'human' | 'agent' | 'program';
 
 /**
@@ -132,7 +134,7 @@ function getParentProcessName(): string | null {
     // Try /proc first (Linux)
     try {
       // cmdline is NUL-separated; read synchronously via Bun
-      const text = Bun.readTextFileSync(`/proc/${ppid}/cmdline`);
+      const text = readFileSync(`/proc/${ppid}/cmdline`, 'utf-8');
       // Extract the first token (executable name)
       const parts = text.split('\0').filter(Boolean);
       if (parts.length > 0) {

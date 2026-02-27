@@ -70,7 +70,7 @@ function buildApp() {
         spec: body.spec,
         provider: body.provider || undefined,
         region: body.region || undefined,
-        filters: body.filters || undefined,
+        filters: body.filters as CatalogRequest['filters'] || undefined,
       };
 
       const resolved = resolveSpec(request);
@@ -91,7 +91,7 @@ function buildApp() {
           minGpuCount: t.Optional(t.Number()),
           minMemoryGib: t.Optional(t.Number()),
           minVcpus: t.Optional(t.Number()),
-          arch: t.Optional(t.String()),
+          arch: t.Optional(t.Union([t.Literal('amd64'), t.Literal('arm64')])),
           hasGpu: t.Optional(t.Boolean()),
           hasSpot: t.Optional(t.Boolean()),
           providers: t.Optional(t.Array(t.String())),
@@ -104,7 +104,7 @@ function buildApp() {
       const request: CatalogRequest = {
         action: 'resolve-spec',
         spec: body.original_spec,
-        filters: body.filters || undefined,
+        filters: body.filters as CatalogRequest['filters'] || undefined,
       };
 
       const resolved = resolveSpec(request);
@@ -141,7 +141,7 @@ function buildApp() {
           minGpuCount: t.Optional(t.Number()),
           minMemoryGib: t.Optional(t.Number()),
           minVcpus: t.Optional(t.Number()),
-          arch: t.Optional(t.String()),
+          arch: t.Optional(t.Union([t.Literal('amd64'), t.Literal('arm64')])),
           hasGpu: t.Optional(t.Boolean()),
           hasSpot: t.Optional(t.Boolean()),
           providers: t.Optional(t.Array(t.String())),
@@ -158,7 +158,8 @@ function buildApp() {
 
 export async function initOrbital(
   catalog: Catalog,
-): Promise<{ shutdown: () => Promise<void>; app: Elysia }> {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+): Promise<{ shutdown: () => Promise<void>; app: any }> {
   const port = catalog.getConfig().ports.orbital;
   const app = buildApp().listen({ port, idleTimeout: 0 });
 

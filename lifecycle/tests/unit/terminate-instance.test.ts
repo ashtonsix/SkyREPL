@@ -16,7 +16,7 @@ import {
   getWorkflowNodes,
   queryMany,
   queryOne,
-  createUsageRecord,
+  emitAuditEvent,
   type Instance,
   type Allocation,
 } from "../../control/src/material/db";
@@ -79,6 +79,8 @@ function createTestInstance(overrides: Partial<Omit<Instance, "id" | "created_at
     init_checksum: null,
     registration_token_hash: null,
     last_heartbeat: Date.now(),
+    provider_metadata: null,
+    display_name: null,
     ...overrides,
   });
 }
@@ -332,20 +334,26 @@ describe("Terminate Instance - Node Executor Edge Cases", () => {
     });
   });
 
-  test("cleanup-records: closes open usage records", async () => {
+  test("cleanup-records: emits metering_stop audit event and sets terminate:complete", async () => {
     const instance = createTestInstance();
-    const usageRecord = createUsageRecord({
+
+    // Emit a metering_start first (setup: instance was billable)
+    emitAuditEvent({
+      event_type: "metering_start",
+      tenant_id: 1,
       instance_id: instance.id,
-      allocation_id: null,
-      run_id: null,
       provider: "mock-provider",
       spec: "cpu-1x",
       region: "local",
-      is_spot: 0,
-      started_at: Date.now() - 60000,
-      finished_at: null,
-      duration_ms: null,
-      estimated_cost_usd: null,
+      source: "lifecycle",
+      is_cost: true,
+      is_usage: true,
+      data: {
+        provider_resource_id: instance.provider_id,
+        metering_window_start_ms: Date.now() - 60000,
+      },
+      dedupe_key: `mock-provider:${instance.provider_id}:metering_start`,
+      occurred_at: Date.now() - 60000,
     });
 
     const ctx = createMockNodeContext({
@@ -362,13 +370,17 @@ describe("Terminate Instance - Node Executor Edge Cases", () => {
 
     expect(result.recordsCleaned).toBe(1);
 
-    // Verify the usage record was closed
-    const updated = queryOne<{ finished_at: number | null; duration_ms: number | null }>(
-      "SELECT finished_at, duration_ms FROM usage_records WHERE id = ?",
-      [usageRecord.id]
+    // Verify instance is now terminate:complete
+    const updated = getInstance(instance.id);
+    expect(updated?.workflow_state).toBe("terminate:complete");
+
+    // Verify metering_stop was emitted to audit_log
+    const stopEvent = queryOne<{ event_type: string; instance_id: number }>(
+      "SELECT event_type, instance_id FROM audit_log WHERE event_type = 'metering_stop' AND instance_id = ?",
+      [instance.id]
     );
-    expect(updated?.finished_at).not.toBeNull();
-    expect(updated?.duration_ms).toBeGreaterThan(0);
+    expect(stopEvent).not.toBeNull();
+    expect(stopEvent?.event_type).toBe("metering_stop");
   });
 });
 
@@ -973,20 +985,26 @@ describe("Terminate Instance Contract: state machine invariants", () => {
     );
   });
 
-  test("INVARIANT: usage records are closed when workflow completes", async () => {
+  test("INVARIANT: metering_stop audit event is emitted when workflow completes", async () => {
     const instance = createTestInstance();
-    const usageRecord = createUsageRecord({
+
+    // Emit metering_start in test setup (instance was billable)
+    emitAuditEvent({
+      event_type: "metering_start",
+      tenant_id: 1,
       instance_id: instance.id,
-      allocation_id: null,
-      run_id: null,
       provider: "mock-provider",
       spec: "cpu-1x",
       region: "local",
-      is_spot: 0,
-      started_at: Date.now() - 120_000,
-      finished_at: null,
-      duration_ms: null,
-      estimated_cost_usd: null,
+      source: "lifecycle",
+      is_cost: true,
+      is_usage: true,
+      data: {
+        provider_resource_id: instance.provider_id,
+        metering_window_start_ms: Date.now() - 120_000,
+      },
+      dedupe_key: `mock-provider:${instance.provider_id}:metering_start`,
+      occurred_at: Date.now() - 120_000,
     });
 
     const { workflowId } = await submit({
@@ -996,13 +1014,15 @@ describe("Terminate Instance Contract: state machine invariants", () => {
 
     await waitForWorkflow(workflowId);
 
-    const closed = queryOne<{ finished_at: number | null; duration_ms: number | null }>(
-      "SELECT finished_at, duration_ms FROM usage_records WHERE id = ?",
-      [usageRecord.id]
+    // metering_stop must be in audit_log for this instance
+    const stopEvent = queryOne<{ event_type: string; is_cost: number; occurred_at: number }>(
+      "SELECT event_type, is_cost, occurred_at FROM audit_log WHERE event_type = 'metering_stop' AND instance_id = ?",
+      [instance.id]
     );
-    // finished_at must be set and duration_ms must be positive
-    expect(closed?.finished_at).not.toBeNull();
-    expect(closed?.duration_ms).toBeGreaterThan(0);
+    expect(stopEvent).not.toBeNull();
+    expect(stopEvent?.event_type).toBe("metering_stop");
+    expect(stopEvent?.is_cost).toBe(1);
+    expect(stopEvent?.occurred_at).toBeGreaterThan(0);
   });
 });
 

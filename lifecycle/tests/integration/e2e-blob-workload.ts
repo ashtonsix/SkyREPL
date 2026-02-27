@@ -103,6 +103,7 @@ async function setup() {
     init_checksum: null,
     registration_token_hash: tokenHash,
     provider_metadata: null,
+    display_name: null,
     last_heartbeat: Date.now(),
   });
   instanceId = instance.id;

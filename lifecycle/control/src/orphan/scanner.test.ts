@@ -129,6 +129,8 @@ describe("scanner", () => {
       init_checksum: null,
       registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null,
+      display_name: null,
     });
 
     const cloud = buildMockProvider("orbstack", [
@@ -218,6 +220,8 @@ describe("scanner", () => {
       init_checksum: null,
       registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null,
+      display_name: null,
     });
 
     const cloud = buildMockProvider("orbstack", []); // nothing in cloud
@@ -244,6 +248,8 @@ describe("scanner", () => {
       init_checksum: null,
       registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null,
+      display_name: null,
     });
 
     const cloud = buildMockProvider("orbstack", []);

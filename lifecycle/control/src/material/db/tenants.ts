@@ -16,6 +16,7 @@ export interface Tenant {
   name: string;
   seat_cap: number;
   budget_usd: number | null;
+  account_type: "byo" | "managed";
   created_at: number;
   updated_at: number;
 }
@@ -47,6 +48,7 @@ export function createTenant(opts: {
   name: string;
   seatCap?: number;
   budgetUsd?: number | null;
+  accountType?: "byo" | "managed";
 }): Tenant {
   const existing = getTenantByName(opts.name);
   if (existing) {
@@ -60,9 +62,9 @@ export function createTenant(opts: {
   const now = Date.now();
   const db = getDatabase();
   const result = db.prepare(
-    `INSERT INTO tenants (name, seat_cap, budget_usd, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(opts.name, opts.seatCap ?? 5, opts.budgetUsd ?? null, now, now);
+    `INSERT INTO tenants (name, seat_cap, budget_usd, account_type, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(opts.name, opts.seatCap ?? 5, opts.budgetUsd ?? null, opts.accountType ?? "byo", now, now);
 
   return getTenant(Number(result.lastInsertRowid))!;
 }
@@ -71,6 +73,7 @@ export function updateTenant(id: number, updates: {
   name?: string;
   seatCap?: number;
   budgetUsd?: number | null;
+  accountType?: "byo" | "managed";
 }): Tenant {
   const tenant = getTenant(id);
   if (!tenant) {
@@ -91,6 +94,10 @@ export function updateTenant(id: number, updates: {
   if (updates.budgetUsd !== undefined) {
     sets.push("budget_usd = ?");
     values.push(updates.budgetUsd);
+  }
+  if (updates.accountType !== undefined) {
+    sets.push("account_type = ?");
+    values.push(updates.accountType);
   }
 
   values.push(id);

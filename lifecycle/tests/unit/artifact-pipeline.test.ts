@@ -43,6 +43,8 @@ function createTestInstance(): Instance {
     init_checksum: null,
     last_heartbeat: now,
     registration_token_hash: null,
+    provider_metadata: null,
+    display_name: null,
   });
 }
 

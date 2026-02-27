@@ -87,6 +87,8 @@ function createTestInstance(overrides?: Partial<{
     init_checksum: overrides?.init_checksum !== undefined ? overrides.init_checksum : null,
     registration_token_hash: null,
     last_heartbeat: overrides?.last_heartbeat ?? now,
+    provider_metadata: null,
+    display_name: null,
   });
 }
 
@@ -696,6 +698,8 @@ describe("instance: CRUD schema smoke", () => {
       init_checksum: null,
       registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null,
+      display_name: null,
     });
     expect(instance.id).toBeDefined();
 

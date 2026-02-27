@@ -435,7 +435,7 @@ export function registerBlobRoutes(app: Elysia<any>): void {
       } else {
         const provider = getBlobProvider(auth.tenantId);
         await provider.upload(s3Key!, data);
-        updateBlobStorageKey(blob.id, s3Key!);
+        updateBlobStorageKey(blob.id, s3Key!, data.length);
       }
     }
 

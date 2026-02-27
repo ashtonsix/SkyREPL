@@ -24,9 +24,11 @@ import {
 } from "../material/db"; // raw-db: boutique queries (heartbeat update, active-allocs check, panic log insert), see WL-057
 import { appendLog, flushRunBuffers } from "../background/log-streaming";
 import { activateAllocation, failAllocation } from "../workflow/state-transitions";
+import { emitAuditEvent } from "../material/db";
 import { stateEvents, STATE_EVENT } from "../workflow/events";
 import { sseManager } from "./sse-protocol";
 import { extendAllocationDebugHold } from "../resource/allocation";
+import { computeMeteringStopData } from "../billing/metering";
 import type { AgentBridge } from "../workflow/nodes/start-run";
 import type { StartRunMessage } from "@skyrepl/contracts";
 import { TIMING } from "@skyrepl/contracts";
@@ -272,7 +274,7 @@ export function registerAgentRoutes(app: Elysia<any>): void {
       }
     }
 
-    // For Slice 1, we need a blob_id per run+stream. Get or create log object.
+    // Get or create a log object for this run+stream.
     // Look up existing log object for this run+stream
     const existingLogObj = queryOne<{ id: number; blob_id: number }>(
       `SELECT o.id, o.blob_id FROM objects o
@@ -594,12 +596,56 @@ export function registerAgentRoutes(app: Elysia<any>): void {
       return authError;
     }
 
+    // Emit metering_stop: the VM is about to be reclaimed by the provider.
+    // Use the interrupt timestamp as the billing window end so cost attribution
+    // is accurate to when the instance actually stopped being useful.
+    // M-9 fix: enriched with computeMeteringStopData (WL-061-6-2)
+    const interruptNow = Date.now();
+    const instance = getInstanceRecordRaw(instanceId);
+    if (instance?.provider_id) {
+      try {
+        const meterData = computeMeteringStopData(
+          instanceId,
+          instance.provider,
+          instance.spec,
+          instance.region ?? null,
+          instance.is_spot === 1,
+          interruptNow
+        );
+
+        emitAuditEvent({
+          event_type: "metering_stop",
+          tenant_id: instance.tenant_id,
+          instance_id: instanceId,
+          provider: instance.provider,
+          spec: instance.spec,
+          region: instance.region ?? undefined,
+          source: "lifecycle",
+          is_cost: true,
+          is_usage: true,
+          data: {
+            provider_resource_id: instance.provider_id,
+            metering_window_end_ms: interruptNow,
+            reason: "spot_interrupt",
+            ...meterData,
+          },
+          dedupe_key: `${instance.provider}:${instance.provider_id}:metering_stop`,
+          occurred_at: interruptNow,
+        });
+      } catch (auditErr) {
+        console.warn("[agent] Failed to emit metering_stop audit event during spot interrupt complete", {
+          instanceId,
+          error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+        });
+      }
+    }
+
     console.log(`[agent] Spot interrupt complete: instance=${instanceId}`);
 
     return { ack: true };
   });
 
-  // ─── Heartbeat Panic Start (stub for Slice 1) ────────────────────────
+  // ─── Heartbeat Panic Start (stub) ─────────────────────────────────────
 
   app.post("/v1/agent/heartbeat-panic-start", async ({ body, request, set }) => {
     const req = body as HeartbeatPanicStartRequest;
@@ -619,7 +665,7 @@ export function registerAgentRoutes(app: Elysia<any>): void {
     return { ack: true };
   });
 
-  // ─── Heartbeat Panic Complete (stub for Slice 1) ──────────────────────
+  // ─── Heartbeat Panic Complete (stub) ──────────────────────────────────
 
   app.post("/v1/agent/heartbeat-panic-complete", async ({ body, request, set }) => {
     const req = body as HeartbeatPanicCompleteRequest;
@@ -667,7 +713,7 @@ export function registerAgentRoutes(app: Elysia<any>): void {
     });
   });
 
-  // ─── Panic Diagnostics (stub for Slice 1) ────────────────────────────
+  // ─── Panic Diagnostics (stub) ─────────────────────────────────────────
 
   app.post("/v1/instances/:id/panic", async ({ params, body, request, set }) => {
     const panic = body as PanicDiagnosticsRequest;
@@ -743,7 +789,33 @@ export async function handleSyncComplete(
   );
 
   if (alloc) {
-    activateAllocation(alloc.id);
+    const activateResult = activateAllocation(alloc.id);
+
+    // Emit attribution_start: allocation is now actively attributed to a run
+    if (activateResult.success) {
+      try {
+        emitAuditEvent({
+          event_type: "attribution_start",
+          tenant_id: alloc.tenant_id,
+          instance_id: alloc.instance_id ?? undefined,
+          allocation_id: alloc.id,
+          run_id: runId,
+          user_id: alloc.claimed_by ?? undefined,
+          source: "lifecycle",
+          is_attribution: true,
+          data: { attribution_weight: 1.0 },
+          dedupe_key: `attribution_start:${alloc.id}`,
+          occurred_at: Date.now(),
+        });
+      } catch (err) {
+        // Non-fatal: attribution emission failure should not block sync completion
+        console.warn("[agent] Failed to emit attribution_start audit event", {
+          allocationId: alloc.id,
+          runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
 }
 
@@ -872,7 +944,7 @@ export function createRealAgentBridge(): AgentBridge {
       const agentFiles = rawFiles.map((f) => ({
         path: f.path,
         checksum: f.checksum,
-        // For Slice 1: agent downloads from control plane. Real impl would use presigned S3 URLs.
+        // Agent downloads from control plane. Production would use presigned S3 URLs.
         url: `/v1/blobs/by-checksum/${encodeURIComponent(f.checksum)}`,
       }));
       const command: StartRunMessage = {

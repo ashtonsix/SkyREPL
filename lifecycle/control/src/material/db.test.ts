@@ -51,10 +51,6 @@ import {
   recordOrphanScan,
   addToWhitelist,
   isWhitelisted,
-  createUsageRecord,
-  finishUsageRecord,
-  getMonthlyCostByProvider,
-  getActiveUsageRecords,
 } from "./db";
 import {
   claimAllocation,
@@ -102,6 +98,8 @@ function seedInstance(): number {
     init_checksum: null,
     registration_token_hash: null,
     last_heartbeat: Date.now(),
+    provider_metadata: null,
+    display_name: null,
   });
   return inst.id;
 }
@@ -148,6 +146,8 @@ describe("instances", () => {
       init_checksum: null,
       registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null,
+      display_name: null,
     });
 
     expect(inst.id).toBeGreaterThan(0);
@@ -188,6 +188,8 @@ describe("instances", () => {
       init_checksum: null,
       registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null,
+      display_name: null,
     });
 
     expect(listInstances().length).toBe(2);
@@ -710,6 +712,8 @@ describe("warm pool", () => {
       init_checksum: "abc123",
       registration_token_hash: null,
       last_heartbeat: Date.now(),
+      provider_metadata: null,
+      display_name: null,
     });
 
     createAllocation({
@@ -781,41 +785,3 @@ describe("orphan operations", () => {
   });
 });
 
-// =============================================================================
-// Usage Records
-// =============================================================================
-
-describe("usage records", () => {
-  test("lifecycle: create, track active, finish", () => {
-    const instId = seedInstance();
-    const startedAt = Date.now();
-
-    const record = createUsageRecord({
-      instance_id: instId,
-      allocation_id: null,
-      run_id: null,
-      provider: "orbstack",
-      spec: "4vcpu-8gb",
-      region: "local",
-      is_spot: 0,
-      started_at: startedAt,
-      finished_at: null,
-      duration_ms: null,
-      estimated_cost_usd: null,
-    });
-
-    expect(record.id).toBeGreaterThan(0);
-    expect(record.finished_at).toBeNull();
-
-    const active = getActiveUsageRecords();
-    expect(active.length).toBe(1);
-
-    const finishedAt = startedAt + 60000;
-    const finished = finishUsageRecord(record.id, finishedAt);
-    expect(finished.finished_at).toBe(finishedAt);
-    expect(finished.duration_ms).toBe(60000);
-
-    const afterFinish = getActiveUsageRecords();
-    expect(afterFinish.length).toBe(0);
-  });
-});

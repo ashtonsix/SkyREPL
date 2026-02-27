@@ -64,6 +64,8 @@ function makeInstance() {
     init_checksum: null,
     registration_token_hash: null,
     last_heartbeat: Date.now(),
+    provider_metadata: null,
+    display_name: null,
   });
 }
 
